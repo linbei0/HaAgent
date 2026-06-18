@@ -1,9 +1,15 @@
+"""
+agent_foundry/tools.py - 最小工具路由与本地工具实现
+
+提供 file_search、file_read、apply_patch、shell 和测试用 fake_tool，并统一写入工具 trace。
+"""
+
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import time
-import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,6 +39,7 @@ class ToolRouter:
         }
 
     def dispatch(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        """执行工具并保证每次调用都写入 tool-calls.jsonl。"""
         started = time.perf_counter()
         try:
             if tool_name not in self._allowed_tools:
@@ -56,6 +63,7 @@ class ToolRouter:
         return {"status": "success", "args": args}
 
     def _file_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        """优先使用 ripgrep 搜索文本；rg 不可用时退回 Python 遍历。"""
         query = args.get("query")
         if not isinstance(query, str) or not query:
             return _error("invalid_arguments", "query must be a non-empty string")
@@ -69,6 +77,7 @@ class ToolRouter:
 
         rg = shutil.which("rg")
         if rg:
+            # 使用 JSON 输出避免 Windows 盘符冒号破坏 path:line:column 解析。
             command = [rg, "--json", "--", query, str(root)]
             completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
             if completed.returncode not in (0, 1):
@@ -118,6 +127,7 @@ class ToolRouter:
         }
 
     def _apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        """仅允许工作区内文件，并要求 old_text 唯一匹配后再写回。"""
         path_arg = args.get("path")
         old_text = args.get("old_text")
         new_text = args.get("new_text")
@@ -139,6 +149,7 @@ class ToolRouter:
         return {"status": "success", "path": str(path), "replacements": 1}
 
     def _shell(self, args: dict[str, Any]) -> dict[str, Any]:
+        """运行 shell 命令，捕获 stdout/stderr/exit_code，并把失败结构化返回。"""
         command = args.get("command")
         if not isinstance(command, str) or not command:
             return _error("invalid_arguments", "command must be a non-empty string")
@@ -187,6 +198,7 @@ class ToolRouter:
         return result
 
     def _resolve_workspace_path(self, path: str) -> Path | None:
+        """把相对路径绑定到 workspace，拒绝逃逸到工作区之外的路径。"""
         candidate = Path(path)
         if not candidate.is_absolute():
             candidate = self._workspace_root / candidate
@@ -219,6 +231,7 @@ def _error(error_type: str, message: str) -> dict[str, Any]:
 
 
 def _parse_rg_json(output: str) -> list[dict[str, Any]]:
+    """解析 ripgrep JSON 事件流，只保留 match 事件。"""
     matches = []
     for line in output.splitlines():
         event = json.loads(line)

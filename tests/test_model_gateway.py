@@ -1,3 +1,9 @@
+"""
+tests/test_model_gateway.py - ModelGateway 接口与 provider 行为测试
+
+验证 fake model、OpenAI 适配和模型失败显式暴露。
+"""
+
 import json
 from pathlib import Path
 

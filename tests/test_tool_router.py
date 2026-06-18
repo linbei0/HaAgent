@@ -1,3 +1,9 @@
+"""
+tests/test_tool_router.py - ToolRouter 本地工具行为测试
+
+验证工具授权、trace 写入、文件工具和 shell 工具的结构化结果。
+"""
+
 import json
 from pathlib import Path
 

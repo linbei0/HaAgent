@@ -1,3 +1,9 @@
+"""
+tests/test_task_loading.py - task.yaml 加载测试
+
+验证任务规格字段能被读取，并拒绝缺少必填字段的输入。
+"""
+
 from pathlib import Path
 
 import pytest

@@ -1,3 +1,9 @@
+"""
+agent_foundry/model_gateway.py - 统一模型网关接口
+
+上层只依赖 ModelGateway 协议；fake provider 用于测试，OpenAI provider 是首个真实适配。
+"""
+
 from __future__ import annotations
 
 import json
@@ -63,9 +69,11 @@ class OpenAIResponsesGateway:
         self._transport = transport or _responses_transport
 
     def generate(self, task: TaskSpec) -> ModelResponse:
+        """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
         if not self._api_key:
             raise ModelCallError("OPENAI_API_KEY is required for OpenAIResponsesGateway")
 
+        # provider 失败必须显式暴露给 orchestrator，禁止静默回退到 fake model。
         payload = {"model": self._model, "input": _prompt_for_task(task)}
         try:
             response = self._transport(payload, self._api_key)
@@ -95,6 +103,7 @@ def _format_list(items: list[str]) -> str:
 
 
 def _responses_transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+    """执行真实 HTTP 请求；保持为函数便于测试注入替身 transport。"""
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(payload).encode("utf-8"),

@@ -1,3 +1,9 @@
+"""
+agent_foundry/task.py - task.yaml 加载与校验
+
+把用户提供的 YAML 任务规格转换成运行时使用的 TaskSpec。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,6 +27,7 @@ class TaskSpec:
 
 
 def load_task(path: Path) -> TaskSpec:
+    """读取 task.yaml，并校验 MVP 所需的五个必填字段。"""
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise TaskLoadError("task.yaml must contain a mapping")

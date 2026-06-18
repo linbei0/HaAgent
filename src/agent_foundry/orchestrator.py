@@ -1,3 +1,9 @@
+"""
+agent_foundry/orchestrator.py - Run Orchestrator 状态机
+
+串联 task 加载、模型调用、工具执行和 episode trace 写入。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,10 +29,12 @@ class RunOrchestrator:
         self._model_gateway = model_gateway or FakeModelGateway()
 
     def run(self, task_path: Path) -> RunResult:
+        """执行一次 run，并把所有阶段变化写入 transcript.jsonl。"""
         state_history: list[RunStatus] = []
         writer = EpisodeWriter.create(self._runs_root, task_path)
 
         def transition(status: RunStatus) -> None:
+            # 状态流转是 episode 的关键事实来源，必须先落 trace 再继续执行下一步。
             state_history.append(status)
             writer.append_transcript({"event": "state_transition", "status": status.value})
 
@@ -37,6 +45,7 @@ class RunOrchestrator:
             transition(RunStatus.PLANNING)
             writer.write_context_manifest(self._context_manifest(task))
             writer.write_environment()
+            # 模型调用和响应分开记录，方便后续区分 provider 故障与工具故障。
             writer.append_transcript(
                 {
                     "event": "model_call",
@@ -59,6 +68,7 @@ class RunOrchestrator:
 
             transition(RunStatus.EXECUTING)
             router = ToolRouter(task.allowed_tools, writer, workspace_root=task_path.parent)
+            # 工具失败以结构化结果返回；orchestrator 在这里显式转换成 failed run。
             for tool_call in model_response.tool_calls:
                 tool_result = router.dispatch(tool_call.name, tool_call.args)
                 router.raise_for_error(tool_result)

@@ -1,3 +1,9 @@
+"""
+tests/test_episode_writer.py - EpisodeWriter 文件产物测试
+
+验证 episode package 的核心文件会被稳定创建。
+"""
+
 from pathlib import Path
 
 from agent_foundry.episode import EpisodeWriter

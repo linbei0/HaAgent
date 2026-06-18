@@ -1,3 +1,9 @@
+"""
+tests/test_orchestrator.py - RunOrchestrator 状态流转测试
+
+验证成功路径、工具失败和模型失败会写入正确 run 状态。
+"""
+
 import json
 from pathlib import Path
 
