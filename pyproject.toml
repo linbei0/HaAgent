@@ -7,6 +7,9 @@ dependencies = [
     "pyyaml>=6.0.0",
 ]
 
+[project.scripts]
+agentfoundry = "agentfoundry.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
