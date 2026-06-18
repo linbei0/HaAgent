@@ -16,6 +16,7 @@ from agentfoundry.runtime.state import RunStatus
 from agentfoundry.runtime.task_contract import TaskSpec, load_task
 from agentfoundry.tools.base import ToolRoutingError
 from agentfoundry.tools.router import ToolRouter
+from agentfoundry.verification.engine import VerificationEngine
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,21 @@ class RunOrchestrator:
                 router.raise_for_error(tool_result)
 
             transition(RunStatus.VERIFYING)
+            verification_result = VerificationEngine(writer, task_path.parent).run(task.verification_commands)
+            if verification_result.status == "failed":
+                transition(RunStatus.FAILED)
+                writer.write_failure_attribution(
+                    {
+                        "stage": "verifying",
+                        "category": "Verification Failure",
+                        "evidence": (
+                            f"{verification_result.failed_command} "
+                            f"exited with {verification_result.exit_code}"
+                        ),
+                    },
+                )
+                return RunResult(RunStatus.FAILED, state_history, writer.path)
+
             transition(RunStatus.COMPLETED)
             writer.write_failure_attribution(None)
             return RunResult(RunStatus.COMPLETED, state_history, writer.path)
