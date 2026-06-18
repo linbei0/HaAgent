@@ -37,7 +37,9 @@ class RunOrchestrator:
             writer.write_environment()
 
             transition(RunStatus.EXECUTING)
-            ToolRouter(task.allowed_tools, writer).dispatch("fake_tool", {"goal": task.goal})
+            router = ToolRouter(task.allowed_tools, writer, workspace_root=task_path.parent)
+            tool_result = router.dispatch("fake_tool", {"goal": task.goal})
+            router.raise_for_error(tool_result)
 
             transition(RunStatus.VERIFYING)
             transition(RunStatus.COMPLETED)
