@@ -459,16 +459,28 @@ def test_orchestrator_completes_after_two_tool_rounds(tmp_path: Path) -> None:
     assert "- none" in first_context
     assert "Plan:" in first_context
     assert "- Use allowed tools: fake_tool." in first_context
+    assert first_context.index("Plan:") < first_context.index("Observations:")
+    assert first_context.index("Observations:") < first_context.index("Pending next step:")
+    assert "Pending next step:" in first_context
+    assert "Pending next step:\n- none" in first_context
     assert "Plan:" in second_context
     assert "- Use allowed tools: fake_tool." in second_context
     assert "fake_tool" in second_context
     assert '"args": {"round": 1}' in second_context
+    assert second_context.index("Plan:") < second_context.index("Observations:")
+    assert second_context.index("Observations:") < second_context.index("Pending next step:")
+    assert "Pending next step:" in second_context
+    assert "Continue from the latest successful tool observation" in second_context
     assert any(
         source["source_type"] == "observation" and source["name"] == "fake_tool"
         for source in second_manifest["sources"]
     )
     assert any(
         source["source_type"] == "plan" and source["name"] == "plan.json"
+        for source in second_manifest["sources"]
+    )
+    assert any(
+        source["source_type"] == "pending_next_step" and source["name"] == "pending_next_step"
         for source in second_manifest["sources"]
     )
     for context_id in ["0001", "0002", "0003"]:

@@ -115,7 +115,9 @@ def test_context_builder_model_input_contains_tool_usage(tmp_path: Path) -> None
     assert "fake_tool: deterministic test tool" in model_input
     assert "file_read: read a workspace text file with offset and limit" in model_input
     assert "verification_commands:" in model_input
+    assert "Plan:" in model_input
     assert "Observations:" in model_input
+    assert "Pending next step:" in model_input
     assert "- none" in model_input
 
 
@@ -150,6 +152,34 @@ def test_context_builder_includes_plan_source_and_budget(tmp_path: Path) -> None
         "char_count": len(injected_plan),
         "included_in_model_input": True,
         "inclusion_reason": plan_source["inclusion_reason"],
+    }
+
+
+def test_context_builder_includes_pending_next_step_none_source_and_budget(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+    )
+
+    builder.build()
+
+    model_input = (writer.path / "contexts" / "0001.txt").read_text(encoding="utf-8")
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    pending_source = next(
+        source for source in context_manifest["sources"] if source["source_type"] == "pending_next_step"
+    )
+    injected_pending_next_step = "\n".join(["Pending next step:", "- none"])
+    assert injected_pending_next_step in model_input
+    assert pending_source["name"] == "pending_next_step"
+    assert pending_source["description"]
+    assert pending_source["inclusion_reason"]
+    assert pending_source["budget"] == {
+        "char_count": len(injected_pending_next_step),
+        "included_in_model_input": True,
+        "inclusion_reason": pending_source["inclusion_reason"],
     }
 
 
@@ -238,12 +268,43 @@ def test_context_builder_model_input_contains_observation_summary(tmp_path: Path
     assert "fake_tool" in model_input
     assert '"args": {"round": 1}' in model_input
     assert '"result": {"echo": {"round": 1}, "status": "success"}' in model_input
+    assert "Pending next step:" in model_input
+    assert "Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied." in model_input
     assert len(observation_sources) == 1
     assert observation_sources[0]["source_type"] == "observation"
     assert observation_sources[0]["name"] == "fake_tool"
     assert observation_sources[0]["description"] == "Tool observation from previous turn"
     assert observation_sources[0]["inclusion_reason"] == "Previous tool result is needed for the next model turn."
     assert observation_sources[0]["budget"]["included_in_model_input"] is True
+
+
+def test_context_builder_pending_next_step_handles_tool_error(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        observations=[
+            {
+                "tool_name": "fake_tool",
+                "args": {"round": 1},
+                "result": {"status": "error", "error": "bad args"},
+            },
+        ],
+    )
+
+    builder.build()
+
+    model_input = (writer.path / "contexts" / "0001.txt").read_text(encoding="utf-8")
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    pending_source = next(
+        source for source in context_manifest["sources"] if source["source_type"] == "pending_next_step"
+    )
+    assert "Pending next step:" in model_input
+    assert "Use the latest tool error to adjust parameters, or stop and explain the failure explicitly." in model_input
+    assert pending_source["budget"]["included_in_model_input"] is True
+    assert pending_source["budget"]["inclusion_reason"]
 
 
 def test_context_builder_records_each_allowed_tool_as_source(tmp_path: Path) -> None:
@@ -282,7 +343,7 @@ def test_context_builder_sources_include_inclusion_reason(tmp_path: Path) -> Non
 
     context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
     source_types = {source["source_type"] for source in context_manifest["sources"]}
-    assert {"task", "tool_catalog", "observation", "project_instructions", "plan"} <= source_types
+    assert {"task", "tool_catalog", "observation", "project_instructions", "plan", "pending_next_step"} <= source_types
     assert all(source["inclusion_reason"] for source in context_manifest["sources"])
 
 

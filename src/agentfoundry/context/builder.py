@@ -136,6 +136,9 @@ class ContextBuilder:
                 "Observations:",
                 *self._format_observations(),
                 "",
+                "Pending next step:",
+                *self._format_pending_next_step(),
+                "",
             ],
         )
 
@@ -162,6 +165,12 @@ class ContextBuilder:
                 "plan.json",
                 "Agent plan trace for this episode",
                 "The model needs the planned steps produced during planning.",
+            ),
+            ContextSource(
+                "pending_next_step",
+                "pending_next_step",
+                "Deterministic next-step guidance from the latest tool result",
+                "The model needs explicit continuation guidance after tool observations.",
             ),
         ]
         sources.extend(
@@ -216,6 +225,8 @@ class ContextBuilder:
             return f"- {source.name}: {TOOL_REGISTRY[source.name].description}"
         if source.source_type == "plan":
             return "\n".join(["Plan:", *self._format_plan()])
+        if source.source_type == "pending_next_step":
+            return "\n".join(["Pending next step:", *self._format_pending_next_step()])
         if source.source_type == "observation":
             for observation in self._observations:
                 if _observation_tool_name(observation) == source.name:
@@ -236,6 +247,21 @@ class ContextBuilder:
             )
             for observation in self._observations
         ]
+
+    def _format_pending_next_step(self) -> list[str]:
+        if not self._observations:
+            return ["- none"]
+        latest_result = self._observations[-1].get("result", {})
+        status = latest_result.get("status") if isinstance(latest_result, dict) else None
+        if status == "success":
+            return [
+                "- Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied.",
+            ]
+        if status in {"error", "failed"}:
+            return [
+                "- Use the latest tool error to adjust parameters, or stop and explain the failure explicitly.",
+            ]
+        return ["- Use the latest tool observation to decide the next action explicitly."]
 
     def _read_plan(self) -> dict[str, object]:
         path = self._episode_writer.path / "plan.json"
