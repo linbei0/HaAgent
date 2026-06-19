@@ -240,6 +240,38 @@ def test_package_validator_rejects_tool_call_missing_status(tmp_path: Path) -> N
         validate_episode_package(result.episode_path)
 
 
+def test_package_validator_rejects_tool_name_non_string(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "tool-calls.jsonl").write_text(
+        json.dumps({"tool_name": 123, "status": "success"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="tool-calls.jsonl line 1 tool_name must be a string",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_tool_status_invalid(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "tool-calls.jsonl").write_text(
+        json.dumps({"tool_name": "fake_tool", "status": "timeout"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="tool-calls.jsonl line 1 status is invalid: timeout",
+    ):
+        validate_episode_package(result.episode_path)
+
+
 def test_package_validator_rejects_verification_command_missing_command(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)
@@ -252,6 +284,70 @@ def test_package_validator_rejects_verification_command_missing_command(tmp_path
     with pytest.raises(
         EpisodeValidationError,
         match="verification/commands.jsonl line 1 missing required field: command",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_verification_command_non_string(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "verification" / "commands.jsonl").write_text(
+        json.dumps({"command": 123, "status": "success"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="verification/commands.jsonl line 1 command must be a string",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_verification_status_invalid(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "verification" / "commands.jsonl").write_text(
+        json.dumps({"command": "uv run pytest", "status": "skipped"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="verification/commands.jsonl line 1 status is invalid: skipped",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_verification_exit_code_invalid(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "verification" / "commands.jsonl").write_text(
+        json.dumps({"command": "uv run pytest", "status": "success", "exit_code": "0"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="verification/commands.jsonl line 1 exit_code must be an integer or null",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_verification_timeout_invalid(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "verification" / "commands.jsonl").write_text(
+        json.dumps({"command": "uv run pytest", "status": "success", "timeout": "false"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="verification/commands.jsonl line 1 timeout must be a bool",
     ):
         validate_episode_package(result.episode_path)
 

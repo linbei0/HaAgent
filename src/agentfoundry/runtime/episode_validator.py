@@ -75,6 +75,8 @@ def _read_validated_episode_package(episode_path: Path) -> EpisodePackageView:
     )
     if episode_metadata is None or failure_record is None:
         raise EpisodeValidationError("episode package must contain v1 episode.json and failure.json")
+    _validate_tool_calls(tool_calls)
+    _validate_verification_commands(verification_commands)
     _validate_cross_file_consistency(episode_path, episode_metadata, failure_record, context_manifest, transcript)
     return EpisodePackageView(
         episode_metadata=episode_metadata,
@@ -141,6 +143,40 @@ def _validate_jsonl_fields(path: Path, label: str, required_fields: list[str]) -
                 )
         records.append(record)
     return records
+
+
+def _validate_tool_calls(records: list[dict[str, Any]]) -> None:
+    """校验 tool-calls.jsonl 的最小字段类型和值域。"""
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record["tool_name"], str):
+            raise EpisodeValidationError(f"tool-calls.jsonl line {index} tool_name must be a string")
+        status = record["status"]
+        if status not in {"success", "failed"}:
+            raise EpisodeValidationError(f"tool-calls.jsonl line {index} status is invalid: {status}")
+
+
+def _validate_verification_commands(records: list[dict[str, Any]]) -> None:
+    """校验 verification commands trace 的最小字段类型和值域。"""
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record["command"], str):
+            raise EpisodeValidationError(
+                f"verification/commands.jsonl line {index} command must be a string",
+            )
+        status = record["status"]
+        if status not in {"success", "failed", "timeout"}:
+            raise EpisodeValidationError(
+                f"verification/commands.jsonl line {index} status is invalid: {status}",
+            )
+        if "exit_code" in record and not (
+            isinstance(record["exit_code"], int) or record["exit_code"] is None
+        ):
+            raise EpisodeValidationError(
+                f"verification/commands.jsonl line {index} exit_code must be an integer or null",
+            )
+        if "timeout" in record and not isinstance(record["timeout"], bool):
+            raise EpisodeValidationError(
+                f"verification/commands.jsonl line {index} timeout must be a bool",
+            )
 
 
 def _validate_cross_file_consistency(
