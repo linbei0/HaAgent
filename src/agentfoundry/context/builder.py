@@ -14,7 +14,7 @@ from pathlib import Path
 from agentfoundry.context.manifest import ContextIndex, ContextManifest, ContextSource
 from agentfoundry.runtime.episode import EpisodeWriter
 from agentfoundry.runtime.task_contract import TaskSpec
-from agentfoundry.tools.catalog import TOOL_CATALOG
+from agentfoundry.tools.registry import TOOL_REGISTRY
 
 
 CONTEXT_MANIFEST_VERSION = "1.2"
@@ -73,7 +73,7 @@ class ContextBuilder:
         return BuiltContext(context_id=context_id, model_input=model_input, manifest=manifest)
 
     def _validate_tools(self) -> None:
-        unknown_tools = [tool for tool in self._task.allowed_tools if tool not in TOOL_CATALOG]
+        unknown_tools = [tool for tool in self._task.allowed_tools if tool not in TOOL_REGISTRY]
         if unknown_tools:
             raise ContextBuildError(f"unknown allowed_tools: {', '.join(unknown_tools)}")
 
@@ -101,7 +101,7 @@ class ContextBuilder:
                 *_format_list(self._task.constraints),
                 "allowed_tools:",
                 *[
-                    f"- {tool}: {TOOL_CATALOG[tool]}"
+                    f"- {tool}: {TOOL_REGISTRY[tool].description}"
                     for tool in self._task.allowed_tools
                 ],
                 "acceptance_criteria:",
@@ -124,7 +124,7 @@ class ContextBuilder:
             ContextSource("task", "verification_commands", "Verification commands from task.yaml"),
         ]
         sources.extend(
-            ContextSource("tool_catalog", tool, TOOL_CATALOG[tool])
+            ContextSource("tool_catalog", tool, TOOL_REGISTRY[tool].description)
             for tool in self._task.allowed_tools
         )
         sources.extend(

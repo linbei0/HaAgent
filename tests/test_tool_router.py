@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from agentfoundry.runtime.episode import EpisodeWriter
+from agentfoundry.tools.registry import TOOL_REGISTRY
 from agentfoundry.tools.router import ToolRouter
 
 
@@ -39,6 +40,17 @@ def test_tool_router_runs_fake_tool_and_writes_trace(tmp_path: Path) -> None:
     assert record["tool_name"] == "fake_tool"
     assert record["status"] == "success"
     assert record["result"] == result
+
+
+def test_tool_router_handlers_match_tool_registry(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=list(TOOL_REGISTRY),
+        episode_writer=writer,
+        workspace_root=tmp_path,
+    )
+
+    assert set(router._handlers) == set(TOOL_REGISTRY)
 
 
 def test_tool_router_rejects_disallowed_tool(tmp_path: Path) -> None:

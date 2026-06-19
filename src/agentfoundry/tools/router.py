@@ -13,6 +13,7 @@ from typing import Any
 from agentfoundry.runtime.episode import EpisodeWriter
 from agentfoundry.tools.base import ToolHandler, ToolRoutingError, tool_error
 from agentfoundry.tools.file_tools import apply_patch, file_read, file_search
+from agentfoundry.tools.registry import TOOL_REGISTRY
 from agentfoundry.tools.shell import shell
 
 
@@ -33,6 +34,7 @@ class ToolRouter:
             "apply_patch": lambda args: apply_patch(args, self._workspace_root),
             "shell": lambda args: shell(args, self._workspace_root),
         }
+        self._assert_registry_alignment()
 
     def dispatch(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """执行工具并保证每次调用都写入 tool-calls.jsonl。"""
@@ -57,6 +59,13 @@ class ToolRouter:
 
     def _fake_tool(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "success", "args": args}
+
+    def _assert_registry_alignment(self) -> None:
+        """Router 和 Registry 必须同步，否则 allowed_tools 审计会和实际执行脱节。"""
+        if set(self._handlers) != set(TOOL_REGISTRY):
+            missing = sorted(set(TOOL_REGISTRY) - set(self._handlers))
+            extra = sorted(set(self._handlers) - set(TOOL_REGISTRY))
+            raise ToolRoutingError(f"tool registry mismatch: missing={missing}, extra={extra}")
 
     def _write_trace(
         self,

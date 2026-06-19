@@ -1,16 +1,15 @@
 """
-agentfoundry/tools/catalog.py - 工具目录
+agentfoundry/tools/catalog.py - 工具目录兼容层
 
-集中维护可暴露给 ContextBuilder 的工具名和一句话用途。
+保留旧 TOOL_CATALOG 导入路径，并从 Tool Registry 派生一句话用途。
 """
 
 from __future__ import annotations
 
+from agentfoundry.tools.registry import TOOL_REGISTRY
+
 
 TOOL_CATALOG = {
-    "fake_tool": "deterministic test tool",
-    "file_search": "search workspace text using ripgrep when available",
-    "file_read": "read a workspace text file with offset and limit",
-    "apply_patch": "replace unique text inside a workspace file",
-    "shell": "run a shell command with timeout and captured output",
+    name: definition.description
+    for name, definition in TOOL_REGISTRY.items()
 }
