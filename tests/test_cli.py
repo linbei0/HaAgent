@@ -26,6 +26,21 @@ def write_minimal_episode(
     (episode_path / "verification").mkdir(parents=True)
     if episode_json is not None:
         (episode_path / "episode.json").write_text(json.dumps(episode_json), encoding="utf-8")
+        (episode_path / "task.yaml").write_text(
+            """
+goal: Inspect me
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+            encoding="utf-8",
+        )
+        (episode_path / "environment.json").write_text(
+            json.dumps({"workspace_root": episode_json.get("workspace_root")}),
+            encoding="utf-8",
+        )
     if failure_json is not None:
         (episode_path / "failure.json").write_text(json.dumps(failure_json), encoding="utf-8")
     (episode_path / "context-manifest.json").write_text(
@@ -106,6 +121,17 @@ def test_cli_run_accepts_custom_runs_root(tmp_path: Path, monkeypatch) -> None:
 def test_cli_inspect_completed_episode_outputs_summary(tmp_path: Path, capsys) -> None:
     episode_path = tmp_path / "episode-1"
     (episode_path / "verification").mkdir(parents=True)
+    (episode_path / "task.yaml").write_text(
+        """
+goal: Inspect me
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
     (episode_path / "episode.json").write_text(
         json.dumps(
             {
@@ -155,7 +181,15 @@ def test_cli_inspect_completed_episode_outputs_summary(tmp_path: Path, capsys) -
         json.dumps({"command": "uv run pytest", "status": "success", "exit_code": 0}) + "\n",
         encoding="utf-8",
     )
+    (episode_path / "failure.json").write_text(
+        json.dumps({"status": "success", "failure": None}),
+        encoding="utf-8",
+    )
     (episode_path / "failure-attribution.md").write_text("# Failure Attribution\n\n未失败。\n", encoding="utf-8")
+    (episode_path / "environment.json").write_text(
+        json.dumps({"workspace_root": str(tmp_path)}),
+        encoding="utf-8",
+    )
 
     exit_code = cli.main(["inspect", str(episode_path)])
 
@@ -180,6 +214,17 @@ def test_cli_inspect_completed_episode_outputs_summary(tmp_path: Path, capsys) -
 def test_cli_inspect_outputs_verification_evidence(tmp_path: Path, capsys) -> None:
     episode_path = tmp_path / "episode-1"
     (episode_path / "verification").mkdir(parents=True)
+    (episode_path / "task.yaml").write_text(
+        """
+goal: Inspect me
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
     (episode_path / "episode.json").write_text(
         json.dumps(
             {
@@ -231,6 +276,10 @@ def test_cli_inspect_outputs_verification_evidence(tmp_path: Path, capsys) -> No
     )
     (episode_path / "failure-attribution.md").write_text(
         "# Failure Attribution\n\n- category: Verification Failure\n",
+        encoding="utf-8",
+    )
+    (episode_path / "environment.json").write_text(
+        json.dumps({"workspace_root": str(tmp_path)}),
         encoding="utf-8",
     )
 
@@ -347,13 +396,45 @@ def test_cli_inspect_fails_when_success_failure_json_has_failure(tmp_path: Path,
 
 def test_cli_inspect_legacy_episode_without_failure_json_still_works(tmp_path: Path, capsys) -> None:
     episode_path = tmp_path / "episode-1"
-    write_minimal_episode(episode_path, episode_json=valid_episode_json(tmp_path))
+    write_minimal_episode(episode_path)
 
     exit_code = cli.main(["inspect", str(episode_path)])
 
     assert exit_code == 0
     output = capsys.readouterr().out
     assert "legacy episode without failure.json" in output
+
+
+def test_cli_inspect_new_episode_missing_required_file_uses_validator(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    (episode_path / "environment.json").unlink()
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "episode package missing required file: environment.json" in output
+
+
+def test_cli_inspect_new_episode_invalid_jsonl_uses_validator(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    (episode_path / "transcript.jsonl").write_text("{not json}\n", encoding="utf-8")
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "transcript.jsonl line 1 is not valid JSON" in output
 
 
 def test_cli_inspect_fails_when_required_file_is_missing(tmp_path: Path, capsys) -> None:

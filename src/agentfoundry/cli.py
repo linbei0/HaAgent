@@ -15,6 +15,7 @@ from agentfoundry.runtime.episode_validator import (
     EpisodeValidationError,
     read_episode_metadata,
     read_failure_record,
+    validate_episode_package,
 )
 from agentfoundry.runtime.orchestrator import RunOrchestrator
 
@@ -68,20 +69,12 @@ def render_episode_summary(episode_path: Path) -> str:
     """读取 episode package，并生成面向人的审计摘要。"""
     try:
         episode_metadata, warnings = read_episode_metadata(episode_path)
+        if episode_metadata is not None:
+            validate_episode_package(episode_path)
+        else:
+            _ensure_legacy_inspect_files(episode_path)
     except EpisodeValidationError as error:
         raise EpisodeInspectError(str(error)) from error
-
-    required_files = [
-        "context-manifest.json",
-        "transcript.jsonl",
-        "tool-calls.jsonl",
-        "verification/commands.jsonl",
-        "failure-attribution.md",
-    ]
-    for relative_path in required_files:
-        path = episode_path / relative_path
-        if not path.exists():
-            raise EpisodeInspectError(f"missing required episode file: {relative_path}")
 
     context_manifest = _read_json(episode_path / "context-manifest.json")
     transcript = _read_jsonl(episode_path / "transcript.jsonl")
@@ -136,6 +129,20 @@ def render_episode_summary(episode_path: Path) -> str:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _ensure_legacy_inspect_files(episode_path: Path) -> None:
+    """legacy episode 没有 v1 根 schema，只校验 inspect 展示必须读取的文件。"""
+    required_files = [
+        "context-manifest.json",
+        "transcript.jsonl",
+        "tool-calls.jsonl",
+        "verification/commands.jsonl",
+        "failure-attribution.md",
+    ]
+    for relative_path in required_files:
+        if not (episode_path / relative_path).exists():
+            raise EpisodeInspectError(f"missing required episode file: {relative_path}")
 
 
 def _summary_provider(
