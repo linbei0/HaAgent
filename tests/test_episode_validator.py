@@ -48,6 +48,27 @@ def update_context_manifest(episode_path: Path, **updates: object) -> None:
     write_json(episode_path / "context-manifest.json", context_manifest)
 
 
+def update_first_context_index_budget(episode_path: Path, budget: object | None) -> None:
+    context_manifest = read_json(episode_path / "context-manifest.json")
+    if budget is None:
+        context_manifest["contexts"][0].pop("budget", None)
+    else:
+        context_manifest["contexts"][0]["budget"] = budget
+    write_json(episode_path / "context-manifest.json", context_manifest)
+
+
+def first_context_json_path(episode_path: Path) -> Path:
+    context_manifest = read_json(episode_path / "context-manifest.json")
+    return episode_path / context_manifest["contexts"][0]["manifest_path"]
+
+
+def update_first_context_json(episode_path: Path, **updates: object) -> None:
+    path = first_context_json_path(episode_path)
+    context_json = read_json(path)
+    context_json.update(updates)
+    write_json(path, context_json)
+
+
 def update_environment(episode_path: Path, **updates: object) -> None:
     environment = read_json(episode_path / "environment.json")
     environment.update(updates)
@@ -649,6 +670,119 @@ def test_package_validator_rejects_missing_context_file(tmp_path: Path) -> None:
     with pytest.raises(
         EpisodeValidationError,
         match="context-manifest.json contexts\\[0\\].model_input_path file missing",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_missing_context_index_budget(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_first_context_index_budget(result.episode_path, None)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="context-manifest.json contexts\\[0\\].budget must be an object",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_context_index_budget_id_mismatch(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    context_manifest = read_json(result.episode_path / "context-manifest.json")
+    budget = dict(context_manifest["contexts"][0]["budget"])
+    budget["context_id"] = "9999"
+    update_first_context_index_budget(result.episode_path, budget)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="context-manifest.json contexts\\[0\\].budget.context_id must match context_id",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_missing_source_budget(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    context_path = first_context_json_path(result.episode_path)
+    context_json = read_json(context_path)
+    context_json["sources"][0].pop("budget", None)
+    write_json(context_path, context_json)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="contexts/0001.json sources\\[0\\].budget must be an object",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_source_budget_field_type_error(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    context_path = first_context_json_path(result.episode_path)
+    context_json = read_json(context_path)
+    context_json["sources"][0]["budget"]["char_count"] = "6"
+    write_json(context_path, context_json)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="contexts/0001.json sources\\[0\\].budget.char_count must be an int",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_context_index_source_count_mismatch(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    context_manifest = read_json(result.episode_path / "context-manifest.json")
+    budget = dict(context_manifest["contexts"][0]["budget"])
+    budget["source_count"] = 999
+    update_first_context_index_budget(result.episode_path, budget)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="context-manifest.json contexts\\[0\\].budget.source_count does not match sources length",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_context_index_included_source_count_mismatch(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    context_manifest = read_json(result.episode_path / "context-manifest.json")
+    budget = dict(context_manifest["contexts"][0]["budget"])
+    budget["included_source_count"] = 0
+    update_first_context_index_budget(result.episode_path, budget)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="context-manifest.json contexts\\[0\\].budget.included_source_count does not match included sources",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_context_budget_status_invalid(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_first_context_json(
+        result.episode_path,
+        budget={
+            "character_count": 10,
+            "character_limit": 12000,
+            "status": "near_limit",
+        },
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="contexts/0001.json budget.status is invalid: near_limit",
     ):
         validate_episode_package(result.episode_path)
 

@@ -153,15 +153,23 @@ verification_commands: []
                 "version": "1.1",
                 "context_count": 1,
                 "summary": {"provider": "fake", "goal": "Inspect me"},
-                "contexts": [
-                    {
-                        "context_id": "0001",
-                        "model_input_path": "contexts/0001.txt",
-                        "manifest_path": "contexts/0001.json",
-                    },
-                ],
-            },
-        ),
+                    "contexts": [
+                        {
+                            "context_id": "0001",
+                            "model_input_path": "contexts/0001.txt",
+                            "manifest_path": "contexts/0001.json",
+                            "budget": {
+                                "context_id": "0001",
+                                "total_chars": 11,
+                                "max_chars": 12000,
+                                "status": "within_limit",
+                                "source_count": 1,
+                                "included_source_count": 1,
+                            },
+                        },
+                    ],
+                },
+            ),
         encoding="utf-8",
     )
     (episode_path / "transcript.jsonl").write_text(
@@ -200,7 +208,32 @@ verification_commands: []
         encoding="utf-8",
     )
     (episode_path / "contexts" / "0001.txt").write_text("model input", encoding="utf-8")
-    (episode_path / "contexts" / "0001.json").write_text("{}", encoding="utf-8")
+    (episode_path / "contexts" / "0001.json").write_text(
+        json.dumps(
+            {
+                "context_id": "0001",
+                "budget": {
+                    "character_count": 11,
+                    "character_limit": 12000,
+                    "status": "within_limit",
+                },
+                "sources": [
+                    {
+                        "source_type": "task",
+                        "name": "task.yaml",
+                        "description": "测试任务事实",
+                        "inclusion_reason": "inspect fixture",
+                        "budget": {
+                            "char_count": 11,
+                            "included_in_model_input": True,
+                            "inclusion_reason": "inspect fixture",
+                        },
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
 
     exit_code = cli.main(["inspect", str(episode_path)])
 

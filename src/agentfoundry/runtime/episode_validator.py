@@ -275,6 +275,99 @@ def _validate_context_items(episode_path: Path, contexts: list[Any]) -> None:
                 raise EpisodeValidationError(
                     f"context-manifest.json contexts[{index}].{field_name} file missing: {context[field_name]}",
                 )
+        context_json = _read_json(episode_path / context["manifest_path"])
+        _validate_context_json(index, context, context_json)
+
+
+def _validate_context_json(index: int, context_index: dict[str, Any], context_json: dict[str, Any]) -> None:
+    label = str(context_index["manifest_path"])
+    if not isinstance(context_json.get("context_id"), str):
+        raise EpisodeValidationError(f"{label} context_id must be a string")
+    budget = context_json.get("budget")
+    if not isinstance(budget, dict):
+        raise EpisodeValidationError(f"{label} budget must be an object")
+    _validate_context_budget_object(
+        budget,
+        label=f"{label} budget",
+        count_fields={
+            "character_count": "int",
+            "character_limit": "int",
+        },
+        status_field="status",
+    )
+    sources = context_json.get("sources")
+    if not isinstance(sources, list):
+        raise EpisodeValidationError(f"{label} sources must be a list")
+    for source_index, source in enumerate(sources):
+        _validate_context_source(label, source_index, source)
+    _validate_context_index_budget(index, context_index, sources)
+
+
+def _validate_context_budget_object(
+    budget: dict[str, Any],
+    label: str,
+    count_fields: dict[str, str],
+    status_field: str,
+) -> None:
+    for field_name in count_fields:
+        if not isinstance(budget.get(field_name), int):
+            raise EpisodeValidationError(f"{label}.{field_name} must be an int")
+    status = budget.get(status_field)
+    if status not in {"within_limit", "over_limit"}:
+        raise EpisodeValidationError(f"{label}.{status_field} is invalid: {status}")
+
+
+def _validate_context_source(label: str, source_index: int, source: Any) -> None:
+    if not isinstance(source, dict):
+        raise EpisodeValidationError(f"{label} sources[{source_index}] must be an object")
+    for field_name in ["source_type", "name", "description"]:
+        if not isinstance(source.get(field_name), str):
+            raise EpisodeValidationError(f"{label} sources[{source_index}].{field_name} must be a string")
+    if not _non_empty_string(source.get("inclusion_reason")):
+        raise EpisodeValidationError(f"{label} sources[{source_index}].inclusion_reason must be a non-empty string")
+    budget = source.get("budget")
+    if not isinstance(budget, dict):
+        raise EpisodeValidationError(f"{label} sources[{source_index}].budget must be an object")
+    if not isinstance(budget.get("char_count"), int):
+        raise EpisodeValidationError(f"{label} sources[{source_index}].budget.char_count must be an int")
+    if not isinstance(budget.get("included_in_model_input"), bool):
+        raise EpisodeValidationError(
+            f"{label} sources[{source_index}].budget.included_in_model_input must be a bool",
+        )
+    if not _non_empty_string(budget.get("inclusion_reason")):
+        raise EpisodeValidationError(
+            f"{label} sources[{source_index}].budget.inclusion_reason must be a non-empty string",
+        )
+
+
+def _validate_context_index_budget(index: int, context_index: dict[str, Any], sources: list[Any]) -> None:
+    label = f"context-manifest.json contexts[{index}].budget"
+    budget = context_index.get("budget")
+    if not isinstance(budget, dict):
+        raise EpisodeValidationError(f"{label} must be an object")
+    if budget.get("context_id") != context_index["context_id"]:
+        raise EpisodeValidationError(f"{label}.context_id must match context_id")
+    for field_name in ["total_chars", "max_chars", "source_count", "included_source_count"]:
+        if not isinstance(budget.get(field_name), int):
+            raise EpisodeValidationError(f"{label}.{field_name} must be an int")
+    status = budget.get("status")
+    if status not in {"within_limit", "over_limit"}:
+        raise EpisodeValidationError(f"{label}.status is invalid: {status}")
+    if budget["source_count"] != len(sources):
+        raise EpisodeValidationError(f"{label}.source_count does not match sources length")
+    included_count = sum(
+        1
+        for source in sources
+        if isinstance(source, dict)
+        and isinstance(source.get("budget"), dict)
+        and source["budget"].get("included_in_model_input") is True
+    )
+    if budget["included_source_count"] != included_count:
+        raise EpisodeValidationError(f"{label}.included_source_count does not match included sources")
+
+
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _is_episode_internal_file(episode_path: Path, relative_path: str) -> bool:
