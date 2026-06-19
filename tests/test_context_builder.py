@@ -92,6 +92,64 @@ def test_context_builder_model_input_contains_tool_usage(tmp_path: Path) -> None
     assert "- none" in model_input
 
 
+def test_context_builder_includes_project_instructions_when_agents_md_exists(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Use concise Chinese comments.", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+    )
+
+    builder.build()
+
+    model_input = (writer.path / "contexts" / "0001.txt").read_text(encoding="utf-8")
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    project_sources = [
+        source
+        for source in context_manifest["sources"]
+        if source["source_type"] == "project_instructions"
+    ]
+    assert "Project Instructions:" in model_input
+    assert "Use concise Chinese comments." in model_input
+    assert project_sources == [
+        {
+            "source_type": "project_instructions",
+            "name": "AGENTS.md",
+            "description": "Project instructions from workspace AGENTS.md",
+            "status": "present",
+        },
+    ]
+
+
+def test_context_builder_records_absent_project_instructions(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+    )
+
+    builder.build()
+
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    project_sources = [
+        source
+        for source in context_manifest["sources"]
+        if source["source_type"] == "project_instructions"
+    ]
+    assert project_sources == [
+        {
+            "source_type": "project_instructions",
+            "name": "AGENTS.md",
+            "description": "workspace AGENTS.md not found",
+            "status": "absent",
+        },
+    ]
+
+
 def test_context_builder_model_input_contains_observation_summary(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     builder = ContextBuilder(

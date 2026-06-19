@@ -45,10 +45,12 @@ class ContextBuilder:
         self._provider_name = provider_name
         self._episode_writer = episode_writer
         self._observations = list(observations or [])
+        self._project_instructions: str | None = None
 
     def build(self) -> BuiltContext:
         """构建第一版上下文：不检索文件，只写任务事实和工具目录。"""
         self._validate_tools()
+        self._project_instructions = self._read_project_instructions()
         context_id = self._next_context_id()
         contexts_dir = self._episode_writer.path / "contexts"
         contexts_dir.mkdir(parents=True, exist_ok=True)
@@ -95,6 +97,9 @@ class ContextBuilder:
                 "- Use only the task facts and allowed tools listed below.",
                 "- Report failures explicitly; do not invent successful outcomes.",
                 "",
+                "Project Instructions:",
+                *self._format_project_instructions(),
+                "",
                 "Facts:",
                 f"goal: {self._task.goal}",
                 "constraints:",
@@ -117,6 +122,7 @@ class ContextBuilder:
 
     def _context_manifest(self, context_id: str) -> ContextManifest:
         sources = [
+            self._project_instructions_source(),
             ContextSource("task", "goal", "Goal from task.yaml"),
             ContextSource("task", "constraints", "Constraints from task.yaml"),
             ContextSource("task", "allowed_tools", "Allowed tools from task.yaml"),
@@ -154,6 +160,37 @@ class ContextBuilder:
             )
             for observation in self._observations
         ]
+
+    def _read_project_instructions(self) -> str | None:
+        path = self._workspace_root / "AGENTS.md"
+        if not path.exists():
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ContextBuildError(f"failed to read AGENTS.md: {error}") from error
+
+    def _format_project_instructions(self) -> list[str]:
+        if self._project_instructions is None:
+            return ["- none"]
+        if not self._project_instructions.strip():
+            return ["- empty"]
+        return self._project_instructions.splitlines()
+
+    def _project_instructions_source(self) -> ContextSource:
+        if self._project_instructions is None:
+            return ContextSource(
+                "project_instructions",
+                "AGENTS.md",
+                "workspace AGENTS.md not found",
+                status="absent",
+            )
+        return ContextSource(
+            "project_instructions",
+            "AGENTS.md",
+            "Project instructions from workspace AGENTS.md",
+            status="present",
+        )
 
     def _write_run_manifest(self, index: ContextIndex) -> None:
         manifest_path = self._episode_writer.path / "context-manifest.json"

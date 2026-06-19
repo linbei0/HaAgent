@@ -15,13 +15,17 @@ class ContextSource:
     source_type: str
     name: str
     description: str
+    status: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        source = {
             "source_type": self.source_type,
             "name": self.name,
             "description": self.description,
         }
+        if self.status is not None:
+            source["status"] = self.status
+        return source
 
 
 @dataclass(frozen=True)

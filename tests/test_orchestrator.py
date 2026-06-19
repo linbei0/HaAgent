@@ -181,6 +181,32 @@ def test_orchestrator_fails_unknown_tool_as_task_spec_failure(tmp_path: Path) ->
     assert "mystery_tool" in failure_text
 
 
+def test_orchestrator_attributes_agents_md_read_failure_as_context_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    agents_path = tmp_path / "AGENTS.md"
+    write_task(task_path, ["fake_tool"])
+    agents_path.write_text("blocked", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def read_text_with_failure(path, *args, **kwargs):
+        if Path(path) == agents_path:
+            raise OSError("cannot read AGENTS.md")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_with_failure)
+
+    result = RunOrchestrator(runs_root=runs_dir).run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Context Failure" in failure_text
+    assert "cannot read AGENTS.md" in failure_text
+
+
 def test_orchestrator_failure_attribution_includes_verification_timeout(
     tmp_path: Path,
     monkeypatch,
