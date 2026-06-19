@@ -47,6 +47,12 @@ def update_context_manifest(episode_path: Path, **updates: object) -> None:
     write_json(episode_path / "context-manifest.json", context_manifest)
 
 
+def update_environment(episode_path: Path, **updates: object) -> None:
+    environment = read_json(episode_path / "environment.json")
+    environment.update(updates)
+    write_json(episode_path / "environment.json", environment)
+
+
 def write_task(path: Path) -> None:
     path.write_text(
         """
@@ -210,6 +216,71 @@ def test_package_validator_rejects_missing_required_file(tmp_path: Path) -> None
     with pytest.raises(
         EpisodeValidationError,
         match="episode package missing required file: environment.json",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_environment_python_non_string(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_environment(result.episode_path, python=123)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="environment.json python must be a string",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_environment_platform_non_string(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_environment(result.episode_path, platform=123)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="environment.json platform must be a string",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_environment_created_at_invalid(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_environment(result.episode_path, created_at="not-a-date")
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="environment.json created_at is invalid: not-a-date",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_environment_workspace_root_non_string(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_environment(result.episode_path, workspace_root=123)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="environment.json workspace_root must be a string",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_environment_workspace_root_mismatch(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_environment(result.episode_path, workspace_root=str(tmp_path / "other"))
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="environment.json workspace_root does not match episode.json workspace_root",
     ):
         validate_episode_package(result.episode_path)
 

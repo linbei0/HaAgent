@@ -64,7 +64,7 @@ def _read_validated_episode_package(episode_path: Path) -> EpisodePackageView:
     episode_metadata, _warnings = read_episode_metadata(episode_path)
     failure_record = read_failure_record(episode_path)
     context_manifest = _read_json(episode_path / "context-manifest.json")
-    _read_json(episode_path / "environment.json")
+    environment = _read_json(episode_path / "environment.json")
 
     transcript = _validate_jsonl_fields(episode_path / "transcript.jsonl", "transcript.jsonl", ["event"])
     tool_calls = _validate_jsonl_fields(episode_path / "tool-calls.jsonl", "tool-calls.jsonl", ["tool_name", "status"])
@@ -75,9 +75,17 @@ def _read_validated_episode_package(episode_path: Path) -> EpisodePackageView:
     )
     if episode_metadata is None or failure_record is None:
         raise EpisodeValidationError("episode package must contain v1 episode.json and failure.json")
+    _validate_environment(environment)
     _validate_tool_calls(tool_calls)
     _validate_verification_commands(verification_commands)
-    _validate_cross_file_consistency(episode_path, episode_metadata, failure_record, context_manifest, transcript)
+    _validate_cross_file_consistency(
+        episode_path,
+        episode_metadata,
+        failure_record,
+        context_manifest,
+        environment,
+        transcript,
+    )
     return EpisodePackageView(
         episode_metadata=episode_metadata,
         failure_record=failure_record,
@@ -179,11 +187,25 @@ def _validate_verification_commands(records: list[dict[str, Any]]) -> None:
             )
 
 
+def _validate_environment(environment: dict[str, Any]) -> None:
+    """校验 environment.json 的最小审计字段类型。"""
+    for field_name in ["python", "platform"]:
+        if not isinstance(environment.get(field_name), str):
+            raise EpisodeValidationError(f"environment.json {field_name} must be a string")
+    _validate_iso_datetime_field(
+        environment.get("created_at"),
+        label="environment.json created_at",
+    )
+    if "workspace_root" in environment and not isinstance(environment["workspace_root"], str):
+        raise EpisodeValidationError("environment.json workspace_root must be a string")
+
+
 def _validate_cross_file_consistency(
     episode_path: Path,
     episode_metadata: dict[str, Any],
     failure_record: dict[str, Any],
     context_manifest: dict[str, Any],
+    environment: dict[str, Any],
     transcript: list[dict[str, Any]],
 ) -> None:
     """校验 episode 根状态、失败记录、context 索引与 transcript 末态一致。"""
@@ -207,6 +229,15 @@ def _validate_cross_file_consistency(
         raise EpisodeValidationError("failure.json status success requires episode status completed")
     if failure_status == "failed" and episode_status != RunStatus.FAILED.value:
         raise EpisodeValidationError("failure.json status failed requires episode status failed")
+
+    environment_workspace_root = environment.get("workspace_root")
+    if (
+        environment_workspace_root is not None
+        and environment_workspace_root != episode_metadata["workspace_root"]
+    ):
+        raise EpisodeValidationError(
+            "environment.json workspace_root does not match episode.json workspace_root",
+        )
 
     contexts = context_manifest.get("contexts")
     context_count = context_manifest.get("context_count")
@@ -318,11 +349,16 @@ def _validate_failure_record(record: dict[str, Any]) -> None:
 
 def _validate_iso_datetime(value: Any) -> None:
     """校验 created_at 是 ISO 时间字符串；Z 后缀转为 Python 可解析的 +00:00。"""
+    _validate_iso_datetime_field(value, label="corrupt episode: episode.json created_at")
+
+
+def _validate_iso_datetime_field(value: Any, label: str) -> None:
+    """校验指定字段是 ISO 时间字符串；Z 后缀转为 Python 可解析的 +00:00。"""
     if not isinstance(value, str):
-        raise EpisodeValidationError("corrupt episode: episode.json created_at must be an ISO string")
+        raise EpisodeValidationError(f"{label} must be an ISO string")
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
         raise EpisodeValidationError(
-            f"corrupt episode: episode.json created_at is invalid: {value}",
+            f"{label} is invalid: {value}",
         ) from error

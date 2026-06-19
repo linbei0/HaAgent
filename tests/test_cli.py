@@ -189,7 +189,14 @@ verification_commands: []
     )
     (episode_path / "failure-attribution.md").write_text("# Failure Attribution\n\n未失败。\n", encoding="utf-8")
     (episode_path / "environment.json").write_text(
-        json.dumps({"workspace_root": str(tmp_path)}),
+        json.dumps(
+            {
+                "python": "3.13",
+                "platform": "test",
+                "created_at": "2026-06-19T00:00:00+00:00",
+                "workspace_root": str(tmp_path),
+            },
+        ),
         encoding="utf-8",
     )
     (episode_path / "contexts" / "0001.txt").write_text("model input", encoding="utf-8")
@@ -283,7 +290,14 @@ verification_commands: []
         encoding="utf-8",
     )
     (episode_path / "environment.json").write_text(
-        json.dumps({"workspace_root": str(tmp_path)}),
+        json.dumps(
+            {
+                "python": "3.13",
+                "platform": "test",
+                "created_at": "2026-06-19T00:00:00+00:00",
+                "workspace_root": str(tmp_path),
+            },
+        ),
         encoding="utf-8",
     )
 
