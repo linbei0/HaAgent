@@ -129,6 +129,46 @@ def test_cli_inspect_completed_episode_outputs_summary(tmp_path: Path, capsys) -
     assert "未失败" in output
 
 
+def test_cli_inspect_outputs_verification_evidence(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    (episode_path / "verification").mkdir(parents=True)
+    (episode_path / "context-manifest.json").write_text(
+        json.dumps({"summary": {"provider": "fake"}, "context_count": 0, "contexts": []}),
+        encoding="utf-8",
+    )
+    (episode_path / "transcript.jsonl").write_text(
+        json.dumps({"event": "state_transition", "status": "failed"}) + "\n",
+        encoding="utf-8",
+    )
+    (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
+    (episode_path / "verification" / "commands.jsonl").write_text(
+        json.dumps(
+            {
+                "command": "python fail.py",
+                "status": "failed",
+                "exit_code": 3,
+                "timeout": False,
+                "stdout_excerpt": "out evidence",
+                "stderr_excerpt": "err evidence",
+            },
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (episode_path / "failure-attribution.md").write_text(
+        "# Failure Attribution\n\n- category: Verification Failure\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "python fail.py: failed (exit_code=3)" in output
+    assert "stdout: out evidence" in output
+    assert "stderr: err evidence" in output
+
+
 def test_cli_inspect_fails_when_required_file_is_missing(tmp_path: Path, capsys) -> None:
     episode_path = tmp_path / "episode-1"
     episode_path.mkdir()

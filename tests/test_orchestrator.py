@@ -234,7 +234,9 @@ def test_orchestrator_fails_when_verification_command_fails(tmp_path: Path) -> N
     write_task(
         task_path,
         ["fake_tool"],
-        verification_commands=["python -c \"import sys; sys.exit(5)\""],
+        verification_commands=[
+            "python -c \"import sys; print('verify-out'); print('verify-err', file=sys.stderr); sys.exit(5)\"",
+        ],
     )
 
     result = RunOrchestrator(runs_root=runs_dir).run(task_path)
@@ -249,6 +251,9 @@ def test_orchestrator_fails_when_verification_command_fails(tmp_path: Path) -> N
     ]
     failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
     assert "Verification Failure" in failure_text
+    assert "exit_code=5" in failure_text
+    assert "stdout: verify-out" in failure_text
+    assert "stderr: verify-err" in failure_text
     commands_log = result.episode_path / "verification" / "commands.jsonl"
     assert json.loads(commands_log.read_text(encoding="utf-8"))["exit_code"] == 5
 

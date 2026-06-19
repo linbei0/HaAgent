@@ -204,9 +204,16 @@ class RunOrchestrator:
 
 
 def _verification_evidence(verification_result) -> str:
-    if verification_result.failure_reason == "timeout":
-        return f"{verification_result.failed_command} timeout"
-    return f"{verification_result.failed_command} exited with {verification_result.exit_code}"
+    lines = [f"command: {verification_result.failed_command}"]
+    if verification_result.timeout or verification_result.failure_reason == "timeout":
+        lines.append("timeout: true")
+    else:
+        lines.append(f"exit_code={verification_result.exit_code}")
+    if verification_result.stdout_excerpt:
+        lines.append(f"stdout: {verification_result.stdout_excerpt}")
+    if verification_result.stderr_excerpt:
+        lines.append(f"stderr: {verification_result.stderr_excerpt}")
+    return "\n".join(lines)
 
 
 def _unexpected_failure_category(error: Exception, state_history: list[RunStatus]) -> str:

@@ -14,12 +14,18 @@ from agentfoundry.runtime.command import run_command
 from agentfoundry.runtime.episode import EpisodeWriter
 
 
+EXCERPT_LIMIT = 2000
+
+
 @dataclass(frozen=True)
 class VerificationResult:
     status: str
     failed_command: str | None = None
     exit_code: int | None = None
     failure_reason: str | None = None
+    timeout: bool = False
+    stdout_excerpt: str = ""
+    stderr_excerpt: str = ""
 
 
 class VerificationEngine:
@@ -47,12 +53,25 @@ class VerificationEngine:
                     failed_command=command,
                     exit_code=record["exit_code"],
                     failure_reason=str(record["status"]),
+                    timeout=bool(record["timeout"]),
+                    stdout_excerpt=str(record["stdout_excerpt"]),
+                    stderr_excerpt=str(record["stderr_excerpt"]),
                 )
         return VerificationResult(status="success")
 
     def _run_command(self, command: str) -> dict[str, object]:
-        return run_command(command, self._workspace_root, self._timeout_seconds).to_dict()
+        command_result = run_command(command, self._workspace_root, self._timeout_seconds).to_dict()
+        return {
+            **command_result,
+            "timeout": command_result["status"] == "timeout",
+            "stdout_excerpt": _excerpt(str(command_result["stdout"])),
+            "stderr_excerpt": _excerpt(str(command_result["stderr"])),
+        }
 
     def _append_record(self, record: dict[str, object]) -> None:
         with self._commands_log.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _excerpt(text: str) -> str:
+    return text[:EXCERPT_LIMIT]

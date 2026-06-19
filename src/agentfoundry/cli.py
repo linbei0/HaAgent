@@ -159,13 +159,21 @@ def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
 def _format_verification(commands: list[dict[str, Any]]) -> list[str]:
     if not commands:
         return ["- none"]
-    return [
-        (
-            f"- {command.get('command', '')}: {command.get('status', 'unknown')} "
-            f"(exit_code={command.get('exit_code')})"
+    lines = []
+    for command in commands:
+        lines.append(
+            (
+                f"- {command.get('command', '')}: {command.get('status', 'unknown')} "
+                f"(exit_code={command.get('exit_code')})"
+            ),
         )
-        for command in commands
-    ]
+        if command.get("timeout"):
+            lines.append("  timeout: true")
+        if command.get("stdout_excerpt"):
+            lines.append(f"  stdout: {command['stdout_excerpt']}")
+        if command.get("stderr_excerpt"):
+            lines.append(f"  stderr: {command['stderr_excerpt']}")
+    return lines
 
 
 if __name__ == "__main__":
