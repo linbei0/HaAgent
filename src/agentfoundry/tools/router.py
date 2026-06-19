@@ -59,7 +59,10 @@ class ToolRouter:
     def raise_for_error(self, result: dict[str, Any]) -> None:
         if result.get("status") == "error":
             error = result.get("error") or {}
-            raise ToolRoutingError(str(error.get("message", "tool failed")))
+            raise ToolRoutingError(
+                str(error.get("message", "tool failed")),
+                error_type=str(error.get("type", "")),
+            )
 
     def _fake_tool(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "success", "args": args}

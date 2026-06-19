@@ -13,6 +13,7 @@ from agentfoundry.context.builder import ContextBuildError, ContextBuilder
 from agentfoundry.models.fake import FakeModelGateway
 from agentfoundry.models.gateway import ModelCallError, ModelGateway
 from agentfoundry.runtime.episode import EpisodeWriter
+from agentfoundry.runtime.failure import FailureCategory
 from agentfoundry.runtime.state import RunStatus
 from agentfoundry.runtime.task_contract import TaskLoadError, load_task, resolve_workspace_root
 from agentfoundry.tools.base import ToolRoutingError
@@ -133,7 +134,7 @@ class RunOrchestrator:
                 writer.write_failure_attribution(
                     {
                         "stage": "executing",
-                        "category": "Loop Limit Failure",
+                        "category": FailureCategory.LOOP_LIMIT.value,
                         "evidence": f"exceeded max_turns={self._max_turns}",
                     },
                 )
@@ -146,7 +147,7 @@ class RunOrchestrator:
                 writer.write_failure_attribution(
                     {
                         "stage": "verifying",
-                        "category": "Verification Failure",
+                        "category": FailureCategory.VERIFICATION.value,
                         "evidence": _verification_evidence(verification_result),
                     },
                 )
@@ -160,7 +161,7 @@ class RunOrchestrator:
             writer.write_failure_attribution(
                 {
                     "stage": "executing",
-                    "category": "Tool Interface Failure",
+                    "category": _tool_failure_category(error).value,
                     "evidence": str(error),
                 },
             )
@@ -170,18 +171,22 @@ class RunOrchestrator:
             writer.write_failure_attribution(
                 {
                     "stage": "planning",
-                    "category": "Model Failure",
+                    "category": FailureCategory.MODEL.value,
                     "evidence": str(error),
                 },
             )
             return _finish_run(writer, RunStatus.FAILED, state_history)
         except ContextBuildError as error:
             transition(RunStatus.FAILED)
-            category = "Task Spec Failure" if "unknown allowed_tools" in str(error) else "Context Failure"
+            category = (
+                FailureCategory.TASK_SPEC
+                if "unknown allowed_tools" in str(error)
+                else FailureCategory.CONTEXT
+            )
             writer.write_failure_attribution(
                 {
                     "stage": "planning",
-                    "category": category,
+                    "category": category.value,
                     "evidence": str(error),
                 },
             )
@@ -191,7 +196,7 @@ class RunOrchestrator:
             writer.write_failure_attribution(
                 {
                     "stage": "created",
-                    "category": "Task Spec Failure",
+                    "category": FailureCategory.TASK_SPEC.value,
                     "evidence": str(error),
                 },
             )
@@ -201,7 +206,7 @@ class RunOrchestrator:
             writer.write_failure_attribution(
                 {
                     "stage": state_history[-2].value if len(state_history) > 1 else "created",
-                    "category": _unexpected_failure_category(error, state_history),
+                    "category": _unexpected_failure_category(error, state_history).value,
                     "evidence": str(error),
                 },
             )
@@ -230,8 +235,14 @@ def _finish_run(
     return RunResult(status, state_history, writer.path)
 
 
-def _unexpected_failure_category(error: Exception, state_history: list[RunStatus]) -> str:
+def _unexpected_failure_category(error: Exception, state_history: list[RunStatus]) -> FailureCategory:
     previous_status = state_history[-2] if len(state_history) > 1 else state_history[-1]
     if isinstance(error, TypeError) and previous_status is RunStatus.PLANNING:
-        return "Model Call Failure"
-    return "Runtime Failure"
+        return FailureCategory.MODEL_CALL
+    return FailureCategory.RUNTIME
+
+
+def _tool_failure_category(error: ToolRoutingError) -> FailureCategory:
+    if error.error_type == "invalid_tool_arguments":
+        return FailureCategory.TOOL_ARGUMENT
+    return FailureCategory.TOOL_INTERFACE

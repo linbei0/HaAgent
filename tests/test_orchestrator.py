@@ -163,6 +163,38 @@ def test_orchestrator_file_tool_uses_resolved_workspace_root(tmp_path: Path) -> 
     assert tool_records[0]["result"]["content"] == "from project root\n"
 
 
+def test_orchestrator_invalid_tool_args_are_tool_argument_failure(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(task_path, ["file_read"])
+    gateway = SequenceGateway(
+        [ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])],
+    )
+
+    result = RunOrchestrator(runs_root=runs_dir, model_gateway=gateway).run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Tool Argument Failure" in failure_text
+    assert "missing required argument: path" in failure_text
+
+
+def test_orchestrator_unknown_runtime_tool_is_tool_interface_failure(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(task_path, ["fake_tool"])
+    gateway = SequenceGateway(
+        [ModelResponse("unknown runtime tool", [ToolCall("mystery_tool", {})])],
+    )
+
+    result = RunOrchestrator(runs_root=runs_dir, model_gateway=gateway).run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Tool Interface Failure" in failure_text
+    assert "tool is not allowed: mystery_tool" in failure_text
+
+
 def test_orchestrator_verification_uses_resolved_workspace_root(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     tasks_dir = project_root / "tasks"

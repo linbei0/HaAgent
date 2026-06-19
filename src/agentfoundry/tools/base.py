@@ -15,6 +15,10 @@ ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 class ToolRoutingError(RuntimeError):
     """Raised when orchestration wants to fail a run on tool errors."""
 
+    def __init__(self, message: str, error_type: str | None = None) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
 
 def tool_error(error_type: str, message: str) -> dict[str, Any]:
     return {"status": "error", "error": {"type": error_type, "message": message}}
