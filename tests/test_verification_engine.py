@@ -39,6 +39,7 @@ def test_verification_engine_records_each_command(tmp_path: Path) -> None:
     assert record["exit_code"] == 0
     assert "verified" in record["stdout"]
     assert record["stderr"] == ""
+    assert record["timeout_seconds"] == 60
 
 
 def test_verification_engine_reports_failed_command(tmp_path: Path) -> None:
@@ -53,3 +54,28 @@ def test_verification_engine_reports_failed_command(tmp_path: Path) -> None:
     record = json.loads((writer.path / "verification" / "commands.jsonl").read_text(encoding="utf-8"))
     assert record["status"] == "failed"
     assert record["exit_code"] == 7
+    assert record["timeout_seconds"] == 60
+
+
+def test_verification_engine_records_timeout(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    engine = VerificationEngine(
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        timeout_seconds=0.01,
+    )
+
+    result = engine.run(["python -c \"import time; print('start'); time.sleep(1)\""])
+
+    assert result.status == "failed"
+    assert result.failed_command == "python -c \"import time; print('start'); time.sleep(1)\""
+    assert result.exit_code is None
+    assert result.failure_reason == "timeout"
+    record = json.loads((writer.path / "verification" / "commands.jsonl").read_text(encoding="utf-8"))
+    assert record["command"] == "python -c \"import time; print('start'); time.sleep(1)\""
+    assert record["status"] == "timeout"
+    assert record["exit_code"] is None
+    assert "stdout" in record
+    assert "stderr" in record
+    assert record["duration_seconds"] >= 0
+    assert record["timeout_seconds"] == 0.01

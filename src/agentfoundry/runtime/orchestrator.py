@@ -91,10 +91,7 @@ class RunOrchestrator:
                     {
                         "stage": "verifying",
                         "category": "Verification Failure",
-                        "evidence": (
-                            f"{verification_result.failed_command} "
-                            f"exited with {verification_result.exit_code}"
-                        ),
+                        "evidence": _verification_evidence(verification_result),
                     },
                 )
                 return RunResult(RunStatus.FAILED, state_history, writer.path)
@@ -143,3 +140,9 @@ class RunOrchestrator:
                 },
             )
             return RunResult(RunStatus.FAILED, state_history, writer.path)
+
+
+def _verification_evidence(verification_result) -> str:
+    if verification_result.failure_reason == "timeout":
+        return f"{verification_result.failed_command} timeout"
+    return f"{verification_result.failed_command} exited with {verification_result.exit_code}"

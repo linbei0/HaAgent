@@ -20,12 +20,19 @@ class VerificationResult:
     status: str
     failed_command: str | None = None
     exit_code: int | None = None
+    failure_reason: str | None = None
 
 
 class VerificationEngine:
-    def __init__(self, episode_writer: EpisodeWriter, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        episode_writer: EpisodeWriter,
+        workspace_root: Path,
+        timeout_seconds: float = 60,
+    ) -> None:
         self._episode_writer = episode_writer
         self._workspace_root = workspace_root
+        self._timeout_seconds = timeout_seconds
         self._commands_log = episode_writer.path / "verification" / "commands.jsonl"
         self._commands_log.parent.mkdir(parents=True, exist_ok=True)
         self._commands_log.write_text("", encoding="utf-8")
@@ -40,19 +47,32 @@ class VerificationEngine:
                     status="failed",
                     failed_command=command,
                     exit_code=record["exit_code"],
+                    failure_reason=str(record["status"]),
                 )
         return VerificationResult(status="success")
 
     def _run_command(self, command: str) -> dict[str, object]:
         started = time.perf_counter()
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=self._workspace_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                cwd=self._workspace_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self._timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            return {
+                "command": command,
+                "status": "timeout",
+                "exit_code": None,
+                "stdout": _decode_timeout_output(error.stdout),
+                "stderr": _decode_timeout_output(error.stderr),
+                "duration_seconds": time.perf_counter() - started,
+                "timeout_seconds": self._timeout_seconds,
+            }
         return {
             "command": command,
             "status": "success" if completed.returncode == 0 else "failed",
@@ -60,8 +80,17 @@ class VerificationEngine:
             "stdout": completed.stdout,
             "stderr": completed.stderr,
             "duration_seconds": time.perf_counter() - started,
+            "timeout_seconds": self._timeout_seconds,
         }
 
     def _append_record(self, record: dict[str, object]) -> None:
         with self._commands_log.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _decode_timeout_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value

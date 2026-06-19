@@ -10,6 +10,7 @@ from pathlib import Path
 from agentfoundry.models.gateway import ModelCallError
 from agentfoundry.runtime.orchestrator import RunOrchestrator
 from agentfoundry.runtime.state import RunStatus
+from agentfoundry.verification.engine import VerificationResult
 
 
 class FailingGateway:
@@ -134,3 +135,37 @@ def test_orchestrator_fails_unknown_tool_as_task_spec_failure(tmp_path: Path) ->
     failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
     assert "Task Spec Failure" in failure_text
     assert "mystery_tool" in failure_text
+
+
+def test_orchestrator_failure_attribution_includes_verification_timeout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(task_path, ["fake_tool"], verification_commands=["slow command"])
+
+    class TimeoutVerificationEngine:
+        def __init__(self, episode_writer, workspace_root):
+            pass
+
+        def run(self, commands):
+            return VerificationResult(
+                status="failed",
+                failed_command=commands[0],
+                exit_code=None,
+                failure_reason="timeout",
+            )
+
+    monkeypatch.setattr(
+        "agentfoundry.runtime.orchestrator.VerificationEngine",
+        TimeoutVerificationEngine,
+    )
+
+    result = RunOrchestrator(runs_root=runs_dir).run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Verification Failure" in failure_text
+    assert "slow command" in failure_text
+    assert "timeout" in failure_text
