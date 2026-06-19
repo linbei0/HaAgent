@@ -15,8 +15,42 @@ from agentfoundry.runtime.failure import FailureCategory
 from agentfoundry.runtime.state import RunStatus
 
 
+REQUIRED_PACKAGE_FILES = [
+    "episode.json",
+    "task.yaml",
+    "context-manifest.json",
+    "transcript.jsonl",
+    "tool-calls.jsonl",
+    "verification/commands.jsonl",
+    "failure-attribution.md",
+    "failure.json",
+    "environment.json",
+]
+
+
 class EpisodeValidationError(RuntimeError):
     """Episode package 存在但 schema 损坏或版本不兼容时抛出。"""
+
+
+def validate_episode_package(episode_path: Path) -> None:
+    """校验 v1 episode package 的完整性和关键 trace 文件结构。"""
+    for relative_path in REQUIRED_PACKAGE_FILES:
+        path = episode_path / relative_path
+        if not path.exists():
+            raise EpisodeValidationError(f"episode package missing required file: {relative_path}")
+
+    read_episode_metadata(episode_path)
+    read_failure_record(episode_path)
+    _read_json(episode_path / "context-manifest.json")
+    _read_json(episode_path / "environment.json")
+
+    _validate_jsonl_fields(episode_path / "transcript.jsonl", "transcript.jsonl", ["event"])
+    _validate_jsonl_fields(episode_path / "tool-calls.jsonl", "tool-calls.jsonl", ["tool_name", "status"])
+    _validate_jsonl_fields(
+        episode_path / "verification" / "commands.jsonl",
+        "verification/commands.jsonl",
+        ["command", "status"],
+    )
 
 
 def read_episode_metadata(episode_path: Path) -> tuple[dict[str, Any] | None, list[str]]:
@@ -46,7 +80,31 @@ def read_failure_record(episode_path: Path) -> dict[str, Any] | None:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise EpisodeValidationError(f"{path.name} is not valid JSON: {error.msg}") from error
+    if not isinstance(value, dict):
+        raise EpisodeValidationError(f"{path.name} must contain a JSON object")
+    return value
+
+
+def _validate_jsonl_fields(path: Path, label: str, required_fields: list[str]) -> None:
+    """逐行校验 JSONL 可解析，并检查该 trace 类型的最小字段。"""
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise EpisodeValidationError(f"{label} line {line_number} is not valid JSON") from error
+        if not isinstance(record, dict):
+            raise EpisodeValidationError(f"{label} line {line_number} must contain a JSON object")
+        for field_name in required_fields:
+            if field_name not in record:
+                raise EpisodeValidationError(
+                    f"{label} line {line_number} missing required field: {field_name}",
+                )
 
 
 def _validate_episode_metadata(metadata: dict[str, Any]) -> None:

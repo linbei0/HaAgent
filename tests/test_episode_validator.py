@@ -13,7 +13,10 @@ from agentfoundry.runtime.episode_validator import (
     EpisodeValidationError,
     read_episode_metadata,
     read_failure_record,
+    validate_episode_package,
 )
+from agentfoundry.runtime.orchestrator import RunOrchestrator
+from agentfoundry.runtime.state import RunStatus
 
 
 def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, object]:
@@ -30,6 +33,21 @@ def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, o
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def write_task(path: Path) -> None:
+    path.write_text(
+        """
+goal: Validate package
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria:
+  - Run reaches completed state
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
 
 
 def test_validator_accepts_valid_episode_metadata(tmp_path: Path) -> None:
@@ -93,3 +111,68 @@ def test_validator_rejects_failure_unknown_category(tmp_path: Path) -> None:
         match="corrupt episode: failure.json category is invalid: Surprise Failure",
     ):
         read_failure_record(episode_path)
+
+
+def test_package_validator_accepts_new_run_episode(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_missing_required_file(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "environment.json").unlink()
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="episode package missing required file: environment.json",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_invalid_transcript_jsonl(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "transcript.jsonl").write_text("{not json}\n", encoding="utf-8")
+
+    with pytest.raises(EpisodeValidationError, match="transcript.jsonl line 1 is not valid JSON"):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_tool_call_missing_status(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "tool-calls.jsonl").write_text(
+        json.dumps({"tool_name": "fake_tool"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="tool-calls.jsonl line 1 missing required field: status",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_verification_command_missing_command(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "verification" / "commands.jsonl").write_text(
+        json.dumps({"status": "success"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="verification/commands.jsonl line 1 missing required field: command",
+    ):
+        validate_episode_package(result.episode_path)
