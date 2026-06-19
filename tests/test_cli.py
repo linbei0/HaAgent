@@ -18,6 +18,40 @@ class FakeResult:
         self.episode_path = episode_path
 
 
+def write_minimal_episode(
+    episode_path: Path,
+    episode_json: dict[str, object] | None = None,
+    failure_json: dict[str, object] | None = None,
+) -> None:
+    (episode_path / "verification").mkdir(parents=True)
+    if episode_json is not None:
+        (episode_path / "episode.json").write_text(json.dumps(episode_json), encoding="utf-8")
+    if failure_json is not None:
+        (episode_path / "failure.json").write_text(json.dumps(failure_json), encoding="utf-8")
+    (episode_path / "context-manifest.json").write_text(
+        json.dumps({"summary": {"provider": "fake"}, "context_count": 0, "contexts": []}),
+        encoding="utf-8",
+    )
+    (episode_path / "transcript.jsonl").write_text(
+        json.dumps({"event": "state_transition", "status": "completed"}) + "\n",
+        encoding="utf-8",
+    )
+    (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
+    (episode_path / "verification" / "commands.jsonl").write_text("", encoding="utf-8")
+    (episode_path / "failure-attribution.md").write_text("legacy", encoding="utf-8")
+
+
+def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, object]:
+    return {
+        "episode_version": "1.0",
+        "created_at": "2026-06-19T00:00:00+00:00",
+        "task_path": "task.yaml",
+        "status": status,
+        "provider": "fake",
+        "workspace_root": str(tmp_path),
+    }
+
+
 def test_cli_run_uses_default_runs_root_and_prints_result(
     tmp_path: Path,
     capsys,
@@ -248,6 +282,78 @@ def test_cli_inspect_unknown_episode_version_fails(tmp_path: Path, capsys) -> No
     assert exit_code == 1
     output = capsys.readouterr().out
     assert "unsupported episode_version: 9.9" in output
+
+
+def test_cli_inspect_fails_when_episode_json_missing_field(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    episode_json = valid_episode_json(tmp_path)
+    del episode_json["workspace_root"]
+    write_minimal_episode(episode_path, episode_json=episode_json)
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "corrupt episode: episode.json missing required field: workspace_root" in output
+
+
+def test_cli_inspect_fails_when_episode_json_status_is_invalid(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(episode_path, episode_json=valid_episode_json(tmp_path, status="done-ish"))
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "corrupt episode: episode.json status is invalid: done-ish" in output
+
+
+def test_cli_inspect_fails_when_failure_json_category_is_unknown(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path, status="failed"),
+        failure_json={
+            "status": "failed",
+            "failure": {
+                "category": "Surprise Failure",
+                "stage": "verifying",
+                "evidence": "bad",
+            },
+        },
+    )
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "corrupt episode: failure.json category is invalid: Surprise Failure" in output
+
+
+def test_cli_inspect_fails_when_success_failure_json_has_failure(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": {"category": "Runtime Failure"}},
+    )
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "corrupt episode: failure.json success record must have failure=null" in output
+
+
+def test_cli_inspect_legacy_episode_without_failure_json_still_works(tmp_path: Path, capsys) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(episode_path, episode_json=valid_episode_json(tmp_path))
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "legacy episode without failure.json" in output
 
 
 def test_cli_inspect_fails_when_required_file_is_missing(tmp_path: Path, capsys) -> None:
