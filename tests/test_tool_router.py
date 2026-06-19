@@ -40,6 +40,12 @@ def test_tool_router_runs_fake_tool_and_writes_trace(tmp_path: Path) -> None:
     assert record["tool_name"] == "fake_tool"
     assert record["status"] == "success"
     assert record["result"] == result
+    assert record["policy"] == {
+        "tool_name": "fake_tool",
+        "risk_level": "low",
+        "action": "allow",
+        "reason": "policy v0 allows low risk tool fake_tool",
+    }
 
 
 def test_tool_router_handlers_match_tool_registry(tmp_path: Path) -> None:
@@ -190,6 +196,22 @@ def test_shell_captures_exit_code_stdout_and_stderr(tmp_path: Path) -> None:
     assert "out" in result["stdout"]
     assert "err" in result["stderr"]
     assert result["error"]["type"] == "command_failed"
+
+
+def test_policy_allows_high_risk_tool_and_records_reason(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("shell", {"command": "python -c \"print('ok')\"", "timeout_seconds": 5})
+
+    assert result["status"] == "success"
+    record = _read_single_tool_call(writer)
+    assert record["policy"] == {
+        "tool_name": "shell",
+        "risk_level": "high",
+        "action": "allow",
+        "reason": "policy v0 allows high risk tool shell for audit-only enforcement",
+    }
 
 
 def test_shell_reports_timeout(tmp_path: Path) -> None:

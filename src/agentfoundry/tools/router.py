@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agentfoundry.runtime.episode import EpisodeWriter
+from agentfoundry.runtime.policy import PolicyDecision, evaluate_tool_call
 from agentfoundry.tools.base import ToolHandler, ToolRoutingError, tool_error
 from agentfoundry.tools.file_tools import apply_patch, file_read, file_search
 from agentfoundry.tools.registry import TOOL_REGISTRY
@@ -39,12 +40,14 @@ class ToolRouter:
     def dispatch(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """执行工具并保证每次调用都写入 tool-calls.jsonl。"""
         started = time.perf_counter()
+        policy_decision: PolicyDecision | None = None
         try:
             if tool_name not in self._allowed_tools:
                 result = tool_error("tool_not_allowed", f"tool is not allowed: {tool_name}")
             elif tool_name not in self._handlers:
                 result = tool_error("unknown_tool", f"unknown tool: {tool_name}")
             else:
+                policy_decision = evaluate_tool_call(TOOL_REGISTRY[tool_name])
                 validation_error = _validate_args(tool_name, args)
                 if validation_error:
                     result = validation_error
@@ -53,7 +56,7 @@ class ToolRouter:
         except Exception as error:
             result = tool_error(type(error).__name__, str(error))
 
-        self._write_trace(tool_name, args, result, started)
+        self._write_trace(tool_name, args, result, started, policy_decision)
         return result
 
     def raise_for_error(self, result: dict[str, Any]) -> None:
@@ -80,6 +83,7 @@ class ToolRouter:
         args: dict[str, Any],
         result: dict[str, Any],
         started: float,
+        policy_decision: PolicyDecision | None,
     ) -> None:
         self._episode_writer.append_tool_call(
             {
@@ -88,6 +92,7 @@ class ToolRouter:
                 "status": result["status"],
                 "result": result if result["status"] == "success" else None,
                 "error": result.get("error"),
+                "policy": policy_decision.to_dict() if policy_decision else None,
                 "duration_seconds": time.perf_counter() - started,
             },
         )
