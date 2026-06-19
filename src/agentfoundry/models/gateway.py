@@ -118,8 +118,11 @@ def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
         # 当前只支持 Responses API 的最小 function_call 结构，避免误吞 provider 新格式。
         if not isinstance(item, dict):
             raise ModelCallError("unsupported OpenAI output item")
-        if item.get("type") != "function_call":
-            raise ModelCallError(f"unsupported OpenAI output type: {item.get('type')}")
+        output_type = item.get("type")
+        if output_type in {"message", "output_text", "text"}:
+            continue
+        if output_type != "function_call":
+            raise ModelCallError(f"unsupported OpenAI output type: {output_type}")
         name = item.get("name")
         if not isinstance(name, str) or not name:
             raise ModelCallError("missing tool name")

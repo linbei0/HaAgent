@@ -163,6 +163,47 @@ def test_openai_gateway_normalizes_tool_call_response() -> None:
     )
 
 
+def test_openai_gateway_text_only_response_with_output_message_has_no_tool_calls() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "provider text",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "provider text"}],
+                },
+                {"type": "output_text", "text": "provider text"},
+            ],
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        transport=transport,
+    )
+
+    response = gateway.generate(make_task())
+
+    assert response == ModelResponse(content="provider text", tool_calls=[])
+
+
+def test_openai_gateway_rejects_unknown_output_type() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "provider text",
+            "output": [{"type": "image_generation_call"}],
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        transport=transport,
+    )
+
+    with pytest.raises(ModelCallError, match="unsupported OpenAI output type"):
+        gateway.generate(make_task())
+
+
 def test_openai_gateway_rejects_invalid_tool_arguments_json() -> None:
     def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
         return {
