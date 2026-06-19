@@ -87,9 +87,10 @@ class ContextManifest:
     generated_at: str
     budget: ContextBudget
     sources: list[ContextSource]
+    next_action: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        manifest = {
             "context_id": self.context_id,
             "provider": self.provider,
             "workspace_root": self.workspace_root,
@@ -97,3 +98,6 @@ class ContextManifest:
             "budget": self.budget.to_dict(),
             "sources": [source.to_dict() for source in self.sources],
         }
+        if self.next_action is not None:
+            manifest["next_action"] = self.next_action
+        return manifest

@@ -199,6 +199,7 @@ class ContextBuilder:
             generated_at=_now_iso(),
             budget=budget,
             sources=sources,
+            next_action=self._next_action(),
         )
 
     def _source_with_budget(self, source: ContextSource) -> ContextSource:
@@ -249,19 +250,35 @@ class ContextBuilder:
         ]
 
     def _format_pending_next_step(self) -> list[str]:
+        return [f"- {self._next_action()['reason']}"]
+
+    def _next_action(self) -> dict[str, object]:
         if not self._observations:
-            return ["- none"]
+            return {
+                "status": "none",
+                "reason": "none",
+                "based_on_observation_index": None,
+                "based_on_tool_name": None,
+            }
+        observation_index = len(self._observations) - 1
+        latest_observation = self._observations[observation_index]
         latest_result = self._observations[-1].get("result", {})
         status = latest_result.get("status") if isinstance(latest_result, dict) else None
         if status == "success":
-            return [
-                "- Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied.",
-            ]
-        if status in {"error", "failed"}:
-            return [
-                "- Use the latest tool error to adjust parameters, or stop and explain the failure explicitly.",
-            ]
-        return ["- Use the latest tool observation to decide the next action explicitly."]
+            next_action_status = "continue"
+            reason = "Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied."
+        elif status in {"error", "failed"}:
+            next_action_status = "handle_error"
+            reason = "Use the latest tool error to adjust parameters, or stop and explain the failure explicitly."
+        else:
+            next_action_status = "decide"
+            reason = "Use the latest tool observation to decide the next action explicitly."
+        return {
+            "status": next_action_status,
+            "reason": reason,
+            "based_on_observation_index": observation_index,
+            "based_on_tool_name": _observation_tool_name(latest_observation),
+        }
 
     def _read_plan(self) -> dict[str, object]:
         path = self._episode_writer.path / "plan.json"

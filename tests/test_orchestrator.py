@@ -483,6 +483,10 @@ def test_orchestrator_completes_after_two_tool_rounds(tmp_path: Path) -> None:
         source["source_type"] == "pending_next_step" and source["name"] == "pending_next_step"
         for source in second_manifest["sources"]
     )
+    assert second_manifest["next_action"]["status"] == "continue"
+    assert second_manifest["next_action"]["based_on_observation_index"] == 0
+    assert second_manifest["next_action"]["based_on_tool_name"] == "fake_tool"
+    assert "latest successful tool observation" in second_manifest["next_action"]["reason"]
     for context_id in ["0001", "0002", "0003"]:
         context_manifest = json.loads(
             (result.episode_path / "contexts" / f"{context_id}.json").read_text(encoding="utf-8"),

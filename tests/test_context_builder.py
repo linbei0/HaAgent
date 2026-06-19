@@ -173,6 +173,12 @@ def test_context_builder_includes_pending_next_step_none_source_and_budget(tmp_p
     )
     injected_pending_next_step = "\n".join(["Pending next step:", "- none"])
     assert injected_pending_next_step in model_input
+    assert context_manifest["next_action"] == {
+        "status": "none",
+        "reason": "none",
+        "based_on_observation_index": None,
+        "based_on_tool_name": None,
+    }
     assert pending_source["name"] == "pending_next_step"
     assert pending_source["description"]
     assert pending_source["inclusion_reason"]
@@ -269,7 +275,14 @@ def test_context_builder_model_input_contains_observation_summary(tmp_path: Path
     assert '"args": {"round": 1}' in model_input
     assert '"result": {"echo": {"round": 1}, "status": "success"}' in model_input
     assert "Pending next step:" in model_input
-    assert "Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied." in model_input
+    expected_reason = "Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied."
+    assert expected_reason in model_input
+    assert context_manifest["next_action"] == {
+        "status": "continue",
+        "reason": expected_reason,
+        "based_on_observation_index": 0,
+        "based_on_tool_name": "fake_tool",
+    }
     assert len(observation_sources) == 1
     assert observation_sources[0]["source_type"] == "observation"
     assert observation_sources[0]["name"] == "fake_tool"
@@ -301,10 +314,52 @@ def test_context_builder_pending_next_step_handles_tool_error(tmp_path: Path) ->
     pending_source = next(
         source for source in context_manifest["sources"] if source["source_type"] == "pending_next_step"
     )
+    expected_reason = "Use the latest tool error to adjust parameters, or stop and explain the failure explicitly."
     assert "Pending next step:" in model_input
-    assert "Use the latest tool error to adjust parameters, or stop and explain the failure explicitly." in model_input
+    assert expected_reason in model_input
+    assert context_manifest["next_action"] == {
+        "status": "handle_error",
+        "reason": expected_reason,
+        "based_on_observation_index": 0,
+        "based_on_tool_name": "fake_tool",
+    }
     assert pending_source["budget"]["included_in_model_input"] is True
     assert pending_source["budget"]["inclusion_reason"]
+
+
+def test_context_builder_next_action_handles_unknown_tool_status(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        observations=[
+            {
+                "tool_name": "fake_tool",
+                "args": {"round": 1},
+                "result": {"status": "weird"},
+            },
+            {
+                "tool_name": "file_read",
+                "args": {"path": "notes.txt"},
+                "result": {"status": "unknown"},
+            },
+        ],
+    )
+
+    builder.build()
+
+    model_input = (writer.path / "contexts" / "0001.txt").read_text(encoding="utf-8")
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    expected_reason = "Use the latest tool observation to decide the next action explicitly."
+    assert expected_reason in model_input
+    assert context_manifest["next_action"] == {
+        "status": "decide",
+        "reason": expected_reason,
+        "based_on_observation_index": 1,
+        "based_on_tool_name": "file_read",
+    }
 
 
 def test_context_builder_records_each_allowed_tool_as_source(tmp_path: Path) -> None:
