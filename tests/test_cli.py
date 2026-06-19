@@ -182,6 +182,19 @@ def test_cli_inspect_outputs_verification_evidence(tmp_path: Path, capsys) -> No
         + "\n",
         encoding="utf-8",
     )
+    (episode_path / "failure.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "failure": {
+                    "category": "Verification Failure",
+                    "stage": "verifying",
+                    "evidence": "structured evidence",
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
     (episode_path / "failure-attribution.md").write_text(
         "# Failure Attribution\n\n- category: Verification Failure\n",
         encoding="utf-8",
@@ -194,6 +207,10 @@ def test_cli_inspect_outputs_verification_evidence(tmp_path: Path, capsys) -> No
     assert "python fail.py: failed (exit_code=3)" in output
     assert "stdout: out evidence" in output
     assert "stderr: err evidence" in output
+    assert "Structured Failure" in output
+    assert "category: Verification Failure" in output
+    assert "stage: verifying" in output
+    assert "structured evidence" in output
 
 
 def test_cli_inspect_legacy_episode_without_episode_json_warns(tmp_path: Path, capsys) -> None:

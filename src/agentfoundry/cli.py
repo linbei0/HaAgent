@@ -79,6 +79,7 @@ def render_episode_summary(episode_path: Path) -> str:
     transcript = _read_jsonl(episode_path / "transcript.jsonl")
     tool_calls = _read_jsonl(episode_path / "tool-calls.jsonl")
     verification = _read_jsonl(episode_path / "verification" / "commands.jsonl")
+    failure_record = _read_failure_record(episode_path)
     failure_attribution = (episode_path / "failure-attribution.md").read_text(encoding="utf-8").strip()
 
     state_flow = [
@@ -116,12 +117,21 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_tool_calls(tool_calls))
     lines.extend(["", "Verification"])
     lines.extend(_format_verification(verification))
+    lines.extend(["", "Structured Failure"])
+    lines.extend(_format_failure_record(failure_record))
     lines.extend(["", "Failure Attribution", failure_attribution])
     return "\n".join(lines)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_failure_record(episode_path: Path) -> dict[str, Any] | None:
+    path = episode_path / "failure.json"
+    if not path.exists():
+        return None
+    return _read_json(path)
 
 
 def _read_episode_metadata(episode_path: Path) -> tuple[dict[str, Any] | None, list[str]]:
@@ -200,6 +210,20 @@ def _format_verification(commands: list[dict[str, Any]]) -> list[str]:
         if command.get("stderr_excerpt"):
             lines.append(f"  stderr: {command['stderr_excerpt']}")
     return lines
+
+
+def _format_failure_record(record: dict[str, Any] | None) -> list[str]:
+    if record is None:
+        return ["- legacy episode without failure.json"]
+    if record.get("status") == "success":
+        return ["- status: success"]
+    failure = record.get("failure") or {}
+    return [
+        f"- status: {record.get('status', 'unknown')}",
+        f"- category: {failure.get('category', 'unknown')}",
+        f"- stage: {failure.get('stage', 'unknown')}",
+        f"- evidence: {failure.get('evidence', '')}",
+    ]
 
 
 if __name__ == "__main__":

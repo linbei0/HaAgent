@@ -96,6 +96,8 @@ def test_orchestrator_records_successful_state_flow(tmp_path: Path) -> None:
     assert episode["provider"] == "fake"
     assert episode["task_path"] == str(task_path)
     assert episode["workspace_root"] == str(tmp_path.resolve())
+    failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
+    assert failure == {"status": "success", "failure": None}
 
 
 def test_orchestrator_fails_when_fake_tool_is_not_allowed(tmp_path: Path) -> None:
@@ -177,6 +179,9 @@ def test_orchestrator_invalid_tool_args_are_tool_argument_failure(tmp_path: Path
     failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
     assert "Tool Argument Failure" in failure_text
     assert "missing required argument: path" in failure_text
+    failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
+    assert failure["status"] == "failed"
+    assert failure["failure"]["category"] == "Tool Argument Failure"
 
 
 def test_orchestrator_unknown_runtime_tool_is_tool_interface_failure(tmp_path: Path) -> None:
@@ -231,6 +236,11 @@ def test_orchestrator_fails_when_workspace_root_does_not_exist(tmp_path: Path) -
     assert "workspace_root does not exist" in failure_text
     episode = json.loads((result.episode_path / "episode.json").read_text(encoding="utf-8"))
     assert episode["status"] == "failed"
+    failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
+    assert failure["status"] == "failed"
+    assert failure["failure"]["category"] == "Task Spec Failure"
+    assert failure["failure"]["stage"] == "created"
+    assert "workspace_root does not exist" in failure["failure"]["evidence"]
 
 
 def test_orchestrator_fails_when_model_gateway_fails(tmp_path: Path) -> None:
@@ -296,6 +306,11 @@ def test_orchestrator_fails_when_verification_command_fails(tmp_path: Path) -> N
     assert "stderr: verify-err" in failure_text
     commands_log = result.episode_path / "verification" / "commands.jsonl"
     assert json.loads(commands_log.read_text(encoding="utf-8"))["exit_code"] == 5
+    failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
+    assert failure["status"] == "failed"
+    assert failure["failure"]["category"] == "Verification Failure"
+    assert "stdout: verify-out" in failure["failure"]["evidence"]
+    assert "stderr: verify-err" in failure["failure"]["evidence"]
 
 
 def test_orchestrator_fails_unknown_tool_as_task_spec_failure(tmp_path: Path) -> None:

@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from agentfoundry.runtime.failure import FailureCategory
+
 
 EPISODE_VERSION = "1.0"
 
@@ -86,12 +88,25 @@ class EpisodeWriter:
         """写入失败归因；成功 run 也保留文件，方便测试和审计稳定读取。"""
         if failure is None:
             content = "# Failure Attribution\n\n未失败。\n"
+            self._write_json("failure.json", {"status": "success", "failure": None})
         else:
+            _validate_failure_category(str(failure.get("category")))
             content = (
                 "# Failure Attribution\n\n"
                 f"- stage: {failure.get('stage')}\n"
                 f"- category: {failure.get('category')}\n"
                 f"- evidence: {failure.get('evidence')}\n"
+            )
+            self._write_json(
+                "failure.json",
+                {
+                    "status": "failed",
+                    "failure": {
+                        "category": failure.get("category"),
+                        "stage": failure.get("stage"),
+                        "evidence": failure.get("evidence"),
+                    },
+                },
             )
         (self.path / "failure-attribution.md").write_text(content, encoding="utf-8")
 
@@ -104,3 +119,8 @@ class EpisodeWriter:
             json.dumps(value, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+
+def _validate_failure_category(category: str) -> None:
+    if category not in {failure_category.value for failure_category in FailureCategory}:
+        raise ValueError(f"unknown failure category: {category}")
