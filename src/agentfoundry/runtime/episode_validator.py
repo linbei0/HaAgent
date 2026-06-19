@@ -40,18 +40,21 @@ def validate_episode_package(episode_path: Path) -> None:
         if not path.exists():
             raise EpisodeValidationError(f"episode package missing required file: {relative_path}")
 
-    read_episode_metadata(episode_path)
-    read_failure_record(episode_path)
-    _read_json(episode_path / "context-manifest.json")
+    episode_metadata, _warnings = read_episode_metadata(episode_path)
+    failure_record = read_failure_record(episode_path)
+    context_manifest = _read_json(episode_path / "context-manifest.json")
     _read_json(episode_path / "environment.json")
 
-    _validate_jsonl_fields(episode_path / "transcript.jsonl", "transcript.jsonl", ["event"])
+    transcript = _validate_jsonl_fields(episode_path / "transcript.jsonl", "transcript.jsonl", ["event"])
     _validate_jsonl_fields(episode_path / "tool-calls.jsonl", "tool-calls.jsonl", ["tool_name", "status"])
     _validate_jsonl_fields(
         episode_path / "verification" / "commands.jsonl",
         "verification/commands.jsonl",
         ["command", "status"],
     )
+    if episode_metadata is None or failure_record is None:
+        raise EpisodeValidationError("episode package must contain v1 episode.json and failure.json")
+    _validate_cross_file_consistency(episode_metadata, failure_record, context_manifest, transcript)
 
 
 def read_episode_metadata(episode_path: Path) -> tuple[dict[str, Any] | None, list[str]]:
@@ -90,8 +93,9 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def _validate_jsonl_fields(path: Path, label: str, required_fields: list[str]) -> None:
+def _validate_jsonl_fields(path: Path, label: str, required_fields: list[str]) -> list[dict[str, Any]]:
     """逐行校验 JSONL 可解析，并检查该 trace 类型的最小字段。"""
+    records = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
@@ -106,6 +110,46 @@ def _validate_jsonl_fields(path: Path, label: str, required_fields: list[str]) -
                 raise EpisodeValidationError(
                     f"{label} line {line_number} missing required field: {field_name}",
                 )
+        records.append(record)
+    return records
+
+
+def _validate_cross_file_consistency(
+    episode_metadata: dict[str, Any],
+    failure_record: dict[str, Any],
+    context_manifest: dict[str, Any],
+    transcript: list[dict[str, Any]],
+) -> None:
+    """校验 episode 根状态、失败记录、context 索引与 transcript 末态一致。"""
+    state_transitions = [
+        record
+        for record in transcript
+        if record.get("event") == "state_transition"
+    ]
+    if not state_transitions:
+        raise EpisodeValidationError("transcript.jsonl missing state_transition")
+
+    episode_status = str(episode_metadata["status"])
+    final_status = str(state_transitions[-1].get("status"))
+    if episode_status != final_status:
+        raise EpisodeValidationError(
+            f"episode status {episode_status} does not match transcript final status {final_status}",
+        )
+
+    failure_status = failure_record["status"]
+    if failure_status == "success" and episode_status != RunStatus.COMPLETED.value:
+        raise EpisodeValidationError("failure.json status success requires episode status completed")
+    if failure_status == "failed" and episode_status != RunStatus.FAILED.value:
+        raise EpisodeValidationError("failure.json status failed requires episode status failed")
+
+    contexts = context_manifest.get("contexts")
+    context_count = context_manifest.get("context_count")
+    if not isinstance(contexts, list):
+        raise EpisodeValidationError("context-manifest.json contexts must be a list")
+    if context_count != len(contexts):
+        raise EpisodeValidationError(
+            f"context-manifest.json context_count {context_count} does not match contexts length {len(contexts)}",
+        )
 
 
 def _validate_episode_metadata(metadata: dict[str, Any]) -> None:

@@ -35,6 +35,10 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def read_json(path: Path) -> dict[str, object]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def write_task(path: Path) -> None:
     path.write_text(
         """
@@ -241,4 +245,89 @@ def test_package_validator_rejects_verification_command_missing_command(tmp_path
         EpisodeValidationError,
         match="verification/commands.jsonl line 1 missing required field: command",
     ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_episode_status_mismatching_transcript(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    episode_json = read_json(result.episode_path / "episode.json")
+    episode_json["status"] = "failed"
+    write_json(result.episode_path / "episode.json", episode_json)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="episode status failed does not match transcript final status completed",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_failure_success_with_failed_episode(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    episode_json = read_json(result.episode_path / "episode.json")
+    episode_json["status"] = "failed"
+    write_json(result.episode_path / "episode.json", episode_json)
+    (result.episode_path / "transcript.jsonl").write_text(
+        json.dumps({"event": "state_transition", "status": "failed"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="failure.json status success requires episode status completed",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_failure_failed_with_completed_episode(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    write_json(
+        result.episode_path / "failure.json",
+        {
+            "status": "failed",
+            "failure": {
+                "category": "Verification Failure",
+                "stage": "verifying",
+                "evidence": "bad",
+            },
+        },
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="failure.json status failed requires episode status failed",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_context_count_mismatch(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    context_manifest = read_json(result.episode_path / "context-manifest.json")
+    context_manifest["context_count"] = 999
+    write_json(result.episode_path / "context-manifest.json", context_manifest)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="context-manifest.json context_count 999 does not match contexts length",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_missing_state_transition(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "transcript.jsonl").write_text(
+        json.dumps({"event": "model_call", "provider": "fake"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EpisodeValidationError, match="transcript.jsonl missing state_transition"):
         validate_episode_package(result.episode_path)
