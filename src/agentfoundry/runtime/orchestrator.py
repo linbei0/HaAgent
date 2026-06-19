@@ -14,7 +14,7 @@ from agentfoundry.models.fake import FakeModelGateway
 from agentfoundry.models.gateway import ModelCallError, ModelGateway
 from agentfoundry.runtime.episode import EpisodeWriter
 from agentfoundry.runtime.state import RunStatus
-from agentfoundry.runtime.task_contract import load_task
+from agentfoundry.runtime.task_contract import TaskLoadError, load_task, resolve_workspace_root
 from agentfoundry.tools.base import ToolRoutingError
 from agentfoundry.tools.registry import export_tool_schemas
 from agentfoundry.tools.router import ToolRouter
@@ -53,16 +53,17 @@ class RunOrchestrator:
 
         try:
             task = load_task(task_path)
+            workspace_root = resolve_workspace_root(task, task_path)
             transition(RunStatus.PLANNING)
-            writer.write_environment()
+            writer.write_environment(workspace_root)
 
-            router = ToolRouter(task.allowed_tools, writer, workspace_root=task_path.parent)
+            router = ToolRouter(task.allowed_tools, writer, workspace_root=workspace_root)
             observations: list[dict[str, object]] = []
             has_entered_executing = False
             for turn in range(1, self._max_turns + 1):
                 context = ContextBuilder(
                     task=task,
-                    workspace_root=task_path.parent,
+                    workspace_root=workspace_root,
                     provider_name=self._model_gateway.provider_name,
                     episode_writer=writer,
                     observations=observations,
@@ -134,7 +135,7 @@ class RunOrchestrator:
                 return RunResult(RunStatus.FAILED, state_history, writer.path)
 
             transition(RunStatus.VERIFYING)
-            verification_result = VerificationEngine(writer, task_path.parent).run(task.verification_commands)
+            verification_result = VerificationEngine(writer, workspace_root).run(task.verification_commands)
             if verification_result.status == "failed":
                 transition(RunStatus.FAILED)
                 writer.write_failure_attribution(
@@ -176,6 +177,16 @@ class RunOrchestrator:
                 {
                     "stage": "planning",
                     "category": category,
+                    "evidence": str(error),
+                },
+            )
+            return RunResult(RunStatus.FAILED, state_history, writer.path)
+        except TaskLoadError as error:
+            transition(RunStatus.FAILED)
+            writer.write_failure_attribution(
+                {
+                    "stage": "created",
+                    "category": "Task Spec Failure",
                     "evidence": str(error),
                 },
             )

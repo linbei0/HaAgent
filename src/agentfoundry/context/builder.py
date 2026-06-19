@@ -11,13 +11,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agentfoundry.context.manifest import ContextIndex, ContextManifest, ContextSource
+from agentfoundry.context.manifest import ContextBudget, ContextIndex, ContextManifest, ContextSource
 from agentfoundry.runtime.episode import EpisodeWriter
 from agentfoundry.runtime.task_contract import TaskSpec
 from agentfoundry.tools.registry import TOOL_REGISTRY
 
 
 CONTEXT_MANIFEST_VERSION = "1.2"
+CONTEXT_CHARACTER_LIMIT = 12000
 
 
 class ContextBuildError(RuntimeError):
@@ -56,11 +57,17 @@ class ContextBuilder:
         contexts_dir.mkdir(parents=True, exist_ok=True)
 
         model_input = self._render_model_input()
+        budget = _context_budget(model_input)
+        if budget.status != "within_limit":
+            raise ContextBuildError(
+                "context character budget exceeded: "
+                f"{budget.character_count} > {budget.character_limit}",
+            )
         model_input_path = contexts_dir / f"{context_id}.txt"
         manifest_path = contexts_dir / f"{context_id}.json"
         model_input_path.write_text(model_input, encoding="utf-8")
 
-        manifest = self._context_manifest(context_id)
+        manifest = self._context_manifest(context_id, budget)
         manifest_path.write_text(
             json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -120,17 +127,32 @@ class ContextBuilder:
             ],
         )
 
-    def _context_manifest(self, context_id: str) -> ContextManifest:
+    def _context_manifest(self, context_id: str, budget: ContextBudget) -> ContextManifest:
         sources = [
             self._project_instructions_source(),
-            ContextSource("task", "goal", "Goal from task.yaml"),
-            ContextSource("task", "constraints", "Constraints from task.yaml"),
-            ContextSource("task", "allowed_tools", "Allowed tools from task.yaml"),
-            ContextSource("task", "acceptance_criteria", "Acceptance criteria from task.yaml"),
-            ContextSource("task", "verification_commands", "Verification commands from task.yaml"),
+            ContextSource("task", "goal", "Goal from task.yaml", "The model needs the task goal."),
+            ContextSource("task", "constraints", "Constraints from task.yaml", "The model must obey task constraints."),
+            ContextSource("task", "allowed_tools", "Allowed tools from task.yaml", "The model needs the allowed tool list."),
+            ContextSource(
+                "task",
+                "acceptance_criteria",
+                "Acceptance criteria from task.yaml",
+                "The model needs completion criteria.",
+            ),
+            ContextSource(
+                "task",
+                "verification_commands",
+                "Verification commands from task.yaml",
+                "The model needs to know how the run will be verified.",
+            ),
         ]
         sources.extend(
-            ContextSource("tool_catalog", tool, TOOL_REGISTRY[tool].description)
+            ContextSource(
+                "tool_catalog",
+                tool,
+                TOOL_REGISTRY[tool].description,
+                "Allowed tool description is included for model tool selection.",
+            )
             for tool in self._task.allowed_tools
         )
         sources.extend(
@@ -138,6 +160,7 @@ class ContextBuilder:
                 "observation",
                 _observation_tool_name(observation),
                 "Tool observation from previous turn",
+                "Previous tool result is needed for the next model turn.",
             )
             for observation in self._observations
         )
@@ -146,6 +169,7 @@ class ContextBuilder:
             provider=self._provider_name,
             workspace_root=str(self._workspace_root),
             generated_at=_now_iso(),
+            budget=budget,
             sources=sources,
         )
 
@@ -183,12 +207,14 @@ class ContextBuilder:
                 "project_instructions",
                 "AGENTS.md",
                 "workspace AGENTS.md not found",
+                "Absence is recorded so audits can see no project instructions were loaded.",
                 status="absent",
             )
         return ContextSource(
             "project_instructions",
             "AGENTS.md",
             "Project instructions from workspace AGENTS.md",
+            "Workspace AGENTS.md is the project instruction source for this run.",
             status="present",
         )
 
@@ -234,3 +260,13 @@ def _observation_summary(observation: dict[str, object]) -> dict[str, object]:
         "args": observation.get("args", {}),
         "result": observation.get("result", {}),
     }
+
+
+def _context_budget(model_input: str) -> ContextBudget:
+    character_count = len(model_input)
+    status = "within_limit" if character_count <= CONTEXT_CHARACTER_LIMIT else "over_limit"
+    return ContextBudget(
+        character_count=character_count,
+        character_limit=CONTEXT_CHARACTER_LIMIT,
+        status=status,
+    )

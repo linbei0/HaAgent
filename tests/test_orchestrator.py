@@ -52,15 +52,17 @@ def write_task(
     path: Path,
     allowed_tools: list[str],
     verification_commands: list[str] | None = None,
+    workspace_root: str | None = None,
 ) -> None:
     allowed_tools_yaml = "\n".join(f"  - {tool}" for tool in allowed_tools)
     verification_commands = verification_commands or []
     verification_yaml = "\n".join(f"  - {command}" for command in verification_commands)
     verification_block = f"\n{verification_yaml}" if verification_yaml else " []"
+    workspace_root_line = f"workspace_root: {workspace_root}\n" if workspace_root is not None else ""
     path.write_text(
         f"""
 goal: Exercise orchestrator
-constraints: []
+{workspace_root_line}constraints: []
 allowed_tools:
 {allowed_tools_yaml}
 acceptance_criteria:
@@ -86,6 +88,8 @@ def test_orchestrator_records_successful_state_flow(tmp_path: Path) -> None:
         RunStatus.VERIFYING,
         RunStatus.COMPLETED,
     ]
+    environment = json.loads((result.episode_path / "environment.json").read_text(encoding="utf-8"))
+    assert environment["workspace_root"] == str(tmp_path.resolve())
 
 
 def test_orchestrator_fails_when_fake_tool_is_not_allowed(tmp_path: Path) -> None:
@@ -101,6 +105,92 @@ def test_orchestrator_fails_when_fake_tool_is_not_allowed(tmp_path: Path) -> Non
     assert "Task Spec Failure" in failure_text
     assert "other_tool" in failure_text
     assert (result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_orchestrator_workspace_root_can_point_to_project_root_and_read_agents_md(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    tasks_dir = project_root / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (project_root / "AGENTS.md").write_text("Project root instruction.", encoding="utf-8")
+    task_path = tasks_dir / "task.yaml"
+    write_task(task_path, ["fake_tool"], workspace_root="..")
+    gateway = SequenceGateway([ModelResponse("done", [])])
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    first_context = (result.episode_path / "contexts" / "0001.txt").read_text(encoding="utf-8")
+    context_manifest = json.loads((result.episode_path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    assert "Project root instruction." in first_context
+    assert context_manifest["workspace_root"] == str(project_root.resolve())
+
+
+def test_orchestrator_file_tool_uses_resolved_workspace_root(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    tasks_dir = project_root / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (project_root / "root-note.txt").write_text("from project root\n", encoding="utf-8")
+    task_path = tasks_dir / "task.yaml"
+    write_task(task_path, ["file_read"], workspace_root="..")
+    gateway = SequenceGateway(
+        [
+            ModelResponse("read root file", [ToolCall("file_read", {"path": "root-note.txt"})]),
+            ModelResponse("done", []),
+        ],
+    )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    tool_records = [
+        json.loads(line)
+        for line in (result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert tool_records[0]["result"]["content"] == "from project root\n"
+
+
+def test_orchestrator_verification_uses_resolved_workspace_root(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    tasks_dir = project_root / "tasks"
+    tasks_dir.mkdir(parents=True)
+    task_path = tasks_dir / "task.yaml"
+    write_task(
+        task_path,
+        ["fake_tool"],
+        verification_commands=[
+            "python -c \"from pathlib import Path; Path('verified-root.txt').write_text('ok', encoding='utf-8')\"",
+        ],
+        workspace_root="..",
+    )
+    gateway = SequenceGateway([ModelResponse("done", [])])
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    assert (project_root / "verified-root.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_orchestrator_fails_when_workspace_root_does_not_exist(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path, ["fake_tool"], workspace_root="missing-workspace")
+
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Task Spec Failure" in failure_text
+    assert "workspace_root does not exist" in failure_text
 
 
 def test_orchestrator_fails_when_model_gateway_fails(tmp_path: Path) -> None:
@@ -205,6 +295,19 @@ def test_orchestrator_attributes_agents_md_read_failure_as_context_failure(
     failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
     assert "Context Failure" in failure_text
     assert "cannot read AGENTS.md" in failure_text
+
+
+def test_orchestrator_attributes_context_budget_failure_as_context_failure(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path, ["fake_tool"])
+    (tmp_path / "AGENTS.md").write_text("x" * 13000, encoding="utf-8")
+
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Context Failure" in failure_text
+    assert "context character budget exceeded" in failure_text
 
 
 def test_orchestrator_failure_attribution_includes_verification_timeout(

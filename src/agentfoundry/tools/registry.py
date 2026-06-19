@@ -49,6 +49,10 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
                     "type": "string",
                     "description": "text to search for in workspace files",
                 },
+                "root": {
+                    "type": "string",
+                    "description": "optional workspace-relative directory to search",
+                },
             },
             "required": ["query"],
             "additionalProperties": False,

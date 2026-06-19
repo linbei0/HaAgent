@@ -41,15 +41,15 @@ class EpisodeWriter:
     def write_context_manifest(self, manifest: dict[str, Any]) -> None:
         self._write_json("context-manifest.json", manifest)
 
-    def write_environment(self) -> None:
-        self._write_json(
-            "environment.json",
-            {
-                "python": sys.version,
-                "platform": platform.platform(),
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-        )
+    def write_environment(self, workspace_root: Path | None = None) -> None:
+        environment = {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        if workspace_root is not None:
+            environment["workspace_root"] = str(workspace_root)
+        self._write_json("environment.json", environment)
 
     def write_failure_attribution(self, failure: dict[str, Any] | None) -> None:
         """写入失败归因；成功 run 也保留文件，方便测试和审计稳定读取。"""

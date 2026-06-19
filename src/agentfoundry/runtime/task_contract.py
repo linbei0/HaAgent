@@ -24,6 +24,7 @@ class TaskSpec:
     allowed_tools: list[str]
     acceptance_criteria: list[str]
     verification_commands: list[str]
+    workspace_root: str | None = None
 
 
 def load_task(path: Path) -> TaskSpec:
@@ -39,12 +40,36 @@ def load_task(path: Path) -> TaskSpec:
         allowed_tools=_required_str_list(raw, "allowed_tools"),
         acceptance_criteria=_required_str_list(raw, "acceptance_criteria"),
         verification_commands=_required_str_list(raw, "verification_commands"),
+        workspace_root=_optional_str(raw, "workspace_root"),
     )
+
+
+def resolve_workspace_root(task: TaskSpec, task_path: Path) -> Path:
+    """解析 task.yaml 的 workspace_root，失败时显式暴露为 TaskLoadError。"""
+    raw_root = task.workspace_root
+    candidate = task_path.parent if raw_root is None else Path(raw_root)
+    if raw_root is not None and not candidate.is_absolute():
+        candidate = task_path.parent / candidate
+    workspace_root = candidate.resolve()
+    if not workspace_root.exists():
+        raise TaskLoadError(f"workspace_root does not exist: {workspace_root}")
+    if not workspace_root.is_dir():
+        raise TaskLoadError(f"workspace_root must be a directory: {workspace_root}")
+    return workspace_root
 
 
 def _required_str(raw: dict[str, Any], field: str) -> str:
     if field not in raw:
         raise TaskLoadError(f"missing required field: {field}")
+    value = raw[field]
+    if not isinstance(value, str):
+        raise TaskLoadError(f"{field} must be a string")
+    return value
+
+
+def _optional_str(raw: dict[str, Any], field: str) -> str | None:
+    if field not in raw:
+        return None
     value = raw[field]
     if not isinstance(value, str):
         raise TaskLoadError(f"{field} must be a string")

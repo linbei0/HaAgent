@@ -59,6 +59,11 @@ def test_context_builder_writes_context_files_and_manifest(tmp_path: Path) -> No
     assert (writer.path / "contexts" / "0001.json").exists()
     context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
     assert context_manifest["generated_at"]
+    assert context_manifest["budget"] == {
+        "character_count": len(result.model_input),
+        "character_limit": 12000,
+        "status": "within_limit",
+    }
     manifest = json.loads((writer.path / "context-manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "1.2"
     assert manifest["generated_at"]
@@ -119,6 +124,7 @@ def test_context_builder_includes_project_instructions_when_agents_md_exists(tmp
             "name": "AGENTS.md",
             "description": "Project instructions from workspace AGENTS.md",
             "status": "present",
+            "inclusion_reason": "Workspace AGENTS.md is the project instruction source for this run.",
         },
     ]
 
@@ -146,6 +152,7 @@ def test_context_builder_records_absent_project_instructions(tmp_path: Path) -> 
             "name": "AGENTS.md",
             "description": "workspace AGENTS.md not found",
             "status": "absent",
+            "inclusion_reason": "Absence is recorded so audits can see no project instructions were loaded.",
         },
     ]
 
@@ -184,6 +191,7 @@ def test_context_builder_model_input_contains_observation_summary(tmp_path: Path
             "source_type": "observation",
             "name": "fake_tool",
             "description": "Tool observation from previous turn",
+            "inclusion_reason": "Previous tool result is needed for the next model turn.",
         },
     ]
 
@@ -207,6 +215,39 @@ def test_context_builder_records_each_allowed_tool_as_source(tmp_path: Path) -> 
     ]
     assert [source["name"] for source in tool_sources] == ["fake_tool", "file_read"]
     assert tool_sources[0]["description"] == "deterministic test tool"
+
+
+def test_context_builder_sources_include_inclusion_reason(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Project instruction.", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        observations=[{"tool_name": "fake_tool", "args": {}, "result": {"status": "success"}}],
+    )
+
+    builder.build()
+
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    source_types = {source["source_type"] for source in context_manifest["sources"]}
+    assert {"task", "tool_catalog", "observation", "project_instructions"} <= source_types
+    assert all(source["inclusion_reason"] for source in context_manifest["sources"])
+
+
+def test_context_builder_rejects_context_over_character_limit(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("x" * 13000, encoding="utf-8")
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+    )
+
+    with pytest.raises(ContextBuildError, match="context character budget exceeded"):
+        builder.build()
 
 
 def test_context_builder_rejects_unknown_allowed_tool(tmp_path: Path) -> None:

@@ -40,7 +40,28 @@ verification_commands:
         allowed_tools=["fake_tool"],
         acceptance_criteria=["State flow is recorded"],
         verification_commands=["uv run pytest"],
+        workspace_root=None,
     )
+
+
+def test_load_task_reads_optional_workspace_root(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(
+        task_path,
+        """
+goal: Build with workspace root
+workspace_root: ..
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+    )
+
+    task = load_task(task_path)
+
+    assert task.workspace_root == ".."
 
 
 def test_load_task_rejects_missing_required_field(tmp_path: Path) -> None:
