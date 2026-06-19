@@ -80,6 +80,30 @@ def test_validator_rejects_invalid_episode_status(tmp_path: Path) -> None:
         read_episode_metadata(episode_path)
 
 
+@pytest.mark.parametrize("created_at", [123, "not-a-date"])
+def test_validator_rejects_invalid_created_at(tmp_path: Path, created_at: object) -> None:
+    episode_path = tmp_path / "episode-1"
+    payload = valid_episode_json(tmp_path)
+    payload["created_at"] = created_at
+    write_json(episode_path / "episode.json", payload)
+
+    with pytest.raises(EpisodeValidationError, match="corrupt episode: episode.json created_at"):
+        read_episode_metadata(episode_path)
+
+
+def test_validator_rejects_non_string_workspace_root(tmp_path: Path) -> None:
+    episode_path = tmp_path / "episode-1"
+    payload = valid_episode_json(tmp_path)
+    payload["workspace_root"] = 123
+    write_json(episode_path / "episode.json", payload)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="corrupt episode: episode.json workspace_root must be a string",
+    ):
+        read_episode_metadata(episode_path)
+
+
 def test_validator_accepts_legacy_missing_episode_and_failure_json(tmp_path: Path) -> None:
     episode_path = tmp_path / "episode-1"
     episode_path.mkdir()
@@ -109,6 +133,48 @@ def test_validator_rejects_failure_unknown_category(tmp_path: Path) -> None:
     with pytest.raises(
         EpisodeValidationError,
         match="corrupt episode: failure.json category is invalid: Surprise Failure",
+    ):
+        read_failure_record(episode_path)
+
+
+def test_validator_rejects_failure_invalid_stage(tmp_path: Path) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_json(
+        episode_path / "failure.json",
+        {
+            "status": "failed",
+            "failure": {
+                "category": "Verification Failure",
+                "stage": "cleanup",
+                "evidence": "bad",
+            },
+        },
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="corrupt episode: failure.json stage is invalid: cleanup",
+    ):
+        read_failure_record(episode_path)
+
+
+def test_validator_rejects_failure_non_string_evidence(tmp_path: Path) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_json(
+        episode_path / "failure.json",
+        {
+            "status": "failed",
+            "failure": {
+                "category": "Verification Failure",
+                "stage": "verifying",
+                "evidence": ["bad"],
+            },
+        },
+    )
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="corrupt episode: failure.json evidence must be a string",
     ):
         read_failure_record(episode_path)
 

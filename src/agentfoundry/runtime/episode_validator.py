@@ -7,6 +7,7 @@ agentfoundry/runtime/episode_validator.py - Episode schema 校验模块
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +128,13 @@ def _validate_episode_metadata(metadata: dict[str, Any]) -> None:
     if status not in {run_status.value for run_status in RunStatus}:
         raise EpisodeValidationError(f"corrupt episode: episode.json status is invalid: {status}")
 
+    _validate_iso_datetime(metadata["created_at"])
+    for field_name in ["task_path", "provider", "workspace_root"]:
+        if not isinstance(metadata[field_name], str):
+            raise EpisodeValidationError(
+                f"corrupt episode: episode.json {field_name} must be a string",
+            )
+
 
 def _validate_failure_record(record: dict[str, Any]) -> None:
     """校验 failure.json，区分 legacy 缺失和存在但损坏的结构。"""
@@ -154,3 +162,22 @@ def _validate_failure_record(record: dict[str, Any]) -> None:
     category = failure["category"]
     if category not in {failure_category.value for failure_category in FailureCategory}:
         raise EpisodeValidationError(f"corrupt episode: failure.json category is invalid: {category}")
+
+    stage = failure["stage"]
+    if stage not in {run_status.value for run_status in RunStatus}:
+        raise EpisodeValidationError(f"corrupt episode: failure.json stage is invalid: {stage}")
+
+    if not isinstance(failure["evidence"], str):
+        raise EpisodeValidationError("corrupt episode: failure.json evidence must be a string")
+
+
+def _validate_iso_datetime(value: Any) -> None:
+    """校验 created_at 是 ISO 时间字符串；Z 后缀转为 Python 可解析的 +00:00。"""
+    if not isinstance(value, str):
+        raise EpisodeValidationError("corrupt episode: episode.json created_at must be an ISO string")
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise EpisodeValidationError(
+            f"corrupt episode: episode.json created_at is invalid: {value}",
+        ) from error
