@@ -7,11 +7,10 @@ agentfoundry/verification/engine.py - Verification Engine
 from __future__ import annotations
 
 import json
-import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentfoundry.runtime.command import run_command
 from agentfoundry.runtime.episode import EpisodeWriter
 
 
@@ -52,45 +51,8 @@ class VerificationEngine:
         return VerificationResult(status="success")
 
     def _run_command(self, command: str) -> dict[str, object]:
-        started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                command,
-                shell=True,
-                cwd=self._workspace_root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=self._timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as error:
-            return {
-                "command": command,
-                "status": "timeout",
-                "exit_code": None,
-                "stdout": _decode_timeout_output(error.stdout),
-                "stderr": _decode_timeout_output(error.stderr),
-                "duration_seconds": time.perf_counter() - started,
-                "timeout_seconds": self._timeout_seconds,
-            }
-        return {
-            "command": command,
-            "status": "success" if completed.returncode == 0 else "failed",
-            "exit_code": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-            "duration_seconds": time.perf_counter() - started,
-            "timeout_seconds": self._timeout_seconds,
-        }
+        return run_command(command, self._workspace_root, self._timeout_seconds).to_dict()
 
     def _append_record(self, record: dict[str, object]) -> None:
         with self._commands_log.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def _decode_timeout_output(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value

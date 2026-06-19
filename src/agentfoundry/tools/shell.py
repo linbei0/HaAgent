@@ -6,10 +6,10 @@ agentfoundry/tools/shell.py - shell 本地工具
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from agentfoundry.runtime.command import run_command
 from agentfoundry.tools.base import tool_error
 from agentfoundry.tools.file_tools import resolve_workspace_path
 
@@ -28,37 +28,21 @@ def shell(args: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
         return tool_error("path_outside_workspace", "cwd must be inside workspace")
 
     timeout_seconds = float(args.get("timeout_seconds", 60))
-    try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as error:
-        return {
-            "status": "error",
-            "exit_code": None,
-            "stdout": error.stdout or "",
-            "stderr": error.stderr or "",
-            "error": {
-                "type": "timeout",
-                "message": f"command timed out after {timeout_seconds} seconds",
-            },
-        }
-
+    command_result = run_command(command, cwd, timeout_seconds)
     result = {
-        "status": "success" if completed.returncode == 0 else "error",
-        "exit_code": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
+        "status": "success" if command_result.status == "success" else "error",
+        "exit_code": command_result.exit_code,
+        "stdout": command_result.stdout,
+        "stderr": command_result.stderr,
     }
-    if completed.returncode != 0:
+    if command_result.status == "timeout":
+        result["error"] = {
+            "type": "timeout",
+            "message": f"command timed out after {timeout_seconds} seconds",
+        }
+    elif command_result.status == "failed":
         result["error"] = {
             "type": "command_failed",
-            "message": f"command exited with code {completed.returncode}",
+            "message": f"command exited with code {command_result.exit_code}",
         }
     return result

@@ -132,3 +132,20 @@ def test_shell_captures_exit_code_stdout_and_stderr(tmp_path: Path) -> None:
     assert "out" in result["stdout"]
     assert "err" in result["stderr"]
     assert result["error"]["type"] == "command_failed"
+
+
+def test_shell_reports_timeout(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch(
+        "shell",
+        {
+            "command": "python -c \"import time; time.sleep(1)\"",
+            "timeout_seconds": 0.01,
+        },
+    )
+
+    assert result["status"] == "error"
+    assert result["exit_code"] is None
+    assert result["error"]["type"] == "timeout"
