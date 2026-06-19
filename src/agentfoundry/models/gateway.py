@@ -87,7 +87,7 @@ class OpenAIResponsesGateway:
         output_text = response.get("output_text")
         if not isinstance(output_text, str):
             raise ModelCallError("OpenAI response did not include output_text")
-        return ModelResponse(content=output_text, tool_calls=[])
+        return ModelResponse(content=output_text, tool_calls=_parse_tool_calls(response))
 
 
 def _prompt_for_task(task: TaskSpec) -> str:
@@ -104,6 +104,40 @@ def _format_list(items: list[str]) -> str:
     if not items:
         return "- none"
     return "\n".join(f"- {item}" for item in items)
+
+
+def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
+    output = response.get("output")
+    if output is None:
+        return []
+    if not isinstance(output, list):
+        raise ModelCallError("OpenAI output must be a list when present")
+
+    tool_calls: list[ToolCall] = []
+    for item in output:
+        # 当前只支持 Responses API 的最小 function_call 结构，避免误吞 provider 新格式。
+        if not isinstance(item, dict):
+            raise ModelCallError("unsupported OpenAI output item")
+        if item.get("type") != "function_call":
+            raise ModelCallError(f"unsupported OpenAI output type: {item.get('type')}")
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            raise ModelCallError("missing tool name")
+        arguments = item.get("arguments")
+        if not isinstance(arguments, str):
+            raise ModelCallError("missing tool arguments")
+        tool_calls.append(ToolCall(name=name, args=_parse_tool_arguments(arguments)))
+    return tool_calls
+
+
+def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError as error:
+        raise ModelCallError("invalid tool arguments JSON") from error
+    if not isinstance(parsed, dict):
+        raise ModelCallError("tool arguments must be a JSON object")
+    return parsed
 
 
 def _responses_transport(payload: dict[str, object], api_key: str) -> dict[str, object]:

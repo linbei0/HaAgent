@@ -16,7 +16,11 @@ dist/
 
 # AgentFoundry runtime output
 .runs/
+.smoke-runs/
 
 # Local environment files
 .env
 .env.*
+
+# docs
+docs/

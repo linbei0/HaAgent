@@ -136,6 +136,84 @@ def test_openai_gateway_payload_uses_model_input_and_tools() -> None:
     }
 
 
+def test_openai_gateway_normalizes_tool_call_response() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "",
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "fake_tool",
+                    "arguments": "{\"value\": 1}",
+                },
+            ],
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        transport=transport,
+    )
+
+    response = gateway.generate(make_task())
+
+    assert response == ModelResponse(
+        content="",
+        tool_calls=[ToolCall(name="fake_tool", args={"value": 1})],
+    )
+
+
+def test_openai_gateway_rejects_invalid_tool_arguments_json() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "",
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "fake_tool",
+                    "arguments": "{not-json",
+                },
+            ],
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        transport=transport,
+    )
+
+    with pytest.raises(ModelCallError, match="invalid tool arguments JSON"):
+        gateway.generate(make_task())
+
+
+def test_openai_gateway_rejects_missing_tool_name_or_arguments() -> None:
+    def missing_name_transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "",
+            "output": [{"type": "function_call", "arguments": "{}"}],
+        }
+
+    def missing_arguments_transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "",
+            "output": [{"type": "function_call", "name": "fake_tool"}],
+        }
+
+    with pytest.raises(ModelCallError, match="missing tool name"):
+        OpenAIResponsesGateway(
+            api_key="test-key",
+            model="gpt-test",
+            transport=missing_name_transport,
+        ).generate(make_task())
+
+    with pytest.raises(ModelCallError, match="missing tool arguments"):
+        OpenAIResponsesGateway(
+            api_key="test-key",
+            model="gpt-test",
+            transport=missing_arguments_transport,
+        ).generate(make_task())
+
+
 def test_openai_gateway_failure_is_explicit() -> None:
     def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
         raise RuntimeError("provider unavailable")
