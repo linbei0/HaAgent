@@ -6,11 +6,13 @@ agentfoundry/runtime/task_contract.py - task.yaml 加载与校验
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from agentfoundry.tools.registry import TOOL_REGISTRY
 
 
 class TaskLoadError(ValueError):
@@ -25,6 +27,7 @@ class TaskSpec:
     acceptance_criteria: list[str]
     verification_commands: list[str]
     workspace_root: str | None = None
+    policy: dict[str, list[str]] = field(default_factory=lambda: {"approval_allowed_tools": []})
 
 
 def load_task(path: Path) -> TaskSpec:
@@ -41,6 +44,7 @@ def load_task(path: Path) -> TaskSpec:
         acceptance_criteria=_required_str_list(raw, "acceptance_criteria"),
         verification_commands=_required_str_list(raw, "verification_commands"),
         workspace_root=_optional_str(raw, "workspace_root"),
+        policy=_optional_policy(raw),
     )
 
 
@@ -83,3 +87,23 @@ def _required_str_list(raw: dict[str, Any], field: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise TaskLoadError(f"{field} must be a list of strings")
     return value
+
+
+def _optional_policy(raw: dict[str, Any]) -> dict[str, list[str]]:
+    policy = raw.get("policy", {})
+    if policy is None:
+        policy = {}
+    if not isinstance(policy, dict):
+        raise TaskLoadError("policy must be a mapping")
+    approval_allowed_tools = policy.get("approval_allowed_tools", [])
+    if not isinstance(approval_allowed_tools, list) or not all(
+        isinstance(item, str)
+        for item in approval_allowed_tools
+    ):
+        raise TaskLoadError("policy.approval_allowed_tools must be a list of strings")
+    unknown_tools = [tool for tool in approval_allowed_tools if tool not in TOOL_REGISTRY]
+    if unknown_tools:
+        raise TaskLoadError(
+            f"unknown policy.approval_allowed_tools: {', '.join(unknown_tools)}",
+        )
+    return {"approval_allowed_tools": approval_allowed_tools}

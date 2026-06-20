@@ -38,4 +38,13 @@ def test_policy_denies_high_risk_tools() -> None:
     assert decision.reason == "policy denies high risk tool high_tool"
     assert decision.approval.required is True
     assert decision.approval.status == "missing"
-    assert "approval missing" in decision.approval.reason
+    assert decision.approval.reason == "approval not allowed for high risk tool high_tool"
+
+
+def test_policy_records_approval_allowed_but_missing_for_high_risk_tools() -> None:
+    decision = evaluate_tool_call(make_tool("high"), approval_allowed_tools=["high_tool"])
+
+    assert decision.action == "deny"
+    assert decision.approval.required is True
+    assert decision.approval.status == "missing"
+    assert decision.approval.reason == "approval allowed but missing for high risk tool high_tool"

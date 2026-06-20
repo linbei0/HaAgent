@@ -41,6 +41,7 @@ verification_commands:
         acceptance_criteria=["State flow is recorded"],
         verification_commands=["uv run pytest"],
         workspace_root=None,
+        policy={"approval_allowed_tools": []},
     )
 
 
@@ -62,6 +63,88 @@ verification_commands: []
     task = load_task(task_path)
 
     assert task.workspace_root == ".."
+
+
+def test_load_task_defaults_policy_approval_allowed_tools_to_empty(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(
+        task_path,
+        """
+goal: Default policy
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+    )
+
+    task = load_task(task_path)
+
+    assert task.policy == {"approval_allowed_tools": []}
+
+
+def test_load_task_reads_policy_approval_allowed_tools(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(
+        task_path,
+        """
+goal: Policy config
+constraints: []
+allowed_tools:
+  - shell
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools:
+    - shell
+""".strip(),
+    )
+
+    task = load_task(task_path)
+
+    assert task.policy == {"approval_allowed_tools": ["shell"]}
+
+
+def test_load_task_rejects_non_list_policy_approval_allowed_tools(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(
+        task_path,
+        """
+goal: Bad policy
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools: shell
+""".strip(),
+    )
+
+    with pytest.raises(TaskLoadError, match="policy.approval_allowed_tools"):
+        load_task(task_path)
+
+
+def test_load_task_rejects_unknown_policy_approval_allowed_tool(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(
+        task_path,
+        """
+goal: Unknown approval tool
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools:
+    - mystery_tool
+""".strip(),
+    )
+
+    with pytest.raises(TaskLoadError, match="unknown policy.approval_allowed_tools"):
+        load_task(task_path)
 
 
 def test_load_task_rejects_missing_required_field(tmp_path: Path) -> None:

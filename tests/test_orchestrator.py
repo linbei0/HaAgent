@@ -53,6 +53,7 @@ def write_task(
     allowed_tools: list[str],
     verification_commands: list[str] | None = None,
     workspace_root: str | None = None,
+    policy_block: str = "",
 ) -> None:
     allowed_tools_yaml = "\n".join(f"  - {tool}" for tool in allowed_tools)
     verification_commands = verification_commands or []
@@ -68,6 +69,7 @@ allowed_tools:
 acceptance_criteria:
   - Run reaches terminal state
 verification_commands:{verification_block}
+{policy_block}
 """.strip(),
         encoding="utf-8",
     )
@@ -227,6 +229,34 @@ def test_orchestrator_policy_denied_tool_is_tool_interface_failure(tmp_path: Pat
     assert tool_call["status"] == "error"
     assert tool_call["policy"]["action"] == "deny"
     assert tool_call["error"]["type"] == "policy_denied"
+
+
+def test_orchestrator_passes_policy_approval_allowed_tools_to_router(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(
+        task_path,
+        ["shell"],
+        policy_block="""
+policy:
+  approval_allowed_tools:
+    - shell
+""".strip(),
+    )
+    gateway = SequenceGateway(
+        [ModelResponse("try shell", [ToolCall("shell", {"command": "echo blocked"})])],
+    )
+
+    result = RunOrchestrator(runs_root=runs_dir, model_gateway=gateway).run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    tool_call = json.loads((result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    assert tool_call["policy"]["action"] == "deny"
+    assert tool_call["policy"]["approval"] == {
+        "required": True,
+        "status": "missing",
+        "reason": "approval allowed but missing for high risk tool shell",
+    }
 
 
 def test_orchestrator_unknown_runtime_tool_is_tool_interface_failure(tmp_path: Path) -> None:

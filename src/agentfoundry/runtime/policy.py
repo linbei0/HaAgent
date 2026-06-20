@@ -30,16 +30,25 @@ class PolicyDecision:
         return asdict(self)
 
 
-def evaluate_tool_call(tool_definition: ToolDefinition) -> PolicyDecision:
+def evaluate_tool_call(
+    tool_definition: ToolDefinition,
+    approval_allowed_tools: list[str] | None = None,
+) -> PolicyDecision:
     """根据 Tool Registry 风险等级返回工具调用决策。"""
+    approval_allowed_tools = approval_allowed_tools or []
     action = "deny" if tool_definition.risk_level == "high" else "allow"
     reason_action = "denies" if action == "deny" else "allows"
     reason = f"policy {reason_action} {tool_definition.risk_level} risk tool {tool_definition.name}"
     if action == "deny":
+        approval_reason = (
+            f"approval allowed but missing for high risk tool {tool_definition.name}"
+            if tool_definition.name in approval_allowed_tools
+            else f"approval not allowed for high risk tool {tool_definition.name}"
+        )
         approval = ApprovalDecision(
             required=True,
             status="missing",
-            reason=f"approval missing for high risk tool {tool_definition.name}",
+            reason=approval_reason,
         )
     else:
         approval = ApprovalDecision(

@@ -73,7 +73,12 @@ class RunOrchestrator:
                 },
             )
 
-            router = ToolRouter(task.allowed_tools, writer, workspace_root=workspace_root)
+            router = ToolRouter(
+                task.allowed_tools,
+                writer,
+                workspace_root=workspace_root,
+                approval_allowed_tools=task.policy["approval_allowed_tools"],
+            )
             observations: list[dict[str, object]] = []
             has_entered_executing = False
             for turn in range(1, self._max_turns + 1):

@@ -149,7 +149,7 @@ def test_tool_router_denies_high_risk_shell_before_handler(tmp_path: Path) -> No
     assert result["status"] == "error"
     assert result["error"]["type"] == "policy_denied"
     assert "policy denies high risk tool shell" in result["error"]["message"]
-    assert "approval missing" in result["error"]["message"]
+    assert "approval not allowed" in result["error"]["message"]
     assert calls == []
     record = _read_single_tool_call(writer)
     assert record["status"] == "error"
@@ -157,7 +157,7 @@ def test_tool_router_denies_high_risk_shell_before_handler(tmp_path: Path) -> No
     assert record["policy"]["approval"] == {
         "required": True,
         "status": "missing",
-        "reason": "approval missing for high risk tool shell",
+        "reason": "approval not allowed for high risk tool shell",
     }
     assert record["error"]["type"] == "policy_denied"
 
@@ -226,6 +226,7 @@ def test_apply_patch_is_denied_before_handler(tmp_path: Path) -> None:
     record = _read_single_tool_call(writer)
     assert record["policy"]["action"] == "deny"
     assert record["policy"]["approval"]["required"] is True
+    assert record["policy"]["approval"]["reason"] == "approval not allowed for high risk tool apply_patch"
     assert record["error"]["type"] == "policy_denied"
 
 
@@ -290,10 +291,42 @@ def test_policy_denies_high_risk_tool_and_records_reason(tmp_path: Path) -> None
         "approval": {
             "required": True,
             "status": "missing",
-            "reason": "approval missing for high risk tool shell",
+            "reason": "approval not allowed for high risk tool shell",
         },
     }
     assert record["error"]["type"] == "policy_denied"
+
+
+def test_policy_allowed_high_risk_tool_still_denies_but_records_allowed_missing(
+    tmp_path: Path,
+) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["shell"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["shell"],
+    )
+    calls = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success"}
+
+    router._handlers["shell"] = handler
+
+    result = router.dispatch("shell", {"command": "echo blocked"})
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "policy_denied"
+    assert "approval allowed but missing" in result["error"]["message"]
+    assert calls == []
+    record = _read_single_tool_call(writer)
+    assert record["policy"]["approval"] == {
+        "required": True,
+        "status": "missing",
+        "reason": "approval allowed but missing for high risk tool shell",
+    }
 
 
 def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None:

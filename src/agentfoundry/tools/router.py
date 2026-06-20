@@ -24,8 +24,10 @@ class ToolRouter:
         allowed_tools: list[str],
         episode_writer: EpisodeWriter,
         workspace_root: Path,
+        approval_allowed_tools: list[str] | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
+        self._approval_allowed_tools = list(approval_allowed_tools or [])
         self._episode_writer = episode_writer
         self._workspace_root = workspace_root.resolve()
         self._handlers: dict[str, ToolHandler] = {
@@ -51,7 +53,10 @@ class ToolRouter:
             elif tool_name not in self._handlers:
                 result = tool_error("unknown_tool", f"unknown tool: {tool_name}")
             else:
-                policy_decision = evaluate_tool_call(TOOL_REGISTRY[tool_name])
+                policy_decision = evaluate_tool_call(
+                    TOOL_REGISTRY[tool_name],
+                    approval_allowed_tools=self._approval_allowed_tools,
+                )
                 if policy_decision.action == "deny":
                     result = tool_error(
                         "policy_denied",
