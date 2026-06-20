@@ -38,11 +38,21 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("episode_path", type=Path, help="path to an episode directory")
 
     export_eval_parser = subparsers.add_parser("export-eval", help="export an eval case JSON")
-    export_eval_parser.add_argument("episode_path", type=Path, help="path to an episode directory")
+    export_eval_parser.add_argument(
+        "episode_paths",
+        nargs="+",
+        type=Path,
+        help="path to one or more episode directories",
+    )
     export_eval_parser.add_argument(
         "--output",
         type=Path,
         help="write eval case JSON to this file instead of stdout",
+    )
+    export_eval_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="write one eval case JSON file per episode into this existing directory",
     )
     return parser
 
@@ -67,21 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export-eval":
-        try:
-            eval_case = export_eval_case(args.episode_path)
-        except EpisodeValidationError as error:
-            print(f"error: {error}")
-            return 1
-        output = json.dumps(eval_case, ensure_ascii=False, indent=2)
-        if args.output is not None:
-            if not args.output.parent.exists():
-                print(f"error: output parent directory does not exist: {args.output.parent}")
-                return 1
-            args.output.write_text(output + "\n", encoding="utf-8")
-            print(f"exported_eval_case={args.output}")
-            return 0
-        print(output)
-        return 0
+        return _handle_export_eval(args.episode_paths, args.output, args.output_dir)
 
     parser.error(f"unknown command: {args.command}")
     return 2
@@ -89,6 +85,70 @@ def main(argv: list[str] | None = None) -> int:
 
 class EpisodeInspectError(RuntimeError):
     """Raised when an episode package cannot be inspected safely."""
+
+
+def _handle_export_eval(
+    episode_paths: list[Path],
+    output_path: Path | None,
+    output_dir: Path | None,
+) -> int:
+    """处理 eval case 单文件和批量导出命令。"""
+    if len(episode_paths) == 1:
+        return _export_single_eval_case(episode_paths[0], output_path, output_dir)
+    if output_path is not None:
+        print("error: --output can only be used with a single episode path")
+        return 1
+    if output_dir is None:
+        print("error: multiple episode paths require --output-dir")
+        return 1
+    if not output_dir.exists():
+        print(f"error: output directory does not exist: {output_dir}")
+        return 1
+    if not output_dir.is_dir():
+        print(f"error: output directory is not a directory: {output_dir}")
+        return 1
+    had_error = False
+    for episode_path in episode_paths:
+        target_path = output_dir / f"{episode_path.name}.json"
+        try:
+            _write_eval_case_file(episode_path, target_path)
+        except EpisodeValidationError as error:
+            had_error = True
+            print(f"error={episode_path}: {error}")
+            continue
+        print(f"exported_eval_case={target_path}")
+    return 1 if had_error else 0
+
+
+def _export_single_eval_case(
+    episode_path: Path,
+    output_path: Path | None,
+    output_dir: Path | None,
+) -> int:
+    if output_dir is not None:
+        print("error: --output-dir requires multiple episode paths")
+        return 1
+    try:
+        eval_case = export_eval_case(episode_path)
+    except EpisodeValidationError as error:
+        print(f"error: {error}")
+        return 1
+    output = json.dumps(eval_case, ensure_ascii=False, indent=2)
+    if output_path is not None:
+        if not output_path.parent.exists():
+            print(f"error: output parent directory does not exist: {output_path.parent}")
+            return 1
+        output_path.write_text(output + "\n", encoding="utf-8")
+        print(f"exported_eval_case={output_path}")
+        return 0
+    print(output)
+    return 0
+
+
+def _write_eval_case_file(episode_path: Path, output_path: Path) -> None:
+    eval_case = export_eval_case(episode_path)
+    output = json.dumps(eval_case, ensure_ascii=False, indent=2)
+    output_path.write_text(output + "\n", encoding="utf-8")
 
 
 def render_episode_summary(episode_path: Path) -> str:
