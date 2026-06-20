@@ -6,6 +6,7 @@ agentfoundry/runtime/eval_export.py - Eval Case 导出器
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "failure": _failure_summary(failure_record),
         "verification": _verification_summary(package_view.verification_commands),
         "tool_names_used": _tool_names_used(package_view.tool_calls),
+        "next_actions": _next_actions_summary(episode_path, package_view.context_manifest),
     }
 
 
@@ -66,3 +68,50 @@ def _verification_summary(records: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _tool_names_used(records: list[dict[str, Any]]) -> list[str]:
     names = {str(record["tool_name"]) for record in records}
     return sorted(names)
+
+
+def _next_actions_summary(episode_path: Path, context_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    contexts = context_manifest.get("contexts", [])
+    if not isinstance(contexts, list):
+        return []
+    return [_next_action_summary(episode_path, context) for context in contexts if isinstance(context, dict)]
+
+
+def _next_action_summary(episode_path: Path, context: dict[str, Any]) -> dict[str, Any]:
+    context_id = str(context.get("context_id", "unknown"))
+    manifest_path = context.get("manifest_path")
+    if not isinstance(manifest_path, str):
+        return _missing_next_action(context_id)
+    next_action = _read_next_action(episode_path / manifest_path)
+    if next_action is None:
+        return _missing_next_action(context_id)
+    return {
+        "context_id": context_id,
+        "status": str(next_action.get("status", "missing")),
+        "reason": str(next_action.get("reason", "legacy/missing")),
+        "based_on_observation_index": next_action.get("based_on_observation_index"),
+        "based_on_tool_name": next_action.get("based_on_tool_name"),
+    }
+
+
+def _read_next_action(path: Path) -> dict[str, Any] | None:
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    if not isinstance(context, dict):
+        return None
+    next_action = context.get("next_action")
+    if not isinstance(next_action, dict):
+        return None
+    return next_action
+
+
+def _missing_next_action(context_id: str) -> dict[str, Any]:
+    return {
+        "context_id": context_id,
+        "status": "missing",
+        "reason": "legacy/missing",
+        "based_on_observation_index": None,
+        "based_on_tool_name": None,
+    }

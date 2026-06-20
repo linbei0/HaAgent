@@ -4,6 +4,7 @@ tests/test_eval_export.py - Eval Case Export 测试
 验证 episode package 可以导出为后续 eval 数据管线可消费的最小字典。
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,22 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     assert eval_case["failure"] is None
     assert eval_case["verification"] == []
     assert eval_case["tool_names_used"] == ["fake_tool"]
+    assert eval_case["next_actions"] == [
+        {
+            "context_id": "0001",
+            "status": "none",
+            "reason": "none",
+            "based_on_observation_index": None,
+            "based_on_tool_name": None,
+        },
+        {
+            "context_id": "0002",
+            "status": "continue",
+            "reason": "Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied.",
+            "based_on_observation_index": 0,
+            "based_on_tool_name": "fake_tool",
+        },
+    ]
 
 
 def test_failed_episode_exports_failure_information(tmp_path: Path) -> None:
@@ -99,6 +116,26 @@ def test_exporting_same_episode_is_deterministic(tmp_path: Path) -> None:
     assert first_export == second_export
 
 
+def test_export_eval_case_marks_missing_next_action(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    first_context_path = result.episode_path / "contexts" / "0001.json"
+    first_context = json.loads(first_context_path.read_text(encoding="utf-8"))
+    first_context.pop("next_action")
+    first_context_path.write_text(json.dumps(first_context), encoding="utf-8")
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert eval_case["next_actions"][0] == {
+        "context_id": "0001",
+        "status": "missing",
+        "reason": "legacy/missing",
+        "based_on_observation_index": None,
+        "based_on_tool_name": None,
+    }
+
+
 def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)
@@ -125,3 +162,4 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
     assert eval_case["episode_version"] == "1.0"
     assert eval_case["task"]["goal"] == "Export eval case"
     assert eval_case["tool_names_used"] == ["fake_tool"]
+    assert eval_case["next_actions"] == []
