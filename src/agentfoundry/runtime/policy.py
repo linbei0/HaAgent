@@ -1,7 +1,7 @@
 """
-agentfoundry/runtime/policy.py - Policy Engine v0
+agentfoundry/runtime/policy.py - Policy Engine
 
-为工具调用生成审计用 policy decision；v0 只记录 allow，不阻止调用。
+为工具调用生成可执行的 policy decision，高风险工具会在路由层被拒绝。
 """
 
 from __future__ import annotations
@@ -12,24 +12,45 @@ from agentfoundry.tools.registry import ToolDefinition
 
 
 @dataclass(frozen=True)
+class ApprovalDecision:
+    required: bool
+    status: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class PolicyDecision:
     tool_name: str
     risk_level: str
     action: str
     reason: str
+    approval: ApprovalDecision
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
 def evaluate_tool_call(tool_definition: ToolDefinition) -> PolicyDecision:
-    """返回工具调用的审计决策；v0 所有已知工具都 allow。"""
-    reason = f"policy v0 allows {tool_definition.risk_level} risk tool {tool_definition.name}"
-    if tool_definition.risk_level == "high":
-        reason += " for audit-only enforcement"
+    """根据 Tool Registry 风险等级返回工具调用决策。"""
+    action = "deny" if tool_definition.risk_level == "high" else "allow"
+    reason_action = "denies" if action == "deny" else "allows"
+    reason = f"policy {reason_action} {tool_definition.risk_level} risk tool {tool_definition.name}"
+    if action == "deny":
+        approval = ApprovalDecision(
+            required=True,
+            status="missing",
+            reason=f"approval missing for high risk tool {tool_definition.name}",
+        )
+    else:
+        approval = ApprovalDecision(
+            required=False,
+            status="not_required",
+            reason=f"approval not required for {tool_definition.risk_level} risk tool {tool_definition.name}",
+        )
     return PolicyDecision(
         tool_name=tool_definition.name,
         risk_level=tool_definition.risk_level,
-        action="allow",
+        action=action,
         reason=reason,
+        approval=approval,
     )

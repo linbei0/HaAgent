@@ -52,11 +52,17 @@ class ToolRouter:
                 result = tool_error("unknown_tool", f"unknown tool: {tool_name}")
             else:
                 policy_decision = evaluate_tool_call(TOOL_REGISTRY[tool_name])
-                validation_error = _validate_args(tool_name, args)
-                if validation_error:
-                    result = validation_error
+                if policy_decision.action == "deny":
+                    result = tool_error(
+                        "policy_denied",
+                        f"{policy_decision.reason}; {policy_decision.approval.reason}",
+                    )
                 else:
-                    result = self._handlers[tool_name](args)
+                    validation_error = _validate_args(tool_name, args)
+                    if validation_error:
+                        result = validation_error
+                    else:
+                        result = self._handlers[tool_name](args)
         except Exception as error:
             result = tool_error(type(error).__name__, str(error))
 

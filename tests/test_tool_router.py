@@ -44,7 +44,12 @@ def test_tool_router_runs_fake_tool_and_writes_trace(tmp_path: Path) -> None:
         "tool_name": "fake_tool",
         "risk_level": "low",
         "action": "allow",
-        "reason": "policy v0 allows low risk tool fake_tool",
+        "reason": "policy allows low risk tool fake_tool",
+        "approval": {
+            "required": False,
+            "status": "not_required",
+            "reason": "approval not required for low risk tool fake_tool",
+        },
     }
 
 
@@ -128,7 +133,7 @@ def test_tool_router_does_not_call_handler_when_schema_validation_fails(tmp_path
     assert calls == []
 
 
-def test_tool_router_validates_number_type_before_handler(tmp_path: Path) -> None:
+def test_tool_router_denies_high_risk_shell_before_handler(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
     calls = []
@@ -139,13 +144,22 @@ def test_tool_router_validates_number_type_before_handler(tmp_path: Path) -> Non
 
     router._handlers["shell"] = handler
 
-    valid_result = router.dispatch("shell", {"command": "echo ok", "timeout_seconds": 1.5})
-    invalid_result = router.dispatch("shell", {"command": "echo ok", "timeout_seconds": "slow"})
+    result = router.dispatch("shell", {"command": "echo ok", "timeout_seconds": 1.5})
 
-    assert valid_result["status"] == "success"
-    assert invalid_result["error"]["type"] == "tool_argument_invalid"
-    assert "argument timeout_seconds must be number" in invalid_result["error"]["message"]
-    assert calls == [{"command": "echo ok", "timeout_seconds": 1.5}]
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "policy_denied"
+    assert "policy denies high risk tool shell" in result["error"]["message"]
+    assert "approval missing" in result["error"]["message"]
+    assert calls == []
+    record = _read_single_tool_call(writer)
+    assert record["status"] == "error"
+    assert record["policy"]["action"] == "deny"
+    assert record["policy"]["approval"] == {
+        "required": True,
+        "status": "missing",
+        "reason": "approval missing for high risk tool shell",
+    }
+    assert record["error"]["type"] == "policy_denied"
 
 
 def test_tool_router_unknown_tool_keeps_existing_failure_semantics(tmp_path: Path) -> None:
@@ -187,11 +201,18 @@ def test_file_search_finds_matching_text_and_writes_trace(tmp_path: Path) -> Non
     assert json.loads(trace_lines[0])["tool_name"] == "file_search"
 
 
-def test_apply_patch_rejects_path_outside_workspace(tmp_path: Path) -> None:
+def test_apply_patch_is_denied_before_handler(tmp_path: Path) -> None:
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("old", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["apply_patch"], episode_writer=writer, workspace_root=tmp_path)
+    calls = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success"}
+
+    router._handlers["apply_patch"] = handler
 
     result = router.dispatch(
         "apply_patch",
@@ -199,11 +220,16 @@ def test_apply_patch_rejects_path_outside_workspace(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "path_outside_workspace"
+    assert result["error"]["type"] == "policy_denied"
+    assert calls == []
     assert outside.read_text(encoding="utf-8") == "old"
+    record = _read_single_tool_call(writer)
+    assert record["policy"]["action"] == "deny"
+    assert record["policy"]["approval"]["required"] is True
+    assert record["error"]["type"] == "policy_denied"
 
 
-def test_apply_patch_replaces_unique_text_inside_workspace(tmp_path: Path) -> None:
+def test_apply_patch_denial_writes_tool_call_error(tmp_path: Path) -> None:
     target = tmp_path / "change.txt"
     target.write_text("before\nold value\nafter\n", encoding="utf-8")
     writer = make_writer(tmp_path)
@@ -214,11 +240,18 @@ def test_apply_patch_replaces_unique_text_inside_workspace(tmp_path: Path) -> No
         {"path": "change.txt", "old_text": "old value", "new_text": "new value"},
     )
 
-    assert result["status"] == "success"
-    assert target.read_text(encoding="utf-8") == "before\nnew value\nafter\n"
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "policy_denied"
+    assert target.read_text(encoding="utf-8") == "before\nold value\nafter\n"
+    record = _read_single_tool_call(writer)
+    assert record["tool_name"] == "apply_patch"
+    assert record["status"] == "error"
+    assert record["policy"]["action"] == "deny"
+    assert record["policy"]["approval"]["status"] == "missing"
+    assert record["error"]["type"] == "policy_denied"
 
 
-def test_shell_captures_exit_code_stdout_and_stderr(tmp_path: Path) -> None:
+def test_shell_policy_denial_writes_tool_call_error(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
 
@@ -231,43 +264,51 @@ def test_shell_captures_exit_code_stdout_and_stderr(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "error"
-    assert result["exit_code"] == 3
-    assert "out" in result["stdout"]
-    assert "err" in result["stderr"]
-    assert result["error"]["type"] == "command_failed"
+    assert result["error"]["type"] == "policy_denied"
+    record = _read_single_tool_call(writer)
+    assert record["tool_name"] == "shell"
+    assert record["status"] == "error"
+    assert record["policy"]["action"] == "deny"
+    assert record["policy"]["approval"]["required"] is True
+    assert record["policy"]["approval"]["status"] == "missing"
+    assert record["error"]["type"] == "policy_denied"
 
 
-def test_policy_allows_high_risk_tool_and_records_reason(tmp_path: Path) -> None:
+def test_policy_denies_high_risk_tool_and_records_reason(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
 
     result = router.dispatch("shell", {"command": "python -c \"print('ok')\"", "timeout_seconds": 5})
 
-    assert result["status"] == "success"
+    assert result["status"] == "error"
     record = _read_single_tool_call(writer)
     assert record["policy"] == {
         "tool_name": "shell",
         "risk_level": "high",
-        "action": "allow",
-        "reason": "policy v0 allows high risk tool shell for audit-only enforcement",
+        "action": "deny",
+        "reason": "policy denies high risk tool shell",
+        "approval": {
+            "required": True,
+            "status": "missing",
+            "reason": "approval missing for high risk tool shell",
+        },
     }
+    assert record["error"]["type"] == "policy_denied"
 
 
-def test_shell_reports_timeout(tmp_path: Path) -> None:
+def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
 
     result = router.dispatch(
         "shell",
         {
-            "command": "python -c \"import time; time.sleep(1)\"",
-            "timeout_seconds": 0.01,
+            "timeout_seconds": "slow",
         },
     )
 
     assert result["status"] == "error"
-    assert result["exit_code"] is None
-    assert result["error"]["type"] == "timeout"
+    assert result["error"]["type"] == "policy_denied"
 
 
 def _read_single_tool_call(writer: EpisodeWriter) -> dict[str, object]:
