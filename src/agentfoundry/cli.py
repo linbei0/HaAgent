@@ -128,6 +128,8 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_model_calls(model_calls))
     lines.extend(["", "Tool Calls"])
     lines.extend(_format_tool_calls(tool_calls))
+    lines.extend(["", "Tool Argument Errors"])
+    lines.extend(_format_tool_argument_errors(tool_calls))
     lines.extend(["", "Verification"])
     lines.extend(_format_verification(verification))
     lines.extend(["", "Structured Failure"])
@@ -245,6 +247,19 @@ def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
         f"- {call.get('tool_name', 'unknown')}: {call.get('status', 'unknown')}"
         for call in tool_calls
     ]
+
+
+def _format_tool_argument_errors(tool_calls: list[dict[str, Any]]) -> list[str]:
+    errors = []
+    for call in tool_calls:
+        error = call.get("error")
+        if isinstance(error, dict) and error.get("type") == "tool_argument_invalid":
+            errors.append(
+                f"- {call.get('tool_name', 'unknown')}: {error.get('message', '')}",
+            )
+    if not errors:
+        return ["- none"]
+    return errors
 
 
 def _format_verification(commands: list[dict[str, Any]]) -> list[str]:

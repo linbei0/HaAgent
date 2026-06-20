@@ -38,6 +38,7 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "failure": _failure_summary(failure_record),
         "verification": _verification_summary(package_view.verification_commands),
         "tool_names_used": _tool_names_used(package_view.tool_calls),
+        "tool_argument_errors": _tool_argument_errors(package_view.tool_calls),
         "next_actions": _next_actions_summary(episode_path, package_view.context_manifest),
     }
 
@@ -79,6 +80,20 @@ def _int_or_default(value: Any, default: int) -> int:
 def _tool_names_used(records: list[dict[str, Any]]) -> list[str]:
     names = {str(record["tool_name"]) for record in records}
     return sorted(names)
+
+
+def _tool_argument_errors(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    errors = []
+    for record in records:
+        error = record.get("error")
+        if isinstance(error, dict) and error.get("type") == "tool_argument_invalid":
+            errors.append(
+                {
+                    "tool_name": str(record.get("tool_name", "unknown")),
+                    "message": str(error.get("message", "")),
+                },
+            )
+    return errors
 
 
 def _next_actions_summary(episode_path: Path, context_manifest: dict[str, Any]) -> list[dict[str, Any]]:

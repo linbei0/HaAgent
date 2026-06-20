@@ -8,7 +8,9 @@ import json
 from pathlib import Path
 
 from agentfoundry import cli
+from agentfoundry.models.gateway import ModelResponse, ToolCall
 from agentfoundry.runtime.episode_validator import EpisodePackageView
+from agentfoundry.runtime.orchestrator import RunOrchestrator
 from agentfoundry.runtime.state import RunStatus
 
 
@@ -17,6 +19,15 @@ class FakeResult:
 
     def __init__(self, episode_path: Path) -> None:
         self.episode_path = episode_path
+
+
+class OneShotGateway:
+    provider_name = "one-shot"
+
+    def generate(self, task, model_input=None, tool_schemas=None, observations=None):
+        if observations:
+            return ModelResponse("done", [])
+        return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
 
 def write_minimal_episode(
@@ -327,6 +338,8 @@ verification_commands: []
     assert "Model Calls" in output
     assert "Tool Calls" in output
     assert "fake_tool: success" in output
+    assert "Tool Argument Errors" in output
+    assert "- none" in output
     assert "Verification" in output
     assert "uv run pytest: success (exit_code=0)" in output
     assert "Failure Attribution" in output
@@ -435,6 +448,38 @@ verification_commands: []
     assert "category: Verification Failure" in output
     assert "stage: verifying" in output
     assert "structured evidence" in output
+
+
+def test_cli_inspect_outputs_tool_argument_errors(tmp_path: Path, capsys) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Show tool argument errors
+constraints: []
+allowed_tools:
+  - file_read
+acceptance_criteria:
+  - Argument error is visible
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=OneShotGateway(),
+    ).run(task_path)
+    verification_dir = result.episode_path / "verification"
+    verification_dir.mkdir(exist_ok=True)
+    (verification_dir / "commands.jsonl").write_text("", encoding="utf-8")
+    inspect_exit = cli.main(["inspect", str(result.episode_path)])
+
+    output = capsys.readouterr().out
+    assert result.status is RunStatus.FAILED
+    assert inspect_exit == 0
+    assert "Tool Argument Errors" in output
+    assert "file_read" in output
+    assert "missing required argument: path" in output
 
 
 def test_cli_inspect_redacts_verification_secrets_from_real_episode(tmp_path: Path, capsys) -> None:
