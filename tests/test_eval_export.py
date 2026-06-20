@@ -90,8 +90,76 @@ def test_failed_episode_exports_failure_information(tmp_path: Path) -> None:
             "status": "failed",
             "exit_code": 7,
             "timeout": False,
+            "stdout_excerpt": "",
+            "stderr_excerpt": "",
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+            "stdout_original_length": 0,
+            "stderr_original_length": 0,
+            "redacted": False,
         },
     ]
+
+
+def test_eval_export_includes_verification_evidence_metadata(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    stdout = "x" * 2007
+    raw_key = "OPENAI_API_KEY=super-secret-value"
+    write_task(
+        task_path,
+        verification_commands=[
+            (
+                "python -c "
+                "\"import sys; "
+                f"print('{stdout}', end=''); "
+                f"print('{raw_key}', file=sys.stderr); "
+                "sys.exit(5)\""
+            ),
+        ],
+    )
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+
+    eval_case = export_eval_case(result.episode_path)
+    verification = eval_case["verification"][0]
+
+    assert result.status is RunStatus.FAILED
+    assert verification["stdout_excerpt"] == "x" * 2000
+    assert verification["stdout_truncated"] is True
+    assert verification["stdout_original_length"] == 2007
+    assert verification["stderr_excerpt"] == "OPENAI_API_KEY=[REDACTED]\n"
+    assert verification["stderr_truncated"] is False
+    assert verification["stderr_original_length"] == len(raw_key + "\n")
+    assert verification["redacted"] is True
+    assert raw_key not in verification["stderr_excerpt"]
+
+
+def test_eval_export_defaults_missing_verification_metadata(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path, verification_commands=["python -c \"import sys; sys.exit(7)\""])
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    commands_path = result.episode_path / "verification" / "commands.jsonl"
+    record = json.loads(commands_path.read_text(encoding="utf-8"))
+    for field_name in [
+        "stdout_excerpt",
+        "stderr_excerpt",
+        "stdout_truncated",
+        "stderr_truncated",
+        "stdout_original_length",
+        "stderr_original_length",
+        "redacted",
+    ]:
+        record.pop(field_name, None)
+    commands_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert eval_case["verification"][0]["stdout_excerpt"] == ""
+    assert eval_case["verification"][0]["stderr_excerpt"] == ""
+    assert eval_case["verification"][0]["stdout_truncated"] is False
+    assert eval_case["verification"][0]["stderr_truncated"] is False
+    assert eval_case["verification"][0]["stdout_original_length"] == 0
+    assert eval_case["verification"][0]["stderr_original_length"] == 0
+    assert eval_case["verification"][0]["redacted"] is False
 
 
 def test_invalid_episode_fails_through_validator(tmp_path: Path) -> None:

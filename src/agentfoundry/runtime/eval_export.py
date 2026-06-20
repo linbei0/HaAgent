@@ -60,9 +60,20 @@ def _verification_summary(records: list[dict[str, Any]]) -> list[dict[str, Any]]
             "status": record["status"],
             "exit_code": record.get("exit_code"),
             "timeout": bool(record.get("timeout", False)),
+            "stdout_excerpt": str(record.get("stdout_excerpt", "")),
+            "stderr_excerpt": str(record.get("stderr_excerpt", "")),
+            "stdout_truncated": bool(record.get("stdout_truncated", False)),
+            "stderr_truncated": bool(record.get("stderr_truncated", False)),
+            "stdout_original_length": _int_or_default(record.get("stdout_original_length"), 0),
+            "stderr_original_length": _int_or_default(record.get("stderr_original_length"), 0),
+            "redacted": bool(record.get("redacted", False)),
         }
         for record in records
     ]
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
 def _tool_names_used(records: list[dict[str, Any]]) -> list[str]:
