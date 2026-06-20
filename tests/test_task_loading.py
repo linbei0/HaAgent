@@ -251,3 +251,10 @@ verification_commands: []
 
     with pytest.raises(TaskLoadError, match="allowed_tools"):
         load_task(task_path)
+
+
+def test_openai_tool_call_smoke_task_loads_without_network_verification() -> None:
+    task = load_task(Path("examples/tasks/openai_tool_call_smoke.yaml"))
+
+    assert task.allowed_tools == ["fake_tool"]
+    assert task.verification_commands == []
