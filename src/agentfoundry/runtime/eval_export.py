@@ -37,6 +37,7 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "final_status": episode_metadata["status"],
         "failure": _failure_summary(failure_record),
         "verification": _verification_summary(package_view.verification_commands),
+        "sandbox_summary": _sandbox_summary(package_view.sandbox),
         "tool_names_used": _tool_names_used(package_view.tool_calls),
         "tool_argument_errors": _tool_argument_errors(package_view.tool_calls),
         "approval_summary": _approval_summary(package_view.tool_calls),
@@ -72,6 +73,18 @@ def _verification_summary(records: list[dict[str, Any]]) -> list[dict[str, Any]]
         }
         for record in records
     ]
+
+
+def _sandbox_summary(sandbox: dict[str, Any]) -> dict[str, Any]:
+    resource_limits = sandbox["resource_limits"]
+    return {
+        "workspace_root": sandbox["workspace_root"],
+        "filesystem_boundary": sandbox["filesystem_boundary"],
+        "network_policy": sandbox["network_policy"],
+        "process_policy": sandbox["process_policy"],
+        "credential_policy": sandbox["credential_policy"],
+        "command_timeout_seconds": resource_limits["command_timeout_seconds"],
+    }
 
 
 def _int_or_default(value: Any, default: int) -> int:

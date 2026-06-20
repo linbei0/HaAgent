@@ -45,6 +45,7 @@ class EpisodePackageView:
     tool_calls: list[dict[str, Any]]
     verification_commands: list[dict[str, Any]]
     plan: dict[str, Any] = field(default_factory=dict)
+    sandbox: dict[str, Any] = field(default_factory=dict)
 
 
 def validate_episode_package(episode_path: Path) -> None:
@@ -102,6 +103,7 @@ def _read_validated_episode_package(episode_path: Path) -> EpisodePackageView:
         transcript=transcript,
         tool_calls=tool_calls,
         verification_commands=verification_commands,
+        sandbox=sandbox,
     )
 
 

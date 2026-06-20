@@ -77,6 +77,15 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     assert eval_case["verification"] == []
     assert eval_case["tool_names_used"] == ["fake_tool"]
     assert eval_case["tool_argument_errors"] == []
+    sandbox = json.loads((result.episode_path / "sandbox.json").read_text(encoding="utf-8"))
+    assert eval_case["sandbox_summary"] == {
+        "workspace_root": sandbox["workspace_root"],
+        "filesystem_boundary": sandbox["filesystem_boundary"],
+        "network_policy": sandbox["network_policy"],
+        "process_policy": sandbox["process_policy"],
+        "credential_policy": sandbox["credential_policy"],
+        "command_timeout_seconds": sandbox["resource_limits"]["command_timeout_seconds"],
+    }
     assert eval_case["approval_summary"] == [
         {
             "tool_name": "fake_tool",
@@ -308,6 +317,57 @@ def test_eval_export_includes_verification_evidence_metadata(tmp_path: Path) -> 
     assert raw_key not in verification["stderr_excerpt"]
 
 
+def test_eval_export_reads_sandbox_summary_from_sandbox_json(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    sandbox_path = result.episode_path / "sandbox.json"
+    sandbox = json.loads(sandbox_path.read_text(encoding="utf-8"))
+    sandbox["network_policy"] = "test-network-policy"
+    sandbox["resource_limits"]["command_timeout_seconds"] = 12.5
+    sandbox_path.write_text(json.dumps(sandbox), encoding="utf-8")
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert eval_case["sandbox_summary"] == {
+        "workspace_root": sandbox["workspace_root"],
+        "filesystem_boundary": sandbox["filesystem_boundary"],
+        "network_policy": "test-network-policy",
+        "process_policy": sandbox["process_policy"],
+        "credential_policy": sandbox["credential_policy"],
+        "command_timeout_seconds": 12.5,
+    }
+
+
+def test_eval_export_rejects_missing_sandbox_through_validator(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "sandbox.json").unlink()
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="episode package missing required file: sandbox.json",
+    ):
+        export_eval_case(result.episode_path)
+
+
+def test_eval_export_rejects_damaged_sandbox_through_validator(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    sandbox_path = result.episode_path / "sandbox.json"
+    sandbox = json.loads(sandbox_path.read_text(encoding="utf-8"))
+    sandbox["resource_limits"]["command_timeout_seconds"] = "sixty"
+    sandbox_path.write_text(json.dumps(sandbox), encoding="utf-8")
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="sandbox.json resource_limits.command_timeout_seconds must be a number",
+    ):
+        export_eval_case(result.episode_path)
+
+
 def test_eval_export_defaults_missing_verification_metadata(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path, verification_commands=["python -c \"import sys; sys.exit(7)\""])
@@ -357,6 +417,7 @@ def test_exporting_same_episode_is_deterministic(tmp_path: Path) -> None:
     second_export = export_eval_case(result.episode_path)
 
     assert first_export == second_export
+    assert first_export["sandbox_summary"] == second_export["sandbox_summary"]
 
 
 def test_export_eval_case_marks_missing_next_action(tmp_path: Path) -> None:
@@ -396,6 +457,14 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
         transcript=[],
         tool_calls=[{"tool_name": "fake_tool", "status": "success"}],
         verification_commands=[],
+        sandbox={
+            "workspace_root": str(tmp_path),
+            "filesystem_boundary": "workspace_root",
+            "network_policy": "unrestricted",
+            "process_policy": "local_subprocess",
+            "credential_policy": "inherit_environment",
+            "resource_limits": {"command_timeout_seconds": 60},
+        },
     )
 
     monkeypatch.setattr(eval_export, "load_validated_episode_package", lambda path: package_view)
@@ -406,6 +475,14 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
     assert eval_case["task"]["goal"] == "Export eval case"
     assert eval_case["tool_names_used"] == ["fake_tool"]
     assert eval_case["tool_argument_errors"] == []
+    assert eval_case["sandbox_summary"] == {
+        "workspace_root": str(tmp_path),
+        "filesystem_boundary": "workspace_root",
+        "network_policy": "unrestricted",
+        "process_policy": "local_subprocess",
+        "credential_policy": "inherit_environment",
+        "command_timeout_seconds": 60,
+    }
     assert eval_case["approval_summary"] == [
         {
             "tool_name": "fake_tool",
