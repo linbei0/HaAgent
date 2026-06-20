@@ -11,6 +11,7 @@ import pytest
 
 from agentfoundry.models.fake import FakeModelGateway
 from agentfoundry.models.gateway import (
+    DEFAULT_RESPONSES_ENDPOINT,
     ModelCallError,
     ModelResponse,
     OpenAIResponsesGateway,
@@ -108,6 +109,45 @@ def test_openai_gateway_uses_unified_response_shape() -> None:
         "model": "gpt-test",
         "input": "Goal: Exercise model gateway\nConstraints:\n- none\nAcceptance criteria:\n- none",
     }
+
+
+def test_openai_gateway_defaults_to_official_responses_endpoint() -> None:
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        transport=lambda payload, api_key: {"output_text": "ok"},
+    )
+
+    assert gateway.responses_endpoint == DEFAULT_RESPONSES_ENDPOINT
+
+
+def test_openai_gateway_reads_base_url_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://compatible.example/v1")
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        transport=lambda payload, api_key: {"output_text": "ok"},
+    )
+
+    assert gateway.responses_endpoint == "https://compatible.example/v1/responses"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_endpoint"),
+    [
+        ("https://compatible.example/v1/responses", "https://compatible.example/v1/responses"),
+        ("https://compatible.example/v1", "https://compatible.example/v1/responses"),
+        ("https://compatible.example", "https://compatible.example/v1/responses"),
+        ("compatible.example", "https://compatible.example/v1/responses"),
+    ],
+)
+def test_openai_gateway_normalizes_base_url(base_url: str, expected_endpoint: str) -> None:
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        base_url=base_url,
+        transport=lambda payload, api_key: {"output_text": "ok"},
+    )
+
+    assert gateway.responses_endpoint == expected_endpoint
 
 
 def test_openai_gateway_payload_uses_model_input_and_tools() -> None:

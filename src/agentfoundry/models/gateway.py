@@ -46,6 +46,7 @@ class ModelGateway(Protocol):
 
 
 Transport = Callable[[dict[str, object], str], dict[str, object]]
+DEFAULT_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
 
 
 class OpenAIResponsesGateway:
@@ -55,11 +56,29 @@ class OpenAIResponsesGateway:
         self,
         api_key: str | None = None,
         model: str = "gpt-4.1-mini",
+        base_url: str | None = None,
         transport: Transport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._model = model
-        self._transport = transport or _responses_transport
+        configured_base_url = (
+            base_url
+            if base_url is not None
+            else os.environ.get("OPENAI_BASE_URL")
+        )
+        self._responses_endpoint = _normalize_responses_endpoint(configured_base_url)
+        self._transport = transport or (
+            lambda payload, api_key: _responses_transport(
+                payload,
+                api_key,
+                self._responses_endpoint,
+            )
+        )
+
+    @property
+    def responses_endpoint(self) -> str:
+        """返回本次 gateway 会请求的 Responses API endpoint，便于审计和测试。"""
+        return self._responses_endpoint
 
     def generate(
         self,
@@ -143,10 +162,28 @@ def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
     return parsed
 
 
-def _responses_transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+def _normalize_responses_endpoint(base_url: str | None) -> str:
+    """把裸域名或 /v1 base URL 规范化为 Responses API endpoint。"""
+    if base_url is None or not base_url.strip():
+        return DEFAULT_RESPONSES_ENDPOINT
+    endpoint = base_url.strip().rstrip("/")
+    if "://" not in endpoint:
+        endpoint = f"https://{endpoint}"
+    if endpoint.endswith("/v1/responses"):
+        return endpoint
+    if endpoint.endswith("/v1"):
+        return f"{endpoint}/responses"
+    return f"{endpoint}/v1/responses"
+
+
+def _responses_transport(
+    payload: dict[str, object],
+    api_key: str,
+    endpoint: str = DEFAULT_RESPONSES_ENDPOINT,
+) -> dict[str, object]:
     """执行真实 HTTP 请求；保持为函数便于测试注入替身 transport。"""
     request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",

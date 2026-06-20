@@ -200,6 +200,39 @@ def test_cli_run_explicit_fake_provider_keeps_default_gateway_path(
     assert calls == {"runs_root": Path(".runs"), "task_path": task_path}
 
 
+def test_cli_run_fake_provider_ignores_base_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: x\n", encoding="utf-8")
+    calls = {}
+
+    class FakeOrchestrator:
+        def __init__(self, runs_root: Path) -> None:
+            calls["runs_root"] = runs_root
+
+        def run(self, received_task_path: Path) -> FakeResult:
+            calls["task_path"] = received_task_path
+            return FakeResult(tmp_path / ".runs" / "episode-1")
+
+    monkeypatch.setattr(cli, "RunOrchestrator", FakeOrchestrator)
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(task_path),
+            "--provider",
+            "fake",
+            "--base-url",
+            "https://compatible.example/v1",
+        ],
+    )
+
+    assert exit_code == 0
+    assert calls == {"runs_root": Path(".runs"), "task_path": task_path}
+
+
 def test_cli_run_openai_provider_passes_gateway_to_orchestrator(
     tmp_path: Path,
     monkeypatch,
@@ -235,6 +268,100 @@ def test_cli_run_openai_provider_passes_gateway_to_orchestrator(
     assert calls["task_path"] == task_path
     assert calls["model"] == "gpt-test"
     assert isinstance(calls["model_gateway"], FakeOpenAIGateway)
+
+
+def test_cli_run_openai_provider_passes_base_url_to_gateway(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: x\n", encoding="utf-8")
+    calls = {}
+
+    class FakeOpenAIGateway:
+        provider_name = "openai"
+
+        def __init__(
+            self,
+            model: str = "gpt-4.1-mini",
+            base_url: str | None = None,
+        ) -> None:
+            calls["model"] = model
+            calls["base_url"] = base_url
+
+    class FakeOrchestrator:
+        def __init__(self, runs_root: Path, model_gateway=None) -> None:
+            calls["runs_root"] = runs_root
+            calls["model_gateway"] = model_gateway
+
+        def run(self, received_task_path: Path) -> FakeResult:
+            calls["task_path"] = received_task_path
+            return FakeResult(tmp_path / ".runs" / "episode-1")
+
+    monkeypatch.setattr(cli, "OpenAIResponsesGateway", FakeOpenAIGateway)
+    monkeypatch.setattr(cli, "RunOrchestrator", FakeOrchestrator)
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(task_path),
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-test",
+            "--base-url",
+            "https://compatible.example/v1",
+        ],
+    )
+
+    assert exit_code == 0
+    assert calls["model"] == "gpt-test"
+    assert calls["base_url"] == "https://compatible.example/v1"
+    assert isinstance(calls["model_gateway"], FakeOpenAIGateway)
+
+
+def test_cli_run_base_url_argument_takes_priority_over_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env.example/v1")
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: x\n", encoding="utf-8")
+    calls = {}
+
+    class FakeOpenAIGateway:
+        provider_name = "openai"
+
+        def __init__(
+            self,
+            model: str = "gpt-4.1-mini",
+            base_url: str | None = None,
+        ) -> None:
+            calls["base_url"] = base_url
+
+    class FakeOrchestrator:
+        def __init__(self, runs_root: Path, model_gateway=None) -> None:
+            calls["model_gateway"] = model_gateway
+
+        def run(self, received_task_path: Path) -> FakeResult:
+            return FakeResult(tmp_path / ".runs" / "episode-1")
+
+    monkeypatch.setattr(cli, "OpenAIResponsesGateway", FakeOpenAIGateway)
+    monkeypatch.setattr(cli, "RunOrchestrator", FakeOrchestrator)
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(task_path),
+            "--provider",
+            "openai",
+            "--base-url",
+            "https://cli.example/v1",
+        ],
+    )
+
+    assert exit_code == 0
+    assert calls["base_url"] == "https://cli.example/v1"
 
 
 def test_cli_run_openai_missing_api_key_fails_without_network(

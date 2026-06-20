@@ -45,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         help="OpenAI model name; only used when --provider openai",
     )
+    run_parser.add_argument(
+        "--base-url",
+        help="OpenAI-compatible Responses API base URL; only used when --provider openai",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="inspect an episode package")
     inspect_parser.add_argument("episode_path", type=Path, help="path to an episode directory")
@@ -76,11 +80,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         if args.provider == "openai":
-            model_gateway = (
-                OpenAIResponsesGateway(model=args.model)
-                if args.model is not None
-                else OpenAIResponsesGateway()
-            )
+            gateway_kwargs = {}
+            if args.model is not None:
+                gateway_kwargs["model"] = args.model
+            if args.base_url is not None:
+                gateway_kwargs["base_url"] = args.base_url
+            model_gateway = OpenAIResponsesGateway(**gateway_kwargs)
             result = RunOrchestrator(
                 runs_root=args.runs_root,
                 model_gateway=model_gateway,
