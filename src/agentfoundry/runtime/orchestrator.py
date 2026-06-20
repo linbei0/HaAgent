@@ -253,6 +253,6 @@ def _unexpected_failure_category(error: Exception, state_history: list[RunStatus
 
 
 def _tool_failure_category(error: ToolRoutingError) -> FailureCategory:
-    if error.error_type == "invalid_tool_arguments":
+    if error.error_type in {"invalid_tool_arguments", "tool_argument_invalid"}:
         return FailureCategory.TOOL_ARGUMENT
     return FailureCategory.TOOL_INTERFACE

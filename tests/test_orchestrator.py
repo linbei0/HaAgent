@@ -202,6 +202,8 @@ def test_orchestrator_invalid_tool_args_are_tool_argument_failure(tmp_path: Path
     failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
     assert failure["status"] == "failed"
     assert failure["failure"]["category"] == "Tool Argument Failure"
+    tool_call = json.loads((result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    assert tool_call["error"]["type"] == "tool_argument_invalid"
 
 
 def test_orchestrator_unknown_runtime_tool_is_tool_interface_failure(tmp_path: Path) -> None:

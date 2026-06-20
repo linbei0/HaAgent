@@ -80,11 +80,12 @@ def test_tool_router_rejects_missing_required_argument_and_writes_trace(tmp_path
     result = router.dispatch("file_search", {})
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "invalid_tool_arguments"
+    assert result["error"]["type"] == "tool_argument_invalid"
     assert "missing required argument: query" in result["error"]["message"]
     record = _read_single_tool_call(writer)
     assert record["tool_name"] == "file_search"
     assert record["status"] == "error"
+    assert record["error"]["type"] == "tool_argument_invalid"
 
 
 def test_tool_router_rejects_argument_type_mismatch(tmp_path: Path) -> None:
@@ -94,7 +95,7 @@ def test_tool_router_rejects_argument_type_mismatch(tmp_path: Path) -> None:
     result = router.dispatch("file_read", {"path": "notes.txt", "offset": "1"})
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "invalid_tool_arguments"
+    assert result["error"]["type"] == "tool_argument_invalid"
     assert "argument offset must be integer" in result["error"]["message"]
 
 
@@ -105,8 +106,46 @@ def test_tool_router_rejects_extra_argument_when_schema_disallows_it(tmp_path: P
     result = router.dispatch("file_search", {"query": "needle", "extra": True})
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "invalid_tool_arguments"
+    assert result["error"]["type"] == "tool_argument_invalid"
     assert "unexpected argument: extra" in result["error"]["message"]
+
+
+def test_tool_router_does_not_call_handler_when_schema_validation_fails(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
+    calls = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success"}
+
+    router._handlers["file_read"] = handler
+
+    result = router.dispatch("file_read", {"path": "notes.txt", "extra": True})
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "tool_argument_invalid"
+    assert calls == []
+
+
+def test_tool_router_validates_number_type_before_handler(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
+    calls = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success"}
+
+    router._handlers["shell"] = handler
+
+    valid_result = router.dispatch("shell", {"command": "echo ok", "timeout_seconds": 1.5})
+    invalid_result = router.dispatch("shell", {"command": "echo ok", "timeout_seconds": "slow"})
+
+    assert valid_result["status"] == "success"
+    assert invalid_result["error"]["type"] == "tool_argument_invalid"
+    assert "argument timeout_seconds must be number" in invalid_result["error"]["message"]
+    assert calls == [{"command": "echo ok", "timeout_seconds": 1.5}]
 
 
 def test_tool_router_unknown_tool_keeps_existing_failure_semantics(tmp_path: Path) -> None:

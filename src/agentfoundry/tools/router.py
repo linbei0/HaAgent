@@ -105,18 +105,18 @@ class ToolRouter:
 def _validate_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | None:
     schema = TOOL_REGISTRY[tool_name].parameters
     if schema.get("type") != "object":
-        return tool_error("invalid_tool_arguments", "tool arguments schema must be object")
+        return tool_error("tool_argument_invalid", "tool arguments schema must be object")
 
     required = schema.get("required", [])
     for name in required:
         if name not in args:
-            return tool_error("invalid_tool_arguments", f"missing required argument: {name}")
+            return tool_error("tool_argument_invalid", f"missing required argument: {name}")
 
     properties = schema.get("properties", {})
     if schema.get("additionalProperties") is False:
         for name in args:
             if name not in properties:
-                return tool_error("invalid_tool_arguments", f"unexpected argument: {name}")
+                return tool_error("tool_argument_invalid", f"unexpected argument: {name}")
 
     for name, value in args.items():
         property_schema = properties.get(name)
@@ -125,7 +125,7 @@ def _validate_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | Non
         expected_type = property_schema.get("type")
         if expected_type and not _matches_json_type(value, expected_type):
             return tool_error(
-                "invalid_tool_arguments",
+                "tool_argument_invalid",
                 f"argument {name} must be {expected_type}",
             )
     return None
