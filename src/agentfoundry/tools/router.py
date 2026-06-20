@@ -25,9 +25,11 @@ class ToolRouter:
         episode_writer: EpisodeWriter,
         workspace_root: Path,
         approval_allowed_tools: list[str] | None = None,
+        approved_tools: list[str] | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
+        self._approved_tools = list(approved_tools or [])
         self._episode_writer = episode_writer
         self._workspace_root = workspace_root.resolve()
         self._handlers: dict[str, ToolHandler] = {
@@ -56,6 +58,7 @@ class ToolRouter:
                 policy_decision = evaluate_tool_call(
                     TOOL_REGISTRY[tool_name],
                     approval_allowed_tools=self._approval_allowed_tools,
+                    approved_tools=self._approved_tools,
                 )
                 if policy_decision.action == "deny":
                     result = tool_error(

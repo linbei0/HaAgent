@@ -48,3 +48,24 @@ def test_policy_records_approval_allowed_but_missing_for_high_risk_tools() -> No
     assert decision.approval.required is True
     assert decision.approval.status == "missing"
     assert decision.approval.reason == "approval allowed but missing for high risk tool high_tool"
+
+
+def test_policy_allows_high_risk_tool_when_approval_is_granted() -> None:
+    decision = evaluate_tool_call(
+        make_tool("high"),
+        approval_allowed_tools=["high_tool"],
+        approved_tools=["high_tool"],
+    )
+
+    assert decision.action == "allow"
+    assert decision.approval.required is True
+    assert decision.approval.status == "granted"
+    assert decision.approval.reason == "approval granted for high risk tool high_tool"
+
+
+def test_policy_low_risk_tool_ignores_approved_tools() -> None:
+    decision = evaluate_tool_call(make_tool("low"), approved_tools=["low_tool"])
+
+    assert decision.action == "allow"
+    assert decision.approval.required is False
+    assert decision.approval.status == "not_required"

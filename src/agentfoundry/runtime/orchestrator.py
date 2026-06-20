@@ -78,6 +78,7 @@ class RunOrchestrator:
                 writer,
                 workspace_root=workspace_root,
                 approval_allowed_tools=task.policy["approval_allowed_tools"],
+                approved_tools=task.policy["approved_tools"],
             )
             observations: list[dict[str, object]] = []
             has_entered_executing = False

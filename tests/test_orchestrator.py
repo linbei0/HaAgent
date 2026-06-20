@@ -259,6 +259,48 @@ policy:
     }
 
 
+def test_orchestrator_passes_policy_approved_tools_to_router(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(
+        task_path,
+        ["shell"],
+        policy_block="""
+policy:
+  approval_allowed_tools:
+    - shell
+  approved_tools:
+    - shell
+""".strip(),
+    )
+    gateway = SequenceGateway(
+        [
+            ModelResponse("try approved shell", [ToolCall("shell", {"command": "echo approved"})]),
+            ModelResponse("done", []),
+        ],
+    )
+
+    def approved_shell(args, workspace_root):
+        return {"status": "success", "stdout": "approved\n", "stderr": "", "args": args}
+
+    monkeypatch.setattr("agentfoundry.tools.router.shell", approved_shell)
+
+    result = RunOrchestrator(runs_root=runs_dir, model_gateway=gateway).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    tool_call = json.loads((result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    assert tool_call["status"] == "success"
+    assert tool_call["policy"]["action"] == "allow"
+    assert tool_call["policy"]["approval"] == {
+        "required": True,
+        "status": "granted",
+        "reason": "approval granted for high risk tool shell",
+    }
+
+
 def test_orchestrator_unknown_runtime_tool_is_tool_interface_failure(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     runs_dir = tmp_path / ".runs"

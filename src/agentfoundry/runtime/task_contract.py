@@ -27,7 +27,9 @@ class TaskSpec:
     acceptance_criteria: list[str]
     verification_commands: list[str]
     workspace_root: str | None = None
-    policy: dict[str, list[str]] = field(default_factory=lambda: {"approval_allowed_tools": []})
+    policy: dict[str, list[str]] = field(
+        default_factory=lambda: {"approval_allowed_tools": [], "approved_tools": []},
+    )
 
 
 def load_task(path: Path) -> TaskSpec:
@@ -101,9 +103,29 @@ def _optional_policy(raw: dict[str, Any]) -> dict[str, list[str]]:
         for item in approval_allowed_tools
     ):
         raise TaskLoadError("policy.approval_allowed_tools must be a list of strings")
+    approved_tools = policy.get("approved_tools", [])
+    if not isinstance(approved_tools, list) or not all(
+        isinstance(item, str)
+        for item in approved_tools
+    ):
+        raise TaskLoadError("policy.approved_tools must be a list of strings")
     unknown_tools = [tool for tool in approval_allowed_tools if tool not in TOOL_REGISTRY]
     if unknown_tools:
         raise TaskLoadError(
             f"unknown policy.approval_allowed_tools: {', '.join(unknown_tools)}",
         )
-    return {"approval_allowed_tools": approval_allowed_tools}
+    unknown_approved_tools = [tool for tool in approved_tools if tool not in TOOL_REGISTRY]
+    if unknown_approved_tools:
+        raise TaskLoadError(
+            f"unknown policy.approved_tools: {', '.join(unknown_approved_tools)}",
+        )
+    not_allowed_tools = [tool for tool in approved_tools if tool not in approval_allowed_tools]
+    if not_allowed_tools:
+        raise TaskLoadError(
+            "approved_tools must also appear in approval_allowed_tools: "
+            + ", ".join(not_allowed_tools),
+        )
+    return {
+        "approval_allowed_tools": approval_allowed_tools,
+        "approved_tools": approved_tools,
+    }

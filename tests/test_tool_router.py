@@ -329,6 +329,39 @@ def test_policy_allowed_high_risk_tool_still_denies_but_records_allowed_missing(
     }
 
 
+def test_approved_high_risk_tool_runs_handler_and_records_granted(
+    tmp_path: Path,
+) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["shell"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["shell"],
+        approved_tools=["shell"],
+    )
+    calls = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success", "approved": True}
+
+    router._handlers["shell"] = handler
+
+    result = router.dispatch("shell", {"command": "echo approved"})
+
+    assert result == {"status": "success", "approved": True}
+    assert calls == [{"command": "echo approved"}]
+    record = _read_single_tool_call(writer)
+    assert record["status"] == "success"
+    assert record["policy"]["action"] == "allow"
+    assert record["policy"]["approval"] == {
+        "required": True,
+        "status": "granted",
+        "reason": "approval granted for high risk tool shell",
+    }
+
+
 def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
