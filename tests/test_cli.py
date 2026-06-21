@@ -225,6 +225,182 @@ verification_commands: []
     assert "final_response=Fake model observed tool results." in output
 
 
+def test_cli_smoke_runs_fake_hello_by_default(tmp_path: Path, capsys) -> None:
+    exit_code = cli.main(["smoke", "--runs-root", str(tmp_path / ".runs")])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "smoke=hello" in output
+    assert "status=completed" in output
+    assert "episode_path=" in output
+    assert "real_file_read" not in output
+    assert "real_edit_verify" not in output
+
+
+def test_cli_smoke_with_profile_runs_fake_and_real_tasks(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "profile-secret")
+    (tmp_path / ".haagent").mkdir()
+    (tmp_path / ".haagent" / "providers.json").write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    class FakeOpenAIChatGateway:
+        provider_name = "openai-chat"
+
+        def __init__(
+            self,
+            api_key: str | None = None,
+            model: str = "gpt-4.1-mini",
+            base_url: str | None = None,
+        ) -> None:
+            assert api_key == "profile-secret"
+            assert model == "deepseek-v4-pro"
+            assert base_url == "https://api.deepseek.com"
+
+    class FakeOrchestrator:
+        def __init__(
+            self,
+            runs_root: Path,
+            model_gateway=None,
+            max_turns: int = 3,
+        ) -> None:
+            self._runs_root = runs_root
+            self._model_gateway = model_gateway
+            self._max_turns = max_turns
+
+        def run(self, received_task_path: Path) -> FakeResult:
+            calls.append(
+                (received_task_path.as_posix(), self._model_gateway, self._max_turns),
+            )
+            return FakeResult(self._runs_root / f"episode-{len(calls)}")
+
+    monkeypatch.setattr(cli, "OpenAIChatCompletionsGateway", FakeOpenAIChatGateway)
+    monkeypatch.setattr(cli, "RunOrchestrator", FakeOrchestrator)
+
+    exit_code = cli.main(
+        [
+            "smoke",
+            "--profile",
+            "deepseek",
+            "--runs-root",
+            str(tmp_path / ".runs"),
+            "--max-turns",
+            "9",
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "smoke=hello" in output
+    assert "smoke=real_file_read" in output
+    assert "smoke=real_edit_verify" in output
+    assert output.count("status=completed") == 3
+    assert calls[0][0].endswith("examples/tasks/hello.yaml")
+    assert calls[0][1] is None
+    assert calls[1][0].endswith("examples/tasks/openai_chat_file_read_smoke.yaml")
+    assert isinstance(calls[1][1], FakeOpenAIChatGateway)
+    assert calls[2][0].endswith("examples/tasks/openai_chat_edit_smoke.yaml")
+    assert isinstance(calls[2][1], FakeOpenAIChatGateway)
+    assert [call[2] for call in calls] == [9, 9, 9]
+
+
+def test_cli_smoke_missing_profile_reports_real_failures_after_fake(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = cli.main(
+        [
+            "smoke",
+            "--profile",
+            "deepseek",
+            "--runs-root",
+            str(tmp_path / ".runs"),
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "smoke=hello" in output
+    assert "status=completed" in output
+    assert "smoke=real_file_read" in output
+    assert "smoke=real_edit_verify" in output
+    assert output.count("status=failed") == 2
+    assert "episode_path=none" in output
+    assert "failed_stage=configuration" in output
+    assert "failure_category=Provider Profile Error" in output
+    assert "reason=provider profile config not found: .haagent\\providers.json" in output
+
+
+def test_cli_smoke_missing_profile_api_key_env_reports_real_failures_after_fake(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    profile_dir = tmp_path / ".haagent"
+    profile_dir.mkdir()
+    (profile_dir / "providers.json").write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "smoke",
+            "--profile",
+            "deepseek",
+            "--runs-root",
+            str(tmp_path / ".runs"),
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "smoke=hello" in output
+    assert "status=completed" in output
+    assert "smoke=real_file_read" in output
+    assert "smoke=real_edit_verify" in output
+    assert output.count("status=failed") == 2
+    assert "failed_stage=configuration" in output
+    assert "failure_category=Provider Profile Error" in output
+    assert "reason=api key environment variable is not set: DEEPSEEK_API_KEY" in output
+
+
 def test_cli_run_uses_default_max_turns(
     tmp_path: Path,
     monkeypatch,

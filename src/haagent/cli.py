@@ -1,13 +1,14 @@
 """
 haagent/cli.py - HaAgent CLI 入口
 
-提供 haagent run <task.yaml> 和 haagent inspect <episode_path> 命令。
+提供 run、smoke、inspect 和 export-eval 命令的参数解析与输出展示。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,9 @@ from haagent.runtime.episode_validator import (
 )
 from haagent.runtime.eval_export import export_eval_case
 from haagent.runtime.orchestrator import RunOrchestrator
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +61,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=3,
         help="maximum model/tool turns before failing the run (default: 3)",
+    )
+
+    smoke_parser = subparsers.add_parser(
+        "smoke",
+        help="run the minimal HaAgent smoke suite",
+    )
+    smoke_parser.add_argument(
+        "--runs-root",
+        type=Path,
+        default=Path(".runs"),
+        help="directory for episode packages (default: .runs)",
+    )
+    smoke_parser.add_argument(
+        "--profile",
+        help="real provider profile name from .haagent/providers.json",
+    )
+    smoke_parser.add_argument(
+        "--max-turns",
+        type=_positive_int,
+        default=12,
+        help="maximum model/tool turns per smoke task (default: 12)",
     )
 
     inspect_parser = subparsers.add_parser("inspect", help="inspect an episode package")
@@ -107,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
         _print_run_summary(result)
         return 0 if result.status.value == "completed" else 1
 
+    if args.command == "smoke":
+        return _handle_smoke(args)
+
     if args.command == "inspect":
         try:
             print(render_episode_summary(args.episode_path))
@@ -120,6 +148,115 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+@dataclass(frozen=True)
+class SmokeDefinition:
+    name: str
+    task_path: Path
+    requires_profile: bool
+
+
+@dataclass(frozen=True)
+class SmokeResult:
+    name: str
+    status: str
+    episode_path: Path | None
+    failed_stage: str | None = None
+    failure_category: str | None = None
+    reason: str | None = None
+
+
+SMOKE_DEFINITIONS = [
+    SmokeDefinition(
+        name="hello",
+        task_path=PROJECT_ROOT / "examples/tasks/hello.yaml",
+        requires_profile=False,
+    ),
+    SmokeDefinition(
+        name="real_file_read",
+        task_path=PROJECT_ROOT / "examples/tasks/openai_chat_file_read_smoke.yaml",
+        requires_profile=True,
+    ),
+    SmokeDefinition(
+        name="real_edit_verify",
+        task_path=PROJECT_ROOT / "examples/tasks/openai_chat_edit_smoke.yaml",
+        requires_profile=True,
+    ),
+]
+
+
+def _handle_smoke(args: argparse.Namespace) -> int:
+    smoke_definitions = [
+        definition
+        for definition in SMOKE_DEFINITIONS
+        if not definition.requires_profile or args.profile is not None
+    ]
+    exit_code = 0
+    for definition in smoke_definitions:
+        result = _run_smoke_definition(definition, args)
+        _print_smoke_result(result)
+        if result.status != "completed":
+            exit_code = 1
+    return exit_code
+
+
+def _run_smoke_definition(definition: SmokeDefinition, args: argparse.Namespace) -> SmokeResult:
+    model_gateway = None
+    if definition.requires_profile:
+        try:
+            model_gateway = _gateway_from_profile(load_provider_profile(args.profile))
+        except ProviderProfileError as error:
+            return SmokeResult(
+                name=definition.name,
+                status="failed",
+                episode_path=None,
+                failed_stage="configuration",
+                failure_category="Provider Profile Error",
+                reason=str(error),
+            )
+    result = RunOrchestrator(
+        runs_root=args.runs_root,
+        model_gateway=model_gateway,
+        max_turns=args.max_turns,
+    ).run(definition.task_path)
+    if result.status.value == "completed":
+        return SmokeResult(definition.name, result.status.value, result.episode_path)
+    stage, category, reason = _run_failure_summary(result.episode_path)
+    return SmokeResult(
+        name=definition.name,
+        status=result.status.value,
+        episode_path=result.episode_path,
+        failed_stage=stage,
+        failure_category=category,
+        reason=reason,
+    )
+
+
+def _run_failure_summary(episode_path: Path) -> tuple[str, str, str]:
+    try:
+        package_view = load_inspect_episode_package(episode_path)
+    except EpisodeValidationError as error:
+        return "summary", "Episode Summary Error", str(error)
+    failure = package_view.failure_record.get("failure")
+    if not isinstance(failure, dict):
+        return "unknown", "unknown", ""
+    return (
+        str(failure.get("stage", "unknown")),
+        str(failure.get("category", "unknown")),
+        str(failure.get("evidence", "")),
+    )
+
+
+def _print_smoke_result(result: SmokeResult) -> None:
+    print(f"smoke={result.name}")
+    print(f"status={result.status}")
+    episode_path = "none" if result.episode_path is None else str(result.episode_path)
+    print(f"episode_path={episode_path}")
+    if result.status != "completed":
+        print(f"failed_stage={_summary_value(result.failed_stage or 'unknown')}")
+        print(f"failure_category={_summary_value(result.failure_category or 'unknown')}")
+        print(f"reason={_summary_value(result.reason or '')}")
 
 
 def _build_run_model_gateway(args: argparse.Namespace):
