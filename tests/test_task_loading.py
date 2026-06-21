@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from agentfoundry.runtime.task_contract import TaskLoadError, TaskSpec, load_task
+from agentfoundry.runtime.task_contract import (
+    TaskLoadError,
+    TaskSpec,
+    load_task,
+    resolve_workspace_root,
+)
 
 
 def write_task(path: Path, content: str) -> None:
@@ -258,3 +263,17 @@ def test_openai_tool_call_smoke_task_loads_without_network_verification() -> Non
 
     assert task.allowed_tools == ["fake_tool"]
     assert task.verification_commands == []
+
+
+def test_openai_chat_file_read_smoke_task_loads_with_existing_workspace() -> None:
+    task_path = Path("examples/tasks/openai_chat_file_read_smoke.yaml")
+    task = load_task(task_path)
+    workspace_root = resolve_workspace_root(task, task_path)
+
+    assert task.workspace_root == "../workspaces/file_read_smoke"
+    assert task.allowed_tools == ["file_read"]
+    assert task.verification_commands == []
+    assert workspace_root.is_dir()
+    assert (workspace_root / "notes.txt").read_text(encoding="utf-8").strip() == (
+        "AgentFoundry file_read smoke phrase: harness reads workspace notes."
+    )
