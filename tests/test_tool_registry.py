@@ -64,6 +64,15 @@ def test_export_tool_schemas_only_exports_allowed_tools() -> None:
     assert [definition.name for definition in allowed_tool_definitions(["file_read"])] == ["file_read"]
 
 
+def test_export_shell_schema_describes_cwd_relative_to_workspace_root() -> None:
+    schemas = export_tool_schemas(["shell"])
+    cwd_description = schemas[0]["parameters"]["properties"]["cwd"]["description"]
+
+    assert "workspace_root" in cwd_description
+    assert "." in cwd_description
+    assert "omit" in cwd_description
+
+
 def test_tool_registry_rejects_unknown_tool() -> None:
     with pytest.raises(KeyError, match="unknown tool: mystery_tool"):
         get_tool_definition("mystery_tool")

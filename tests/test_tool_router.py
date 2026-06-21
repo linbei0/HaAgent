@@ -10,6 +10,7 @@ from pathlib import Path
 from haagent.runtime.episode import EpisodeWriter
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.router import ToolRouter
+from haagent.tools.shell import shell
 
 
 def make_writer(tmp_path: Path) -> EpisodeWriter:
@@ -362,6 +363,62 @@ def test_approved_high_risk_tool_runs_handler_and_records_granted(
     }
 
 
+def test_shell_uses_workspace_root_when_cwd_is_missing(tmp_path: Path) -> None:
+    result = shell({"command": _print_cwd_command(), "timeout_seconds": 5}, tmp_path)
+
+    assert result["status"] == "success"
+    assert result["stdout"].strip() == str(tmp_path.resolve())
+
+
+def test_shell_uses_workspace_root_when_cwd_is_dot(tmp_path: Path) -> None:
+    result = shell(
+        {"command": _print_cwd_command(), "cwd": ".", "timeout_seconds": 5},
+        tmp_path,
+    )
+
+    assert result["status"] == "success"
+    assert result["stdout"].strip() == str(tmp_path.resolve())
+
+
+def test_shell_runs_in_workspace_relative_subdirectory(tmp_path: Path) -> None:
+    subdir = tmp_path / "src"
+    subdir.mkdir()
+
+    result = shell(
+        {"command": _print_cwd_command(), "cwd": "src", "timeout_seconds": 5},
+        tmp_path,
+    )
+
+    assert result["status"] == "success"
+    assert result["stdout"].strip() == str(subdir.resolve())
+
+
+def test_shell_rejects_missing_cwd_with_argument_error(tmp_path: Path) -> None:
+    result = shell(
+        {"command": _print_cwd_command(), "cwd": "missing", "timeout_seconds": 5},
+        tmp_path,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "tool_argument_invalid"
+    message = result["error"]["message"]
+    assert "cwd does not exist" in result["error"]["message"]
+    assert 'cwd is relative to workspace_root; use "." or omit cwd for workspace root' in message
+
+
+def test_shell_rejects_cwd_outside_workspace_root(tmp_path: Path) -> None:
+    result = shell(
+        {"command": _print_cwd_command(), "cwd": "..", "timeout_seconds": 5},
+        tmp_path,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "tool_argument_invalid"
+    message = result["error"]["message"]
+    assert "cwd must stay inside workspace_root" in message
+    assert 'cwd is relative to workspace_root; use "." or omit cwd for workspace root' in message
+
+
 def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
@@ -380,3 +437,7 @@ def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None
 def _read_single_tool_call(writer: EpisodeWriter) -> dict[str, object]:
     trace = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8")
     return json.loads(trace)
+
+
+def _print_cwd_command() -> str:
+    return "python -c \"from pathlib import Path; print(Path.cwd().resolve())\""

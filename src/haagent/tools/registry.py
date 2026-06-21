@@ -123,7 +123,10 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "optional workspace-relative working directory",
+                    "description": (
+                        'working directory relative to workspace_root; use "." or omit '
+                        "for workspace root"
+                    ),
                 },
                 "timeout_seconds": {
                     "type": "number",
