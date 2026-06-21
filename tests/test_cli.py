@@ -575,6 +575,231 @@ def test_cli_run_openai_chat_provider_passes_custom_max_turns(
     assert isinstance(calls["model_gateway"], FakeOpenAIChatGateway)
 
 
+def test_cli_run_profile_creates_gateway_from_local_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "profile-secret")
+    (tmp_path / ".haagent").mkdir()
+    (tmp_path / ".haagent" / "providers.json").write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: x\n", encoding="utf-8")
+    calls = {}
+
+    class FakeOpenAIChatGateway:
+        provider_name = "openai-chat"
+
+        def __init__(
+            self,
+            api_key: str | None = None,
+            model: str = "gpt-4.1-mini",
+            base_url: str | None = None,
+        ) -> None:
+            calls["api_key"] = api_key
+            calls["model"] = model
+            calls["base_url"] = base_url
+
+    class FakeOrchestrator:
+        def __init__(
+            self,
+            runs_root: Path,
+            model_gateway=None,
+            max_turns: int = 3,
+        ) -> None:
+            calls["runs_root"] = runs_root
+            calls["model_gateway"] = model_gateway
+            calls["max_turns"] = max_turns
+
+        def run(self, received_task_path: Path) -> FakeResult:
+            calls["task_path"] = received_task_path
+            return FakeResult(tmp_path / ".runs" / "episode-1")
+
+    monkeypatch.setattr(cli, "OpenAIChatCompletionsGateway", FakeOpenAIChatGateway)
+    monkeypatch.setattr(cli, "RunOrchestrator", FakeOrchestrator)
+
+    exit_code = cli.main(
+        [
+            "run",
+            str(task_path),
+            "--profile",
+            "deepseek",
+            "--max-turns",
+            "12",
+        ],
+    )
+
+    assert exit_code == 0
+    assert calls["api_key"] == "profile-secret"
+    assert calls["model"] == "deepseek-v4-pro"
+    assert calls["base_url"] == "https://api.deepseek.com"
+    assert calls["max_turns"] == 12
+    assert isinstance(calls["model_gateway"], FakeOpenAIChatGateway)
+
+
+def test_cli_run_profile_missing_name_fails_explicitly(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".haagent").mkdir()
+    (tmp_path / ".haagent" / "providers.json").write_text(
+        json.dumps({"profiles": []}),
+        encoding="utf-8",
+    )
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: x\n", encoding="utf-8")
+
+    exit_code = cli.main(["run", str(task_path), "--profile", "deepseek"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "error: provider profile not found: deepseek" in output
+    assert not (tmp_path / ".runs").exists()
+
+
+def test_cli_run_profile_missing_api_key_env_fails_explicitly(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    (tmp_path / ".haagent").mkdir()
+    (tmp_path / ".haagent" / "providers.json").write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: x\n", encoding="utf-8")
+
+    exit_code = cli.main(["run", str(task_path), "--profile", "deepseek"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "error: api key environment variable is not set: DEEPSEEK_API_KEY" in output
+    assert not (tmp_path / ".runs").exists()
+
+
+def test_cli_run_profile_secret_stays_out_of_episode_inspect_eval_and_model_input(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    secret = "profile-secret-value"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    (tmp_path / ".haagent").mkdir()
+    (tmp_path / ".haagent" / "providers.json").write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Finish without tools
+constraints: []
+allowed_tools: []
+acceptance_criteria:
+  - Final response is recorded.
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class FinalGateway:
+        provider_name = "openai-chat"
+
+        def __init__(
+            self,
+            api_key: str | None = None,
+            model: str = "gpt-4.1-mini",
+            base_url: str | None = None,
+        ) -> None:
+            assert api_key == secret
+            assert model == "deepseek-v4-pro"
+            assert base_url == "https://api.deepseek.com"
+
+        def generate(self, task, model_input, tool_schemas, observations):
+            assert secret not in model_input
+            return ModelResponse("done", [])
+
+    monkeypatch.setattr(cli, "OpenAIChatCompletionsGateway", FinalGateway)
+
+    run_exit = cli.main(
+        [
+            "run",
+            str(task_path),
+            "--profile",
+            "deepseek",
+            "--runs-root",
+            str(tmp_path / ".runs"),
+        ],
+    )
+    run_output = capsys.readouterr().out
+    episode_path = Path(
+        next(line.split("=", 1)[1] for line in run_output.splitlines() if line.startswith("episode_path=")),
+    )
+    episode_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in episode_path.rglob("*")
+        if path.is_file()
+    )
+
+    inspect_exit = cli.main(["inspect", str(episode_path)])
+    inspect_output = capsys.readouterr().out
+    export_exit = cli.main(["export-eval", str(episode_path)])
+    export_output = capsys.readouterr().out
+
+    assert run_exit == 0
+    assert inspect_exit == 0
+    assert export_exit == 0
+    assert secret not in run_output
+    assert secret not in episode_text
+    assert secret not in inspect_output
+    assert secret not in export_output
+
+
 def test_cli_run_rejects_non_positive_max_turns(capsys) -> None:
     with pytest.raises(SystemExit) as error:
         cli.main(["run", "task.yaml", "--max-turns", "0"])

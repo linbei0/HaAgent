@@ -19,6 +19,7 @@ from haagent.models.gateway import (
     OpenAIResponsesGateway,
     ToolCall,
 )
+from haagent.models.provider_profile import ProviderProfileError, load_provider_profile
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.task_contract import TaskSpec
 
@@ -100,6 +101,88 @@ def test_fake_model_gateway_records_current_inputs() -> None:
     assert gateway.calls[-1]["model_input"] == "context text"
     assert gateway.calls[-1]["tool_schemas"] == [{"name": "fake_tool"}]
     assert gateway.calls[-1]["observations"] == [{"tool_name": "fake_tool"}]
+
+
+def test_provider_profile_loads_named_profile_and_api_key_env(tmp_path: Path) -> None:
+    config_path = tmp_path / ".haagent" / "providers.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_provider_profile(
+        "deepseek",
+        config_path=config_path,
+        environ={"DEEPSEEK_API_KEY": "secret-key"},
+    )
+
+    assert profile.name == "deepseek"
+    assert profile.provider == "openai-chat"
+    assert profile.base_url == "https://api.deepseek.com"
+    assert profile.model == "deepseek-v4-pro"
+    assert profile.api_key_env == "DEEPSEEK_API_KEY"
+    assert profile.api_key == "secret-key"
+
+
+def test_provider_profile_missing_name_fails_explicitly(tmp_path: Path) -> None:
+    config_path = tmp_path / ".haagent" / "providers.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "openai-main",
+                        "provider": "openai",
+                        "base_url": "https://api.openai.com",
+                        "model": "gpt-4.1-mini",
+                        "api_key_env": "OPENAI_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProviderProfileError, match="provider profile not found: deepseek"):
+        load_provider_profile("deepseek", config_path=config_path, environ={"OPENAI_API_KEY": "key"})
+
+
+def test_provider_profile_missing_api_key_env_fails_explicitly(tmp_path: Path) -> None:
+    config_path = tmp_path / ".haagent" / "providers.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProviderProfileError, match="api key environment variable is not set: DEEPSEEK_API_KEY"):
+        load_provider_profile("deepseek", config_path=config_path, environ={})
 
 
 def test_openai_gateway_uses_unified_response_shape() -> None:

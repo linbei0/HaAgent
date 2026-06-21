@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
+from haagent.models.provider_profile import ProviderProfile, ProviderProfileError, load_provider_profile
 from haagent.runtime.episode_validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
@@ -38,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["fake", "openai", "openai-chat"],
         default="fake",
         help="model provider to use (default: fake)",
+    )
+    run_parser.add_argument(
+        "--profile",
+        help="provider profile name from .haagent/providers.json",
     )
     run_parser.add_argument(
         "--model",
@@ -83,18 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        if args.provider in {"openai", "openai-chat"}:
-            gateway_kwargs = {}
-            if args.model is not None:
-                gateway_kwargs["model"] = args.model
-            if args.base_url is not None:
-                gateway_kwargs["base_url"] = args.base_url
-            gateway_class = (
-                OpenAIResponsesGateway
-                if args.provider == "openai"
-                else OpenAIChatCompletionsGateway
-            )
-            model_gateway = gateway_class(**gateway_kwargs)
+        try:
+            model_gateway = _build_run_model_gateway(args)
+        except ProviderProfileError as error:
+            print(f"error: {error}")
+            return 1
+        if model_gateway is not None:
             result = RunOrchestrator(
                 runs_root=args.runs_root,
                 model_gateway=model_gateway,
@@ -122,6 +121,42 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _build_run_model_gateway(args: argparse.Namespace):
+    if args.profile is not None:
+        if args.provider != "fake" or args.model is not None or args.base_url is not None:
+            raise ProviderProfileError(
+                "--profile cannot be combined with --provider, --model, or --base-url",
+            )
+        return _gateway_from_profile(load_provider_profile(args.profile))
+
+    if args.provider in {"openai", "openai-chat"}:
+        gateway_kwargs = {}
+        if args.model is not None:
+            gateway_kwargs["model"] = args.model
+        if args.base_url is not None:
+            gateway_kwargs["base_url"] = args.base_url
+        gateway_class = (
+            OpenAIResponsesGateway
+            if args.provider == "openai"
+            else OpenAIChatCompletionsGateway
+        )
+        return gateway_class(**gateway_kwargs)
+    return None
+
+
+def _gateway_from_profile(profile: ProviderProfile):
+    gateway_kwargs = {
+        "api_key": profile.api_key,
+        "model": profile.model,
+        "base_url": profile.base_url,
+    }
+    if profile.provider == "openai":
+        return OpenAIResponsesGateway(**gateway_kwargs)
+    if profile.provider == "openai-chat":
+        return OpenAIChatCompletionsGateway(**gateway_kwargs)
+    raise ProviderProfileError(f"unsupported provider in profile: {profile.provider}")
 
 
 def _positive_int(value: str) -> int:
