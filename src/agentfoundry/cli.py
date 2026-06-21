@@ -285,6 +285,8 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_next_actions(episode_path, context_manifest.get("contexts", [])))
     lines.extend(["", "Model Calls"])
     lines.extend(_format_model_calls(model_calls))
+    lines.extend(["", "Final Response"])
+    lines.extend(_format_final_response(transcript))
     lines.extend(["", "Tool Calls"])
     lines.extend(_format_tool_calls(tool_calls))
     lines.extend(["", "Approval Summary"])
@@ -423,6 +425,36 @@ def _format_model_calls(model_calls: list[dict[str, Any]]) -> list[str]:
         )
         for call in model_calls
     ]
+
+
+def _format_final_response(transcript: list[dict[str, Any]]) -> list[str]:
+    response = _last_model_response(transcript)
+    if response is None:
+        return ["- none"]
+    tool_calls = response.get("tool_calls", [])
+    tool_call_count = len(tool_calls) if isinstance(tool_calls, list) else 0
+    content = str(response.get("content", ""))
+    return [
+        (
+            f"- provider={response.get('provider', 'unknown')} "
+            f"turn={response.get('turn', 'unknown')} "
+            f"tool_call_count={tool_call_count}"
+        ),
+        f"- content: {_excerpt(content)}",
+    ]
+
+
+def _last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for record in reversed(transcript):
+        if record.get("event") == "model_response":
+            return record
+    return None
+
+
+def _excerpt(content: str, limit: int = 500) -> str:
+    if len(content) <= limit:
+        return content
+    return content[:limit] + "... [truncated]"
 
 
 def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:

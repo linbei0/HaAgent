@@ -41,6 +41,7 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "tool_names_used": _tool_names_used(package_view.tool_calls),
         "tool_argument_errors": _tool_argument_errors(package_view.tool_calls),
         "approval_summary": _approval_summary(package_view.tool_calls),
+        "final_response": _final_response_summary(package_view.transcript),
         "next_actions": _next_actions_summary(episode_path, package_view.context_manifest),
     }
 
@@ -133,6 +134,26 @@ def _approval_summary_record(record: dict[str, Any]) -> dict[str, Any]:
         "approval_status": str(approval.get("status", "missing")),
         "approval_reason": str(approval.get("reason", "legacy/missing")),
     }
+
+
+def _final_response_summary(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:
+    response = _last_model_response(transcript)
+    if response is None:
+        return None
+    tool_calls = response.get("tool_calls", [])
+    return {
+        "provider": str(response.get("provider", "unknown")),
+        "turn": response.get("turn"),
+        "content": str(response.get("content", "")),
+        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+    }
+
+
+def _last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for record in reversed(transcript):
+        if record.get("event") == "model_response":
+            return record
+    return None
 
 
 def _next_actions_summary(episode_path: Path, context_manifest: dict[str, Any]) -> list[dict[str, Any]]:

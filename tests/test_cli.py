@@ -537,6 +537,15 @@ verification_commands: []
                 json.dumps({"event": "state_transition", "status": "completed"}),
                 json.dumps({"event": "model_call", "provider": "fake", "context_id": "0001"}),
                 json.dumps({"event": "model_call", "provider": "fake", "context_id": "0002"}),
+                json.dumps(
+                    {
+                        "event": "model_response",
+                        "provider": "fake",
+                        "turn": 2,
+                        "content": "Final answer from inspect fixture.",
+                        "tool_calls": [],
+                    },
+                ),
             ],
         )
         + "\n",
@@ -687,6 +696,9 @@ verification_commands: []
     assert "credential_policy: inherit_environment" in output
     assert "command_timeout_seconds: 60" in output
     assert "Model Calls" in output
+    assert "Final Response" in output
+    assert "provider=fake turn=2 tool_call_count=0" in output
+    assert "Final answer from inspect fixture." in output
     assert "Tool Calls" in output
     assert "fake_tool: success" in output
     assert "Approval Summary" in output
@@ -1037,7 +1049,26 @@ def test_cli_inspect_legacy_episode_without_episode_json_warns(tmp_path: Path, c
     assert "warning: episode.json missing; inspecting legacy episode" in output
     assert "Next Actions" in output
     assert "0001: legacy/missing" in output
+    assert "Final Response" in output
+    assert "Final Response\n- none" in output
     assert "Approval Summary\n- none" in output
+
+
+def test_cli_inspect_final_response_content_is_truncated() -> None:
+    lines = cli._format_final_response(
+        [
+            {
+                "event": "model_response",
+                "provider": "fake",
+                "turn": 1,
+                "content": "x" * 600,
+                "tool_calls": [],
+            },
+        ],
+    )
+
+    assert lines[0] == "- provider=fake turn=1 tool_call_count=0"
+    assert lines[1] == f"- content: {'x' * 500}... [truncated]"
 
 
 def test_cli_inspect_unknown_episode_version_fails(tmp_path: Path, capsys) -> None:

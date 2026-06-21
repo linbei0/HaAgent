@@ -95,6 +95,12 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
             "approval_reason": "approval not required for low risk tool fake_tool",
         },
     ]
+    assert eval_case["final_response"] == {
+        "provider": "fake",
+        "turn": 2,
+        "content": "Fake model observed tool results.",
+        "tool_call_count": 0,
+    }
     assert eval_case["next_actions"] == [
         {
             "context_id": "0001",
@@ -498,4 +504,5 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
             "approval_reason": "legacy/missing",
         },
     ]
+    assert eval_case["final_response"] is None
     assert eval_case["next_actions"] == []
