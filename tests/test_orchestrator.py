@@ -353,6 +353,29 @@ def test_orchestrator_invalid_tool_args_are_tool_argument_failure(tmp_path: Path
     assert tool_call["error"]["type"] == "tool_argument_invalid"
 
 
+def test_orchestrator_file_read_workspace_escape_is_tool_argument_failure(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(task_path, ["file_read"])
+    gateway = SequenceGateway(
+        [ModelResponse("escape path", [ToolCall("file_read", {"path": "../outside.txt"})])],
+    )
+
+    result = RunOrchestrator(runs_root=runs_dir, model_gateway=gateway).run(task_path)
+
+    assert result.status is RunStatus.FAILED
+    failure_text = (result.episode_path / "failure-attribution.md").read_text(encoding="utf-8")
+    assert "Tool Argument Failure" in failure_text
+    assert "path must stay inside workspace_root" in failure_text
+    failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
+    assert failure["failure"]["category"] == "Tool Argument Failure"
+    tool_call = json.loads((result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    assert tool_call["error"] == {
+        "type": "tool_argument_invalid",
+        "message": "path must stay inside workspace_root; path is relative to workspace_root",
+    }
+
+
 def test_orchestrator_policy_denied_tool_is_tool_interface_failure(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     runs_dir = tmp_path / ".runs"

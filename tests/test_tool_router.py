@@ -187,6 +187,20 @@ def test_file_read_supports_offset_and_limit(tmp_path: Path) -> None:
     assert result["limit"] == 2
 
 
+def test_file_read_missing_path_returns_short_argument_error(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("file_read", {"path": "missing.txt"})
+
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "type": "tool_argument_invalid",
+        "message": "path does not exist: missing.txt; path is relative to workspace_root",
+    }
+    assert str(tmp_path) not in result["error"]["message"]
+
+
 def test_file_search_finds_matching_text_and_writes_trace(tmp_path: Path) -> None:
     (tmp_path / "alpha.txt").write_text("needle appears here\n", encoding="utf-8")
     (tmp_path / "beta.txt").write_text("nothing useful\n", encoding="utf-8")
@@ -200,6 +214,20 @@ def test_file_search_finds_matching_text_and_writes_trace(tmp_path: Path) -> Non
     trace_lines = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(trace_lines) == 1
     assert json.loads(trace_lines[0])["tool_name"] == "file_search"
+
+
+def test_file_search_missing_root_returns_short_argument_error(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_search"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("file_search", {"query": "needle", "root": "missing"})
+
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "type": "tool_argument_invalid",
+        "message": 'root does not exist: missing; root is relative to workspace_root; use "." or omit root',
+    }
+    assert str(tmp_path) not in result["error"]["message"]
 
 
 def test_apply_patch_is_denied_before_handler(tmp_path: Path) -> None:
@@ -251,6 +279,29 @@ def test_apply_patch_denial_writes_tool_call_error(tmp_path: Path) -> None:
     assert record["policy"]["action"] == "deny"
     assert record["policy"]["approval"]["status"] == "missing"
     assert record["error"]["type"] == "policy_denied"
+
+
+def test_apply_patch_missing_path_returns_short_argument_error(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["apply_patch"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
+    )
+
+    result = router.dispatch(
+        "apply_patch",
+        {"path": "missing.txt", "old_text": "old", "new_text": "new"},
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "type": "tool_argument_invalid",
+        "message": "path does not exist: missing.txt; path is relative to workspace_root",
+    }
+    assert str(tmp_path) not in result["error"]["message"]
 
 
 def test_shell_policy_denial_writes_tool_call_error(tmp_path: Path) -> None:
@@ -417,6 +468,19 @@ def test_shell_rejects_cwd_outside_workspace_root(tmp_path: Path) -> None:
     message = result["error"]["message"]
     assert "cwd must stay inside workspace_root" in message
     assert 'cwd is relative to workspace_root; use "." or omit cwd for workspace root' in message
+
+
+def test_shell_rejects_non_positive_timeout_with_argument_error(tmp_path: Path) -> None:
+    result = shell(
+        {"command": _print_cwd_command(), "timeout_seconds": 0},
+        tmp_path,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "type": "tool_argument_invalid",
+        "message": "timeout_seconds must be positive",
+    }
 
 
 def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None:

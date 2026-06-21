@@ -15,18 +15,26 @@ from typing import Any
 from haagent.tools.base import tool_error
 
 
+PATH_GUIDANCE = "path is relative to workspace_root"
+ROOT_GUIDANCE = 'root is relative to workspace_root; use "." or omit root'
+
+
 def file_search(args: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     """优先使用 ripgrep 搜索文本；rg 不可用时退回 Python 遍历。"""
     query = args.get("query")
     if not isinstance(query, str) or not query:
-        return tool_error("invalid_arguments", "query must be a non-empty string")
+        return tool_error("tool_argument_invalid", "query must be a non-empty string")
 
     root_arg = args.get("root", ".")
     if not isinstance(root_arg, str):
-        return tool_error("invalid_arguments", "root must be a string")
+        return tool_error("tool_argument_invalid", "root must be a string")
     root = resolve_workspace_path(root_arg, workspace_root)
     if root is None:
-        return tool_error("path_outside_workspace", "root must be inside workspace")
+        return tool_error("tool_argument_invalid", f"root must stay inside workspace_root; {ROOT_GUIDANCE}")
+    if not root.exists():
+        return tool_error("tool_argument_invalid", f"root does not exist: {root_arg}; {ROOT_GUIDANCE}")
+    if not root.is_dir():
+        return tool_error("tool_argument_invalid", f"root must be a directory: {root_arg}; {ROOT_GUIDANCE}")
 
     rg = shutil.which("rg")
     if rg:
@@ -60,15 +68,19 @@ def file_search(args: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
 def file_read(args: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     path_arg = args.get("path")
     if not isinstance(path_arg, str):
-        return tool_error("invalid_arguments", "path must be a string")
+        return tool_error("tool_argument_invalid", "path must be a string")
     path = resolve_workspace_path(path_arg, workspace_root)
     if path is None:
-        return tool_error("path_outside_workspace", "path must be inside workspace")
+        return tool_error("tool_argument_invalid", f"path must stay inside workspace_root; {PATH_GUIDANCE}")
+    if not path.exists():
+        return tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
+    if not path.is_file():
+        return tool_error("tool_argument_invalid", f"path must be a file: {path_arg}; {PATH_GUIDANCE}")
 
     offset = int(args.get("offset", 0))
     limit = int(args.get("limit", 200))
     if offset < 0 or limit < 0:
-        return tool_error("invalid_arguments", "offset and limit must be non-negative")
+        return tool_error("tool_argument_invalid", "offset and limit must be non-negative")
 
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     selected = lines[offset : offset + limit]
@@ -87,11 +99,15 @@ def apply_patch(args: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     old_text = args.get("old_text")
     new_text = args.get("new_text")
     if not all(isinstance(value, str) for value in (path_arg, old_text, new_text)):
-        return tool_error("invalid_arguments", "path, old_text, and new_text must be strings")
+        return tool_error("tool_argument_invalid", "path, old_text, and new_text must be strings")
 
     path = resolve_workspace_path(path_arg, workspace_root)
     if path is None:
-        return tool_error("path_outside_workspace", "path must be inside workspace")
+        return tool_error("tool_argument_invalid", f"path must stay inside workspace_root; {PATH_GUIDANCE}")
+    if not path.exists():
+        return tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
+    if not path.is_file():
+        return tool_error("tool_argument_invalid", f"path must be a file: {path_arg}; {PATH_GUIDANCE}")
 
     text = path.read_text(encoding="utf-8")
     count = text.count(old_text)

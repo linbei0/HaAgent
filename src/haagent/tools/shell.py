@@ -34,6 +34,9 @@ def shell(args: dict[str, Any], workspace_root: Path) -> dict[str, Any]:
     cwd = cwd_result
 
     timeout_seconds = float(args.get("timeout_seconds", 60))
+    if timeout_seconds <= 0:
+        return tool_error("tool_argument_invalid", "timeout_seconds must be positive")
+
     command_result = run_command(command, cwd, timeout_seconds)
     result = {
         "status": "success" if command_result.status == "success" else "error",
