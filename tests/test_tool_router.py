@@ -393,7 +393,7 @@ def test_shell_runs_in_workspace_relative_subdirectory(tmp_path: Path) -> None:
     assert result["stdout"].strip() == str(subdir.resolve())
 
 
-def test_shell_rejects_missing_cwd_with_argument_error(tmp_path: Path) -> None:
+def test_shell_rejects_missing_directory_cwd_with_argument_error(tmp_path: Path) -> None:
     result = shell(
         {"command": _print_cwd_command(), "cwd": "missing", "timeout_seconds": 5},
         tmp_path,

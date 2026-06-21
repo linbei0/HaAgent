@@ -731,7 +731,9 @@ def test_orchestrator_completes_after_two_tool_rounds(tmp_path: Path) -> None:
     assert "Plan:" in second_context
     assert "- Use allowed tools: fake_tool." in second_context
     assert "fake_tool" in second_context
-    assert '"args": {"round": 1}' in second_context
+    assert '"args_keys": ["round"]' in second_context
+    assert '"result_keys": ["args", "status"]' in second_context
+    assert '"args": {"round": 1}' not in second_context
     assert second_context.index("Plan:") < second_context.index("Observations:")
     assert second_context.index("Observations:") < second_context.index("Pending next step:")
     assert "Pending next step:" in second_context
