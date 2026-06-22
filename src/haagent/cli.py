@@ -30,6 +30,9 @@ from haagent.runtime.orchestrator import RunOrchestrator
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AUTHORING_ALLOWED_TOOLS = ["file_list", "file_read", "file_search", "apply_patch", "shell"]
 AUTHORING_APPROVED_TOOLS = ["apply_patch", "shell"]
+CHAT_ALLOWED_TOOLS = ["file_list", "file_search", "file_read", "apply_patch", "shell"]
+CHAT_APPROVED_TOOLS = ["apply_patch", "shell"]
+CHAT_MAX_TURNS = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,6 +83,32 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=3,
         help="maximum model/tool turns before failing the run (default: 3)",
+    )
+
+    chat_parser = subparsers.add_parser("chat", help="run a natural language request")
+    chat_parser.add_argument("request", help="natural language request to run in the workspace")
+    chat_parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        help="workspace root for the chat request (default: current directory)",
+    )
+    chat_parser.add_argument(
+        "--provider",
+        choices=["fake", "openai", "openai-chat"],
+        default="fake",
+        help="model provider to use (default: fake)",
+    )
+    chat_parser.add_argument(
+        "--profile",
+        help="provider profile name from .haagent/providers.json",
+    )
+    chat_parser.add_argument(
+        "--model",
+        help="OpenAI model name; only used when --provider openai",
+    )
+    chat_parser.add_argument(
+        "--base-url",
+        help="OpenAI-compatible Responses API base URL; only used when --provider openai",
     )
 
     smoke_parser = subparsers.add_parser(
@@ -155,6 +184,26 @@ def main(argv: list[str] | None = None) -> int:
                     max_turns=args.max_turns,
                 ).run(task_path)
             _print_run_summary(result)
+            return 0 if result.status.value == "completed" else 1
+        finally:
+            if generated_task_dir is not None:
+                generated_task_dir.cleanup()
+
+    if args.command == "chat":
+        generated_task_dir: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            model_gateway = _build_run_model_gateway(args)
+            task_path, generated_task_dir = _chat_task_path(args)
+        except ProviderProfileError as error:
+            print(f"error: {error}")
+            return 1
+        try:
+            result = RunOrchestrator(
+                runs_root=Path(".runs"),
+                model_gateway=model_gateway,
+                max_turns=CHAT_MAX_TURNS,
+            ).run(task_path)
+            _print_chat_summary(result)
             return 0 if result.status.value == "completed" else 1
         finally:
             if generated_task_dir is not None:
@@ -241,6 +290,22 @@ def _run_task_path(
     return task_path, generated_task_dir
 
 
+def _chat_task_path(
+    args: argparse.Namespace,
+) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
+    workspace_root = args.workspace_root if args.workspace_root is not None else Path.cwd()
+    generated_task_dir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(
+        prefix="haagent-chat-",
+    )
+    task_path = Path(generated_task_dir.name) / "task.yaml"
+    _write_chat_task_yaml(
+        task_path,
+        request=str(args.request),
+        workspace_root=workspace_root,
+    )
+    return task_path, generated_task_dir
+
+
 def _write_authoring_task_yaml(
     path: Path,
     *,
@@ -258,6 +323,27 @@ def _write_authoring_task_yaml(
         "policy": {
             "approval_allowed_tools": list(AUTHORING_APPROVED_TOOLS),
             "approved_tools": list(AUTHORING_APPROVED_TOOLS),
+        },
+    }
+    path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _write_chat_task_yaml(
+    path: Path,
+    *,
+    request: str,
+    workspace_root: Path,
+) -> None:
+    task = {
+        "goal": request,
+        "workspace_root": str(workspace_root.resolve()),
+        "constraints": [],
+        "allowed_tools": list(CHAT_ALLOWED_TOOLS),
+        "acceptance_criteria": ["Complete the requested chat task."],
+        "verification_commands": [],
+        "policy": {
+            "approval_allowed_tools": list(CHAT_APPROVED_TOOLS),
+            "approved_tools": list(CHAT_APPROVED_TOOLS),
         },
     }
     path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -376,6 +462,30 @@ def _print_run_summary(result) -> None:
     """输出短 run 摘要；完整复盘仍交给 inspect。"""
     print(f"status={result.status.value}")
     print(f"episode_path={result.episode_path}")
+    try:
+        package_view = load_inspect_episode_package(result.episode_path)
+    except EpisodeValidationError as error:
+        print(f"summary_error={_summary_value(str(error))}")
+        return
+
+    print(f"provider={_summary_provider(package_view.episode_metadata)}")
+    if result.status.value == "completed":
+        print(f"final_response={_summary_value(_run_final_response(package_view.transcript))}")
+        return
+
+    failure = package_view.failure_record.get("failure")
+    if not isinstance(failure, dict):
+        failure = {}
+    print(f"failed_stage={_summary_value(str(failure.get('stage', 'unknown')))}")
+    print(f"failure_category={_summary_value(str(failure.get('category', 'unknown')))}")
+    print(f"reason={_summary_value(str(failure.get('evidence', '')))}")
+
+
+def _print_chat_summary(result) -> None:
+    """输出 chat 摘要；chat v1 没有验证命令，必须显式说明。"""
+    print(f"status={result.status.value}")
+    print(f"episode_path={result.episode_path}")
+    print("verification=not_run")
     try:
         package_view = load_inspect_episode_package(result.episode_path)
     except EpisodeValidationError as error:
