@@ -16,6 +16,7 @@ class FailureCategory(StrEnum):
     MODEL_CALL = "Model Call Failure"
     TOOL_INTERFACE = "Tool Interface Failure"
     TOOL_ARGUMENT = "Tool Argument Failure"
+    USER_DENIED = "User Denied Failure"
     VERIFICATION = "Verification Failure"
     LOOP_LIMIT = "Loop Limit Failure"
     RUNTIME = "Runtime Failure"

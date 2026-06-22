@@ -15,6 +15,11 @@ from haagent.models.fake import FakeModelGateway
 from haagent.models.gateway import ModelCallError, ModelGateway
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.failure import FailureCategory
+from haagent.runtime.human_interaction import (
+    HumanInteractionHandler,
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+)
 from haagent.runtime.plan import build_plan
 from haagent.runtime.state import RunStatus
 from haagent.runtime.task_contract import TaskLoadError, load_task, resolve_workspace_root
@@ -40,12 +45,14 @@ class RunOrchestrator:
         max_turns: int = 3,
         session_summary: str | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
+        interaction_handler: HumanInteractionHandler | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
         self._max_turns = max_turns
         self._session_summary = session_summary
         self._event_sink = event_sink
+        self._interaction_handler = interaction_handler
 
     def _emit_event(self, event: dict[str, object]) -> None:
         if self._event_sink is not None:
@@ -200,7 +207,15 @@ class RunOrchestrator:
                             "args": tool_call.args,
                         },
                     )
-                    tool_result = router.dispatch(tool_call.name, tool_call.args)
+                    tool_result = router.dispatch(
+                        tool_call.name,
+                        tool_call.args,
+                        interaction_handler=(
+                            _interaction_bridge(self, writer, turn)
+                            if self._interaction_handler is not None
+                            else None
+                        ),
+                    )
                     if tool_result.get("status") == "error":
                         error = tool_result.get("error") or {}
                         self._emit_event(
@@ -339,6 +354,78 @@ def _verification_loop_limit_evidence(max_turns: int, verification_result) -> st
     )
 
 
+def _interaction_bridge(
+    orchestrator: RunOrchestrator,
+    writer: EpisodeWriter,
+    turn: int,
+) -> HumanInteractionHandler:
+    def handle(request: HumanInteractionRequest) -> HumanInteractionResponse:
+        requested_event = _interaction_requested_event(turn, request)
+        writer.append_interaction_event(
+            str(requested_event["event_type"]),
+            _transcript_event(requested_event),
+        )
+        orchestrator._emit_event(requested_event)
+        if orchestrator._interaction_handler is None:
+            response = HumanInteractionResponse(approved=False, answer="")
+        else:
+            response = orchestrator._interaction_handler(request)
+        response_event = _interaction_response_event(turn, request, response)
+        writer.append_interaction_event(
+            str(response_event["event_type"]),
+            _transcript_event(response_event),
+        )
+        orchestrator._emit_event(response_event)
+        return response
+
+    return handle
+
+
+def _interaction_requested_event(turn: int, request: HumanInteractionRequest) -> dict[str, object]:
+    event_type = "approval_requested" if request.interaction_type == "approval" else "user_input_requested"
+    return {
+        "event_type": event_type,
+        "turn": turn,
+        "tool_name": request.tool_name,
+        "question": request.question,
+        "reason": request.reason,
+        "risk_level": request.risk_level,
+        "args_summary": request.args_summary,
+        "approved": None,
+    }
+
+
+def _interaction_response_event(
+    turn: int,
+    request: HumanInteractionRequest,
+    response: HumanInteractionResponse,
+) -> dict[str, object]:
+    if request.interaction_type == "approval":
+        event_type = "approval_granted" if response.approved else "approval_denied"
+        return {
+            "event_type": event_type,
+            "turn": turn,
+            "tool_name": request.tool_name,
+            "question": request.question,
+            "approved": response.approved,
+        }
+    return {
+        "event_type": "user_input_received",
+        "turn": turn,
+        "tool_name": request.tool_name,
+        "question": request.question,
+        "answer": response.answer,
+        "answer_chars": len(response.answer),
+        "approved": response.approved,
+    }
+
+
+def _transcript_event(event: dict[str, object]) -> dict[str, object]:
+    record = dict(event)
+    record.pop("event_type", None)
+    return record
+
+
 def _verification_observation(verification_result) -> dict[str, object]:
     return {
         "tool_name": "verification",
@@ -400,6 +487,8 @@ def _unexpected_failure_category(error: Exception, state_history: list[RunStatus
 
 
 def _tool_failure_category(error: ToolRoutingError) -> FailureCategory:
+    if error.error_type == "approval_denied":
+        return FailureCategory.USER_DENIED
     if error.error_type in {"invalid_tool_arguments", "tool_argument_invalid"}:
         return FailureCategory.TOOL_ARGUMENT
     return FailureCategory.TOOL_INTERFACE

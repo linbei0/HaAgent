@@ -22,6 +22,7 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "file_list",
         "file_search",
         "file_read",
+        "request_user_input",
         "file_write",
         "code_run",
         "apply_patch",
@@ -91,6 +92,16 @@ def test_file_read_schema_supports_keyword() -> None:
 
     assert "keyword" in schema["parameters"]["properties"]
     assert schema["parameters"]["properties"]["keyword"]["type"] == "string"
+
+
+def test_request_user_input_schema_requires_question() -> None:
+    schemas = export_tool_schemas(["request_user_input"])
+    schema = schemas[0]
+
+    assert schema["description"] == "ask the user for missing information before continuing the task"
+    assert schema["parameters"]["required"] == ["question"]
+    assert schema["parameters"]["properties"]["question"]["type"] == "string"
+    assert schema["parameters"]["properties"]["reason"]["type"] == "string"
 
 
 def test_file_write_schema_describes_modes() -> None:

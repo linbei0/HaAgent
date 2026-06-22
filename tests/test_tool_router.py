@@ -7,6 +7,7 @@ tests/test_tool_router.py - ToolRouter 本地工具行为测试
 import json
 from pathlib import Path
 
+from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.episode import EpisodeWriter
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.router import ToolRouter
@@ -648,6 +649,109 @@ def test_policy_allowed_high_risk_tool_still_denies_but_records_allowed_missing(
         "status": "missing",
         "reason": "approval allowed but missing for high risk tool shell",
     }
+
+
+def test_request_user_input_tool_uses_interaction_handler_and_writes_trace(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["request_user_input"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+    )
+    requests = []
+
+    def interaction_handler(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="Use src/app.py")
+
+    result = router.dispatch(
+        "request_user_input",
+        {"question": "Which file should I edit?", "reason": "Need target"},
+        interaction_handler=interaction_handler,
+    )
+
+    assert result == {
+        "status": "success",
+        "question": "Which file should I edit?",
+        "answer": "Use src/app.py",
+        "answer_chars": len("Use src/app.py"),
+    }
+    assert len(requests) == 1
+    assert requests[0].interaction_type == "user_input"
+    assert requests[0].tool_name == "request_user_input"
+    assert requests[0].question == "Which file should I edit?"
+    record = _read_single_tool_call(writer)
+    assert record["tool_name"] == "request_user_input"
+    assert record["status"] == "success"
+    assert record["policy"]["action"] == "allow"
+
+
+def test_high_risk_tool_with_missing_approval_prompts_and_runs_when_granted(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+    )
+    requests = []
+
+    def interaction_handler(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="yes")
+
+    result = router.dispatch(
+        "file_write",
+        {"path": "notes.txt", "content": "approved", "mode": "create"},
+        interaction_handler=interaction_handler,
+    )
+
+    assert result["status"] == "success"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "approved"
+    assert len(requests) == 1
+    assert requests[0].interaction_type == "approval"
+    assert requests[0].tool_name == "file_write"
+    assert requests[0].args_summary == {"content_chars": 8, "mode": "create", "path": "notes.txt"}
+    record = _read_single_tool_call(writer)
+    assert record["status"] == "success"
+    assert record["policy"]["action"] == "allow"
+    assert record["policy"]["approval"] == {
+        "required": True,
+        "status": "granted",
+        "reason": "approval granted for high risk tool file_write",
+    }
+
+
+def test_high_risk_tool_denial_does_not_call_handler_or_modify_workspace(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+    )
+
+    def interaction_handler(request):
+        return HumanInteractionResponse(approved=False, answer="no")
+
+    result = router.dispatch(
+        "file_write",
+        {"path": "notes.txt", "content": "denied", "mode": "create"},
+        interaction_handler=interaction_handler,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "approval_denied"
+    assert not (tmp_path / "notes.txt").exists()
+    record = _read_single_tool_call(writer)
+    assert record["status"] == "error"
+    assert record["policy"]["action"] == "deny"
+    assert record["policy"]["approval"] == {
+        "required": True,
+        "status": "denied",
+        "reason": "approval denied for high risk tool file_write",
+    }
+    assert record["error"]["type"] == "approval_denied"
 
 
 def test_approved_high_risk_tool_runs_handler_and_records_granted(

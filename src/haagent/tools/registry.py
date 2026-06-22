@@ -114,6 +114,26 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
+    "request_user_input": ToolDefinition(
+        name="request_user_input",
+        description="ask the user for missing information before continuing the task",
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "question to ask the user",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "short reason why the information is needed",
+                },
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    ),
     "file_write": ToolDefinition(
         name="file_write",
         description="create, overwrite, or append a workspace text file",

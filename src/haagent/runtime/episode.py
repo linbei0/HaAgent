@@ -44,6 +44,9 @@ class EpisodeWriter:
     def append_tool_call(self, record: dict[str, Any]) -> None:
         self._append_jsonl("tool-calls.jsonl", record)
 
+    def append_interaction_event(self, event_type: str, record: dict[str, Any]) -> None:
+        self.append_transcript({"event": event_type, **record})
+
     def write_context_manifest(self, manifest: dict[str, Any]) -> None:
         self._write_json("context-manifest.json", manifest)
 

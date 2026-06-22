@@ -25,6 +25,10 @@ from haagent.runtime.episode_validator import (
     load_inspect_episode_package,
 )
 from haagent.runtime.eval_export import export_eval_case
+from haagent.runtime.human_interaction import (
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+)
 from haagent.runtime.orchestrator import RunOrchestrator
 
 
@@ -209,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             str(args.request),
             event_sink=_print_chat_event,
             include_session_events=True,
+            interaction_handler=_read_chat_interaction,
         )
         _print_chat_turn_result(result)
         return 0 if result.status == "completed" else 1
@@ -473,7 +478,11 @@ def _run_chat_repl(session: AgentSession) -> int:
             print("session reset")
             continue
 
-        result = session.run_prompt_events(prompt, event_sink=_print_chat_event)
+        result = session.run_prompt_events(
+            prompt,
+            event_sink=_print_chat_event,
+            interaction_handler=_read_chat_interaction,
+        )
         _print_chat_turn_result(result)
 
 
@@ -492,7 +501,14 @@ def _print_chat_turn_result(result: ChatTurnResult) -> None:
 
 def _print_chat_event(event: ChatEvent) -> None:
     pieces = [f"event={event.event_type}"]
-    if event.event_type in {"tool_started", "tool_finished", "tool_failed"}:
+    if event.event_type in {
+        "tool_started",
+        "tool_finished",
+        "tool_failed",
+        "approval_requested",
+        "approval_granted",
+        "approval_denied",
+    }:
         tool_name = event.payload.get("tool_name")
         if tool_name is not None:
             pieces.append(f"tool={tool_name}")
@@ -510,6 +526,23 @@ def _print_chat_event(event: ChatEvent) -> None:
         message = event.payload.get("message")
         if message:
             pieces.append(f"message={_shell_token(str(message))}")
+    elif event.event_type == "approval_requested":
+        question = event.payload.get("question")
+        if question:
+            pieces.append(f"question={_shell_token(str(question))}")
+        pieces.append(f"args={_format_event_mapping(event.payload.get('args_summary'))}")
+    elif event.event_type in {"approval_granted", "approval_denied"}:
+        approved = event.payload.get("approved")
+        if approved is not None:
+            pieces.append(f"approved={str(approved).lower()}")
+    elif event.event_type == "user_input_requested":
+        question = event.payload.get("question")
+        if question:
+            pieces.append(f"question={_shell_token(str(question))}")
+    elif event.event_type == "user_input_received":
+        answer_chars = event.payload.get("answer_chars")
+        if answer_chars is not None:
+            pieces.append(f"answer_chars={answer_chars}")
     elif event.event_type == "assistant_message":
         content = event.payload.get("content")
         if content:
@@ -519,6 +552,18 @@ def _print_chat_event(event: ChatEvent) -> None:
         if status is not None:
             pieces.append(f"status={status}")
     print(" ".join(pieces))
+
+
+def _read_chat_interaction(request: HumanInteractionRequest) -> HumanInteractionResponse:
+    try:
+        if request.interaction_type == "approval":
+            raw_answer = input("approve [y/N]> ")
+            approved = raw_answer.strip().lower() in {"y", "yes"}
+            return HumanInteractionResponse(approved=approved, answer=raw_answer)
+        answer = input("answer> ")
+        return HumanInteractionResponse(approved=True, answer=answer)
+    except EOFError:
+        return HumanInteractionResponse(approved=False, answer="")
 
 
 def _format_event_mapping(value: object) -> str:

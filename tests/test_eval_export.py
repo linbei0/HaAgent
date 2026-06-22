@@ -13,6 +13,7 @@ from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.runtime import eval_export
 from haagent.runtime.episode_validator import EpisodePackageView, EpisodeValidationError
 from haagent.runtime.eval_export import EVAL_CASE_VERSION, export_eval_case
+from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestrator import RunOrchestrator
 from haagent.runtime.state import RunStatus
 
@@ -287,6 +288,53 @@ policy:
             "approval_required": True,
             "approval_status": "granted",
             "approval_reason": "approval granted for high risk tool shell",
+        },
+    ]
+
+
+def test_eval_export_includes_human_interaction_events_for_denied_approval(
+    tmp_path: Path,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Export denied approval
+constraints: []
+allowed_tools:
+  - shell
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools:
+    - shell
+""".strip(),
+        encoding="utf-8",
+    )
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=ShellOnceGateway(),
+        interaction_handler=lambda request: HumanInteractionResponse(approved=False, answer="no"),
+    ).run(task_path)
+    verification_dir = result.episode_path / "verification"
+    verification_dir.mkdir(exist_ok=True)
+    (verification_dir / "commands.jsonl").write_text("", encoding="utf-8")
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert result.status is RunStatus.FAILED
+    assert eval_case["failure"]["category"] == "User Denied Failure"
+    assert eval_case["human_interactions"] == [
+        {
+            "event": "approval_requested",
+            "tool_name": "shell",
+            "question": "Approve high risk tool shell?",
+            "approved": None,
+        },
+        {
+            "event": "approval_denied",
+            "tool_name": "shell",
+            "question": "Approve high risk tool shell?",
+            "approved": False,
         },
     ]
 

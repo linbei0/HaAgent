@@ -10,6 +10,7 @@ from pathlib import Path
 from haagent import cli
 from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.runtime.chat_session import AgentSession
+from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.task_contract import load_task
 
 
@@ -72,6 +73,30 @@ class CodeRunThenDoneGateway:
                 ],
             )
         return ModelResponse("done code", [])
+
+
+class ClarifyThenDoneGateway:
+    provider_name = "clarify-then-done"
+
+    def __init__(self) -> None:
+        self.model_inputs: list[str] = []
+
+    def generate(self, task, model_input, tool_schemas, observations):
+        self.model_inputs.append(model_input)
+        if not observations:
+            return ModelResponse(
+                "need target",
+                [
+                    ToolCall(
+                        "request_user_input",
+                        {
+                            "question": "Which file should I inspect?",
+                            "reason": "Need target file",
+                        },
+                    ),
+                ],
+            )
+        return ModelResponse("done with answer", [])
 
 
 class FakeProfileGateway:
@@ -158,10 +183,10 @@ def test_cli_chat_default_tools_include_real_task_tool_pack(tmp_path: Path, caps
     assert exit_code == 0
     assert "file_write" in task.allowed_tools
     assert "code_run" in task.allowed_tools
+    assert "request_user_input" in task.allowed_tools
     assert "file_write" in task.policy["approval_allowed_tools"]
     assert "code_run" in task.policy["approval_allowed_tools"]
-    assert "file_write" in task.policy["approved_tools"]
-    assert "code_run" in task.policy["approved_tools"]
+    assert task.policy["approved_tools"] == []
 
 
 def test_cli_chat_single_prompt_accepts_explicit_workspace_root(
@@ -305,6 +330,7 @@ def test_agent_session_events_show_single_turn_order_and_tool_success(tmp_path: 
         "write notes",
         event_sink=events.append,
         include_session_events=True,
+        interaction_handler=lambda request: HumanInteractionResponse(approved=True, answer="yes"),
     )
 
     assert result.status == "completed"
@@ -312,6 +338,8 @@ def test_agent_session_events_show_single_turn_order_and_tool_success(tmp_path: 
         "session_started",
         "turn_started",
         "tool_started",
+        "approval_requested",
+        "approval_granted",
         "tool_finished",
         "assistant_message",
         "turn_finished",
@@ -320,9 +348,77 @@ def test_agent_session_events_show_single_turn_order_and_tool_success(tmp_path: 
     assert events[2].payload["tool_name"] == "file_write"
     assert events[2].payload["args_summary"]["content_chars"] == len("SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT")
     assert "content" not in events[2].payload["args_summary"]
-    assert events[3].payload["result_summary"]["bytes_written"] == len("SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT")
+    assert events[5].payload["result_summary"]["bytes_written"] == len("SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT")
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT"
     assert (result.episode_path / "tool-calls.jsonl").exists()
+
+
+def test_agent_session_user_input_request_continues_with_answer(tmp_path: Path) -> None:
+    events = []
+    gateway = ClarifyThenDoneGateway()
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+        max_turns=20,
+    )
+
+    result = session.run_prompt_events(
+        "inspect target",
+        event_sink=events.append,
+        interaction_handler=lambda request: HumanInteractionResponse(
+            approved=True,
+            answer="Use README.md",
+        ),
+    )
+
+    assert result.status == "completed"
+    assert [event.event_type for event in events] == [
+        "turn_started",
+        "tool_started",
+        "user_input_requested",
+        "user_input_received",
+        "tool_finished",
+        "assistant_message",
+        "turn_finished",
+    ]
+    assert events[2].payload["question"] == "Which file should I inspect?"
+    assert events[3].payload["answer_chars"] == len("Use README.md")
+    assert "Use README.md" in gateway.model_inputs[1]
+    assert "tool-calls.jsonl" not in gateway.model_inputs[1]
+
+
+def test_agent_session_denied_approval_fails_without_running_tool(tmp_path: Path) -> None:
+    events = []
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=WriteThenDoneGateway(),
+        max_turns=20,
+    )
+
+    result = session.run_prompt_events(
+        "write notes",
+        event_sink=events.append,
+        interaction_handler=lambda request: HumanInteractionResponse(approved=False, answer="no"),
+    )
+
+    assert result.status == "failed"
+    assert not (tmp_path / "notes.txt").exists()
+    assert [event.event_type for event in events] == [
+        "turn_started",
+        "tool_started",
+        "approval_requested",
+        "approval_denied",
+        "tool_failed",
+        "turn_finished",
+    ]
+    assert result.failure_category == "User Denied Failure"
+    transcript = [
+        json.loads(line)
+        for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(record.get("event") == "approval_denied" for record in transcript)
 
 
 def test_agent_session_events_emit_tool_failed_on_real_tool_error(tmp_path: Path) -> None:
@@ -354,6 +450,8 @@ def test_cli_chat_single_prompt_prints_progress_events_without_secret_content(
     capsys,
 ) -> None:
     monkeypatch.setattr(cli, "_build_run_model_gateway", lambda args: WriteThenDoneGateway())
+    inputs = iter(["y"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
 
     exit_code = cli.main(["chat", "Write notes", "--workspace-root", str(tmp_path), "--provider", "fake"])
 
@@ -362,6 +460,8 @@ def test_cli_chat_single_prompt_prints_progress_events_without_secret_content(
     assert "event=session_started" in output
     assert "event=turn_started" in output
     assert "event=tool_started tool=file_write" in output
+    assert "event=approval_requested tool=file_write" in output
+    assert "event=approval_granted tool=file_write" in output
     assert "content_chars=37" in output
     assert "event=tool_finished tool=file_write status=success" in output
     assert "event=assistant_message" in output
@@ -377,7 +477,7 @@ def test_cli_chat_repl_prints_events_and_still_accepts_quit(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "_build_run_model_gateway", lambda args: WriteThenDoneGateway())
-    inputs = iter(["Write notes", ":quit"])
+    inputs = iter(["Write notes", "y", ":quit"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
 
     exit_code = cli.main(["chat", "--provider", "fake"])
@@ -386,6 +486,8 @@ def test_cli_chat_repl_prints_events_and_still_accepts_quit(
     assert exit_code == 0
     assert "event=session_started" in output
     assert "event=tool_started tool=file_write" in output
+    assert "event=approval_requested tool=file_write" in output
+    assert "event=approval_granted tool=file_write" in output
     assert "event=session_finished" in output
     assert "bye" in output
     assert "SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT" not in output
@@ -397,16 +499,60 @@ def test_cli_chat_event_output_hides_full_code_and_long_stdout(
     capsys,
 ) -> None:
     monkeypatch.setattr(cli, "_build_run_model_gateway", lambda args: CodeRunThenDoneGateway())
+    inputs = iter(["y"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
 
     exit_code = cli.main(["chat", "Run code", "--workspace-root", str(tmp_path), "--provider", "fake"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "event=tool_started tool=code_run" in output
+    assert "event=approval_requested tool=code_run" in output
     assert "code_chars=" in output
     assert "event=tool_finished tool=code_run status=success" in output
     assert "SECRET_STDOUT_SHOULD_NOT_PRINT" not in output
     assert "print(" not in output
+
+
+def test_cli_chat_repl_answers_user_input_request(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_build_run_model_gateway", lambda args: ClarifyThenDoneGateway())
+    inputs = iter(["Inspect", "README.md", ":quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    exit_code = cli.main(["chat", "--provider", "fake"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "event=user_input_requested" in output
+    assert "question=\"Which file should I inspect?\"" in output
+    assert "event=user_input_received" in output
+    assert "answer_chars=9" in output
+    assert "status=completed" in output
+
+
+def test_user_input_answer_is_bounded_in_next_model_input(tmp_path: Path) -> None:
+    long_answer = "A" * 1200
+    gateway = ClarifyThenDoneGateway()
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+        max_turns=20,
+    )
+
+    result = session.run_prompt_events(
+        "inspect target",
+        interaction_handler=lambda request: HumanInteractionResponse(
+            approved=True,
+            answer=long_answer,
+        ),
+    )
+
+    assert result.status == "completed"
+    assert "A" * 240 in gateway.model_inputs[1]
+    assert "A" * 400 not in gateway.model_inputs[1]
+    assert "tool-calls.jsonl" not in gateway.model_inputs[1]
 
 
 def test_agent_session_summary_is_bounded_and_not_episode_trace(tmp_path: Path) -> None:

@@ -71,3 +71,31 @@ def evaluate_tool_call(
         reason=reason,
         approval=approval,
     )
+
+
+def grant_tool_approval(decision: PolicyDecision) -> PolicyDecision:
+    return PolicyDecision(
+        tool_name=decision.tool_name,
+        risk_level=decision.risk_level,
+        action="allow",
+        reason=f"policy allows {decision.risk_level} risk tool {decision.tool_name}",
+        approval=ApprovalDecision(
+            required=True,
+            status="granted",
+            reason=f"approval granted for high risk tool {decision.tool_name}",
+        ),
+    )
+
+
+def deny_tool_approval(decision: PolicyDecision) -> PolicyDecision:
+    return PolicyDecision(
+        tool_name=decision.tool_name,
+        risk_level=decision.risk_level,
+        action="deny",
+        reason=f"policy denies {decision.risk_level} risk tool {decision.tool_name}",
+        approval=ApprovalDecision(
+            required=True,
+            status="denied",
+            reason=f"approval denied for high risk tool {decision.tool_name}",
+        ),
+    )

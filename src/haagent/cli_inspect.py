@@ -80,6 +80,8 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_final_response(transcript))
     lines.extend(["", "Tool Calls"])
     lines.extend(_format_tool_calls(tool_calls))
+    lines.extend(["", "Human Interactions"])
+    lines.extend(_format_human_interactions(transcript))
     lines.extend(["", "Approval Summary"])
     lines.extend(_format_approval_summary(tool_calls))
     lines.extend(["", "Tool Argument Errors"])
@@ -252,6 +254,36 @@ def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
         f"- {call.get('tool_name', 'unknown')}: {call.get('status', 'unknown')}"
         for call in tool_calls
     ]
+
+
+def _format_human_interactions(transcript: list[dict[str, Any]]) -> list[str]:
+    interaction_events = [
+        record
+        for record in transcript
+        if record.get("event")
+        in {
+            "user_input_requested",
+            "user_input_received",
+            "approval_requested",
+            "approval_granted",
+            "approval_denied",
+        }
+    ]
+    if not interaction_events:
+        return ["- none"]
+    lines = []
+    for record in interaction_events:
+        event = record.get("event", "unknown")
+        tool_name = record.get("tool_name", "unknown")
+        question = _excerpt(str(record.get("question", "")), 160)
+        if event == "user_input_received":
+            lines.append(f"- {event}: tool={tool_name} answer_chars={record.get('answer_chars', 0)}")
+        elif event in {"approval_granted", "approval_denied"}:
+            approved = str(record.get("approved")).lower()
+            lines.append(f"- {event}: tool={tool_name} approved={approved} question={question}")
+        else:
+            lines.append(f"- {event}: tool={tool_name} question={question}")
+    return lines
 
 
 def _format_approval_summary(tool_calls: list[dict[str, Any]]) -> list[str]:

@@ -11,7 +11,17 @@ from pathlib import Path
 from typing import Any
 
 from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.policy import PolicyDecision, evaluate_tool_call
+from haagent.runtime.human_interaction import (
+    HumanInteractionHandler,
+    HumanInteractionRequest,
+    interaction_args_summary,
+)
+from haagent.runtime.policy import (
+    PolicyDecision,
+    deny_tool_approval,
+    evaluate_tool_call,
+    grant_tool_approval,
+)
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
 from haagent.tools.code_run import code_run
 from haagent.tools.file_tools import apply_patch, file_list, file_read, file_search, file_write
@@ -38,6 +48,7 @@ class ToolRouter:
             "file_list": lambda args: file_list(args, self._workspace_root),
             "file_search": lambda args: file_search(args, self._workspace_root),
             "file_read": lambda args: file_read(args, self._workspace_root),
+            "request_user_input": self._request_user_input_without_handler,
             "file_write": lambda args: file_write(args, self._workspace_root),
             "code_run": lambda args: code_run(args, self._workspace_root),
             "apply_patch": lambda args: apply_patch(args, self._workspace_root),
@@ -49,7 +60,12 @@ class ToolRouter:
             raise ToolRoutingError(str(error), error_type="tool_registry_invalid") from error
         self._assert_registry_alignment()
 
-    def dispatch(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def dispatch(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        interaction_handler: HumanInteractionHandler | None = None,
+    ) -> dict[str, Any]:
         """执行工具并保证每次调用都写入 tool-calls.jsonl。"""
         started = time.perf_counter()
         policy_decision: PolicyDecision | None = None
@@ -65,14 +81,18 @@ class ToolRouter:
                     approved_tools=self._approved_tools,
                 )
                 if policy_decision.action == "deny":
-                    result = tool_error(
-                        "policy_denied",
-                        f"{policy_decision.reason}; {policy_decision.approval.reason}",
+                    result, policy_decision = self._handle_denied_policy(
+                        tool_name,
+                        args,
+                        policy_decision,
+                        interaction_handler,
                     )
                 else:
                     validation_error = _validate_args(tool_name, args)
                     if validation_error:
                         result = validation_error
+                    elif tool_name == "request_user_input":
+                        result = self._request_user_input(args, interaction_handler)
                     else:
                         result = self._handlers[tool_name](args)
         except Exception as error:
@@ -91,6 +111,80 @@ class ToolRouter:
 
     def _fake_tool(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "success", "args": args}
+
+    def _request_user_input_without_handler(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._request_user_input(args, None)
+
+    def _request_user_input(
+        self,
+        args: dict[str, Any],
+        interaction_handler: HumanInteractionHandler | None,
+    ) -> dict[str, Any]:
+        if interaction_handler is None:
+            return tool_error(
+                "user_input_unavailable",
+                "user input requested but no interaction handler is available",
+            )
+        question = str(args.get("question", ""))
+        response = interaction_handler(
+            HumanInteractionRequest(
+                interaction_type="user_input",
+                tool_name="request_user_input",
+                question=question,
+                reason=str(args.get("reason", "")),
+                risk_level="low",
+                args_summary=interaction_args_summary("request_user_input", args),
+            ),
+        )
+        if not response.approved:
+            return tool_error("user_input_unavailable", "user input request was not answered")
+        answer = response.answer
+        return {
+            "status": "success",
+            "question": question,
+            "answer": answer,
+            "answer_chars": len(answer),
+        }
+
+    def _handle_denied_policy(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        policy_decision: PolicyDecision,
+        interaction_handler: HumanInteractionHandler | None,
+    ) -> tuple[dict[str, Any], PolicyDecision]:
+        if tool_name not in self._approval_allowed_tools or interaction_handler is None:
+            return (
+                tool_error(
+                    "policy_denied",
+                    f"{policy_decision.reason}; {policy_decision.approval.reason}",
+                ),
+                policy_decision,
+            )
+        validation_error = _validate_args(tool_name, args)
+        if validation_error:
+            return validation_error, policy_decision
+        response = interaction_handler(
+            HumanInteractionRequest(
+                interaction_type="approval",
+                tool_name=tool_name,
+                question=f"Approve high risk tool {tool_name}?",
+                reason=policy_decision.approval.reason,
+                risk_level=policy_decision.risk_level,
+                args_summary=interaction_args_summary(tool_name, args),
+            ),
+        )
+        if not response.approved:
+            denied_policy = deny_tool_approval(policy_decision)
+            return (
+                tool_error(
+                    "approval_denied",
+                    f"approval denied for high risk tool {tool_name}",
+                ),
+                denied_policy,
+            )
+        granted_policy = grant_tool_approval(policy_decision)
+        return self._handlers[tool_name](args), granted_policy
 
     def _assert_registry_alignment(self) -> None:
         """Router 和 Registry 必须同步，否则 allowed_tools 审计会和实际执行脱节。"""

@@ -13,6 +13,7 @@ import pytest
 from haagent import cli, cli_inspect
 from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.runtime.episode_validator import EpisodePackageView
+from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestrator import RunOrchestrator
 from haagent.runtime.state import RunStatus
 
@@ -722,6 +723,42 @@ policy:
     assert "Approval Summary" in output
     assert "shell: action=allow approval.required=true approval.status=granted" in output
     assert "approval granted for high risk tool shell" in output
+
+
+def test_cli_inspect_shows_human_interaction_events_for_denied_approval(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Inspect denied approval
+constraints: []
+allowed_tools:
+  - shell
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools:
+    - shell
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=ShellOnceGateway(),
+        interaction_handler=lambda request: HumanInteractionResponse(approved=False, answer="no"),
+    ).run(task_path)
+    inspect_exit = cli.main(["inspect", str(result.episode_path)])
+
+    output = capsys.readouterr().out
+    assert result.status is RunStatus.FAILED
+    assert inspect_exit == 0
+    assert "Human Interactions" in output
+    assert "- approval_requested: tool=shell" in output
+    assert "- approval_denied: tool=shell" in output
+    assert "User Denied Failure" in output
 
 
 def test_cli_inspect_redacts_verification_secrets_from_real_episode(tmp_path: Path, capsys) -> None:

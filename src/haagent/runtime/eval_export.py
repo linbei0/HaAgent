@@ -41,6 +41,7 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "tool_names_used": _tool_names_used(package_view.tool_calls),
         "tool_argument_errors": _tool_argument_errors(package_view.tool_calls),
         "approval_summary": _approval_summary(package_view.tool_calls),
+        "human_interactions": _human_interactions_summary(package_view.transcript),
         "final_response": _final_response_summary(package_view.transcript),
         "next_actions": _next_actions_summary(episode_path, package_view.context_manifest),
     }
@@ -140,6 +141,30 @@ def _policy_not_evaluated(record: dict[str, Any]) -> bool:
         and isinstance(error, dict)
         and error.get("type") in {"tool_not_allowed", "unknown_tool"}
     )
+
+
+def _human_interactions_summary(transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events = []
+    for record in transcript:
+        event = record.get("event")
+        if event not in {
+            "user_input_requested",
+            "user_input_received",
+            "approval_requested",
+            "approval_granted",
+            "approval_denied",
+        }:
+            continue
+        summary = {
+            "event": event,
+            "tool_name": str(record.get("tool_name", "unknown")),
+            "question": str(record.get("question", "")),
+            "approved": record.get("approved"),
+        }
+        if event == "user_input_received":
+            summary["answer_chars"] = record.get("answer_chars")
+        events.append(summary)
+    return events
 
 
 def _final_response_summary(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:

@@ -25,6 +25,8 @@ def observation_summary(observation: dict[str, object]) -> dict[str, object]:
         return _file_list_observation_summary(args, result)
     if tool_name == "file_read":
         return _file_read_observation_summary(args, result)
+    if tool_name == "request_user_input":
+        return _request_user_input_observation_summary(args, result)
     if tool_name == "file_write":
         return _file_write_observation_summary(args, result)
     if tool_name == "file_search":
@@ -86,6 +88,22 @@ def _file_write_observation_summary(
         "bytes_written": result.get("bytes_written"),
         "created": result.get("created"),
         "truncated": False,
+    }
+
+
+def _request_user_input_observation_summary(
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, object]:
+    answer = _string_value(result.get("answer"))
+    answer_excerpt, answer_truncated = _compact_excerpt(answer)
+    return {
+        "status": _string_value(result.get("status")),
+        "question": _first_present_string(args.get("question"), result.get("question")),
+        "reason": _first_present_string(args.get("reason")),
+        "answer_excerpt": answer_excerpt,
+        "answer_chars": _first_present(result.get("answer_chars"), len(answer)),
+        "truncated": answer_truncated,
     }
 
 

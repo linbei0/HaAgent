@@ -413,6 +413,37 @@ def test_context_builder_model_input_contains_observation_summary(tmp_path: Path
     assert _has_complete_budget(observation_sources[0])
 
 
+def test_context_builder_compacts_request_user_input_observation(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    long_answer = "A" * 1200
+    builder = ContextBuilder(
+        task=make_task(["request_user_input"]),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        observations=[
+            {
+                "tool_name": "request_user_input",
+                "args": {"question": "Which file?", "reason": "Need target"},
+                "result": {
+                    "status": "success",
+                    "question": "Which file?",
+                    "answer": long_answer,
+                    "answer_chars": len(long_answer),
+                },
+            },
+        ],
+    )
+
+    result = builder.build()
+
+    assert "Which file?" in result.model_input
+    assert "A" * 240 in result.model_input
+    assert "A" * 400 not in result.model_input
+    assert '"answer_chars": 1200' in result.model_input
+    assert '"truncated": true' in result.model_input
+
+
 def test_context_builder_compacts_long_file_read_observation(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     long_content = "\n".join([f"line-{index:03d}-" + ("x" * 20) for index in range(80)])

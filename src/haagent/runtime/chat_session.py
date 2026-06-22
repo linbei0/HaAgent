@@ -19,6 +19,10 @@ from haagent.runtime.episode_validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
 )
+from haagent.runtime.human_interaction import (
+    HumanInteractionHandler,
+    interaction_args_summary,
+)
 from haagent.runtime.orchestrator import RunOrchestrator
 
 
@@ -26,6 +30,7 @@ CHAT_ALLOWED_TOOLS = [
     "file_list",
     "file_search",
     "file_read",
+    "request_user_input",
     "file_write",
     "code_run",
     "apply_patch",
@@ -113,14 +118,19 @@ class AgentSession:
             return "fake"
         return self.model_gateway.provider_name
 
-    def run_prompt(self, prompt: str) -> ChatTurnResult:
-        return self.run_prompt_events(prompt)
+    def run_prompt(
+        self,
+        prompt: str,
+        interaction_handler: HumanInteractionHandler | None = None,
+    ) -> ChatTurnResult:
+        return self.run_prompt_events(prompt, interaction_handler=interaction_handler)
 
     def run_prompt_events(
         self,
         prompt: str,
         event_sink: Callable[[ChatEvent], None] | None = None,
         include_session_events: bool = False,
+        interaction_handler: HumanInteractionHandler | None = None,
     ) -> ChatTurnResult:
         clean_prompt = prompt.strip()
         if not clean_prompt:
@@ -157,6 +167,7 @@ class AgentSession:
                 max_turns=self.max_turns,
                 session_summary=self.summary_text(),
                 event_sink=on_runtime_event,
+                interaction_handler=interaction_handler,
             ).run(task_path)
 
         turn_result = self._build_turn_result(clean_prompt, result)
@@ -300,7 +311,7 @@ def _write_chat_task_yaml(path: Path, request: str, workspace_root: Path) -> Non
         "verification_commands": [],
         "policy": {
             "approval_allowed_tools": list(CHAT_APPROVED_TOOLS),
-            "approved_tools": list(CHAT_APPROVED_TOOLS),
+            "approved_tools": [],
         },
     }
     path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -347,6 +358,16 @@ def _runtime_event_message(event_type: str, payload: dict[str, object]) -> str:
         return f"finished tool {payload.get('tool_name', 'unknown')}"
     if event_type == "tool_failed":
         return f"failed tool {payload.get('tool_name', 'unknown')}"
+    if event_type == "approval_requested":
+        return f"approval requested for {payload.get('tool_name', 'unknown')}"
+    if event_type == "approval_granted":
+        return f"approval granted for {payload.get('tool_name', 'unknown')}"
+    if event_type == "approval_denied":
+        return f"approval denied for {payload.get('tool_name', 'unknown')}"
+    if event_type == "user_input_requested":
+        return _summary_value(str(payload.get("question", "")))
+    if event_type == "user_input_received":
+        return "user input received"
     if event_type == "assistant_message":
         return _summary_value(str(payload.get("content", "")))
     return event_type
@@ -378,6 +399,30 @@ def _runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[
             "error_type": str(error.get("type", "unknown")),
             "message": _summary_value(str(error.get("message", ""))),
         }
+    if event_type in {"approval_requested", "approval_granted", "approval_denied"}:
+        args_summary = payload.get("args_summary") if isinstance(payload.get("args_summary"), dict) else {}
+        return {
+            "model_turn": payload.get("turn"),
+            "tool_name": str(payload.get("tool_name", "unknown")),
+            "question": _summary_value(str(payload.get("question", "")), 240),
+            "approved": payload.get("approved"),
+            "args_summary": args_summary,
+        }
+    if event_type == "user_input_requested":
+        return {
+            "model_turn": payload.get("turn"),
+            "tool_name": str(payload.get("tool_name", "unknown")),
+            "question": _summary_value(str(payload.get("question", "")), 240),
+            "reason": _summary_value(str(payload.get("reason", "")), 240),
+        }
+    if event_type == "user_input_received":
+        return {
+            "model_turn": payload.get("turn"),
+            "tool_name": str(payload.get("tool_name", "unknown")),
+            "question": _summary_value(str(payload.get("question", "")), 240),
+            "answer_chars": payload.get("answer_chars"),
+            "approved": payload.get("approved"),
+        }
     if event_type == "assistant_message":
         return {
             "model_turn": payload.get("turn"),
@@ -387,32 +432,14 @@ def _runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[
 
 
 def _tool_args_summary(tool_name: str, args: dict[str, object]) -> dict[str, object]:
-    if tool_name == "file_write":
-        content = str(args.get("content", ""))
-        return {
-            "path": _summary_value(str(args.get("path", "")), 160),
-            "mode": str(args.get("mode", "")),
-            "content_chars": len(content),
-        }
-    if tool_name == "code_run":
-        code = str(args.get("code", ""))
-        return {
-            "cwd": str(args.get("cwd", ".")),
-            "timeout_seconds": args.get("timeout_seconds"),
-            "code_chars": len(code),
-        }
+    if tool_name in {"file_write", "code_run", "apply_patch", "shell", "request_user_input"}:
+        return interaction_args_summary(tool_name, args)
     if tool_name == "file_read":
         return {
             "path": _summary_value(str(args.get("path", "")), 160),
             "offset": args.get("offset"),
             "limit": args.get("limit"),
             "keyword": _summary_value(str(args.get("keyword", "")), 80),
-        }
-    if tool_name == "shell":
-        return {
-            "cwd": str(args.get("cwd", ".")),
-            "timeout_seconds": args.get("timeout_seconds"),
-            "command": _summary_value(str(args.get("command", "")), 160),
         }
     return {"args_keys": sorted(str(key) for key in args)}
 
