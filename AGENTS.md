@@ -49,6 +49,7 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 - Prefer `apply_patch` for file edits to avoid PowerShell encoding issues.
 - Do not add UI, browser automation, multi-agent behavior, or long-term memory unless explicitly requested.
 - For CLI work, prioritize the direct natural-language experience: single-shot `haagent chat "<request>"` and interactive `haagent chat`.
+- Interactive `haagent chat` is backed by `AgentSession`; keep session state and bounded summaries in runtime code, not in `cli.py`.
 - Keep `run`, `inspect`, and `export-eval` functional, but do not optimize them ahead of the chat experience unless the task explicitly asks.
 
 ## Compatibility Policy
@@ -95,4 +96,5 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 - Failures must be explicit and structured; do not add silent fallbacks or simulated success paths.
 - Path-mutating tools must stay inside the configured workspace root.
 - Chat/natural-language entry points must not bypass the runtime contracts. If they generate temporary task contracts internally, those contracts must be recorded in the episode for later inspection.
+- REPL chat may carry only bounded session summaries into the next model input; it must not copy full history, full episode traces, or full tool outputs.
 - Harness audit data should not be copied wholesale into model input. Use compact observations and bounded source budgets.

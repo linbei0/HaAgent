@@ -19,6 +19,7 @@ import yaml
 from haagent.cli_inspect import EpisodeInspectError, render_episode_summary
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
 from haagent.models.provider_profile import ProviderProfile, ProviderProfileError, load_provider_profile
+from haagent.runtime.chat_session import AgentSession, CHAT_MAX_TURNS, ChatTurnResult
 from haagent.runtime.episode_validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
@@ -30,9 +31,6 @@ from haagent.runtime.orchestrator import RunOrchestrator
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AUTHORING_ALLOWED_TOOLS = ["file_list", "file_read", "file_search", "apply_patch", "shell"]
 AUTHORING_APPROVED_TOOLS = ["apply_patch", "shell"]
-CHAT_ALLOWED_TOOLS = ["file_list", "file_search", "file_read", "apply_patch", "shell"]
-CHAT_APPROVED_TOOLS = ["apply_patch", "shell"]
-CHAT_MAX_TURNS = 20
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,7 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     chat_parser = subparsers.add_parser("chat", help="run a natural language request")
-    chat_parser.add_argument("request", help="natural language request to run in the workspace")
+    chat_parser.add_argument(
+        "request",
+        nargs="?",
+        help="natural language request to run in the workspace; omit to enter REPL",
+    )
     chat_parser.add_argument(
         "--workspace-root",
         type=Path,
@@ -190,24 +192,22 @@ def main(argv: list[str] | None = None) -> int:
                 generated_task_dir.cleanup()
 
     if args.command == "chat":
-        generated_task_dir: tempfile.TemporaryDirectory[str] | None = None
         try:
             model_gateway = _build_run_model_gateway(args)
-            task_path, generated_task_dir = _chat_task_path(args)
         except ProviderProfileError as error:
             print(f"error: {error}")
             return 1
-        try:
-            result = RunOrchestrator(
-                runs_root=Path(".runs"),
-                model_gateway=model_gateway,
-                max_turns=CHAT_MAX_TURNS,
-            ).run(task_path)
-            _print_chat_summary(result)
-            return 0 if result.status.value == "completed" else 1
-        finally:
-            if generated_task_dir is not None:
-                generated_task_dir.cleanup()
+        session = AgentSession(
+            workspace_root=args.workspace_root if args.workspace_root is not None else Path.cwd(),
+            runs_root=Path(".runs"),
+            model_gateway=model_gateway,
+            max_turns=CHAT_MAX_TURNS,
+        )
+        if args.request is None:
+            return _run_chat_repl(session)
+        result = session.run_prompt(str(args.request))
+        _print_chat_turn_result(result)
+        return 0 if result.status == "completed" else 1
 
     if args.command == "smoke":
         return _handle_smoke(args)
@@ -290,22 +290,6 @@ def _run_task_path(
     return task_path, generated_task_dir
 
 
-def _chat_task_path(
-    args: argparse.Namespace,
-) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
-    workspace_root = args.workspace_root if args.workspace_root is not None else Path.cwd()
-    generated_task_dir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(
-        prefix="haagent-chat-",
-    )
-    task_path = Path(generated_task_dir.name) / "task.yaml"
-    _write_chat_task_yaml(
-        task_path,
-        request=str(args.request),
-        workspace_root=workspace_root,
-    )
-    return task_path, generated_task_dir
-
-
 def _write_authoring_task_yaml(
     path: Path,
     *,
@@ -323,27 +307,6 @@ def _write_authoring_task_yaml(
         "policy": {
             "approval_allowed_tools": list(AUTHORING_APPROVED_TOOLS),
             "approved_tools": list(AUTHORING_APPROVED_TOOLS),
-        },
-    }
-    path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
-
-
-def _write_chat_task_yaml(
-    path: Path,
-    *,
-    request: str,
-    workspace_root: Path,
-) -> None:
-    task = {
-        "goal": request,
-        "workspace_root": str(workspace_root.resolve()),
-        "constraints": [],
-        "allowed_tools": list(CHAT_ALLOWED_TOOLS),
-        "acceptance_criteria": ["Complete the requested chat task."],
-        "verification_commands": [],
-        "policy": {
-            "approval_allowed_tools": list(CHAT_APPROVED_TOOLS),
-            "approved_tools": list(CHAT_APPROVED_TOOLS),
         },
     }
     path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -481,28 +444,43 @@ def _print_run_summary(result) -> None:
     print(f"reason={_summary_value(str(failure.get('evidence', '')))}")
 
 
-def _print_chat_summary(result) -> None:
-    """输出 chat 摘要；chat v1 没有验证命令，必须显式说明。"""
-    print(f"status={result.status.value}")
-    print(f"episode_path={result.episode_path}")
-    print("verification=not_run")
-    try:
-        package_view = load_inspect_episode_package(result.episode_path)
-    except EpisodeValidationError as error:
-        print(f"summary_error={_summary_value(str(error))}")
-        return
+def _run_chat_repl(session: AgentSession) -> int:
+    _print_session_status(session)
+    while True:
+        try:
+            raw_prompt = input("haagent> ")
+        except EOFError:
+            print("bye")
+            return 0
+        prompt = raw_prompt.strip()
+        if not prompt:
+            continue
+        if prompt in {":quit", ":exit"}:
+            print("bye")
+            return 0
+        if prompt == ":status":
+            _print_session_status(session)
+            continue
+        if prompt == ":new":
+            session.new()
+            print("session reset")
+            continue
 
-    print(f"provider={_summary_provider(package_view.episode_metadata)}")
-    if result.status.value == "completed":
-        print(f"final_response={_summary_value(_run_final_response(package_view.transcript))}")
-        return
+        result = session.run_prompt(prompt)
+        _print_chat_turn_result(result)
 
-    failure = package_view.failure_record.get("failure")
-    if not isinstance(failure, dict):
-        failure = {}
-    print(f"failed_stage={_summary_value(str(failure.get('stage', 'unknown')))}")
-    print(f"failure_category={_summary_value(str(failure.get('category', 'unknown')))}")
-    print(f"reason={_summary_value(str(failure.get('evidence', '')))}")
+
+def _print_session_status(session: AgentSession) -> None:
+    status = session.status()
+    print(f"session_id={status['session_id']}")
+    print(f"workspace_root={status['workspace_root']}")
+    print(f"provider={status['provider']}")
+    print(f"turn_count={status['turn_count']}")
+
+
+def _print_chat_turn_result(result: ChatTurnResult) -> None:
+    for line in result.output_lines():
+        print(line)
 
 
 def _run_final_response(transcript: list[dict[str, Any]]) -> str:

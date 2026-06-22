@@ -31,6 +31,7 @@ from haagent.tools.registry import TOOL_REGISTRY
 CONTEXT_MANIFEST_VERSION = "1.2"
 CONTEXT_CHARACTER_LIMIT = 12000
 PROJECT_INSTRUCTIONS_CHAR_LIMIT = 2000
+SESSION_SUMMARY_CHAR_LIMIT = 1000
 AUDIT_SOURCE_EXCLUSION_REASON = "Audit evidence is stored in the episode and is not sent to the model by default."
 
 
@@ -54,6 +55,7 @@ class ContextBuilder:
         episode_writer: EpisodeWriter,
         observations: list[dict[str, object]] | None = None,
         final_response_requested: bool = False,
+        session_summary: str | None = None,
     ) -> None:
         self._task = task
         self._workspace_root = workspace_root
@@ -61,6 +63,7 @@ class ContextBuilder:
         self._episode_writer = episode_writer
         self._observations = list(observations or [])
         self._final_response_requested = final_response_requested
+        self._session_summary = session_summary
         self._project_instructions: str | None = None
         self._plan: dict[str, object] | None = None
 
@@ -124,6 +127,7 @@ class ContextBuilder:
                 "",
                 "Project Instructions:",
                 *self._format_project_instructions(),
+                *self._format_session_summary_block(),
                 "",
                 "Facts:",
                 f"goal: {self._task.goal}",
@@ -182,6 +186,15 @@ class ContextBuilder:
                 "The model needs explicit continuation guidance after tool observations.",
             ),
         ]
+        if self._session_summary is not None:
+            sources.append(
+                ContextSource(
+                    "session_summary",
+                    "session_summary",
+                    "Bounded summary of previous chat turns",
+                    "The model needs concise prior chat context without full episode traces.",
+                ),
+            )
         sources.extend(
             ContextSource(
                 "tool_catalog",
@@ -237,6 +250,8 @@ class ContextBuilder:
     def _source_content(self, source: ContextSource) -> str:
         if source.source_type == "project_instructions":
             return "\n".join(self._format_project_instructions())
+        if source.source_type == "session_summary":
+            return "\n".join(["Session Summary:", *self._format_session_summary()])
         if source.source_type == "task":
             return _task_source_content(source.name, self._task)
         if source.source_type == "tool_catalog":
@@ -257,6 +272,8 @@ class ContextBuilder:
     def _source_raw_content(self, source: ContextSource) -> str:
         if source.source_type == "project_instructions":
             return self._project_instructions or ""
+        if source.source_type == "session_summary":
+            return self._session_summary or ""
         if source.source_type == "observation":
             for observation in self._observations:
                 if observation_tool_name(observation) == source.name:
@@ -366,6 +383,16 @@ class ContextBuilder:
         if not self._project_instructions.strip():
             return ["- empty"]
         return self._project_instructions[:PROJECT_INSTRUCTIONS_CHAR_LIMIT].splitlines()
+
+    def _format_session_summary_block(self) -> list[str]:
+        if self._session_summary is None:
+            return []
+        return ["", "Session Summary:", *self._format_session_summary()]
+
+    def _format_session_summary(self) -> list[str]:
+        if self._session_summary is None or not self._session_summary.strip():
+            return ["- none"]
+        return self._session_summary[:SESSION_SUMMARY_CHAR_LIMIT].splitlines()
 
     def _project_instructions_source(self) -> ContextSource:
         if self._project_instructions is None:

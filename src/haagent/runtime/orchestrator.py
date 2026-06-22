@@ -37,10 +37,12 @@ class RunOrchestrator:
         runs_root: Path,
         model_gateway: ModelGateway | None = None,
         max_turns: int = 3,
+        session_summary: str | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
         self._max_turns = max_turns
+        self._session_summary = session_summary
 
     def run(self, task_path: Path) -> RunResult:
         """执行一次 run，并把所有阶段变化写入 transcript.jsonl。"""
@@ -100,6 +102,7 @@ class RunOrchestrator:
                     episode_writer=writer,
                     observations=observations,
                     final_response_requested=final_response_requested,
+                    session_summary=self._session_summary,
                 ).build()
                 tool_schemas = [] if final_response_requested else export_tool_schemas(task.allowed_tools)
                 # 每一轮模型调用都绑定独立 context_id，便于复盘工具观察如何进入下一轮。
