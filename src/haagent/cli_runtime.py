@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
-from haagent.models.provider_profile import ProviderProfile, ProviderProfileError, load_provider_profile
+from haagent.models.provider_profile import (
+    ProviderProfile,
+    ProviderProfileError,
+    load_active_provider_profile,
+    load_provider_profile,
+)
 from haagent.runtime.chat_session import AgentSession
 from haagent.runtime.orchestrator import RunOrchestrator
 
@@ -54,11 +59,16 @@ class CliRuntime:
 
     def build_run_model_gateway(self, args: argparse.Namespace) -> Any:
         if args.profile is not None:
-            if args.provider != "fake" or args.model is not None or args.base_url is not None:
+            if args.provider not in {None, "fake"} or args.model is not None or args.base_url is not None:
                 raise ProviderProfileError(
                     "--profile cannot be combined with --provider, --model, or --base-url",
                 )
             return self.gateway_from_profile(load_provider_profile(args.profile))
+
+        if args.provider is None:
+            if args.model is not None or args.base_url is not None:
+                raise ProviderProfileError("--model and --base-url require --provider or --profile")
+            return self.gateway_from_profile(load_active_provider_profile())
 
         if args.provider in {"openai", "openai-chat"}:
             gateway_kwargs = {}

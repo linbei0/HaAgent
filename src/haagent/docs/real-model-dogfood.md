@@ -2,6 +2,8 @@
 
 Real Model Dogfood 用真实模型在临时 fixture workspace 中跑小型端到端任务，用来检查 HaAgent 是否能独立使用 `context_find`、`file_read`、`apply_patch_set`、`shell`、loop guidance 和 human approval。
 
+Dogfood 是开发/验证能力，不是普通用户入口。普通用户路径是先运行 `uv run haagent setup` 配置模型连接，然后进入任意目录运行 `uv run haagent`。
+
 ## 手动入口
 
 CLI：

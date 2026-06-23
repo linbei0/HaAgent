@@ -1,0 +1,14 @@
+
+goal: 总结这个目录里的文档，说明每个文件大概有什么内容，并给出下一步整理建议。
+workspace_root: ../workspaces/file_read_smoke
+constraints:
+  - 这是个人助手任务示例，不要求用户理解 harness、eval 或 episode。
+  - 先列出当前目录文件，再读取相关文本文件。
+  - 最终回答应面向普通用户，说明可采取的下一步。
+allowed_tools:
+  - file_list
+  - file_read
+acceptance_criteria:
+  - 说明目录里的文档内容。
+  - 给出文件整理或后续处理建议。
+verification_commands: []

@@ -1,7 +1,8 @@
-goal: Read app.py, fix the add function, run verification, and explain the edit and verification result.
+goal: 检查这个小项目，修复 app.py 中的 add 函数，运行验证，并解释修改和结果。
 workspace_root: ../workspaces/edit_smoke
 constraints:
   - This task is for manual OpenAI-compatible chat provider edit-and-verify smoke testing.
+  - Code editing is one HaAgent task type, not the only product center.
   - First read app.py with file_read.
   - Fix add(a, b) so it returns the sum of a and b.
   - Use apply_patch for the edit.

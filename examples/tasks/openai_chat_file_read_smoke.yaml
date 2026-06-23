@@ -1,7 +1,8 @@
-goal: Read notes.txt with file_read first, then answer with the exact smoke phrase from the file.
+goal: 像个人助手一样读取 notes.txt，说明里面有什么，并包含文件中的 exact smoke phrase。
 workspace_root: ../workspaces/file_read_smoke
 constraints:
   - This task is for manual OpenAI-compatible chat provider file_read smoke testing.
+  - It represents a simple local-file assistant task, not a code-only workflow.
   - The model must call file_read on notes.txt before producing the final answer.
   - The final answer must include the exact smoke phrase from notes.txt.
   - Do not use any tool except file_read.

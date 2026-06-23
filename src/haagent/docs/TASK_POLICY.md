@@ -1,8 +1,8 @@
 # 任务契约 policy 配置
 
-任务契约可以通过可选的 `policy` 字段声明本次任务的高风险工具审批配置。任务契约可能来自 `task.yaml`，也可能来自 `haagent chat` 为自然语言请求生成的临时 task contract。
+任务契约可以通过可选的 `policy` 字段声明本次任务的高风险工具审批配置。任务契约可能来自高级 `task.yaml`，也可能来自 `haagent` / `haagent chat` 为自然语言请求生成的临时 task contract。
 
-`task.yaml` 仍是复现、批处理、smoke 和 eval 的高级入口；普通用户路径应优先使用自然语言 chat。无论入口是什么，policy 都只影响 Policy Engine 对工具调用的决策，不会自动引入交互式审批，也不会改变工具本身的执行方式。
+`task.yaml` 仍是复现、批处理、smoke 和 eval 的高级入口；普通用户路径应优先使用 `haagent setup` 后在目标目录运行 `haagent`。无论入口是什么，policy 都只影响 Policy Engine 对工具调用的决策，不会自动引入交互式审批，也不会改变工具本身的执行方式。
 
 ## 字段语义
 

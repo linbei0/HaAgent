@@ -27,8 +27,19 @@ from haagent.cli_render import (
     run_chat_repl,
 )
 from haagent.cli_runtime import CliRuntime, SmokeDefinition
-from haagent.models.provider_profile import ProviderProfileError, load_provider_profile
-from haagent.runtime.chat_session import CHAT_MAX_TURNS, ChatSessionError
+from haagent.models.provider_profile import (
+    ProviderProfileError,
+    ProviderProfileRecord,
+    load_provider_profile,
+    save_active_profile,
+    save_provider_profile,
+)
+from haagent.runtime.chat_session import (
+    CHAT_MAX_TURNS,
+    ChatSessionError,
+    find_latest_session,
+    list_sessions,
+)
 from haagent.runtime.checks import run_quality_checks
 from haagent.runtime.dogfood import render_dogfood_report, run_dogfood_tasks, skipped_dogfood_report
 from haagent.runtime.episode_validator import EpisodeValidationError, load_inspect_episode_package
@@ -87,17 +98,33 @@ def handle_chat(args, runtime: CliRuntime) -> int:
         print(f"error: {error}")
         return 1
     try:
-        if args.resume is None:
+        runs_root = getattr(args, "runs_root", Path(".runs"))
+        workspace_root = args.workspace_root if args.workspace_root is not None else Path.cwd()
+        if args.resume is not None and getattr(args, "continue_session", False):
+            print("error: --resume cannot be combined with --continue")
+            return 1
+        if getattr(args, "continue_session", False):
+            latest = find_latest_session(runs_root, workspace_root)
+            if latest is None:
+                print("error: 当前目录没有可恢复会话")
+                return 1
+            session = runtime.session_cls.resume(
+                latest.session_path,
+                runs_root=runs_root,
+                model_gateway=model_gateway,
+                max_turns=CHAT_MAX_TURNS,
+            )
+        elif args.resume is None:
             session = runtime.session_cls(
-                workspace_root=args.workspace_root if args.workspace_root is not None else Path.cwd(),
-                runs_root=Path(".runs"),
+                workspace_root=workspace_root,
+                runs_root=runs_root,
                 model_gateway=model_gateway,
                 max_turns=CHAT_MAX_TURNS,
             )
         else:
             session = runtime.session_cls.resume(
                 args.resume,
-                runs_root=Path(".runs"),
+                runs_root=runs_root,
                 model_gateway=model_gateway,
                 max_turns=CHAT_MAX_TURNS,
             )
@@ -114,6 +141,49 @@ def handle_chat(args, runtime: CliRuntime) -> int:
     )
     print_chat_turn_result(result)
     return 0 if result.status == "completed" else 1
+
+
+def handle_setup(args) -> int:
+    try:
+        record = ProviderProfileRecord(
+            name=_prompt_value("profile name", default="local"),
+            provider=_prompt_provider(),
+            base_url=_prompt_value("base_url"),
+            model=_prompt_value("model"),
+            api_key_env=_prompt_value("api_key_env", default="OPENAI_API_KEY"),
+        )
+        providers_path = save_provider_profile(record)
+        settings_path = save_active_profile(record.name)
+    except (EOFError, ProviderProfileError) as error:
+        print(f"error: {error}")
+        return 1
+    print(f"providers={providers_path}")
+    print(f"settings={settings_path}")
+    print(f"active_profile={record.name}")
+    print(f"api_key_env={record.api_key_env}")
+    print(f"请确认已在环境变量 {record.api_key_env} 中设置真实 API key。")
+    return 0
+
+
+def handle_sessions(args) -> int:
+    workspace_root = args.workspace_root if args.workspace_root is not None else Path.cwd()
+    try:
+        summaries = list_sessions(args.runs_root, workspace_root)
+    except ChatSessionError as error:
+        print(f"error: {error}")
+        return 1
+    if not summaries:
+        print("no sessions")
+        return 0
+    for summary in summaries:
+        print(f"session_id={summary.session_id}")
+        print(f"created_at={summary.created_at}")
+        print(f"updated_at={summary.updated_at}")
+        print(f"workspace={summary.workspace_root}")
+        print(f"turn_count={summary.turn_count}")
+        print(f"first_request={summary.first_request}")
+        print(f"session_path={summary.session_path}")
+    return 0
 
 
 def handle_smoke(args, runtime: CliRuntime) -> int:
@@ -389,6 +459,23 @@ def export_single_eval_case(
         return 0
     print(output)
     return 0
+
+
+def _prompt_value(label: str, *, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    value = input(f"{label}{suffix}: ").strip()
+    if not value and default is not None:
+        value = default
+    if not value:
+        raise ProviderProfileError(f"{label} is required")
+    return value
+
+
+def _prompt_provider() -> str:
+    provider = _prompt_value("provider (openai/openai-chat)", default="openai-chat")
+    if provider not in {"openai", "openai-chat"}:
+        raise ProviderProfileError(f"unsupported provider: {provider}")
+    return provider
 
 
 def write_eval_case_file(episode_path: Path, output_path: Path) -> None:

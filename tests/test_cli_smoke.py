@@ -283,7 +283,8 @@ def test_cli_smoke_missing_profile_reports_real_failures_after_fake(
     assert "episode_path=none" in output
     assert "failed_stage=configuration" in output
     assert "failure_category=Provider Profile Error" in output
-    assert "reason=provider profile config not found: .haagent\\providers.json" in output
+    assert "reason=provider profile not found: deepseek; searched:" in output
+    assert ".haagent\\providers.json" in output
 
 
 def test_cli_smoke_missing_profile_api_key_env_reports_real_failures_after_fake(

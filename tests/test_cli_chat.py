@@ -148,7 +148,7 @@ def test_cli_chat_parser_accepts_optional_request() -> None:
     assert repl_args.command == "chat"
     assert repl_args.request is None
     assert repl_args.workspace_root is None
-    assert repl_args.provider == "fake"
+    assert repl_args.provider is None
     assert single_args.request == "List this project"
 
 

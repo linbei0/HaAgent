@@ -109,6 +109,17 @@ class ChatTurnResult:
         return lines
 
 
+@dataclass(frozen=True)
+class SessionSummary:
+    session_id: str
+    created_at: str
+    updated_at: str
+    workspace_root: Path
+    turn_count: int
+    first_request: str
+    session_path: Path
+
+
 class AgentSession:
     def __init__(
         self,
@@ -646,6 +657,40 @@ def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:
     if raw.is_absolute() or raw.exists() or raw.name != str(session):
         return raw.resolve()
     return (runs_root / "sessions" / str(session)).resolve()
+
+
+def list_sessions(runs_root: Path, workspace_root: Path) -> list[SessionSummary]:
+    """列出当前 workspace 下的 chat 会话摘要。"""
+    sessions_root = runs_root / "sessions"
+    if not sessions_root.exists():
+        return []
+    resolved_workspace = workspace_root.resolve()
+    summaries: list[SessionSummary] = []
+    for session_path in sessions_root.iterdir():
+        if not session_path.is_dir():
+            continue
+        metadata = _read_session_metadata(session_path)
+        if Path(str(metadata["workspace_root"])).resolve() != resolved_workspace:
+            continue
+        turns = _read_session_turns(session_path)
+        first_request = str(turns[0]["request"]) if turns else "none"
+        summaries.append(
+            SessionSummary(
+                session_id=str(metadata["session_id"]),
+                created_at=str(metadata["created_at"]),
+                updated_at=str(metadata["updated_at"]),
+                workspace_root=resolved_workspace,
+                turn_count=int(metadata["turn_count"]),
+                first_request=first_request,
+                session_path=session_path.resolve(),
+            ),
+        )
+    return sorted(summaries, key=lambda item: item.updated_at, reverse=True)
+
+
+def find_latest_session(runs_root: Path, workspace_root: Path) -> SessionSummary | None:
+    sessions = list_sessions(runs_root, workspace_root)
+    return sessions[0] if sessions else None
 
 
 def _read_session_metadata(session_path: Path) -> dict[str, object]:

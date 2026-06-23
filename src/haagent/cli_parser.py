@@ -17,14 +17,47 @@ from haagent.cli_commands import (
     handle_export_eval,
     handle_inspect,
     handle_run,
+    handle_sessions,
+    handle_setup,
     handle_smoke,
 )
 from haagent.cli_runtime import CliRuntime
 
 
 def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="haagent", description="HaAgent runtime CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(prog="haagent", description="HaAgent local personal assistant")
+    parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        help="workspace root for the assistant session (default: current directory)",
+    )
+    parser.add_argument("--resume", help="resume a chat session by session id or session package path")
+    parser.add_argument(
+        "--continue",
+        action="store_true",
+        dest="continue_session",
+        help="resume the latest chat session for the current workspace",
+    )
+    _add_runs_root(parser, help_text="directory for assistant session packages (default: .runs)")
+    _add_model_provider(
+        parser,
+        default=None,
+        provider_help="model provider override; omit to use the active profile from haagent setup",
+    )
+    parser.set_defaults(command="chat", request=None, handler=lambda args: handle_chat(args, runtime))
+    subparsers = parser.add_subparsers(dest="command", required=False)
+
+    setup_parser = subparsers.add_parser("setup", help="configure the default model profile")
+    setup_parser.set_defaults(handler=handle_setup)
+
+    sessions_parser = subparsers.add_parser("sessions", help="list recent sessions for this workspace")
+    sessions_parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        help="workspace root to list sessions for (default: current directory)",
+    )
+    _add_runs_root(sessions_parser, help_text="directory for assistant session packages (default: .runs)")
+    sessions_parser.set_defaults(handler=handle_sessions)
 
     run_parser = subparsers.add_parser("run", help="run a task.yaml file")
     run_parser.add_argument("task_yaml", nargs="?", type=Path, help="path to task.yaml")
@@ -56,7 +89,18 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         help="workspace root for the chat request (default: current directory)",
     )
     chat_parser.add_argument("--resume", help="resume a chat session by session id or session package path")
-    _add_model_provider(chat_parser)
+    chat_parser.add_argument(
+        "--continue",
+        action="store_true",
+        dest="continue_session",
+        help="resume the latest chat session for the current workspace",
+    )
+    _add_runs_root(chat_parser, help_text="directory for assistant session packages (default: .runs)")
+    _add_model_provider(
+        chat_parser,
+        default=None,
+        provider_help="model provider override; omit to use the active profile from haagent setup",
+    )
     chat_parser.set_defaults(handler=lambda args: handle_chat(args, runtime))
 
     smoke_parser = subparsers.add_parser("smoke", help="run the minimal HaAgent smoke suite")

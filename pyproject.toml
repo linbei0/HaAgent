@@ -1,7 +1,7 @@
 [project]
 name = "haagent"
 version = "0.1.0"
-description = "Harness-first agent runtime MVP."
+description = "Local personal AI assistant runtime."
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0.0",

@@ -2,9 +2,11 @@
 
 ## Project Overview
 
-HaAgent is a local execution Agent written in Python. Its next product target is a Codex/GenericAgent-like experience: start HaAgent, talk to it in natural language, let it read files, modify files, run commands, and explain results inside a configured workspace.
+HaAgent is a local personal AI assistant written in Python. Its product target is: configure a model once, enter any local directory, run `haagent`, and talk naturally while HaAgent reads files, organizes material, edits documents, analyzes local projects, runs commands, and continues multi-turn tasks inside that directory.
 
-Harness remains important, but it should stay mostly behind the scenes. The runtime should constrain tools, record model/tool traces, write episode packages, and support inspect/eval without forcing ordinary users to understand `task.yaml`, episode internals, or eval export before using the Agent.
+HaAgent is not a Codex clone, not an IDE, and not only a code repository assistant. Code development remains one task type, but ordinary product language and default CLI flow must cover personal assistant work across local files and folders.
+
+Harness remains important, but it stays behind the scenes. The runtime should constrain tools, record model/tool traces, write episode packages, and support inspect/eval without forcing ordinary users to understand `task.yaml`, episode internals, dogfood, or eval export before using the assistant.
 
 ## Project Reference Documents
 
@@ -18,14 +20,22 @@ Before making non-trivial changes, consult the relevant project documents:
 
 Use these documents as decision inputs, not as permission to expand scope. For small mechanical edits, read only the directly relevant document. For feature, contract, runtime, context, episode, tool, provider, or CLI behavior changes, read the relevant sections before editing.
 
-The current priority is real Agent capability and experience:
+The current priority is the personal assistant startup experience:
 
-- Prefer `haagent chat` and natural-language task flow as the primary user path.
+- Prefer `haagent setup` followed by plain `haagent` as the primary user path:
+
+  ```powershell
+  uv run haagent setup
+  cd E:\some-folder
+  uv run haagent
+  ```
+
+- Keep `haagent chat` as an explicit/advanced natural-language entry point, not the only ordinary path.
 - Keep `task.yaml` for advanced reproducibility, batch tasks, smoke cases, and eval construction; do not treat it as the ordinary user entry point.
 - Do not block real task execution on harness completeness. Build the direct Agent experience first, keep harness constraints and traces intact, and fill in missing harness engineering after the experience proves useful.
-- Chat should default to the current working directory as workspace root, allow explicit `--workspace-root`, and keep file/shell tools bounded by that root.
+- Plain `haagent` and chat should default to the current working directory as workspace root, allow explicit `--workspace-root`, and keep file/shell tools bounded by that root.
 - The real task tool pack includes `file_read`, `file_write`, `apply_patch`, `shell`, and `code_run`; keep these tools atomic and workspace-bound.
-- Tasks may be analysis-only, documentation-only, code-changing, or verification-oriented. Do not assume every task must modify code or have a verification command.
+- Tasks may be file organization, document summarization, CSV inspection, draft editing, project analysis, code-changing, or verification-oriented. Do not assume every task must modify code or have a verification command.
 
 ## Document Precedence
 
@@ -49,8 +59,8 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 - Keep tests in `tests`.
 - Prefer `apply_patch` for file edits to avoid PowerShell encoding issues.
 - Do not add UI, browser automation, multi-agent behavior, or long-term memory unless explicitly requested.
-- For CLI work, prioritize the direct natural-language experience: single-shot `haagent chat "<request>"` and interactive `haagent chat`.
-- Interactive `haagent chat` is backed by `AgentSession`; keep session state and bounded summaries in runtime code, not in `cli.py`.
+- For CLI work, prioritize the direct personal assistant experience: `haagent setup`, then interactive `haagent` from any directory. Keep `haagent chat "<request>"` and interactive `haagent chat` as explicit entries.
+- Interactive `haagent` / `haagent chat` is backed by `AgentSession`; keep session state and bounded summaries in runtime code, not in `cli.py`.
 - Keep `run`, `inspect`, and `export-eval` functional, but do not optimize them ahead of the chat experience unless the task explicitly asks.
 
 ## Compatibility Policy
