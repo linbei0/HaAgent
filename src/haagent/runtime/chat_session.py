@@ -26,6 +26,13 @@ from haagent.runtime.human_interaction import (
     interaction_args_summary,
 )
 from haagent.runtime.orchestrator import RunOrchestrator
+from haagent.runtime.working_state import (
+    WorkingStateError,
+    empty_working_state,
+    load_working_state,
+    update_working_state,
+    write_working_state,
+)
 
 
 CHAT_ALLOWED_TOOLS = [
@@ -119,9 +126,11 @@ class AgentSession:
         self.session_id = session_id or _new_session_id()
         self.turn_count = 0
         self._summaries: list[str] = []
+        self._working_state = empty_working_state()
         self.session_path = self.runs_root / "sessions" / self.session_id
         self._created_at = datetime.now(UTC).isoformat()
         self._write_session_metadata()
+        self._write_working_state()
 
     @classmethod
     def resume(
@@ -144,6 +153,10 @@ class AgentSession:
         instance.session_id = str(metadata["session_id"])
         instance.turn_count = int(metadata["turn_count"])
         instance._summaries = _bounded_summaries([str(turn["summary"]) for turn in turns])
+        try:
+            instance._working_state = load_working_state(session_path / "working_state.json")
+        except WorkingStateError as error:
+            raise ChatSessionError(str(error)) from error
         instance.session_path = session_path
         instance._created_at = str(metadata["created_at"])
         return instance
@@ -202,12 +215,20 @@ class AgentSession:
                 model_gateway=self.model_gateway,
                 max_turns=self.max_turns,
                 session_summary=self.summary_text(),
+                working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
                 event_sink=on_runtime_event,
                 interaction_handler=interaction_handler,
             ).run(task_path)
 
         turn_result = self._build_turn_result(clean_prompt, result)
         self.turn_count += 1
+        self._working_state = update_working_state(
+            self._working_state,
+            prompt=clean_prompt,
+            result=turn_result,
+            runtime_events=runtime_events,
+        )
+        self._write_working_state()
         turn_summary = _turn_summary(clean_prompt, turn_result)
         self._summaries.append(turn_summary)
         self._summaries = _bounded_summaries(self._summaries)
@@ -253,15 +274,18 @@ class AgentSession:
             "workspace_root": str(self.workspace_root),
             "provider": self.provider_name,
             "turn_count": self.turn_count,
+            "working_state": self._working_state.status_summary(),
         }
 
     def new(self) -> None:
         self.session_id = _new_session_id()
         self.turn_count = 0
         self._summaries = []
+        self._working_state = empty_working_state()
         self.session_path = self.runs_root / "sessions" / self.session_id
         self._created_at = datetime.now(UTC).isoformat()
         self._write_session_metadata()
+        self._write_working_state()
 
     def summary_text(self) -> str | None:
         if not self._summaries:
@@ -371,6 +395,10 @@ class AgentSession:
         with (self.session_path / "turns.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._write_session_metadata()
+
+    def _write_working_state(self) -> None:
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        write_working_state(self.session_path / "working_state.json", self._working_state)
 
     def _write_session_metadata(self) -> None:
         self.session_path.mkdir(parents=True, exist_ok=True)

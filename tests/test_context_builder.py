@@ -200,6 +200,72 @@ def test_context_builder_includes_pending_next_step_none_source_and_budget(tmp_p
     )
 
 
+def test_context_builder_includes_bounded_working_state_source_and_budget(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    working_state = {
+        "current_goal": "Understand the project",
+        "key_findings": ["README explains setup"],
+        "completed_actions": ["Read README"],
+        "next_steps": ["Inspect tests"],
+        "last_updated_turn": 2,
+    }
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        working_state=working_state,
+    )
+
+    result = builder.build()
+
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    working_state_source = next(
+        source for source in context_manifest["sources"] if source["source_type"] == "working_state"
+    )
+    assert "Working State:" in result.model_input
+    assert "current_goal: Understand the project" in result.model_input
+    assert "- README explains setup" in result.model_input
+    assert working_state_source["name"] == "working_state"
+    assert working_state_source["budget"]["included_in_model_input"] is True
+    assert working_state_source["budget"]["model_input_char_count"] <= 1200
+    assert _has_complete_budget(working_state_source)
+
+
+def test_context_builder_truncates_long_working_state_and_excludes_trace_text(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    trace_text = '"event": "model_call" tool-calls.jsonl TRANSCRIPT_SENTINEL'
+    working_state = {
+        "current_goal": "G" * 5000,
+        "key_findings": ["safe finding", trace_text],
+        "completed_actions": ["A" * 5000],
+        "next_steps": ["N" * 5000],
+        "last_updated_turn": 9,
+    }
+    builder = ContextBuilder(
+        task=make_task(),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        working_state=working_state,
+    )
+
+    result = builder.build()
+
+    context_manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+    working_state_source = next(
+        source for source in context_manifest["sources"] if source["source_type"] == "working_state"
+    )
+    assert "Working State:" in result.model_input
+    assert len(result.model_input) <= 12000
+    assert "G" * 1000 not in result.model_input
+    assert trace_text not in result.model_input
+    assert '"event": "model_call"' not in result.model_input
+    assert "tool-calls.jsonl" not in result.model_input
+    assert working_state_source["budget"]["raw_char_count"] > working_state_source["budget"]["model_input_char_count"]
+    assert working_state_source["budget"]["truncated"] is True
+
+
 def test_context_builder_includes_project_instructions_when_agents_md_exists(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("Use concise Chinese comments.", encoding="utf-8")
     writer = make_writer(tmp_path)

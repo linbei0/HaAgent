@@ -57,6 +57,7 @@ class RunOrchestrator:
         model_gateway: ModelGateway | None = None,
         max_turns: int = 3,
         session_summary: str | None = None,
+        working_state: dict[str, object] | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         interaction_handler: HumanInteractionHandler | None = None,
     ) -> None:
@@ -64,6 +65,7 @@ class RunOrchestrator:
         self._model_gateway = model_gateway or FakeModelGateway()
         self._max_turns = max_turns
         self._session_summary = session_summary
+        self._working_state = working_state
         self._event_sink = event_sink
         self._interaction_handler = interaction_handler
 
@@ -143,6 +145,7 @@ class RunOrchestrator:
                     observations=observations,
                     final_response_requested=final_response_requested,
                     session_summary=self._session_summary,
+                    working_state=self._working_state,
                 ).build()
                 tool_schemas = [] if final_response_requested else export_tool_schemas(task.allowed_tools)
                 # 每一轮模型调用都绑定独立 context_id，便于复盘工具观察如何进入下一轮。

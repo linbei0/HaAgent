@@ -25,6 +25,11 @@ from haagent.context.observations import (
 )
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.working_state import (
+    WorkingStateError,
+    format_working_state_for_model,
+    raw_working_state_text,
+)
 from haagent.tools.registry import TOOL_REGISTRY
 
 
@@ -64,6 +69,7 @@ class ContextBuilder:
         observations: list[dict[str, object]] | None = None,
         final_response_requested: bool = False,
         session_summary: str | None = None,
+        working_state: dict[str, object] | None = None,
     ) -> None:
         self._task = task
         self._workspace_root = workspace_root
@@ -72,6 +78,7 @@ class ContextBuilder:
         self._observations = list(observations or [])
         self._final_response_requested = final_response_requested
         self._session_summary = session_summary
+        self._working_state = working_state
         self._project_instructions: str | None = None
         self._plan: dict[str, object] | None = None
 
@@ -136,6 +143,7 @@ class ContextBuilder:
                 "Project Instructions:",
                 *self._format_project_instructions(),
                 *self._format_session_summary_block(),
+                *self._format_working_state_block(),
                 "",
                 "Facts:",
                 f"goal: {self._task.goal}",
@@ -211,6 +219,15 @@ class ContextBuilder:
                     "The model needs concise prior chat context without full episode traces.",
                 ),
             )
+        if self._working_state is not None:
+            sources.append(
+                ContextSource(
+                    "working_state",
+                    "working_state",
+                    "Bounded short-term working state for the current chat session",
+                    "The model needs concise current goal, findings, progress, and next steps without full history.",
+                ),
+            )
         sources.extend(
             ContextSource(
                 "tool_catalog",
@@ -268,6 +285,8 @@ class ContextBuilder:
             return "\n".join(self._format_project_instructions())
         if source.source_type == "session_summary":
             return "\n".join(["Session Summary:", *self._format_session_summary()])
+        if source.source_type == "working_state":
+            return self._working_state_model_content()
         if source.source_type == "task":
             return _task_source_content(source.name, self._task)
         if source.source_type == "tool_workflow":
@@ -292,6 +311,8 @@ class ContextBuilder:
             return self._project_instructions or ""
         if source.source_type == "session_summary":
             return self._session_summary or ""
+        if source.source_type == "working_state":
+            return raw_working_state_text(self._working_state)
         if source.source_type == "observation":
             for observation in self._observations:
                 if observation_tool_name(observation) == source.name:
@@ -429,6 +450,20 @@ class ContextBuilder:
         if self._session_summary is None or not self._session_summary.strip():
             return ["- none"]
         return self._session_summary[:SESSION_SUMMARY_CHAR_LIMIT].splitlines()
+
+    def _format_working_state_block(self) -> list[str]:
+        if self._working_state is None:
+            return []
+        content = self._working_state_model_content()
+        if not content:
+            return []
+        return ["", *content.splitlines()]
+
+    def _working_state_model_content(self) -> str:
+        try:
+            return format_working_state_for_model(self._working_state)
+        except WorkingStateError as error:
+            raise ContextBuildError(f"invalid working_state: {error}") from error
 
     def _project_instructions_source(self) -> ContextSource:
         if self._project_instructions is None:

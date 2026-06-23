@@ -627,6 +627,12 @@ def _print_session_status(session: AgentSession) -> None:
     print(f"workspace_root={status['workspace_root']}")
     print(f"provider={status['provider']}")
     print(f"turn_count={status['turn_count']}")
+    working_state = status.get("working_state") if isinstance(status.get("working_state"), dict) else {}
+    working_state_exists = bool(working_state.get("exists"))
+    print(f"working_state={'present' if working_state_exists else 'empty'}")
+    if working_state_exists:
+        print(f"working_state_goal={_summary_value(str(working_state.get('current_goal', '')), 120)}")
+        print(f"working_state_next_steps={working_state.get('next_steps_count', 0)}")
 
 
 def _print_chat_turn_result(result: ChatTurnResult) -> None:

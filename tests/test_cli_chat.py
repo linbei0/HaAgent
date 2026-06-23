@@ -399,6 +399,31 @@ def test_agent_session_writes_session_package_and_turn_record(tmp_path: Path) ->
     ]
 
 
+def test_agent_session_writes_bounded_working_state_after_turn(tmp_path: Path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=WriteThenDoneGateway(),
+        max_turns=20,
+    )
+
+    result = session.run_prompt(
+        "write notes",
+        interaction_handler=lambda request: HumanInteractionResponse(approved=True, answer="yes"),
+    )
+
+    working_state = json.loads((session.session_path / "working_state.json").read_text(encoding="utf-8"))
+    working_state_text = json.dumps(working_state, ensure_ascii=False, sort_keys=True)
+    assert result.status == "completed"
+    assert working_state["current_goal"] == "write notes"
+    assert working_state["last_updated_turn"] == 1
+    assert working_state["completed_actions"]
+    assert working_state["next_steps"]
+    assert "SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT" not in working_state_text
+    assert '"tool_name"' not in working_state_text
+    assert '"event": "model_call"' not in working_state_text
+
+
 def test_agent_session_resume_restores_turn_count_and_bounded_summary(tmp_path: Path) -> None:
     gateway = RecordingGateway()
     session = AgentSession(
@@ -427,6 +452,30 @@ def test_agent_session_resume_restores_turn_count_and_bounded_summary(tmp_path: 
     assert second.turn_index == 2
 
 
+def test_agent_session_resume_restores_working_state_into_next_context(tmp_path: Path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=RecordingGateway(),
+        max_turns=20,
+    )
+    session.run_prompt("first")
+    resumed_gateway = RecordingGateway()
+
+    resumed = AgentSession.resume(session.session_path, model_gateway=resumed_gateway, max_turns=20)
+    second = resumed.run_prompt("second")
+
+    model_input = resumed_gateway.model_inputs[0]
+    context_manifest = json.loads(
+        (second.episode_path / "contexts" / "0001.json").read_text(encoding="utf-8"),
+    )
+    assert "Working State:" in model_input
+    assert "current_goal: first" in model_input
+    assert "tool-calls.jsonl" not in model_input
+    assert '"event": "model_call"' not in model_input
+    assert any(source["source_type"] == "working_state" for source in context_manifest["sources"])
+
+
 def test_agent_session_resume_rejects_corrupt_session_package(tmp_path: Path) -> None:
     session_path = tmp_path / ".runs" / "sessions" / "session-bad"
     session_path.mkdir(parents=True)
@@ -438,6 +487,23 @@ def test_agent_session_resume_rejects_corrupt_session_package(tmp_path: Path) ->
         assert "invalid session.json" in str(error)
     else:
         raise AssertionError("expected corrupt session package to fail explicitly")
+
+
+def test_agent_session_resume_rejects_corrupt_working_state(tmp_path: Path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=RecordingGateway(),
+        max_turns=20,
+    )
+    (session.session_path / "working_state.json").write_text("{bad json", encoding="utf-8")
+
+    try:
+        AgentSession.resume(session.session_path)
+    except ChatSessionError as error:
+        assert "invalid working_state.json" in str(error)
+    else:
+        raise AssertionError("expected corrupt working_state package to fail explicitly")
 
 
 def test_resumed_session_does_not_inject_tool_output_or_episode_trace(tmp_path: Path) -> None:
@@ -462,6 +528,26 @@ def test_resumed_session_does_not_inject_tool_output_or_episode_trace(tmp_path: 
     assert "tool-calls.jsonl" not in model_input
     assert '"tool_name"' not in model_input
     assert '"event": "model_call"' not in model_input
+
+
+def test_cli_chat_repl_status_shows_working_state_without_full_content(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "_build_run_model_gateway", lambda args: WriteThenDoneGateway())
+    inputs = iter(["Write notes", "y", ":status", ":quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    exit_code = cli.main(["chat", "--provider", "fake"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "working_state=present" in output
+    assert "working_state_goal=Write notes" in output
+    assert "working_state_next_steps=" in output
+    assert "SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT" not in output
 
 
 def test_cli_chat_resume_restores_session_state(tmp_path: Path, monkeypatch, capsys) -> None:
