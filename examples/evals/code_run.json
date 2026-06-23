@@ -1,0 +1,53 @@
+{
+  "eval_id": "builtin-code-run",
+  "workspace_root": "workspaces/code_run",
+  "task": {
+    "goal": "Run a Python check and report its exit_code.",
+    "constraints": [
+      "Use code_run for the check."
+    ],
+    "allowed_tools": [
+      "code_run"
+    ],
+    "acceptance_criteria": [
+      "The final answer includes exit_code=0."
+    ],
+    "verification_commands": [],
+    "policy": {
+      "approval_allowed_tools": [
+        "code_run"
+      ],
+      "approved_tools": [
+        "code_run"
+      ]
+    }
+  },
+  "expected_tool_uses": [
+    "code_run"
+  ],
+  "expectations": {
+    "final_status": "completed",
+    "final_response": {
+      "mode": "contains",
+      "value": "exit_code=0"
+    }
+  },
+  "model_responses": [
+    {
+      "content": "Running Python check.",
+      "tool_calls": [
+        {
+          "name": "code_run",
+          "args": {
+            "code": "print('regression ok')",
+            "timeout_seconds": 5
+          }
+        }
+      ]
+    },
+    {
+      "content": "Python check completed with exit_code=0.",
+      "tool_calls": []
+    }
+  ]
+}

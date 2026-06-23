@@ -797,8 +797,7 @@ def _handle_eval(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
         print(f"eval_report={args.output}")
-    else:
-        _print_eval_summary(report)
+    _print_eval_summary(report)
     return 0 if report["failed_count"] == 0 and report["error_count"] == 0 else 1
 
 
@@ -809,6 +808,11 @@ def _print_eval_summary(report: dict[str, Any]) -> None:
     print(f"passed={report['passed_count']}")
     print(f"failed={report['failed_count']}")
     print(f"error={report['error_count']}")
+    for result in report.get("results", []):
+        if not isinstance(result, dict) or result.get("status") == "passed":
+            continue
+        print(f"failure_case={result.get('case_path')}")
+        print(f"failure_reason={_summary_value(str(result.get('failure_reason', '')))}")
 
 
 def _handle_export_eval(

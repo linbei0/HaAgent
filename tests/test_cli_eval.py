@@ -52,7 +52,11 @@ def test_cli_eval_writes_output_report(tmp_path: Path, capsys) -> None:
     stdout = capsys.readouterr().out
     report = json.loads(output_path.read_text(encoding="utf-8"))
     assert exit_code == 0
-    assert stdout.strip() == f"eval_report={output_path}"
+    assert f"eval_report={output_path}" in stdout
+    assert "total=1" in stdout
+    assert "passed=1" in stdout
+    assert "failed=0" in stdout
+    assert "error=0" in stdout
     assert report["total_count"] == 1
     assert report["passed_count"] == 1
     assert report["results"][0]["status"] == "passed"
@@ -75,3 +79,30 @@ def test_cli_eval_stdout_summary_returns_failure_code_for_mismatch(tmp_path: Pat
     assert "passed=0" in output
     assert "failed=1" in output
     assert "error=0" in output
+    assert f"failure_case={case_path}" in output
+    assert "failure_reason=missing expected tool uses" in output
+
+
+def test_cli_eval_builtin_suite_reports_counts_and_report_path(tmp_path: Path, capsys) -> None:
+    output_path = tmp_path / "builtin-report.json"
+
+    exit_code = cli.main(
+        [
+            "eval",
+            "examples/evals",
+            "--output",
+            str(output_path),
+            "--provider",
+            "fake",
+        ],
+    )
+
+    stdout = capsys.readouterr().out
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert f"eval_report={output_path}" in stdout
+    assert "total=5" in stdout
+    assert "passed=5" in stdout
+    assert "failed=0" in stdout
+    assert "error=0" in stdout
+    assert report["total_count"] == 5

@@ -1,0 +1,55 @@
+{
+  "eval_id": "builtin-file-write",
+  "workspace_root": "workspaces/file_write",
+  "task": {
+    "goal": "Create result.txt with a completion marker and summarize the change.",
+    "constraints": [
+      "Use file_write to create the file."
+    ],
+    "allowed_tools": [
+      "file_write"
+    ],
+    "acceptance_criteria": [
+      "result.txt is written.",
+      "The final answer summarizes completion."
+    ],
+    "verification_commands": [],
+    "policy": {
+      "approval_allowed_tools": [
+        "file_write"
+      ],
+      "approved_tools": [
+        "file_write"
+      ]
+    }
+  },
+  "expected_tool_uses": [
+    "file_write"
+  ],
+  "expectations": {
+    "final_status": "completed",
+    "final_response": {
+      "mode": "contains",
+      "value": "Created result.txt"
+    }
+  },
+  "model_responses": [
+    {
+      "content": "Writing result file.",
+      "tool_calls": [
+        {
+          "name": "file_write",
+          "args": {
+            "path": "result.txt",
+            "content": "completed=true\n",
+            "mode": "overwrite"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Created result.txt with completed=true.",
+      "tool_calls": []
+    }
+  ]
+}

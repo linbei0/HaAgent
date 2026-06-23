@@ -140,3 +140,126 @@ def test_eval_runner_corrupt_case_reports_error_without_stopping_batch(tmp_path:
     assert report["passed_count"] == 1
     assert [result["status"] for result in report["results"]] == ["error", "passed"]
     assert "missing task" in report["results"][0]["failure_reason"]
+
+
+def test_builtin_eval_suite_is_discoverable_and_runs(tmp_path: Path) -> None:
+    suite_path = Path("examples/evals")
+
+    report = run_eval_path(suite_path, runs_root=tmp_path / ".eval-runs", max_turns=5)
+
+    assert report["input_path"] == str(suite_path)
+    assert report["total_count"] >= 5
+    assert report["passed_count"] == report["total_count"]
+    assert report["failed_count"] == 0
+    assert report["error_count"] == 0
+    assert {
+        "builtin-file-read",
+        "builtin-file-write",
+        "builtin-code-run",
+        "builtin-guardrail",
+        "builtin-session-working-state",
+    } <= {result["eval_id"] for result in report["results"]}
+
+
+def test_eval_runner_replays_case_model_responses(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("marker=ALPHA-42\n", encoding="utf-8")
+    case_path = tmp_path / "read.json"
+    case_path.write_text(
+        json.dumps(
+            {
+                "eval_id": "deterministic-read",
+                "workspace_root": "workspace",
+                "task": {
+                    "goal": "Read note marker",
+                    "constraints": [],
+                    "allowed_tools": ["file_read"],
+                    "acceptance_criteria": ["Answer with the marker."],
+                    "verification_commands": [],
+                },
+                "expected_tool_uses": ["file_read"],
+                "expectations": {
+                    "final_status": "completed",
+                    "final_response": {"mode": "contains", "value": "ALPHA-42"},
+                },
+                "model_responses": [
+                    {
+                        "content": "reading",
+                        "tool_calls": [{"name": "file_read", "args": {"path": "note.txt"}}],
+                    },
+                    {"content": "The marker is ALPHA-42.", "tool_calls": []},
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_eval_path(case_path, runs_root=tmp_path / ".eval-runs", max_turns=3)
+
+    result = report["results"][0]
+    assert result["status"] == "passed"
+    assert result["actual_tool_uses"] == ["file_read"]
+
+
+def test_eval_runner_reports_context_expectation_mismatch(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    case_path = tmp_path / "session.json"
+    case_path.write_text(
+        json.dumps(
+            {
+                "eval_id": "session-context-mismatch",
+                "case_type": "chat_session",
+                "workspace_root": "workspace",
+                "chat": {"prompts": ["First turn", "Second turn after resume"]},
+                "expectations": {
+                    "final_status": "completed",
+                    "final_response": {"mode": "contains", "value": "second done"},
+                    "context_contains": ["NOT_PRESENT_IN_CONTEXT"],
+                },
+                "model_responses": [
+                    {"content": "first done", "tool_calls": []},
+                    {"content": "second done", "tool_calls": []},
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_eval_path(case_path, runs_root=tmp_path / ".eval-runs", max_turns=3)
+
+    result = report["results"][0]
+    assert result["status"] == "failed"
+    assert "context missing expected text" in result["failure_reason"]
+
+
+def test_eval_runner_batch_summary_counts_failed_and_error(tmp_path: Path) -> None:
+    passing = write_eval_case(tmp_path, "passing.json")
+    failing = write_eval_case(tmp_path, "failing.json")
+    failing_case = json.loads(failing.read_text(encoding="utf-8"))
+    failing_case["expected_tool_uses"] = ["file_read"]
+    failing.write_text(json.dumps(failing_case, ensure_ascii=False), encoding="utf-8")
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{}", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "manifest_version": "1.0",
+                "records": [
+                    {"status": "success", "output_file": str(passing)},
+                    {"status": "success", "output_file": str(failing)},
+                    {"status": "success", "output_file": str(corrupt)},
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_eval_path(manifest, runs_root=tmp_path / ".eval-runs")
+
+    assert report["total_count"] == 3
+    assert report["passed_count"] == 1
+    assert report["failed_count"] == 1
+    assert report["error_count"] == 1

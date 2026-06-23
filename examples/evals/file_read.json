@@ -1,0 +1,48 @@
+{
+  "eval_id": "builtin-file-read",
+  "workspace_root": "workspaces/file_read",
+  "task": {
+    "goal": "Read docs/note.txt and answer with the project marker.",
+    "constraints": [
+      "Use file_read before answering."
+    ],
+    "allowed_tools": [
+      "file_read"
+    ],
+    "acceptance_criteria": [
+      "The final answer includes ALPHA-42."
+    ],
+    "verification_commands": [],
+    "policy": {
+      "approval_allowed_tools": [],
+      "approved_tools": []
+    }
+  },
+  "expected_tool_uses": [
+    "file_read"
+  ],
+  "expectations": {
+    "final_status": "completed",
+    "final_response": {
+      "mode": "contains",
+      "value": "ALPHA-42"
+    }
+  },
+  "model_responses": [
+    {
+      "content": "Reading the note.",
+      "tool_calls": [
+        {
+          "name": "file_read",
+          "args": {
+            "path": "docs/note.txt"
+          }
+        }
+      ]
+    },
+    {
+      "content": "The project marker is ALPHA-42.",
+      "tool_calls": []
+    }
+  ]
+}

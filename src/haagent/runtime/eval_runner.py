@@ -7,6 +7,7 @@ haagent/runtime/eval_runner.py - 本地确定性 Eval Runner
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,7 +15,8 @@ from typing import Any
 
 import yaml
 
-from haagent.models.gateway import ModelGateway
+from haagent.models.gateway import ModelGateway, ModelResponse, ToolCall
+from haagent.runtime.chat_session import AgentSession
 from haagent.runtime.episode_validator import load_inspect_episode_package
 from haagent.runtime.orchestrator import RunOrchestrator
 
@@ -65,18 +67,57 @@ def _run_single_case(
 ) -> dict[str, Any]:
     try:
         case = _read_case(case_path)
-        task = _case_task(case)
+        gateway = _case_model_gateway(case, model_gateway)
+        if case.get("case_type") == "chat_session":
+            return _run_chat_session_case(case_path, case, runs_root, gateway, max_turns)
+        _required_mapping(case, "task")
         with tempfile.TemporaryDirectory(prefix="haagent-eval-") as task_dir:
+            task_root = Path(task_dir)
+            workspace_root = _materialize_case_workspace(case_path, case, task_root / "workspace")
+            task = _case_task(case_path, case, workspace_root=workspace_root)
             task_path = Path(task_dir) / "task.yaml"
             task_path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
             run_result = RunOrchestrator(
                 runs_root=runs_root,
-                model_gateway=model_gateway,
+                model_gateway=gateway,
                 max_turns=max_turns,
             ).run(task_path)
         return _compare_case(case_path, case, run_result.episode_path, run_result.status.value)
     except Exception as error:
         return _error_result(case_path, str(error))
+
+
+def _run_chat_session_case(
+    case_path: Path,
+    case: dict[str, Any],
+    runs_root: Path,
+    model_gateway: ModelGateway | None,
+    max_turns: int,
+) -> dict[str, Any]:
+    chat = _required_mapping(case, "chat")
+    prompts = _required_str_list(chat, "prompts", "chat.prompts")
+    if not prompts:
+        raise EvalCaseError("chat.prompts must contain at least one prompt")
+    with tempfile.TemporaryDirectory(prefix="haagent-eval-chat-") as workspace_dir:
+        workspace_root = _materialize_case_workspace(case_path, case, Path(workspace_dir) / "workspace")
+        session = AgentSession(
+            workspace_root=workspace_root,
+            runs_root=runs_root,
+            model_gateway=model_gateway,
+            max_turns=max_turns,
+        )
+        result = None
+        for index, prompt in enumerate(prompts):
+            if index > 0:
+                session = AgentSession.resume(
+                    session.session_path,
+                    model_gateway=model_gateway,
+                    max_turns=max_turns,
+                )
+            result = session.run_prompt(prompt)
+    if result is None:
+        raise EvalCaseError("chat.prompts must contain at least one prompt")
+    return _compare_case(case_path, case, result.episode_path, result.status)
 
 
 def _compare_case(
@@ -105,6 +146,9 @@ def _compare_case(
         reasons.append("final response did not contain expected text")
     if failure_category_match is False:
         reasons.append("failure category did not match expected category")
+    context_expectation_reason = _context_expectation_reason(case, episode_path)
+    if context_expectation_reason is not None:
+        reasons.append(context_expectation_reason)
 
     passed = not reasons
     return {
@@ -176,11 +220,11 @@ def _is_manifest(value: dict[str, Any]) -> bool:
     return "manifest_version" in value and "records" in value
 
 
-def _case_task(case: dict[str, Any]) -> dict[str, Any]:
+def _case_task(case_path: Path, case: dict[str, Any], *, workspace_root: Path | None = None) -> dict[str, Any]:
     task = _required_mapping(case, "task")
     return {
         "goal": _required_str(task, "goal", "task.goal"),
-        "workspace_root": _required_str(case, "workspace_root", "workspace_root"),
+        "workspace_root": str(workspace_root or _case_workspace_root(case_path, case)),
         "constraints": _required_str_list(task, "constraints", "task.constraints"),
         "allowed_tools": _required_str_list(task, "allowed_tools", "task.allowed_tools"),
         "acceptance_criteria": _required_str_list(
@@ -195,6 +239,24 @@ def _case_task(case: dict[str, Any]) -> dict[str, Any]:
         ),
         "policy": _case_policy(task.get("policy")),
     }
+
+
+def _case_workspace_root(case_path: Path, case: dict[str, Any]) -> Path:
+    raw = _required_str(case, "workspace_root", "workspace_root")
+    workspace_root = Path(raw)
+    if workspace_root.is_absolute():
+        return workspace_root
+    return (case_path.parent / workspace_root).resolve()
+
+
+def _materialize_case_workspace(case_path: Path, case: dict[str, Any], target_root: Path) -> Path:
+    raw = _required_str(case, "workspace_root", "workspace_root")
+    workspace_root = Path(raw)
+    if workspace_root.is_absolute():
+        return workspace_root
+    source_root = (case_path.parent / workspace_root).resolve()
+    shutil.copytree(source_root, target_root, dirs_exist_ok=True)
+    return target_root.resolve()
 
 
 def _case_policy(value: object) -> dict[str, list[str]]:
@@ -262,6 +324,35 @@ def _failure_category_match(case: dict[str, Any], failure_record: dict[str, Any]
     return actual == expected
 
 
+def _context_expectation_reason(case: dict[str, Any], episode_path: Path) -> str | None:
+    expectations = case.get("expectations")
+    if not isinstance(expectations, dict):
+        return None
+    contains = _optional_string_list(expectations.get("context_contains"), "expectations.context_contains")
+    not_contains = _optional_string_list(expectations.get("context_not_contains"), "expectations.context_not_contains")
+    if not contains and not not_contains:
+        return None
+    context_text = _combined_context_text(episode_path)
+    missing = [text for text in contains if text not in context_text]
+    leaked = [text for text in not_contains if text in context_text]
+    reasons = []
+    if missing:
+        reasons.append(f"context missing expected text: {', '.join(missing)}")
+    if leaked:
+        reasons.append(f"context contained forbidden text: {', '.join(leaked)}")
+    return "; ".join(reasons) if reasons else None
+
+
+def _combined_context_text(episode_path: Path) -> str:
+    contexts_dir = episode_path / "contexts"
+    if not contexts_dir.exists():
+        return ""
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(contexts_dir.glob("*.txt"))
+    )
+
+
 def _last_model_response_content(transcript: list[dict[str, Any]]) -> str:
     for record in reversed(transcript):
         if record.get("event") == "model_response":
@@ -293,6 +384,67 @@ def _string_list(value: object, label: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise EvalCaseError(f"{label} must be a list of strings")
     return list(value)
+
+
+def _optional_string_list(value: object, label: str) -> list[str]:
+    if value is None:
+        return []
+    return _string_list(value, label)
+
+
+def _case_model_gateway(case: dict[str, Any], fallback: ModelGateway | None) -> ModelGateway | None:
+    responses = case.get("model_responses")
+    if responses is None:
+        return fallback
+    if fallback is not None and fallback.provider_name != "fake":
+        return fallback
+    return DeterministicEvalGateway(responses)
+
+
+class DeterministicEvalGateway:
+    provider_name = "deterministic-eval"
+
+    def __init__(self, responses: object) -> None:
+        if not isinstance(responses, list) or not responses:
+            raise EvalCaseError("model_responses must be a non-empty list")
+        self._responses = responses
+        self._index = 0
+
+    def generate(
+        self,
+        task,
+        model_input,
+        tool_schemas,
+        observations,
+    ) -> ModelResponse:
+        if self._index >= len(self._responses):
+            return ModelResponse("deterministic eval responses exhausted", [])
+        raw = self._responses[self._index]
+        self._index += 1
+        if not isinstance(raw, dict):
+            raise EvalCaseError("model_responses items must be objects")
+        content = raw.get("content", "")
+        if not isinstance(content, str):
+            raise EvalCaseError("model_responses.content must be a string")
+        tool_calls = raw.get("tool_calls", [])
+        if not isinstance(tool_calls, list):
+            raise EvalCaseError("model_responses.tool_calls must be a list")
+        return ModelResponse(
+            content=content,
+            tool_calls=[_deterministic_tool_call(item) for item in tool_calls],
+        )
+
+
+def _deterministic_tool_call(raw: object) -> ToolCall:
+    if not isinstance(raw, dict):
+        raise EvalCaseError("model_responses.tool_calls items must be objects")
+    name = raw.get("name")
+    args = raw.get("args", {})
+    if not isinstance(name, str) or not name:
+        raise EvalCaseError("model_responses.tool_calls.name must be a string")
+    if not isinstance(args, dict):
+        raise EvalCaseError("model_responses.tool_calls.args must be an object")
+    return ToolCall(name=name, args=args)
 
 
 def _error_result(case_path: Path, failure_reason: str) -> dict[str, Any]:

@@ -1,0 +1,25 @@
+{
+  "manifest_version": "1.0",
+  "records": [
+    {
+      "status": "success",
+      "output_file": "file_read.json"
+    },
+    {
+      "status": "success",
+      "output_file": "file_write.json"
+    },
+    {
+      "status": "success",
+      "output_file": "code_run.json"
+    },
+    {
+      "status": "success",
+      "output_file": "guardrail.json"
+    },
+    {
+      "status": "success",
+      "output_file": "session_working_state.json"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "eval_id": "builtin-session-working-state",
+  "case_type": "chat_session",
+  "workspace_root": "workspaces/session_working_state",
+  "chat": {
+    "prompts": [
+      "Remember that this task found the setup marker.",
+      "Continue after resume and use the bounded working state."
+    ]
+  },
+  "expectations": {
+    "final_status": "completed",
+    "final_response": {
+      "mode": "contains",
+      "value": "bounded working state"
+    },
+    "context_contains": [
+      "Working State:",
+      "current_goal:",
+      "last_updated_turn: 1"
+    ],
+    "context_not_contains": [
+      "tool-calls.jsonl",
+      "transcript.jsonl",
+      "\"tool_name\""
+    ]
+  },
+  "model_responses": [
+    {
+      "content": "First turn recorded the setup marker.",
+      "tool_calls": []
+    },
+    {
+      "content": "The resumed turn used the bounded working state.",
+      "tool_calls": []
+    }
+  ]
+}
