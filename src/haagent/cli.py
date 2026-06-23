@@ -20,7 +20,13 @@ import yaml
 from haagent.cli_inspect import EpisodeInspectError, render_episode_summary
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
 from haagent.models.provider_profile import ProviderProfile, ProviderProfileError, load_provider_profile
-from haagent.runtime.chat_session import AgentSession, CHAT_MAX_TURNS, ChatEvent, ChatTurnResult
+from haagent.runtime.chat_session import (
+    AgentSession,
+    CHAT_MAX_TURNS,
+    ChatEvent,
+    ChatSessionError,
+    ChatTurnResult,
+)
 from haagent.runtime.dogfood import render_dogfood_report, run_dogfood_tasks, skipped_dogfood_report
 from haagent.runtime.episode_validator import (
     EpisodeValidationError,
@@ -99,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace-root",
         type=Path,
         help="workspace root for the chat request (default: current directory)",
+    )
+    chat_parser.add_argument(
+        "--resume",
+        help="resume a chat session by session id or session package path",
     )
     chat_parser.add_argument(
         "--provider",
@@ -241,12 +251,24 @@ def main(argv: list[str] | None = None) -> int:
         except ProviderProfileError as error:
             print(f"error: {error}")
             return 1
-        session = AgentSession(
-            workspace_root=args.workspace_root if args.workspace_root is not None else Path.cwd(),
-            runs_root=Path(".runs"),
-            model_gateway=model_gateway,
-            max_turns=CHAT_MAX_TURNS,
-        )
+        try:
+            if args.resume is None:
+                session = AgentSession(
+                    workspace_root=args.workspace_root if args.workspace_root is not None else Path.cwd(),
+                    runs_root=Path(".runs"),
+                    model_gateway=model_gateway,
+                    max_turns=CHAT_MAX_TURNS,
+                )
+            else:
+                session = AgentSession.resume(
+                    args.resume,
+                    runs_root=Path(".runs"),
+                    model_gateway=model_gateway,
+                    max_turns=CHAT_MAX_TURNS,
+                )
+        except ChatSessionError as error:
+            print(f"error: {error}")
+            return 1
         if args.request is None:
             return _run_chat_repl(session)
         result = session.run_prompt_events(
@@ -565,6 +587,7 @@ def _run_chat_repl(session: AgentSession) -> int:
 def _print_session_status(session: AgentSession) -> None:
     status = session.status()
     print(f"session_id={status['session_id']}")
+    print(f"session_path={status['session_path']}")
     print(f"workspace_root={status['workspace_root']}")
     print(f"provider={status['provider']}")
     print(f"turn_count={status['turn_count']}")

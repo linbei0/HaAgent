@@ -12,7 +12,7 @@ import yaml
 from haagent import cli
 from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.runtime import chat_session
-from haagent.runtime.chat_session import AgentSession
+from haagent.runtime.chat_session import AgentSession, ChatSessionError
 from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.task_contract import load_task
 
@@ -288,6 +288,7 @@ def test_cli_chat_repl_status_reports_session_state(
     assert "provider=fake" in output
     assert "turn_count=0" in output
     assert "session_id=" in output
+    assert f"session_path={tmp_path.resolve() / '.runs' / 'sessions'}" in output
 
 
 def test_cli_chat_repl_new_resets_turn_count_and_summary(
@@ -319,7 +320,10 @@ def test_cli_chat_repl_empty_input_does_not_run_task(
     exit_code = cli.main(["chat", "--provider", "fake"])
 
     assert exit_code == 0
-    assert not (tmp_path / ".runs").exists()
+    session_dirs = list((tmp_path / ".runs" / "sessions").glob("session-*"))
+    assert len(session_dirs) == 1
+    assert not (session_dirs[0] / "turns.jsonl").exists()
+    assert not any(path.name != "sessions" for path in (tmp_path / ".runs").iterdir())
 
 
 def test_cli_chat_single_prompt_still_runs_once(
@@ -354,6 +358,126 @@ def test_agent_session_chat_default_tools_include_context_find(tmp_path: Path) -
     assert "context_find" in gateway.tool_schema_names[0]
     task = load_task(result.episode_path / "task.yaml")
     assert "context_find" in task.allowed_tools
+
+
+def test_agent_session_writes_session_package_and_turn_record(tmp_path: Path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=RecordingGateway(),
+        max_turns=20,
+    )
+
+    result = session.run_prompt_events("describe greeting code")
+
+    session_json = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
+    turns = [
+        json.loads(line)
+        for line in (session.session_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert session.session_path == tmp_path / ".runs" / "sessions" / result.session_id
+    assert session_json["session_id"] == result.session_id
+    assert session_json["workspace_root"] == str(tmp_path.resolve())
+    assert session_json["provider"] == "recording"
+    assert session_json["turn_count"] == 1
+    assert turns == [
+        {
+            "turn_index": 1,
+            "request": "describe greeting code",
+            "summary": session.summary_text(),
+            "status": "completed",
+            "episode_path": str(result.episode_path),
+            "verification_status": "not_run",
+        },
+    ]
+
+
+def test_agent_session_resume_restores_turn_count_and_bounded_summary(tmp_path: Path) -> None:
+    gateway = RecordingGateway()
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+        max_turns=20,
+    )
+    first = session.run_prompt("first")
+    session_path = session.session_path
+    resumed_gateway = RecordingGateway()
+
+    resumed = AgentSession.resume(
+        session_path,
+        model_gateway=resumed_gateway,
+        max_turns=20,
+    )
+    second = resumed.run_prompt("second")
+
+    assert resumed.turn_count == 2
+    assert resumed.session_id == session.session_id
+    assert resumed.workspace_root == tmp_path.resolve()
+    assert "Session Summary:" in resumed_gateway.model_inputs[0]
+    assert str(first.episode_path) in resumed_gateway.model_inputs[0]
+    assert "tool-calls.jsonl" not in resumed_gateway.model_inputs[0]
+    assert second.turn_index == 2
+
+
+def test_agent_session_resume_rejects_corrupt_session_package(tmp_path: Path) -> None:
+    session_path = tmp_path / ".runs" / "sessions" / "session-bad"
+    session_path.mkdir(parents=True)
+    (session_path / "session.json").write_text("{not json", encoding="utf-8")
+
+    try:
+        AgentSession.resume(session_path)
+    except ChatSessionError as error:
+        assert "invalid session.json" in str(error)
+    else:
+        raise AssertionError("expected corrupt session package to fail explicitly")
+
+
+def test_resumed_session_does_not_inject_tool_output_or_episode_trace(tmp_path: Path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=WriteThenDoneGateway(),
+        max_turns=20,
+    )
+    session.run_prompt(
+        "write notes",
+        interaction_handler=lambda request: HumanInteractionResponse(approved=True, answer="yes"),
+    )
+    resumed_gateway = RecordingGateway()
+
+    resumed = AgentSession.resume(session.session_path, model_gateway=resumed_gateway, max_turns=20)
+    resumed.run_prompt("second")
+
+    model_input = resumed_gateway.model_inputs[0]
+    assert "Session Summary:" in model_input
+    assert "SECRET_WRITE_CONTENT_SHOULD_NOT_PRINT" not in model_input
+    assert "tool-calls.jsonl" not in model_input
+    assert '"tool_name"' not in model_input
+    assert '"event": "model_call"' not in model_input
+
+
+def test_cli_chat_resume_restores_session_state(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    gateway = RecordingGateway()
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+        max_turns=20,
+    )
+    session.run_prompt("first")
+    monkeypatch.setattr(cli, "_build_run_model_gateway", lambda args: RecordingGateway())
+    inputs = iter([":status", ":quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    exit_code = cli.main(["chat", "--resume", session.session_id, "--provider", "fake"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"session_id={session.session_id}" in output
+    assert "turn_count=1" in output
+    assert f"session_path={session.session_path}" in output
 
 
 def test_agent_session_summary_reports_successful_verification(tmp_path: Path, monkeypatch) -> None:

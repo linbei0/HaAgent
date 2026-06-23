@@ -6,9 +6,11 @@ haagent/runtime/chat_session.py - 自然语言 Agent 会话
 
 from __future__ import annotations
 
+import json
 import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -41,6 +43,10 @@ CHAT_ALLOWED_TOOLS = [
 CHAT_APPROVED_TOOLS = ["file_write", "code_run", "apply_patch", "apply_patch_set", "shell"]
 CHAT_MAX_TURNS = 20
 SESSION_SUMMARY_CHAR_LIMIT = 1000
+
+
+class ChatSessionError(RuntimeError):
+    """Chat session package 损坏或无法恢复时抛出。"""
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,34 @@ class AgentSession:
         self.session_id = session_id or _new_session_id()
         self.turn_count = 0
         self._summaries: list[str] = []
+        self.session_path = self.runs_root / "sessions" / self.session_id
+        self._created_at = datetime.now(UTC).isoformat()
+        self._write_session_metadata()
+
+    @classmethod
+    def resume(
+        cls,
+        session: str | Path,
+        *,
+        runs_root: Path | None = None,
+        model_gateway: ModelGateway | None = None,
+        max_turns: int = CHAT_MAX_TURNS,
+    ) -> "AgentSession":
+        session_path = _resolve_session_path(session, runs_root or Path(".runs"))
+        metadata = _read_session_metadata(session_path)
+        turns = _read_session_turns(session_path)
+
+        instance = cls.__new__(cls)
+        instance.workspace_root = Path(str(metadata["workspace_root"])).resolve()
+        instance.runs_root = session_path.parent.parent
+        instance.model_gateway = model_gateway
+        instance.max_turns = max_turns
+        instance.session_id = str(metadata["session_id"])
+        instance.turn_count = int(metadata["turn_count"])
+        instance._summaries = _bounded_summaries([str(turn["summary"]) for turn in turns])
+        instance.session_path = session_path
+        instance._created_at = str(metadata["created_at"])
+        return instance
 
     @property
     def provider_name(self) -> str:
@@ -174,8 +208,10 @@ class AgentSession:
 
         turn_result = self._build_turn_result(clean_prompt, result)
         self.turn_count += 1
-        self._summaries.append(_turn_summary(clean_prompt, turn_result))
+        turn_summary = _turn_summary(clean_prompt, turn_result)
+        self._summaries.append(turn_summary)
         self._summaries = _bounded_summaries(self._summaries)
+        self._record_turn(clean_prompt, turn_result, turn_summary)
         if turn_result.status != "completed":
             self._emit_chat_event(
                 event_sink,
@@ -213,6 +249,7 @@ class AgentSession:
     def status(self) -> dict[str, object]:
         return {
             "session_id": self.session_id,
+            "session_path": str(self.session_path.resolve()),
             "workspace_root": str(self.workspace_root),
             "provider": self.provider_name,
             "turn_count": self.turn_count,
@@ -222,6 +259,9 @@ class AgentSession:
         self.session_id = _new_session_id()
         self.turn_count = 0
         self._summaries = []
+        self.session_path = self.runs_root / "sessions" / self.session_id
+        self._created_at = datetime.now(UTC).isoformat()
+        self._write_session_metadata()
 
     def summary_text(self) -> str | None:
         if not self._summaries:
@@ -316,6 +356,44 @@ class AgentSession:
             failed_stage=str(failure.get("stage", "none")),
             failure_category=str(failure.get("category", "none")),
             reason=str(failure.get("evidence", "none")),
+        )
+
+    def _record_turn(self, prompt: str, result: ChatTurnResult, summary: str) -> None:
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        record = {
+            "turn_index": result.turn_index,
+            "request": _summary_value(prompt, 300),
+            "summary": summary,
+            "status": result.status,
+            "episode_path": str(result.episode_path),
+            "verification_status": result.verification_status,
+        }
+        with (self.session_path / "turns.jsonl").open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._write_session_metadata()
+
+    def _write_session_metadata(self) -> None:
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        metadata_path = self.session_path / "session.json"
+        created_at = self._created_at
+        if metadata_path.exists():
+            try:
+                existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                existing = {}
+            if isinstance(existing, dict) and isinstance(existing.get("created_at"), str):
+                created_at = str(existing["created_at"])
+        metadata = {
+            "session_id": self.session_id,
+            "workspace_root": str(self.workspace_root),
+            "provider": self.provider_name,
+            "created_at": created_at,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "turn_count": self.turn_count,
+        }
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
 
 
@@ -521,6 +599,63 @@ def _summary_value(value: str, limit: int = 300) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit] + "... [truncated]"
+
+
+def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:
+    raw = Path(session)
+    if raw.is_absolute() or raw.exists() or raw.name != str(session):
+        return raw.resolve()
+    return (runs_root / "sessions" / str(session)).resolve()
+
+
+def _read_session_metadata(session_path: Path) -> dict[str, object]:
+    metadata_path = session_path / "session.json"
+    if not metadata_path.exists():
+        raise ChatSessionError(f"session package missing required file: {metadata_path}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ChatSessionError(f"invalid session.json: {metadata_path}") from error
+    if not isinstance(metadata, dict):
+        raise ChatSessionError(f"invalid session.json: {metadata_path} must contain an object")
+    required_fields = ["session_id", "workspace_root", "provider", "created_at", "updated_at", "turn_count"]
+    for field_name in required_fields:
+        if field_name not in metadata:
+            raise ChatSessionError(f"invalid session.json: missing {field_name}")
+    for field_name in ["session_id", "workspace_root", "provider", "created_at", "updated_at"]:
+        if not isinstance(metadata[field_name], str):
+            raise ChatSessionError(f"invalid session.json: {field_name} must be a string")
+    if not isinstance(metadata["turn_count"], int) or isinstance(metadata["turn_count"], bool):
+        raise ChatSessionError("invalid session.json: turn_count must be an integer")
+    if str(metadata["session_id"]) != session_path.name:
+        raise ChatSessionError("invalid session.json: session_id does not match session path")
+    return metadata
+
+
+def _read_session_turns(session_path: Path) -> list[dict[str, object]]:
+    turns_path = session_path / "turns.jsonl"
+    if not turns_path.exists():
+        return []
+    turns: list[dict[str, object]] = []
+    for index, line in enumerate(turns_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ChatSessionError(f"invalid turns.jsonl line {index}") from error
+        if not isinstance(record, dict):
+            raise ChatSessionError(f"invalid turns.jsonl line {index}: must contain an object")
+        for field_name in ["turn_index", "request", "summary", "status", "episode_path", "verification_status"]:
+            if field_name not in record:
+                raise ChatSessionError(f"invalid turns.jsonl line {index}: missing {field_name}")
+        if not isinstance(record["turn_index"], int) or isinstance(record["turn_index"], bool):
+            raise ChatSessionError(f"invalid turns.jsonl line {index}: turn_index must be an integer")
+        for field_name in ["request", "summary", "status", "episode_path", "verification_status"]:
+            if not isinstance(record[field_name], str):
+                raise ChatSessionError(f"invalid turns.jsonl line {index}: {field_name} must be a string")
+        turns.append(record)
+    return turns
 
 
 def _new_session_id() -> str:
