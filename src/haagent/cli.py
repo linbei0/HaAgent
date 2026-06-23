@@ -33,6 +33,7 @@ from haagent.runtime.episode_validator import (
     load_inspect_episode_package,
 )
 from haagent.runtime.eval_export import export_eval_case
+from haagent.runtime.eval_runner import EvalRunnerError, run_eval_path
 from haagent.runtime.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
@@ -208,6 +209,38 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="write one eval case JSON file per episode into this existing directory",
     )
+
+    eval_parser = subparsers.add_parser("eval", help="run exported eval case JSON locally")
+    eval_parser.add_argument("eval_path", type=Path, help="eval case JSON, directory, or batch manifest")
+    eval_parser.add_argument(
+        "--output",
+        type=Path,
+        help="write eval report JSON to this file instead of only printing a summary",
+    )
+    eval_parser.add_argument(
+        "--runs-root",
+        type=Path,
+        default=Path(".runs"),
+        help="directory for eval run episode packages (default: .runs)",
+    )
+    eval_parser.add_argument(
+        "--provider",
+        choices=["fake", "openai", "openai-chat"],
+        default="fake",
+        help="model provider to use (default: fake)",
+    )
+    eval_parser.add_argument(
+        "--profile",
+        help="provider profile name from .haagent/providers.json",
+    )
+    eval_parser.add_argument(
+        "--model",
+        help="OpenAI model name; only used when --provider openai",
+    )
+    eval_parser.add_argument(
+        "--base-url",
+        help="OpenAI-compatible Responses API base URL; only used when --provider openai",
+    )
     return parser
 
 
@@ -296,6 +329,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "export-eval":
         return _handle_export_eval(args.episode_paths, args.output, args.output_dir)
+
+    if args.command == "eval":
+        return _handle_eval(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2
@@ -732,6 +768,41 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("--max-turns must be a positive integer")
     return parsed
+
+
+def _handle_eval(args: argparse.Namespace) -> int:
+    try:
+        model_gateway = _build_run_model_gateway(args)
+        report = run_eval_path(
+            args.eval_path,
+            runs_root=args.runs_root,
+            model_gateway=model_gateway,
+        )
+    except (ProviderProfileError, EvalRunnerError) as error:
+        print(f"error: {error}")
+        return 1
+
+    if args.output is not None:
+        if not args.output.parent.exists():
+            print(f"error: output parent directory does not exist: {args.output.parent}")
+            return 1
+        args.output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"eval_report={args.output}")
+    else:
+        _print_eval_summary(report)
+    return 0 if report["failed_count"] == 0 and report["error_count"] == 0 else 1
+
+
+def _print_eval_summary(report: dict[str, Any]) -> None:
+    status = "passed" if report["failed_count"] == 0 and report["error_count"] == 0 else "failed"
+    print(f"status={status}")
+    print(f"total={report['total_count']}")
+    print(f"passed={report['passed_count']}")
+    print(f"failed={report['failed_count']}")
+    print(f"error={report['error_count']}")
 
 
 def _handle_export_eval(

@@ -30,11 +30,16 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "episode_version": episode_metadata["episode_version"],
         "task": {
             "goal": task.goal,
+            "constraints": task.constraints,
+            "allowed_tools": task.allowed_tools,
             "acceptance_criteria": task.acceptance_criteria,
             "verification_commands": task.verification_commands,
+            "policy": task.policy,
         },
         "workspace_root": episode_metadata["workspace_root"],
         "final_status": episode_metadata["status"],
+        "expected_tool_uses": _tool_names_used(package_view.tool_calls),
+        "expectations": _expectations_summary(episode_metadata, failure_record, package_view.transcript),
         "failure": _failure_summary(failure_record),
         "verification": _verification_summary(package_view.verification_commands),
         "sandbox_summary": _sandbox_summary(package_view.sandbox),
@@ -44,6 +49,23 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "human_interactions": _human_interactions_summary(package_view.transcript),
         "final_response": _final_response_summary(package_view.transcript),
         "next_actions": _next_actions_summary(episode_path, package_view.context_manifest),
+    }
+
+
+def _expectations_summary(
+    episode_metadata: dict[str, Any],
+    failure_record: dict[str, Any],
+    transcript: list[dict[str, Any]],
+) -> dict[str, Any]:
+    final_response = _final_response_summary(transcript)
+    failure = _failure_summary(failure_record)
+    return {
+        "final_status": episode_metadata["status"],
+        "failure_category": failure["category"] if failure else None,
+        "final_response": {
+            "mode": "contains",
+            "value": final_response["content"] if final_response else "",
+        },
     }
 
 

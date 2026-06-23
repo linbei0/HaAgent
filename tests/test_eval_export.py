@@ -84,10 +84,22 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     assert eval_case["eval_case_version"] == EVAL_CASE_VERSION
     assert eval_case["episode_version"] == "1.0"
     assert eval_case["task"]["goal"] == "Export eval case"
+    assert eval_case["task"]["constraints"] == ["Keep export deterministic"]
+    assert eval_case["task"]["allowed_tools"] == ["fake_tool"]
     assert eval_case["task"]["acceptance_criteria"] == ["Eval case contains task facts"]
     assert eval_case["task"]["verification_commands"] == []
+    assert eval_case["task"]["policy"] == {"approval_allowed_tools": [], "approved_tools": []}
     assert eval_case["workspace_root"] == str(tmp_path.resolve())
     assert eval_case["final_status"] == "completed"
+    assert eval_case["expected_tool_uses"] == ["fake_tool"]
+    assert eval_case["expectations"] == {
+        "final_status": "completed",
+        "failure_category": None,
+        "final_response": {
+            "mode": "contains",
+            "value": "Fake model observed tool results.",
+        },
+    }
     assert eval_case["failure"] is None
     assert eval_case["verification"] == []
     assert eval_case["tool_names_used"] == ["fake_tool"]
