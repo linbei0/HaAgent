@@ -19,6 +19,7 @@ from haagent.models.gateway import (
     OpenAIResponsesGateway,
     ToolCall,
 )
+from haagent.models.credentials import FakeCredentialStore, save_insecure_api_key
 from haagent.models.provider_profile import ProviderProfileError, load_provider_profile
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.task_contract import TaskSpec
@@ -146,6 +147,75 @@ def test_provider_profile_loads_named_profile_and_api_key_env(tmp_path: Path) ->
     assert profile.api_key == "secret-key"
 
 
+def test_provider_profile_loads_api_key_from_keyring_when_env_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / ".haagent" / "providers.json"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                        "credential_source": "keyring",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_provider_profile(
+        "deepseek",
+        config_path=config_path,
+        environ={},
+        credential_store=FakeCredentialStore({"profile:deepseek": "keyring-secret"}),
+    )
+
+    assert profile.api_key == "keyring-secret"
+    assert profile.credential_source == "keyring"
+    assert profile.credential_source_used == "keyring"
+
+
+def test_provider_profile_loads_api_key_from_explicit_insecure_file(tmp_path: Path) -> None:
+    config_dir = tmp_path / ".haagent"
+    config_path = config_dir / "providers.json"
+    config_dir.mkdir()
+    config_path.write_text(
+        json.dumps(
+            {
+                "profiles": [
+                    {
+                        "name": "deepseek",
+                        "provider": "openai-chat",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-pro",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                        "credential_source": "insecure_file",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    save_insecure_api_key("deepseek", "plain-secret", config_dir=config_dir)
+
+    profile = load_provider_profile(
+        "deepseek",
+        config_path=config_path,
+        environ={},
+        credential_store=FakeCredentialStore({}),
+        config_dir=config_dir,
+    )
+
+    assert profile.api_key == "plain-secret"
+    assert profile.credential_source == "insecure_file"
+    assert profile.credential_source_used == "insecure_file"
+
+
 def test_provider_profile_missing_name_fails_explicitly(tmp_path: Path) -> None:
     config_path = tmp_path / ".haagent" / "providers.json"
     config_path.parent.mkdir()
@@ -170,7 +240,7 @@ def test_provider_profile_missing_name_fails_explicitly(tmp_path: Path) -> None:
         load_provider_profile("deepseek", config_path=config_path, environ={"OPENAI_API_KEY": "key"})
 
 
-def test_provider_profile_missing_api_key_env_fails_explicitly(tmp_path: Path) -> None:
+def test_provider_profile_missing_api_key_fails_explicitly(tmp_path: Path) -> None:
     config_path = tmp_path / ".haagent" / "providers.json"
     config_path.parent.mkdir()
     config_path.write_text(
@@ -190,8 +260,13 @@ def test_provider_profile_missing_api_key_env_fails_explicitly(tmp_path: Path) -
         encoding="utf-8",
     )
 
-    with pytest.raises(ProviderProfileError, match="api key environment variable is not set: DEEPSEEK_API_KEY"):
-        load_provider_profile("deepseek", config_path=config_path, environ={})
+    with pytest.raises(ProviderProfileError, match="API key is not available"):
+        load_provider_profile(
+            "deepseek",
+            config_path=config_path,
+            environ={},
+            credential_store=FakeCredentialStore({}),
+        )
 
 
 def test_openai_gateway_uses_unified_response_shape() -> None:

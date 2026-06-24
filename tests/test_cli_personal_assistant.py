@@ -10,7 +10,9 @@ import json
 from pathlib import Path
 
 from haagent import cli
+from haagent.models.credentials import FakeCredentialStore
 from haagent.models.gateway import ModelResponse
+from haagent.models import provider_profile
 from haagent.runtime.chat_session import AgentSession
 from haagent.runtime.task_contract import load_task
 
@@ -55,6 +57,7 @@ def _write_user_profile(home: Path, *, api_key_env: str = "CHAT_SECRET") -> None
                         "base_url": "https://api.example/v1",
                         "model": "chat-test",
                         "api_key_env": api_key_env,
+                        "credential_source": "keyring",
                     },
                 ],
             },
@@ -67,8 +70,10 @@ def _write_user_profile(home: Path, *, api_key_env: str = "CHAT_SECRET") -> None
     )
 
 
-def test_setup_writes_user_level_provider_and_settings(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_setup_writes_user_level_provider_settings_and_keyring_secret(tmp_path: Path, monkeypatch, capsys) -> None:
     _set_home(monkeypatch, tmp_path)
+    store = FakeCredentialStore({})
+    monkeypatch.setattr(provider_profile, "DEFAULT_CREDENTIAL_STORE", store)
     answers = iter(
         [
             "local",
@@ -76,9 +81,11 @@ def test_setup_writes_user_level_provider_and_settings(tmp_path: Path, monkeypat
             "https://api.example/v1",
             "chat-test",
             "CHAT_SECRET",
+            "",
         ],
     )
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "sk-setup-secret")
 
     exit_code = cli.main(["setup"])
 
@@ -94,12 +101,67 @@ def test_setup_writes_user_level_provider_and_settings(tmp_path: Path, monkeypat
                 "base_url": "https://api.example/v1",
                 "model": "chat-test",
                 "api_key_env": "CHAT_SECRET",
+                "credential_source": "keyring",
             },
         ],
     }
     assert settings == {"active_profile": "local"}
     assert "sk-" not in json.dumps(providers, ensure_ascii=False)
+    assert store.get_password("haagent", "profile:local") == "sk-setup-secret"
     assert "active_profile=local" in output
+    assert "keyring" in output
+
+
+def test_setup_keyring_failure_does_not_write_insecure_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    _set_home(monkeypatch, tmp_path)
+    store = FakeCredentialStore(available=False, error="backend unavailable")
+    monkeypatch.setattr(provider_profile, "DEFAULT_CREDENTIAL_STORE", store)
+    answers = iter(
+        [
+            "local",
+            "openai-chat",
+            "https://api.example/v1",
+            "chat-test",
+            "CHAT_SECRET",
+            "",
+        ],
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "sk-setup-secret")
+
+    exit_code = cli.main(["setup"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "backend unavailable" in output
+    assert not (tmp_path / ".haagent" / "insecure_credentials.json").exists()
+
+
+def test_setup_insecure_file_requires_explicit_choice(tmp_path: Path, monkeypatch, capsys) -> None:
+    _set_home(monkeypatch, tmp_path)
+    answers = iter(
+        [
+            "local",
+            "openai-chat",
+            "https://api.example/v1",
+            "chat-test",
+            "CHAT_SECRET",
+            "insecure_file",
+        ],
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "sk-plain-secret")
+
+    exit_code = cli.main(["setup"])
+
+    providers = json.loads((tmp_path / ".haagent" / "providers.json").read_text(encoding="utf-8"))
+    insecure_file = (tmp_path / ".haagent" / "insecure_credentials.json").read_text(encoding="utf-8")
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert providers["profiles"][0]["credential_source"] == "insecure_file"
+    assert "sk-plain-secret" not in json.dumps(providers, ensure_ascii=False)
+    assert "sk-plain-secret" in insecure_file
+    assert "明文" in output
 
 
 def test_chat_uses_active_user_profile_by_default(

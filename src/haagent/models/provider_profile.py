@@ -1,16 +1,24 @@
 """
 haagent/models/provider_profile.py - 用户级模型连接配置
 
-读取和写入 HaAgent provider profile，只通过 api_key_env 指定的环境变量解析密钥。
+读取和写入 HaAgent provider profile，并通过凭据层解析真实 API key。
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+
+from haagent.models.credentials import (
+    CredentialError,
+    CredentialRecord,
+    CredentialStore,
+    KeyringCredentialStore,
+    credential_status,
+    resolve_api_key,
+)
 
 
 DEFAULT_PROVIDER_PROFILE_PATH = Path(".haagent") / "providers.json"
@@ -18,6 +26,8 @@ USER_CONFIG_DIR_NAME = ".haagent"
 USER_PROVIDERS_FILE = "providers.json"
 USER_SETTINGS_FILE = "settings.json"
 SUPPORTED_PROFILE_PROVIDERS = {"openai", "openai-chat"}
+DEFAULT_CREDENTIAL_SOURCE = "keyring"
+DEFAULT_CREDENTIAL_STORE: CredentialStore = KeyringCredentialStore()
 
 
 class ProviderProfileError(RuntimeError):
@@ -31,6 +41,8 @@ class ProviderProfile:
     base_url: str
     model: str
     api_key_env: str
+    credential_source: str
+    credential_source_used: str
     api_key: str = field(repr=False)
 
 
@@ -41,6 +53,7 @@ class ProviderProfileRecord:
     base_url: str
     model: str
     api_key_env: str
+    credential_source: str = DEFAULT_CREDENTIAL_SOURCE
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -49,6 +62,7 @@ class ProviderProfileRecord:
             "base_url": self.base_url,
             "model": self.model,
             "api_key_env": self.api_key_env,
+            "credential_source": self.credential_source,
         }
 
 
@@ -69,21 +83,40 @@ def load_provider_profile(
     *,
     config_path: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    credential_store: CredentialStore | None = None,
+    config_dir: Path | None = None,
 ) -> ProviderProfile:
-    """按名称读取 provider profile，并从指定环境变量解析 API key。"""
+    """按名称读取 provider profile，并按凭据优先级解析 API key。"""
     record = _load_profile_record(name, config_path=config_path)
     api_key_env = _required_string(record, "api_key_env")
-    environment = os.environ if environ is None else environ
-    api_key = environment.get(api_key_env)
-    if not api_key:
-        raise ProviderProfileError(f"api key environment variable is not set: {api_key_env}")
+    credential_source = _credential_source(record)
+    try:
+        resolved = resolve_api_key(
+            CredentialRecord(
+                profile_name=_required_string(record, "name"),
+                api_key_env=api_key_env,
+                credential_source=credential_source,
+            ),
+            environ=environ,
+            credential_store=credential_store or DEFAULT_CREDENTIAL_STORE,
+            config_dir=config_dir or _config_dir_for(config_path),
+        )
+    except CredentialError as error:
+        raise ProviderProfileError(str(error)) from error
+    if not resolved.api_key:
+        detail = resolved.credential_store_error or f"configured source: {credential_source}"
+        raise ProviderProfileError(
+            f"API key is not available for profile {name}: {detail}; api_key_env={api_key_env}",
+        )
     return ProviderProfile(
         name=_required_string(record, "name"),
         provider=_required_provider(record),
         base_url=_required_string(record, "base_url"),
         model=_required_string(record, "model"),
         api_key_env=api_key_env,
-        api_key=api_key,
+        credential_source=credential_source,
+        credential_source_used=resolved.credential_source_used or "",
+        api_key=resolved.api_key,
     )
 
 
@@ -100,18 +133,22 @@ def load_provider_profile_record(
         base_url=_required_string(record, "base_url"),
         model=_required_string(record, "model"),
         api_key_env=_required_string(record, "api_key_env"),
+        credential_source=_credential_source(record),
     )
 
 
 def load_active_provider_profile(
     *,
     environ: Mapping[str, str] | None = None,
+    credential_store: CredentialStore | None = None,
 ) -> ProviderProfile:
     """读取用户级 active profile，并解析对应 API key。"""
     return load_provider_profile(
         load_active_profile_name(),
         config_path=user_provider_profile_path(),
         environ=environ,
+        credential_store=credential_store,
+        config_dir=user_config_dir(),
     )
 
 
@@ -121,6 +158,28 @@ def load_active_provider_profile_record() -> ProviderProfileRecord:
         load_active_profile_name(),
         config_path=user_provider_profile_path(),
     )
+
+
+def active_provider_credential_status(
+    *,
+    environ: Mapping[str, str] | None = None,
+    credential_store: CredentialStore | None = None,
+):
+    """读取 active profile 的非敏感凭据状态。"""
+    record = load_active_provider_profile_record()
+    try:
+        return credential_status(
+            CredentialRecord(
+                profile_name=record.name,
+                api_key_env=record.api_key_env,
+                credential_source=record.credential_source,
+            ),
+            environ=environ,
+            credential_store=credential_store or DEFAULT_CREDENTIAL_STORE,
+            config_dir=user_config_dir(),
+        )
+    except CredentialError as error:
+        raise ProviderProfileError(str(error)) from error
 
 
 def load_active_profile_name(*, settings_path: Path | None = None) -> str:
@@ -228,6 +287,7 @@ def _validate_profile_record(record: dict[str, object]) -> None:
     _required_string(record, "base_url")
     _required_string(record, "model")
     _required_string(record, "api_key_env")
+    _credential_source(record)
     if "api_key" in record:
         raise ProviderProfileError("provider profile must not contain api_key")
 
@@ -245,3 +305,18 @@ def _write_json(path: Path, value: dict[str, object]) -> None:
 
 def _setup_required_message() -> str:
     return "未找到默认模型配置，请先运行 haagent setup"
+
+
+def _credential_source(record: dict[str, object]) -> str:
+    value = record.get("credential_source", DEFAULT_CREDENTIAL_SOURCE)
+    if not isinstance(value, str) or not value.strip():
+        raise ProviderProfileError("provider profile field is required: credential_source")
+    if value not in {"env", "keyring", "insecure_file"}:
+        raise ProviderProfileError(f"unsupported credential_source in profile: {value}")
+    return value
+
+
+def _config_dir_for(config_path: Path | None) -> Path:
+    if config_path is None:
+        return user_config_dir()
+    return config_path.parent

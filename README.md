@@ -14,12 +14,12 @@ uv run haagent
 
 `haagent setup` 会写入用户级模型连接配置：
 
-- `~/.haagent/providers.json`: profile 列表，保存 `name`、`provider`、`base_url`、`model`、`api_key_env`。
+- `~/.haagent/providers.json`: profile 列表，保存 `name`、`provider`、`base_url`、`model`、`api_key_env`、`credential_source`。
 - `~/.haagent/settings.json`: 当前默认 profile。
 
 Profile 是“模型连接配置”。`provider` 支持 OpenAI Responses-compatible 的 `openai`，以及 OpenAI Chat Completions-compatible 的 `openai-chat`；`base_url` 填对应兼容 endpoint 的基础地址。
 
-真实 API key 不写入 HaAgent 配置、项目目录、episode、transcript 或会话摘要。请把真实密钥放在 `api_key_env` 指向的环境变量中。
+真实 API key 默认保存到系统凭据库（Windows Credential Manager、macOS Keychain、Linux Secret Service/keyring），跨终端可用。`api_key_env` 指向的环境变量始终优先，可用于 CI 或临时覆盖；明文用户文件只在显式选择 `insecure_file` 时启用。真实 API key 不写入 HaAgent profile、settings、项目目录、episode、transcript 或会话摘要。
 
 ## 日常使用
 

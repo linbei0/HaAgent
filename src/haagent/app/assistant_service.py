@@ -19,6 +19,7 @@ from haagent.models.gateway import (
 from haagent.models.provider_profile import (
     ProviderProfile,
     ProviderProfileError,
+    active_provider_credential_status,
     load_active_provider_profile,
     load_active_provider_profile_record,
 )
@@ -53,6 +54,10 @@ class AssistantWorkspaceStatus:
     model: str | None
     api_key_env: str | None
     api_key_available: bool
+    credential_source_configured: str | None = None
+    credential_source_used: str | None = None
+    credential_store_available: bool | None = None
+    credential_store_error: str | None = None
     profile_error: str | None = None
     current_session_id: str | None = None
     current_turn_count: int | None = None
@@ -105,6 +110,10 @@ class AssistantService:
         model: str | None = None
         api_key_env: str | None = None
         api_key_available = False
+        credential_source_configured: str | None = None
+        credential_source_used: str | None = None
+        credential_store_available: bool | None = None
+        credential_store_error: str | None = None
         profile_error: str | None = None
         try:
             record = load_active_provider_profile_record()
@@ -113,7 +122,12 @@ class AssistantService:
             base_url = record.base_url
             model = record.model
             api_key_env = record.api_key_env
-            api_key_available = bool(self.environ.get(record.api_key_env))
+            credential = active_provider_credential_status(environ=self.environ)
+            api_key_available = credential.api_key_available
+            credential_source_configured = credential.credential_source_configured
+            credential_source_used = credential.credential_source_used
+            credential_store_available = credential.credential_store_available
+            credential_store_error = credential.credential_store_error
         except ProviderProfileError as error:
             profile_error = str(error)
         session_status = self.current_session()
@@ -126,6 +140,10 @@ class AssistantService:
             model=model,
             api_key_env=api_key_env,
             api_key_available=api_key_available,
+            credential_source_configured=credential_source_configured,
+            credential_source_used=credential_source_used,
+            credential_store_available=credential_store_available,
+            credential_store_error=credential_store_error,
             profile_error=profile_error,
             current_session_id=session_status.session_id if session_status is not None else None,
             current_turn_count=session_status.turn_count if session_status is not None else None,

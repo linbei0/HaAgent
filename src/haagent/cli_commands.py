@@ -6,6 +6,7 @@ haagent/cli_commands.py - CLI 子命令处理器
 
 from __future__ import annotations
 
+import getpass
 import json
 import tempfile
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from haagent.cli_render import (
     run_chat_repl,
 )
 from haagent.cli_runtime import CliRuntime, SmokeDefinition
+from haagent.models import provider_profile
+from haagent.models.credentials import CredentialError, save_insecure_api_key, save_keyring_api_key
 from haagent.models.provider_profile import (
     ProviderProfileError,
     ProviderProfileRecord,
@@ -151,17 +154,25 @@ def handle_setup(args) -> int:
             base_url=_prompt_value("base_url"),
             model=_prompt_value("model"),
             api_key_env=_prompt_value("api_key_env", default="OPENAI_API_KEY"),
+            credential_source=_prompt_credential_source(),
         )
+        _save_setup_credential(record)
         providers_path = save_provider_profile(record)
         settings_path = save_active_profile(record.name)
-    except (EOFError, ProviderProfileError) as error:
+    except (EOFError, CredentialError, ProviderProfileError) as error:
         print(f"error: {error}")
         return 1
     print(f"providers={providers_path}")
     print(f"settings={settings_path}")
     print(f"active_profile={record.name}")
     print(f"api_key_env={record.api_key_env}")
-    print(f"请确认已在环境变量 {record.api_key_env} 中设置真实 API key。")
+    print(f"credential_source={record.credential_source}")
+    if record.credential_source == "env":
+        print(f"高级模式：请在环境变量 {record.api_key_env} 中设置真实 API key。")
+    elif record.credential_source == "keyring":
+        print("API key 已保存到系统凭据库，跨终端可用。")
+    else:
+        print("警告：API key 已保存到明文用户文件 insecure_credentials.json。")
     return 0
 
 
@@ -485,6 +496,30 @@ def _prompt_provider() -> str:
     if provider not in {"openai", "openai-chat"}:
         raise ProviderProfileError(f"unsupported provider: {provider}")
     return provider
+
+
+def _prompt_credential_source() -> str:
+    print("凭据保存方式：推荐 keyring（系统凭据库，跨终端可用）。")
+    print("高级 env：只使用环境变量，适合 CI 或临时覆盖。")
+    print("不推荐 insecure_file：写入明文用户文件，必须显式选择。")
+    source = _prompt_value("credential_source (keyring/env/insecure_file)", default="keyring")
+    if source not in {"keyring", "env", "insecure_file"}:
+        raise ProviderProfileError(f"unsupported credential_source: {source}")
+    return source
+
+
+def _save_setup_credential(record: ProviderProfileRecord) -> None:
+    if record.credential_source == "env":
+        return
+    api_key = getpass.getpass("API key: ").strip()
+    if record.credential_source == "keyring":
+        save_keyring_api_key(
+            record.name,
+            api_key,
+            credential_store=provider_profile.DEFAULT_CREDENTIAL_STORE,
+        )
+        return
+    save_insecure_api_key(record.name, api_key, config_dir=provider_profile.user_config_dir())
 
 
 def write_eval_case_file(episode_path: Path, output_path: Path) -> None:

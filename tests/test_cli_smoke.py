@@ -339,6 +339,7 @@ def test_cli_smoke_missing_profile_api_key_env_reports_real_failures_after_fake(
     assert output.count("status=failed") == 2
     assert "failed_stage=configuration" in output
     assert "failure_category=Provider Profile Error" in output
-    assert "reason=api key environment variable is not set: DEEPSEEK_API_KEY" in output
+    assert "reason=API key is not available for profile deepseek" in output
+    assert "api_key_env=DEEPSEEK_API_KEY" in output
 
 

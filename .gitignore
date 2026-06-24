@@ -17,6 +17,7 @@ dist/
 # HaAgent runtime output
 .runs/
 .smoke-runs/
+.runs-verify/
 
 # Local environment files
 .env

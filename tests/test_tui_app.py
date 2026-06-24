@@ -27,6 +27,10 @@ class FakeAssistantService:
         model: str | None = "deepseek-chat",
         api_key_env: str | None = "DEEPSEEK_API_KEY",
         api_key_available: bool = True,
+        credential_source_configured: str | None = "keyring",
+        credential_source_used: str | None = "keyring",
+        credential_store_available: bool | None = True,
+        credential_store_error: str | None = None,
         profile_error: str | None = None,
         block_until_released: bool = False,
         failure_event: ChatEvent | None = None,
@@ -37,6 +41,10 @@ class FakeAssistantService:
         self.model = model
         self.api_key_env = api_key_env
         self.api_key_available = api_key_available
+        self.credential_source_configured = credential_source_configured
+        self.credential_source_used = credential_source_used
+        self.credential_store_available = credential_store_available
+        self.credential_store_error = credential_store_error
         self.profile_error = profile_error
         self.block_until_released = block_until_released
         self.failure_event = failure_event
@@ -54,6 +62,10 @@ class FakeAssistantService:
             model=self.model,
             api_key_env=self.api_key_env,
             api_key_available=self.api_key_available,
+            credential_source_configured=self.credential_source_configured,
+            credential_source_used=self.credential_source_used,
+            credential_store_available=self.credential_store_available,
+            credential_store_error=self.credential_store_error,
             profile_error=self.profile_error,
             current_session_id="session-test",
             current_turn_count=len(self.prompts),
@@ -104,7 +116,7 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
             assert str(tmp_path) in status
             assert "profile: local" in status
             assert "openai-chat/deepseek-chat" in status
-            assert "key: ok" in status
+            assert "key: available via keyring" in status
             assert "DEEPSEEK_API_KEY" in status
             assert "session-test" in status
             assert "Profile" in side
@@ -141,7 +153,11 @@ def test_tui_profile_missing_shows_setup_message(tmp_path: Path) -> None:
 
 def test_tui_api_key_missing_shows_env_name(tmp_path: Path) -> None:
     async def run() -> None:
-        service = FakeAssistantService(workspace_root=tmp_path, api_key_available=False)
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            api_key_available=False,
+            credential_source_used=None,
+        )
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
@@ -149,6 +165,42 @@ def test_tui_api_key_missing_shows_env_name(tmp_path: Path) -> None:
             assert "key: missing" in status
             assert "DEEPSEEK_API_KEY" in status
             assert "DEEPSEEK_API_KEY" in conversation
+
+    asyncio.run(run())
+
+
+def test_tui_api_key_available_via_env(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            credential_source_used="env",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)):
+            status = _text(app, "#status-bar")
+            side = _text(app, "#side-bar")
+            assert "key: available via env" in status
+            assert "key: available via env" in side
+
+    asyncio.run(run())
+
+
+def test_tui_keyring_unavailable_shows_reason(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            api_key_available=False,
+            credential_source_used=None,
+            credential_store_available=False,
+            credential_store_error="backend unavailable",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)):
+            conversation = _text(app, "#conversation")
+            side = _text(app, "#side-bar")
+            assert "系统凭据库不可用：backend unavailable" in conversation
+            assert "uv run haagent setup" in conversation
+            assert "keyring unavailable: backend unavailable" in side
 
     asyncio.run(run())
 

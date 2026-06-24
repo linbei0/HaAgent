@@ -909,7 +909,8 @@ def test_cli_run_profile_missing_api_key_env_fails_explicitly(
 
     output = capsys.readouterr().out
     assert exit_code == 1
-    assert "error: api key environment variable is not set: DEEPSEEK_API_KEY" in output
+    assert "error: API key is not available for profile deepseek" in output
+    assert "api_key_env=DEEPSEEK_API_KEY" in output
     assert not (tmp_path / ".runs").exists()
 
 

@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from haagent.app.assistant_service import AssistantService, AssistantServiceError
+from haagent.models.credentials import FakeCredentialStore
 from haagent.models.gateway import ModelResponse
+from haagent.models import provider_profile
 
 
 class RecordingGateway:
@@ -39,6 +41,7 @@ def _write_user_profile(
     base_url: str = "https://api.deepseek.com",
     model: str = "deepseek-chat",
     api_key_env: str = "DEEPSEEK_API_KEY",
+    credential_source: str = "keyring",
 ) -> None:
     config_dir = home / ".haagent"
     config_dir.mkdir(parents=True)
@@ -52,6 +55,7 @@ def _write_user_profile(
                         "base_url": base_url,
                         "model": model,
                         "api_key_env": api_key_env,
+                        "credential_source": credential_source,
                     },
                 ],
             },
@@ -90,6 +94,9 @@ def test_active_profile_status_reports_api_key_available(tmp_path: Path, monkeyp
     assert status.model == "deepseek-chat"
     assert status.api_key_env == "DEEPSEEK_API_KEY"
     assert status.api_key_available is True
+    assert status.credential_source_configured == "keyring"
+    assert status.credential_source_used == "env"
+    assert status.credential_store_available is True
     assert status.profile_error is None
     assert "sk-secret" not in repr(status)
 
@@ -97,6 +104,7 @@ def test_active_profile_status_reports_api_key_available(tmp_path: Path, monkeyp
 def test_active_profile_status_reports_missing_api_key_env(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_profile(Path.home())
+    monkeypatch.setattr(provider_profile, "DEFAULT_CREDENTIAL_STORE", FakeCredentialStore({}))
     service = _service(tmp_path)
 
     status = service.get_workspace_status()
@@ -104,6 +112,44 @@ def test_active_profile_status_reports_missing_api_key_env(tmp_path: Path, monke
     assert status.profile_name == "local"
     assert status.api_key_env == "DEEPSEEK_API_KEY"
     assert status.api_key_available is False
+    assert status.credential_source_configured == "keyring"
+    assert status.credential_source_used is None
+    assert status.profile_error is None
+
+
+def test_active_profile_status_reports_keyring_api_key_available(tmp_path: Path, monkeypatch) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_profile(Path.home())
+    monkeypatch.setattr(
+        provider_profile,
+        "DEFAULT_CREDENTIAL_STORE",
+        FakeCredentialStore({"profile:local": "keyring-secret"}),
+    )
+    service = _service(tmp_path)
+
+    status = service.get_workspace_status()
+
+    assert status.api_key_available is True
+    assert status.credential_source_used == "keyring"
+    assert status.credential_store_available is True
+    assert "keyring-secret" not in repr(status)
+
+
+def test_active_profile_status_reports_keyring_unavailable(tmp_path: Path, monkeypatch) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_profile(Path.home())
+    monkeypatch.setattr(
+        provider_profile,
+        "DEFAULT_CREDENTIAL_STORE",
+        FakeCredentialStore(available=False, error="backend unavailable"),
+    )
+    service = _service(tmp_path)
+
+    status = service.get_workspace_status()
+
+    assert status.api_key_available is False
+    assert status.credential_store_available is False
+    assert status.credential_store_error == "backend unavailable"
     assert status.profile_error is None
 
 

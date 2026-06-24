@@ -187,11 +187,20 @@ class HaAgentTuiApp(App[None]):
         status = self.service.get_workspace_status()
         if status.profile_error is not None:
             self._append_block("Config", "未找到默认模型配置\n请先运行：uv run haagent setup")
+        elif status.credential_store_available is False:
+            reason = status.credential_store_error or "unknown"
+            self._append_block(
+                "Config",
+                (
+                    f"系统凭据库不可用：{reason}\n"
+                    "请运行：uv run haagent setup 重新选择凭据来源。"
+                ),
+            )
         elif status.api_key_env and not status.api_key_available:
             self._append_block(
                 "Config",
                 (
-                    f"环境变量未设置：{status.api_key_env}\n"
+                    f"API key 缺失：{status.api_key_env}\n"
                     "HaAgent 不会在 TUI 中输入、保存或显示真实 API key。"
                 ),
             )
@@ -211,7 +220,7 @@ class HaAgentTuiApp(App[None]):
         provider = status.provider or "-"
         model = status.model or "-"
         api_key_env = status.api_key_env or "-"
-        key_state = "ok" if status.api_key_available else "missing"
+        key_state = _key_state(status)
         session = status.current_session_id or "-"
         turn_count = status.current_turn_count if status.current_turn_count is not None else 0
         return (
@@ -226,7 +235,8 @@ class HaAgentTuiApp(App[None]):
         base_url = status.base_url or "-"
         model = status.model or "-"
         api_key_env = status.api_key_env or "-"
-        key_state = "available" if status.api_key_available else "missing"
+        key_state = _key_state(status)
+        keyring_status = _keyring_status(status)
         session = status.current_session_id or "-"
         turn_count = status.current_turn_count if status.current_turn_count is not None else 0
         tool_summary = "\n".join(f"  {line}" for line in self._tool_lines[-5:]) or "  none"
@@ -238,7 +248,8 @@ class HaAgentTuiApp(App[None]):
             f"  base_url: {base_url}\n"
             f"  model: {model}\n"
             f"  api_key_env: {api_key_env}\n"
-            f"  key: {key_state}\n\n"
+            f"  key: {key_state}\n"
+            f"  keyring: {keyring_status}\n\n"
             "Session\n"
             f"  id: {session}\n"
             f"  turns: {turn_count}\n"
@@ -266,6 +277,21 @@ def _payload_text(payload: dict[str, object], key: str, default: str) -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _key_state(status: AssistantWorkspaceStatus) -> str:
+    if status.api_key_available and status.credential_source_used:
+        return f"available via {status.credential_source_used}"
+    return "missing"
+
+
+def _keyring_status(status: AssistantWorkspaceStatus) -> str:
+    if status.credential_store_available is False:
+        reason = status.credential_store_error or "unknown"
+        return f"keyring unavailable: {reason}"
+    if status.credential_store_available is True:
+        return "available"
+    return "-"
 
 
 def _failure_body(failed_stage: str, category: str, reason: str, episode_path: str) -> str:
