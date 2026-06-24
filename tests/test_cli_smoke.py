@@ -17,6 +17,10 @@ from haagent.runtime.orchestrator import RunOrchestrator
 from haagent.runtime.state import RunStatus
 
 
+def _set_home(monkeypatch, home: Path) -> None:
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+
 class FakeResult:
     status = RunStatus.COMPLETED
 
@@ -175,6 +179,7 @@ def test_cli_smoke_with_profile_runs_fake_and_real_tasks(
     capsys,
     monkeypatch,
 ) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "profile-secret")
     (tmp_path / ".haagent").mkdir()
@@ -261,6 +266,7 @@ def test_cli_smoke_missing_profile_reports_real_failures_after_fake(
     capsys,
     monkeypatch,
 ) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
 
     exit_code = cli.main(
@@ -292,6 +298,7 @@ def test_cli_smoke_missing_profile_api_key_env_reports_real_failures_after_fake(
     capsys,
     monkeypatch,
 ) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     profile_dir = tmp_path / ".haagent"

@@ -361,7 +361,12 @@ class RunOrchestrator:
                 if _all_declared_verification_commands_passed(
                     task.verification_commands,
                     passed_verification_commands,
-                ) or _in_band_verification_passed_after_file_change(guidance_state):
+                ) or _in_band_verification_passed_after_file_change(
+                    guidance_state,
+                ) or _successful_file_change_without_declared_verification(
+                    completion_observations,
+                    task.verification_commands,
+                ):
                     observations = list(completion_observations)
                     final_response_requested = True
             else:
@@ -453,6 +458,22 @@ def _verification_loop_limit_evidence(max_turns: int, verification_result) -> st
 
 def _in_band_verification_passed_after_file_change(guidance_state: LoopGuidanceState) -> bool:
     return guidance_state.has_file_change and guidance_state.has_verification_evidence
+
+
+def _successful_file_change_without_declared_verification(
+    completion_observations: list[dict[str, object]],
+    verification_commands: list[str],
+) -> bool:
+    if verification_commands or not completion_observations:
+        return False
+    latest = completion_observations[-1]
+    tool_name = latest.get("tool_name")
+    result = latest.get("result")
+    return (
+        tool_name == "file_write"
+        and isinstance(result, dict)
+        and result.get("status") == "success"
+    )
 
 
 def _record_guidance(

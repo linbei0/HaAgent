@@ -18,6 +18,10 @@ from haagent.runtime.state import RunStatus
 from haagent.runtime.task_contract import load_task
 
 
+def _set_home(monkeypatch, home: Path) -> None:
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+
 class FakeResult:
     status = RunStatus.COMPLETED
 
@@ -776,6 +780,7 @@ def test_cli_run_profile_creates_gateway_from_local_config(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "profile-secret")
     (tmp_path / ".haagent").mkdir()
@@ -854,6 +859,7 @@ def test_cli_run_profile_missing_name_fails_explicitly(
     capsys,
     monkeypatch,
 ) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".haagent").mkdir()
     (tmp_path / ".haagent" / "providers.json").write_text(
@@ -876,6 +882,7 @@ def test_cli_run_profile_missing_api_key_env_fails_explicitly(
     capsys,
     monkeypatch,
 ) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     (tmp_path / ".haagent").mkdir()
@@ -912,6 +919,7 @@ def test_cli_run_profile_secret_stays_out_of_episode_inspect_eval_and_model_inpu
     monkeypatch,
 ) -> None:
     secret = "profile-secret-value"
+    _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
     (tmp_path / ".haagent").mkdir()

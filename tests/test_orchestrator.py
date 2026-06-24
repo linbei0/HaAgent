@@ -1266,7 +1266,7 @@ policy:
     )
     final_model_input = (result.episode_path / "contexts" / "0003.txt").read_text(encoding="utf-8")
     assert final_context["next_action"]["status"] == "continue"
-    assert "Produce the final answer now" in final_context["next_action"]["reason"]
+    assert "Produce a concise final answer now" in final_context["next_action"]["reason"]
     assert "apply_patch" in final_model_input
     assert "shell" in final_model_input
     assert "return a - b" in final_model_input

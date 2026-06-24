@@ -232,8 +232,8 @@ class ContextBuilder:
             return {
                 "status": "continue",
                 "reason": (
-                    "Declared verification commands have passed through tool execution. "
-                    "Produce the final answer now; do not call tools again."
+                    "The runtime has enough successful evidence to request the final answer. "
+                    "Produce a concise final answer now; do not call tools again."
                 ),
                 "based_on_observation_index": observation_index,
                 "based_on_tool_name": latest_tool_name,

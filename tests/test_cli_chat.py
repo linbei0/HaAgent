@@ -53,6 +53,33 @@ class WriteThenDoneGateway:
         return ModelResponse("done writing", [])
 
 
+class WriteThenKeepsReadingUnlessFinalGateway:
+    provider_name = "write-then-keeps-reading"
+
+    def __init__(self) -> None:
+        self.tool_schema_names: list[list[str]] = []
+
+    def generate(self, task, model_input, tool_schemas, observations):
+        self.tool_schema_names.append([schema["name"] for schema in tool_schemas])
+        if not observations:
+            return ModelResponse(
+                "writing",
+                [
+                    ToolCall(
+                        "file_write",
+                        {
+                            "path": "notes.txt",
+                            "content": "created from chat",
+                            "mode": "create",
+                        },
+                    ),
+                ],
+            )
+        if not tool_schemas:
+            return ModelResponse("final response after write", [])
+        return ModelResponse("checking again", [ToolCall("file_read", {"path": "notes.txt"})])
+
+
 class BadToolGateway:
     provider_name = "bad-tool"
 
@@ -365,6 +392,29 @@ def test_agent_session_chat_default_tools_include_context_find(tmp_path: Path) -
     assert "context_find" in gateway.tool_schema_names[0]
     task = load_task(result.episode_path / "task.yaml")
     assert "context_find" in task.allowed_tools
+
+
+def test_agent_session_requests_final_response_after_file_write_without_verification(
+    tmp_path: Path,
+) -> None:
+    gateway = WriteThenKeepsReadingUnlessFinalGateway()
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+        max_turns=3,
+    )
+
+    result = session.run_prompt_events(
+        "写一份项目简介到 notes.txt",
+        interaction_handler=lambda request: HumanInteractionResponse(approved=True, answer="yes"),
+    )
+
+    assert result.status == "completed"
+    assert result.final_response == "final response after write"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "created from chat"
+    assert gateway.tool_schema_names[0]
+    assert gateway.tool_schema_names[1] == []
 
 
 def test_agent_session_writes_session_package_and_turn_record(tmp_path: Path) -> None:
