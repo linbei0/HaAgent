@@ -32,6 +32,64 @@ def test_guidance_for_successful_file_search_selects_file_to_read() -> None:
     assert "src/app.py" in guidance.message
 
 
+def test_repeated_read_only_file_read_requires_final_answer() -> None:
+    state = LoopGuidanceState()
+
+    first = guidance_for_observation(
+        {
+            "tool_name": "file_read",
+            "args": {"path": "README.md"},
+            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
+        },
+        state,
+        goal="介绍一下项目",
+    )
+    second = guidance_for_observation(
+        {
+            "tool_name": "file_read",
+            "args": {"path": "README.md"},
+            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
+        },
+        state,
+        goal="介绍一下项目",
+    )
+
+    assert first is not None
+    assert first.status == "continue"
+    assert second is not None
+    assert second.status == "final_answer_required"
+    assert second.trigger == "repeated_read_only_exploration"
+    assert "final answer" in second.message
+    assert "Do not call tools" in second.message
+    assert "do not repeat" in second.message
+
+
+def test_repeated_read_only_guidance_does_not_interrupt_edit_tasks() -> None:
+    state = LoopGuidanceState()
+
+    guidance_for_observation(
+        {
+            "tool_name": "file_read",
+            "args": {"path": "README.md"},
+            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
+        },
+        state,
+        goal="修改 README.md",
+    )
+    second = guidance_for_observation(
+        {
+            "tool_name": "file_read",
+            "args": {"path": "README.md"},
+            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
+        },
+        state,
+        goal="修改 README.md",
+    )
+
+    assert second is not None
+    assert second.status == "continue"
+
+
 def test_guidance_for_successful_context_find_selects_candidate_to_read() -> None:
     guidance = guidance_for_observation(
         {

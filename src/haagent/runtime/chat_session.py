@@ -255,6 +255,7 @@ class AgentSession:
                     "failed_stage": _summary_value(turn_result.failed_stage),
                     "failure_category": _summary_value(turn_result.failure_category),
                     "reason": _summary_value(turn_result.reason),
+                    "episode_path": str(turn_result.episode_path),
                 },
             )
         self._emit_chat_event(
@@ -589,6 +590,7 @@ def _runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[
             "failed_stage": _summary_value(str(payload.get("failed_stage", "unknown"))),
             "failure_category": _summary_value(str(payload.get("failure_category", "unknown"))),
             "reason": _summary_value(str(payload.get("reason", ""))),
+            "episode_path": _summary_value(str(payload.get("episode_path", "")), 300),
         }
     return payload
 

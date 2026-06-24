@@ -209,6 +209,16 @@ class RunOrchestrator:
                     return _finish_run(writer, RunStatus.FAILED, state_history)
 
                 if not model_response.tool_calls:
+                    if final_response_requested and not model_response.content.strip():
+                        transition(RunStatus.FAILED)
+                        writer.write_failure_attribution(
+                            {
+                                "stage": "executing",
+                                "category": FailureCategory.MODEL.value,
+                                "evidence": "model returned empty final response during final response turn",
+                            },
+                        )
+                        return _finish_run(writer, RunStatus.FAILED, state_history)
                     no_tool_guidance = None if final_response_requested else guidance_for_no_tool_response(
                         model_response.content,
                         task.goal,
@@ -323,7 +333,7 @@ class RunOrchestrator:
                         },
                     )
                     if tool_result.get("status") == "error":
-                        guidance = guidance_for_observation(observation, guidance_state)
+                        guidance = guidance_for_observation(observation, guidance_state, goal=task.goal)
                         if _tool_error_is_terminal(tool_result):
                             router.raise_for_error(tool_result)
                         if guidance is not None:
@@ -344,9 +354,11 @@ class RunOrchestrator:
                         },
                     )
                     observations.append(observation)
-                    guidance = guidance_for_observation(observation, guidance_state)
+                    guidance = guidance_for_observation(observation, guidance_state, goal=task.goal)
                     if guidance is not None:
                         observations.append(_record_guidance(writer, self._emit_event, turn, guidance))
+                        if guidance.status == "final_answer_required":
+                            final_response_requested = True
                     if tool_call.name in {"apply_patch", "apply_patch_set"}:
                         completion_observations = [observation]
                     else:

@@ -49,8 +49,9 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 ## Setup Commands
 
 - Install dependencies: `uv sync`
-- Run all tests: `uv run pytest`
-- Run a focused test file: `uv run pytest tests/test_tool_router.py -q`
+- Run a focused test file during development: `uv run pytest tests/test_tool_router.py -q`
+- Run all tests when needed for final regression: `uv run pytest -q`
+- Run the fast local quality gate: `uv run haagent check`
 
 ## Development Workflow
 
@@ -79,7 +80,12 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 
 - Add or update pytest coverage for every behavior change.
 - For bug fixes and new behavior, write the failing test first, then implement the smallest code that passes.
-- Run `uv run pytest` before claiming completion.
+- During the TDD inner loop, run the smallest relevant pytest target first: a single test, a single test file, or the directly affected test group.
+- Do not automatically run full `uv run pytest` after every small edit.
+- Before claiming completion, run the tests directly relevant to the changed behavior.
+- Run full `uv run pytest -q` when a change crosses multiple core modules, changes shared runtime contracts, touches `ToolRouter`, `ModelGateway`, context, episode, CLI entry points, workspace boundaries, or secret handling, or when preparing a commit, merge, release, or user-facing handoff.
+- Run `uv run haagent check` before user-facing handoff when the change affects harness, eval, smoke behavior, CLI quality gates, or runtime task execution.
+- Prefer extending or parameterizing existing tests over adding near-duplicate tests. TDD scaffolding tests may be removed before completion when they no longer provide independent behavioral signal.
 
 ## Code Style
 

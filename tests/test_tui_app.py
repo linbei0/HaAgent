@@ -29,6 +29,7 @@ class FakeAssistantService:
         api_key_available: bool = True,
         profile_error: str | None = None,
         block_until_released: bool = False,
+        failure_event: ChatEvent | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.profile_name = profile_name
@@ -38,6 +39,7 @@ class FakeAssistantService:
         self.api_key_available = api_key_available
         self.profile_error = profile_error
         self.block_until_released = block_until_released
+        self.failure_event = failure_event
         self.started = threading.Event()
         self.release = threading.Event()
         self.prompts: list[str] = []
@@ -63,6 +65,9 @@ class FakeAssistantService:
         if self.block_until_released:
             self.release.wait(timeout=2)
         if event_sink is not None:
+            if self.failure_event is not None:
+                event_sink(self.failure_event)
+                return SimpleNamespace(status="failed")
             event_sink(
                 ChatEvent(
                     event_type="assistant_message",
@@ -104,6 +109,12 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
             assert "session-test" in status
             assert "Profile" in side
             assert "base_url: https://api.deepseek.com" in side
+            assert "Ctrl+Q 退出" in str(app.query_one("#conversation").render())
+            footer = _text(app, "#footer-bar")
+            assert "[Ctrl+Q]退出" in footer
+            assert "[q]退出" not in footer
+            assert "[Enter]发送" in str(app.query_one("#footer-bar").render())
+            assert "[Tab]焦点" in str(app.query_one("#footer-bar").render())
 
     asyncio.run(run())
 
@@ -142,6 +153,19 @@ def test_tui_api_key_missing_shows_env_name(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_tui_ctrl_q_exits_even_when_prompt_input_is_focused(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            assert app.query_one("#prompt-input").has_focus
+            await pilot.press("ctrl+q")
+            await pilot.pause(0.1)
+            assert not app.is_running
+
+    asyncio.run(run())
+
+
 def test_tui_submit_prompt_calls_service_and_renders_assistant_event(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
@@ -156,6 +180,45 @@ def test_tui_submit_prompt_calls_service_and_renders_assistant_event(tmp_path: P
             assert "You" in conversation
             assert "Summarize this folder" in conversation
             assert "assistant: Summarize this folder" in conversation
+
+    asyncio.run(run())
+
+
+def test_tui_failure_event_shows_reason_episode_and_sidebar_summary(tmp_path: Path) -> None:
+    async def run() -> None:
+        episode_path = tmp_path / ".runs" / "episode-failed"
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            failure_event=ChatEvent(
+                event_type="failure",
+                session_id="session-test",
+                turn_index=1,
+                message="chat turn failed",
+                payload={
+                    "status": "failed",
+                    "failed_stage": "executing",
+                    "failure_category": "Loop Limit Failure",
+                    "reason": "exceeded max_turns=20",
+                    "episode_path": str(episode_path),
+                },
+            ),
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "介绍一下项目"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            conversation = _text(app, "#conversation")
+            side = _text(app, "#side-bar")
+            assert "本轮没有完成：模型连续调用工具但没有给出最终回答。" in conversation
+            assert "stage=executing" in conversation
+            assert "category=Loop Limit Failure" in conversation
+            assert "reason=exceeded max_turns=20" in conversation
+            assert str(episode_path) in conversation
+            assert "Last Failure" in side
+            assert "Loop Limit Failure" in side
+            assert str(episode_path) in side
 
     asyncio.run(run())
 

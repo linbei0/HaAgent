@@ -27,6 +27,7 @@ class LoopGuidanceState:
     failed_signatures: list[str] = field(default_factory=list)
     successful_tool_count: int = 0
     successful_tool_names: list[str] = field(default_factory=list)
+    successful_read_only_signatures: list[str] = field(default_factory=list)
     has_file_change: bool = False
     has_verification_evidence: bool = False
 
@@ -34,6 +35,7 @@ class LoopGuidanceState:
 def guidance_for_observation(
     observation: dict[str, object],
     state: LoopGuidanceState,
+    goal: str = "",
 ) -> LoopGuidance | None:
     tool_name = str(observation.get("tool_name", "unknown"))
     args = _dict_or_empty(observation.get("args"))
@@ -69,10 +71,13 @@ def guidance_for_observation(
                 "If the read-back content satisfies the request, produce the final answer now; "
                 "do not keep editing or repeat file_read. Otherwise make one specific next fix."
             )
+        read_only_guidance = _read_only_completion_guidance(tool_name, args, result, state, goal)
+        if read_only_guidance is not None:
+            guidance = read_only_guidance
         return LoopGuidance(
-            status="continue",
+            status="final_answer_required" if read_only_guidance is not None else "continue",
             message=_limit(guidance),
-            trigger="tool_success",
+            trigger="repeated_read_only_exploration" if read_only_guidance is not None else "tool_success",
             tool_name=tool_name,
         )
     return None
@@ -155,6 +160,64 @@ def _success_guidance(tool_name: str, args: dict[str, Any], result: dict[str, An
     if tool_name == "request_user_input":
         return "Use the user's answer to continue the task with the appropriate tool; do not ask the same question again."
     return "Use the successful tool result to choose the next concrete step or produce a final answer if criteria are satisfied."
+
+
+def _read_only_completion_guidance(
+    tool_name: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+    state: LoopGuidanceState,
+    goal: str,
+) -> str | None:
+    if not _goal_is_read_only_summary(goal) or state.has_file_change:
+        return None
+    signature = _read_only_signature(tool_name, args, result)
+    if signature is None:
+        return None
+    repeated = signature in state.successful_read_only_signatures
+    state.successful_read_only_signatures.append(signature)
+    enough_context = len(state.successful_read_only_signatures) >= 4
+    if not repeated and not enough_context:
+        return None
+    return (
+        "You already have enough read-only context for this summary/description task. "
+        "Produce the final answer now. Do not call tools again, do not repeat the same "
+        "file_read/file_list, and summarize the gathered evidence for the user."
+    )
+
+
+def _read_only_signature(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str | None:
+    if tool_name == "file_read":
+        path = _first_present_string(args.get("path"), result.get("path"))
+        if not path:
+            return None
+        offset = _first_present(args.get("offset"), result.get("offset"))
+        keyword = _first_present(args.get("keyword"), result.get("keyword"))
+        return f"file_read:{path}:offset={offset}:keyword={keyword}"
+    if tool_name == "file_list":
+        path = _first_present_string(args.get("path"), result.get("path"), ".")
+        max_depth = _first_present(args.get("max_depth"), result.get("max_depth"))
+        return f"file_list:{path}:max_depth={max_depth}"
+    return None
+
+
+def _goal_is_read_only_summary(goal: str) -> bool:
+    normalized = goal.lower()
+    if _goal_needs_edit(normalized) or _goal_needs_verification(normalized):
+        return False
+    markers = [
+        "介绍",
+        "总结",
+        "概述",
+        "说明",
+        "解释",
+        "describe",
+        "summarize",
+        "summary",
+        "explain",
+        "overview",
+    ]
+    return any(marker in normalized for marker in markers)
 
 
 def _error_guidance(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str:
@@ -254,6 +317,20 @@ def _dict_or_empty(value: object) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _first_present(*values: object) -> object:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _first_present_string(*values: object) -> str:
+    for value in values:
+        if value is not None:
+            return str(value)
+    return ""
 
 
 def _limit(message: str) -> str:

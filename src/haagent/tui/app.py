@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -70,6 +71,7 @@ class HaAgentTuiApp(App[None]):
     """
 
     BINDINGS = [
+        ("ctrl+q", "quit", "退出"),
         ("q", "quit", "退出"),
         ("?", "help", "帮助"),
     ]
@@ -80,6 +82,7 @@ class HaAgentTuiApp(App[None]):
         self._state = "idle"
         self._conversation_lines: list[str] = []
         self._tool_lines: list[str] = []
+        self._last_failure: dict[str, str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status-bar")
@@ -88,7 +91,7 @@ class HaAgentTuiApp(App[None]):
             yield Static("", id="side-bar")
         with Vertical(id="input-panel"):
             yield Input(placeholder="输入 prompt，Enter 发送", id="prompt-input")
-        yield Static("[Enter]发送 [Tab]焦点 [?]帮助 [q]退出", id="footer-bar")
+        yield Static(Text("[Enter]发送 [Tab]焦点 [?]帮助 [Ctrl+Q]退出"), id="footer-bar")
 
     def on_mount(self) -> None:
         self._show_initial_configuration_state()
@@ -110,7 +113,7 @@ class HaAgentTuiApp(App[None]):
         self._run_prompt(prompt)
 
     def action_help(self) -> None:
-        self._append_block("Help", "Enter 发送，Tab 切换焦点，q 退出。")
+        self._append_block("Help", "Enter 发送，Tab 切换焦点，Ctrl+Q 退出。")
         self._refresh_conversation()
 
     def action_quit(self) -> None:
@@ -158,7 +161,14 @@ class HaAgentTuiApp(App[None]):
             reason = _payload_text(payload, "reason", event.message)
             failed_stage = _payload_text(payload, "failed_stage", "unknown")
             category = _payload_text(payload, "failure_category", "unknown")
-            self._append_block("Failure", f"stage={failed_stage}\ncategory={category}\nreason={reason}")
+            episode_path = _payload_text(payload, "episode_path", "unknown")
+            self._last_failure = {
+                "failed_stage": failed_stage,
+                "failure_category": category,
+                "reason": reason,
+                "episode_path": episode_path,
+            }
+            self._append_block("Failure", _failure_body(failed_stage, category, reason, episode_path))
         self._refresh()
 
     def _finish_prompt(self, status: str) -> None:
@@ -193,8 +203,8 @@ class HaAgentTuiApp(App[None]):
         self.query_one("#side-bar", Static).update(self._side_bar(status))
 
     def _refresh_conversation(self) -> None:
-        content = "\n".join(self._conversation_lines) if self._conversation_lines else "Ready."
-        self.query_one("#conversation", Static).update(content)
+        content = "\n".join(self._conversation_lines) if self._conversation_lines else "Ready. 输入 prompt 后按 Enter 发送；Ctrl+Q 退出。"
+        self.query_one("#conversation", Static).update(Text(content))
 
     def _status_line(self, status: AssistantWorkspaceStatus) -> str:
         profile = status.profile_name or "missing"
@@ -220,6 +230,7 @@ class HaAgentTuiApp(App[None]):
         session = status.current_session_id or "-"
         turn_count = status.current_turn_count if status.current_turn_count is not None else 0
         tool_summary = "\n".join(f"  {line}" for line in self._tool_lines[-5:]) or "  none"
+        failure_summary = _format_last_failure(self._last_failure)
         return (
             "Profile\n"
             f"  name: {profile}\n"
@@ -233,7 +244,9 @@ class HaAgentTuiApp(App[None]):
             f"  turns: {turn_count}\n"
             f"  state: {self._state}\n\n"
             "Tools\n"
-            f"{tool_summary}"
+            f"{tool_summary}\n\n"
+            "Last Failure\n"
+            f"{failure_summary}"
         )
 
     def _append_block(self, title: str, body: str) -> None:
@@ -253,6 +266,32 @@ def _payload_text(payload: dict[str, object], key: str, default: str) -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _failure_body(failed_stage: str, category: str, reason: str, episode_path: str) -> str:
+    lines: list[str] = []
+    if category == "Loop Limit Failure":
+        lines.append("本轮没有完成：模型连续调用工具但没有给出最终回答。")
+    lines.extend(
+        [
+            f"stage={failed_stage}",
+            f"category={category}",
+            f"reason={reason}",
+            f"episode_path={episode_path}",
+        ],
+    )
+    return "\n".join(lines)
+
+
+def _format_last_failure(failure: dict[str, str] | None) -> str:
+    if failure is None:
+        return "  none"
+    return (
+        f"  category: {failure['failure_category']}\n"
+        f"  stage: {failure['failed_stage']}\n"
+        f"  reason: {failure['reason']}\n"
+        f"  episode: {failure['episode_path']}"
+    )
 
 
 def run_tui(service: AssistantService) -> int:
