@@ -32,8 +32,8 @@ class FakeResult:
 class OneShotGateway:
     provider_name = "one-shot"
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if observations:
+    def generate(self, messages, tool_schemas):
+        if any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
@@ -44,8 +44,8 @@ class ShellOnceGateway:
     def __init__(self) -> None:
         self._called = False
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if self._called or observations:
+    def generate(self, messages, tool_schemas):
+        if self._called or any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         self._called = True
         return ModelResponse("shell", [ToolCall("shell", {"command": "echo approval"})])
@@ -257,7 +257,7 @@ def test_cli_run_goal_entry_starts_fake_provider_task(
         next(line.split("=", 1)[1] for line in output.splitlines() if line.startswith("episode_path=")),
     )
     task_text = (episode_path / "task.yaml").read_text(encoding="utf-8")
-    first_model_input = (episode_path / "contexts" / "0001.txt").read_text(encoding="utf-8")
+    first_model_input = (episode_path / "contexts" / "0001.json").read_text(encoding="utf-8")
 
     assert exit_code == 0
     assert "status=completed" in output
@@ -966,7 +966,8 @@ verification_commands: []
             assert model == "deepseek-v4-pro"
             assert base_url == "https://api.deepseek.com"
 
-        def generate(self, task, model_input, tool_schemas, observations):
+        def generate(self, messages, tool_schemas):
+            model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
             assert secret not in model_input
             return ModelResponse("done", [])
 

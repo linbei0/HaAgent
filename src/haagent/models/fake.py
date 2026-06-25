@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.task_contract import TaskSpec
 
 
 class FakeModelGateway:
@@ -18,23 +17,21 @@ class FakeModelGateway:
     def __init__(self, response: ModelResponse | None = None) -> None:
         self._response = response or ModelResponse(
             content="Use the fake tool for the MVP execution step.",
-            tool_calls=[ToolCall(name="fake_tool", args={})],
+            tool_calls=[ToolCall(name="fake_tool", args={}, id="call_fake0001")],
         )
         self.calls: list[dict[str, Any]] = []
 
     def generate(
         self,
-        task: TaskSpec,
-        model_input: str,
+        messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
-        observations: list[dict[str, Any]],
     ) -> ModelResponse:
         self.calls.append(
             {
-                "task": task,
-                "model_input": model_input,
+                "messages": list(messages),
                 "tool_schemas": list(tool_schemas),
-                "observations": list(observations),
+                # legacy key kept for tests that read model_input
+                "model_input": _extract_model_input(messages),
             },
         )
         if self._response.tool_calls and not _tool_schema_available(tool_schemas, "fake_tool"):
@@ -42,7 +39,8 @@ class FakeModelGateway:
                 content="Fake model has no fake_tool available; relying on verification.",
                 tool_calls=[],
             )
-        if observations and self._response.tool_calls:
+        tool_result_count = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_result_count > 0 and self._response.tool_calls:
             return ModelResponse(content="Fake model observed tool results.", tool_calls=[])
         return self._response
 
@@ -51,3 +49,13 @@ def _tool_schema_available(tool_schemas: list[dict[str, Any]], tool_name: str) -
     if not tool_schemas:
         return True
     return any(schema.get("name") == tool_name for schema in tool_schemas)
+
+
+def _extract_model_input(messages: list[dict[str, Any]]) -> str:
+    """Return concatenated text content of all messages for backward-compat test inspection."""
+    parts: list[str] = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str) and content:
+            parts.append(content)
+    return "\n".join(parts)

@@ -77,7 +77,7 @@ class OneShotGateway:
     def __init__(self, response: ModelResponse) -> None:
         self._response = response
 
-    def generate(self, task, model_input, tool_schemas, observations):
+    def generate(self, messages, tool_schemas):
         return self._response
 
 
@@ -689,7 +689,7 @@ def test_package_validator_rejects_context_item_missing_field(tmp_path: Path) ->
         contexts=[
             {
                 "context_id": "0001",
-                "model_input_path": "contexts/0001.txt",
+                "model_input_path": "contexts/0001.json",
             },
         ],
     )
@@ -739,134 +739,6 @@ def test_package_validator_rejects_missing_context_file(tmp_path: Path) -> None:
         validate_episode_package(result.episode_path)
 
 
-def test_package_validator_rejects_missing_context_index_budget(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    update_first_context_index_budget(result.episode_path, None)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="context-manifest.json contexts\\[0\\].budget must be an object",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_missing_context_next_action(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    context_path = first_context_json_path(result.episode_path)
-    context_json = read_json(context_path)
-    context_json.pop("next_action")
-    write_json(context_path, context_json)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="contexts/0001.json next_action must be an object",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_context_index_budget_id_mismatch(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    context_manifest = read_json(result.episode_path / "context-manifest.json")
-    budget = dict(context_manifest["contexts"][0]["budget"])
-    budget["context_id"] = "9999"
-    update_first_context_index_budget(result.episode_path, budget)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="context-manifest.json contexts\\[0\\].budget.context_id must match context_id",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_missing_source_budget(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    context_path = first_context_json_path(result.episode_path)
-    context_json = read_json(context_path)
-    context_json["sources"][0].pop("budget", None)
-    write_json(context_path, context_json)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="contexts/0001.json sources\\[0\\].budget must be an object",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_source_budget_field_type_error(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    context_path = first_context_json_path(result.episode_path)
-    context_json = read_json(context_path)
-    context_json["sources"][0]["budget"]["raw_char_count"] = "6"
-    write_json(context_path, context_json)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="contexts/0001.json sources\\[0\\].budget.raw_char_count must be an int",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_context_index_source_count_mismatch(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    context_manifest = read_json(result.episode_path / "context-manifest.json")
-    budget = dict(context_manifest["contexts"][0]["budget"])
-    budget["source_count"] = 999
-    update_first_context_index_budget(result.episode_path, budget)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="context-manifest.json contexts\\[0\\].budget.source_count does not match sources length",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_context_index_included_source_count_mismatch(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    context_manifest = read_json(result.episode_path / "context-manifest.json")
-    budget = dict(context_manifest["contexts"][0]["budget"])
-    budget["included_source_count"] = 0
-    update_first_context_index_budget(result.episode_path, budget)
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="context-manifest.json contexts\\[0\\].budget.included_source_count does not match included sources",
-    ):
-        validate_episode_package(result.episode_path)
-
-
-def test_package_validator_rejects_context_budget_status_invalid(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    update_first_context_json(
-        result.episode_path,
-        budget={
-            "character_count": 10,
-            "character_limit": 12000,
-            "status": "near_limit",
-        },
-    )
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="contexts/0001.json budget.status is invalid: near_limit",
-    ):
-        validate_episode_package(result.episode_path)
-
 
 def test_package_validator_rejects_missing_state_transition(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
@@ -891,7 +763,7 @@ def test_load_validated_episode_package_returns_view_for_valid_run(tmp_path: Pat
     assert isinstance(package_view, EpisodePackageView)
     assert package_view.episode_metadata["status"] == "completed"
     assert package_view.failure_record == {"status": "success", "failure": None}
-    assert package_view.context_manifest["context_count"] == 2
+    assert package_view.context_manifest["context_count"] == 1
 
 
 def test_load_validated_episode_package_raises_for_invalid_episode(tmp_path: Path) -> None:

@@ -2,17 +2,26 @@
 haagent/runtime/orchestrator.py - Run Orchestrator 状态机
 
 串联 task 加载、模型调用、工具执行和 episode trace 写入。
+使用累积对话历史（messages list）替代每轮重建 context 块。
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from haagent.context.builder import ContextBuildError, ContextBuilder
+from haagent.context.messages import (
+    build_assistant_message,
+    build_final_response_request_message,
+    build_suggestion_message,
+    build_tool_result_message,
+    generate_tool_call_id,
+)
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelCallError, ModelGateway
+from haagent.models.gateway import ModelCallError, ModelGateway, ToolCall
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.failure import FailureCategory
 from haagent.runtime.guardrails import (
@@ -83,7 +92,6 @@ class RunOrchestrator:
         writer = EpisodeWriter.create(self._runs_root, task_path)
 
         def transition(status: RunStatus) -> None:
-            # 状态流转是 episode 的关键事实来源，必须先落 trace 再继续执行下一步。
             state_history.append(status)
             writer.append_transcript({"event": "state_transition", "status": status.value})
 
@@ -135,28 +143,31 @@ class RunOrchestrator:
                 approved_tools=task.policy["approved_tools"],
             )
             verification_engine: VerificationEngine | None = None
-            observations: list[dict[str, object]] = []
-            completion_observations: list[dict[str, object]] = []
             passed_verification_commands: set[str] = set()
-            final_response_requested = False
             has_file_change = False
             has_shell_verification = False
             safety_guard = SafetyGuard()
             interaction_resolver = HumanInteractionResolver()
+
+            # 构建初始消息（一次，不再每轮重建）
+            context = ContextBuilder(
+                task=task,
+                workspace_root=workspace_root,
+                provider_name=self._model_gateway.provider_name,
+                episode_writer=writer,
+                session_summary=self._session_summary,
+                working_state=self._working_state,
+                interaction_state=interaction_resolver.state_records(),
+            ).build()
+            messages: list[dict[str, Any]] = list(context.messages)
+
+            # 追踪 completion 用的最后一次文件变更 observation（供 _successful_file_change_without_declared_verification）
+            completion_observations: list[dict[str, object]] = []
+            final_response_requested = False
+
             for turn in range(1, self._max_turns + 1):
-                context = ContextBuilder(
-                    task=task,
-                    workspace_root=workspace_root,
-                    provider_name=self._model_gateway.provider_name,
-                    episode_writer=writer,
-                    observations=observations,
-                    final_response_requested=final_response_requested,
-                    session_summary=self._session_summary,
-                    working_state=self._working_state,
-                    interaction_state=interaction_resolver.state_records(),
-                ).build()
                 tool_schemas = [] if final_response_requested else export_tool_schemas(task.allowed_tools)
-                # 每一轮模型调用都绑定独立 context_id，便于复盘工具观察如何进入下一轮。
+
                 writer.append_transcript(
                     {
                         "event": "model_call",
@@ -167,10 +178,8 @@ class RunOrchestrator:
                     },
                 )
                 model_response = self._model_gateway.generate(
-                    task,
-                    model_input=context.model_input,
+                    messages=messages,
                     tool_schemas=tool_schemas,
-                    observations=observations,
                 )
                 output_guardrail = (
                     check_assistant_output(model_response.content)
@@ -188,8 +197,8 @@ class RunOrchestrator:
                             else model_response.content
                         ),
                         "tool_calls": [
-                            {"name": tool_call.name, "args": tool_call.args}
-                            for tool_call in model_response.tool_calls
+                            {"name": tc.name, "args": tc.args}
+                            for tc in model_response.tool_calls
                         ],
                     },
                 )
@@ -251,7 +260,13 @@ class RunOrchestrator:
                         writer.write_failure_attribution(None)
                         return _finish_run(writer, RunStatus.COMPLETED, state_history)
 
-                    observations = [_verification_observation(verification_result)]
+                    # Verification failed — inject result as user message and continue
+                    verification_obs = _verification_observation(verification_result)
+                    ver_msg = build_suggestion_message(
+                        f"Verification failed: {_verification_evidence(verification_result)}. "
+                        "Use the failure details to repair the workspace, then try again."
+                    )
+                    messages.append(ver_msg)
                     final_response_requested = False
                     if turn == self._max_turns:
                         transition(RunStatus.FAILED)
@@ -271,9 +286,30 @@ class RunOrchestrator:
                 if state_history[-1] is not RunStatus.EXECUTING:
                     transition(RunStatus.EXECUTING)
 
-                observations = []
-                # 工具失败以结构化结果返回；orchestrator 在这里显式转换成 failed run。
-                for tool_call in model_response.tool_calls:
+                # Assign IDs to tool calls if missing (fake/test gateways may omit them)
+                tool_calls_with_ids: list[ToolCall] = []
+                for tc in model_response.tool_calls:
+                    if tc.id:
+                        tool_calls_with_ids.append(tc)
+                    else:
+                        tool_calls_with_ids.append(ToolCall(name=tc.name, args=tc.args, id=generate_tool_call_id()))
+
+                # Append assistant message with tool_calls
+                assistant_tool_calls = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.args, ensure_ascii=False),
+                        },
+                    }
+                    for tc in tool_calls_with_ids
+                ]
+                messages.append(build_assistant_message(model_response.content, assistant_tool_calls))
+
+                turn_broke_early = False
+                for tool_call in tool_calls_with_ids:
                     self._emit_event(
                         {
                             "event_type": "tool_started",
@@ -314,18 +350,14 @@ class RunOrchestrator:
                             **observation,
                         },
                     )
-                    violation = safety_guard.check(
-                        tool_call.name,
-                        tool_call.args,
-                        tool_result,
-                    )
+
+                    # Append tool result to messages
+                    messages.append(build_tool_result_message(tool_call.id, tool_call.name, tool_result))
+
+                    violation = safety_guard.check(tool_call.name, tool_call.args, tool_result)
                     if violation is not None and violation.should_abort:
-                        abort_obs = safety_violation_observation(
-                            violation.message, violation.recovery_suggestion
-                        )
-                        writer.append_transcript(
-                            {"event": "safety_abort", "turn": turn, **abort_obs}
-                        )
+                        abort_obs = safety_violation_observation(violation.message, violation.recovery_suggestion)
+                        writer.append_transcript({"event": "safety_abort", "turn": turn, **abort_obs})
                         self._emit_event(
                             {
                                 "event_type": "safety_abort",
@@ -349,20 +381,13 @@ class RunOrchestrator:
                             router.raise_for_error(tool_result)
                         suggestion = suggestion_for_observation(observation)
                         if violation is not None:
-                            safety_obs = safety_violation_observation(
-                                violation.message, violation.recovery_suggestion
-                            )
-                            writer.append_transcript(
-                                {"event": "safety_warning", "turn": turn, **safety_obs}
-                            )
-                            observations = [observation, safety_obs]
+                            safety_obs = safety_violation_observation(violation.message, violation.recovery_suggestion)
+                            writer.append_transcript({"event": "safety_warning", "turn": turn, **safety_obs})
+                            messages.append(build_suggestion_message(str(safety_obs.get("result", {}).get("message", ""))))
                         elif suggestion is not None:
-                            observations = [
-                                observation,
-                                _record_suggestion(writer, self._emit_event, turn, suggestion),
-                            ]
-                        else:
-                            observations = [observation]
+                            _record_suggestion(writer, self._emit_event, turn, suggestion)
+                            messages.append(build_suggestion_message(suggestion.message))
+                        turn_broke_early = True
                         break
 
                     self._emit_event(
@@ -374,12 +399,11 @@ class RunOrchestrator:
                             "result": tool_result,
                         },
                     )
-                    observations.append(observation)
                     suggestion = suggestion_for_observation(observation)
                     if suggestion is not None:
-                        observations.append(
-                            _record_suggestion(writer, self._emit_event, turn, suggestion)
-                        )
+                        _record_suggestion(writer, self._emit_event, turn, suggestion)
+                        messages.append(build_suggestion_message(suggestion.message))
+
                     if tool_call.name in {"apply_patch", "apply_patch_set", "file_write"}:
                         completion_observations = [observation]
                         has_file_change = True
@@ -394,15 +418,20 @@ class RunOrchestrator:
                         task.verification_commands,
                         passed_verification_commands,
                     )
-                if _all_declared_verification_commands_passed(
-                    task.verification_commands,
-                    passed_verification_commands,
-                ) or (has_file_change and has_shell_verification and not task.verification_commands) or _successful_file_change_without_declared_verification(
-                    completion_observations,
-                    task.verification_commands,
+
+                if not turn_broke_early and (
+                    _all_declared_verification_commands_passed(
+                        task.verification_commands,
+                        passed_verification_commands,
+                    )
+                    or (has_file_change and has_shell_verification and not task.verification_commands)
+                    or _successful_file_change_without_declared_verification(
+                        completion_observations,
+                        task.verification_commands,
+                    )
                 ):
-                    observations = list(completion_observations)
                     final_response_requested = True
+                    messages.append(build_final_response_request_message())
             else:
                 transition(RunStatus.FAILED)
                 writer.write_failure_attribution(
@@ -490,7 +519,6 @@ def _verification_loop_limit_evidence(max_turns: int, verification_result) -> st
     )
 
 
-
 def _successful_file_change_without_declared_verification(
     completion_observations: list[dict[str, object]],
     verification_commands: list[str],
@@ -512,7 +540,7 @@ def _record_suggestion(
     emit_event: Callable[[dict[str, object]], None],
     turn: int,
     suggestion: ToolSuggestion,
-) -> dict[str, object]:
+) -> None:
     event = {
         "event_type": "loop_suggestion_added",
         "turn": turn,
@@ -522,7 +550,6 @@ def _record_suggestion(
     }
     writer.append_transcript({"event": "loop_suggestion_added", **_transcript_event(event)})
     emit_event(event)
-    return suggestion_observation(suggestion)
 
 
 def _record_guardrail(
@@ -566,27 +593,18 @@ def _interaction_bridge(
     def handle(request: HumanInteractionRequest) -> HumanInteractionResponse:
         if resolution := interaction_resolver.resolve(request):
             reused_event = _interaction_reused_event(turn, resolution)
-            writer.append_interaction_event(
-                "interaction_reused",
-                _transcript_event(reused_event),
-            )
+            writer.append_interaction_event("interaction_reused", _transcript_event(reused_event))
             orchestrator._emit_event(reused_event)
             return resolution.to_response()
         requested_event = _interaction_requested_event(turn, request)
-        writer.append_interaction_event(
-            str(requested_event["event_type"]),
-            _transcript_event(requested_event),
-        )
+        writer.append_interaction_event(str(requested_event["event_type"]), _transcript_event(requested_event))
         orchestrator._emit_event(requested_event)
         if orchestrator._interaction_handler is None:
             response = HumanInteractionResponse(approved=False, answer="")
         else:
             response = orchestrator._interaction_handler(request)
         response_event = _interaction_response_event(turn, request, response)
-        writer.append_interaction_event(
-            str(response_event["event_type"]),
-            _transcript_event(response_event),
-        )
+        writer.append_interaction_event(str(response_event["event_type"]), _transcript_event(response_event))
         orchestrator._emit_event(response_event)
         interaction_resolver.record(request, response, turn=turn)
         return response
@@ -608,10 +626,7 @@ def _interaction_requested_event(turn: int, request: HumanInteractionRequest) ->
     }
 
 
-def _interaction_reused_event(
-    turn: int,
-    resolution: HumanInteractionResolution,
-) -> dict[str, object]:
+def _interaction_reused_event(turn: int, resolution: HumanInteractionResolution) -> dict[str, object]:
     return {
         "event_type": "interaction_reused",
         "turn": turn,
@@ -679,7 +694,6 @@ def _update_in_band_verification_progress(
     verification_commands: list[str],
     passed_verification_commands: set[str],
 ) -> None:
-    # 修改文件后，之前通过的验证不再证明当前工作区状态。
     if tool_name in {"apply_patch", "apply_patch_set"}:
         passed_verification_commands.clear()
         return

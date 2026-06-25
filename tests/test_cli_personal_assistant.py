@@ -23,9 +23,10 @@ class RecordingGateway:
     def __init__(self) -> None:
         self.model_inputs: list[str] = []
 
-    def generate(self, task, model_input, tool_schemas, observations):
+    def generate(self, messages, tool_schemas):
+        model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
-        return ModelResponse(f"done: {task.goal}", [])
+        return ModelResponse(f"done: {' '.join(m.get('content', '') for m in messages if m.get('role') == 'user')}", [])
 
 
 class FakeProfileGateway:
@@ -36,8 +37,8 @@ class FakeProfileGateway:
         self.model = model
         self.base_url = base_url
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        return ModelResponse(f"profile done: {task.goal}", [])
+    def generate(self, messages, tool_schemas):
+        return ModelResponse(f"profile done: {' '.join(m.get('content', '') for m in messages if m.get('role') == 'user')}", [])
 
 
 def _set_home(monkeypatch, home: Path) -> None:

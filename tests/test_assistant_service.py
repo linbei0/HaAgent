@@ -24,9 +24,10 @@ class RecordingGateway:
         self.profile_name = profile_name
         self.model_inputs: list[str] = []
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        self.model_inputs.append(model_input)
-        return ModelResponse(f"done: {task.goal}", [])
+    def generate(self, messages, tool_schemas):
+        task_content = next((m["content"] for m in messages if m.get("role") == "user"), "")
+        self.model_inputs.append(task_content)
+        return ModelResponse("done", [])
 
 
 def _set_home(monkeypatch, home: Path) -> None:

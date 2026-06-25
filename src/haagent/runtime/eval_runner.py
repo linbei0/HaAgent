@@ -349,7 +349,8 @@ def _combined_context_text(episode_path: Path) -> str:
         return ""
     return "\n".join(
         path.read_text(encoding="utf-8")
-        for path in sorted(contexts_dir.glob("*.txt"))
+        for path in sorted(contexts_dir.glob("*.json"))
+        if not path.name.endswith("-manifest.json")
     )
 
 
@@ -412,10 +413,8 @@ class DeterministicEvalGateway:
 
     def generate(
         self,
-        task,
-        model_input,
+        messages,
         tool_schemas,
-        observations,
     ) -> ModelResponse:
         if self._index >= len(self._responses):
             return ModelResponse("deterministic eval responses exhausted", [])

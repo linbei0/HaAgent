@@ -27,8 +27,8 @@ class FakeResult:
 class OneShotGateway:
     provider_name = "one-shot"
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if observations:
+    def generate(self, messages, tool_schemas):
+        if any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
@@ -39,8 +39,8 @@ class ShellOnceGateway:
     def __init__(self) -> None:
         self._called = False
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if self._called or observations:
+    def generate(self, messages, tool_schemas):
+        if self._called or any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         self._called = True
         return ModelResponse("shell", [ToolCall("shell", {"command": "echo approval"})])

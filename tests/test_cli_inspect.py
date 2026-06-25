@@ -28,8 +28,8 @@ class FakeResult:
 class OneShotGateway:
     provider_name = "one-shot"
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if observations:
+    def generate(self, messages, tool_schemas):
+        if any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
@@ -40,8 +40,8 @@ class ShellOnceGateway:
     def __init__(self) -> None:
         self._called = False
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if self._called or observations:
+    def generate(self, messages, tool_schemas):
+        if self._called or any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         self._called = True
         return ModelResponse("shell", [ToolCall("shell", {"command": "echo approval"})])
@@ -50,7 +50,7 @@ class ShellOnceGateway:
 class NoToolGateway:
     provider_name = "no-tool"
 
-    def generate(self, task, model_input, tool_schemas, observations):
+    def generate(self, messages, tool_schemas):
         return ModelResponse("done", [])
 
 
@@ -203,7 +203,7 @@ verification_commands: []
                     "contexts": [
                         {
                             "context_id": "0001",
-                            "model_input_path": "contexts/0001.txt",
+                            "model_input_path": "contexts/0001.json",
                             "manifest_path": "contexts/0001.json",
                             "budget": {
                                 "context_id": "0001",
@@ -216,7 +216,7 @@ verification_commands: []
                         },
                         {
                             "context_id": "0002",
-                            "model_input_path": "contexts/0002.txt",
+                            "model_input_path": "contexts/0002.json",
                             "manifest_path": "contexts/0002.json",
                             "budget": {
                                 "context_id": "0002",
@@ -326,59 +326,30 @@ verification_commands: []
         ),
         encoding="utf-8",
     )
-    (episode_path / "contexts" / "0001.txt").write_text("model input", encoding="utf-8")
     (episode_path / "contexts" / "0001.json").write_text(
         json.dumps(
             {
                 "context_id": "0001",
-                "budget": {
-                    "character_count": 11,
-                    "character_limit": 12000,
-                    "status": "within_limit",
-                },
-                "sources": [
-                    {
-                        "source_type": "task",
-                        "name": "task.yaml",
-                        "description": "测试任务事实",
-                        "inclusion_reason": "inspect fixture",
-                        "budget": {
-                            "raw_char_count": 11,
-                            "model_input_char_count": 11,
-                            "included_in_model_input": True,
-                            "truncated": False,
-                            "inclusion_reason": "inspect fixture",
-                            "exclusion_reason": None,
-                        },
-                    },
-                ],
-                "next_action": {
-                    "status": "none",
-                    "reason": "none",
-                    "based_on_observation_index": None,
-                    "based_on_tool_name": None,
-                },
+                "message_count": 2,
+                "provider": "fake",
+                "workspace_root": str(tmp_path),
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "system_chars": 11,
+                "task_chars": 11,
             },
         ),
         encoding="utf-8",
     )
-    (episode_path / "contexts" / "0002.txt").write_text("model input 2", encoding="utf-8")
     (episode_path / "contexts" / "0002.json").write_text(
         json.dumps(
             {
                 "context_id": "0002",
-                "budget": {
-                    "character_count": 12,
-                    "character_limit": 12000,
-                    "status": "within_limit",
-                },
-                "sources": [],
-                "next_action": {
-                    "status": "continue",
-                    "reason": "Continue from the latest successful tool observation and judge whether the acceptance criteria are satisfied.",
-                    "based_on_observation_index": 0,
-                    "based_on_tool_name": "fake_tool",
-                },
+                "message_count": 4,
+                "provider": "fake",
+                "workspace_root": str(tmp_path),
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "system_chars": 12,
+                "task_chars": 12,
             },
         ),
         encoding="utf-8",
@@ -396,9 +367,8 @@ verification_commands: []
     assert "Plan" in output
     assert "Use allowed tools: fake_tool." in output
     assert "Next Actions" in output
-    assert "0001: status=none based_on_tool_name=none reason=none" in output
-    assert "0002: status=continue based_on_tool_name=fake_tool" in output
-    assert "latest successful tool observation" in output
+    assert "0001: messages accumulated in conversation history" in output
+    assert "0002: messages accumulated in conversation history" in output
     assert "Contexts" in output
     assert "0001" in output
     assert "Sandbox" in output
@@ -802,7 +772,7 @@ def test_cli_inspect_missing_episode_json_fails(tmp_path: Path, capsys) -> None:
                 "contexts": [
                     {
                         "context_id": "0001",
-                        "model_input_path": "contexts/0001.txt",
+                        "model_input_path": "contexts/0001.json",
                         "manifest_path": "contexts/0001.json",
                     },
                 ],
@@ -810,7 +780,7 @@ def test_cli_inspect_missing_episode_json_fails(tmp_path: Path, capsys) -> None:
         ),
         encoding="utf-8",
     )
-    (episode_path / "contexts" / "0001.txt").write_text("input", encoding="utf-8")
+    (episode_path / "contexts" / "0001.json").write_text("input", encoding="utf-8")
     (episode_path / "contexts" / "0001.json").write_text(
         json.dumps({"context_id": "0001", "sources": []}),
         encoding="utf-8",

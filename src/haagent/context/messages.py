@@ -1,0 +1,152 @@
+"""
+haagent/context/messages.py - 对话消息构建工具
+
+把 HaAgent 的任务合同、工具结果和建议转换成标准 Chat Completions 消息格式。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any
+
+from haagent.context.instructions import AGENT_INSTRUCTIONS
+from haagent.runtime.task_contract import TaskSpec
+from haagent.tools.registry import TOOL_REGISTRY
+
+
+def generate_tool_call_id() -> str:
+    return "call_" + os.urandom(4).hex()
+
+
+def build_system_message(
+    project_instructions: str | None,
+    tool_workflow_hints: list[str],
+    session_summary: str | None = None,
+) -> dict[str, Any]:
+    parts: list[str] = []
+
+    parts.append("Instructions:")
+    for line in AGENT_INSTRUCTIONS:
+        parts.append(f"- {line}")
+
+    if tool_workflow_hints:
+        parts.append("")
+        parts.append("Tool workflow:")
+        for hint in tool_workflow_hints:
+            parts.append(f"- {hint}")
+
+    if project_instructions and project_instructions.strip():
+        parts.append("")
+        parts.append("Project Instructions:")
+        parts.append(project_instructions.strip())
+
+    if session_summary and session_summary.strip():
+        parts.append("")
+        parts.append("Session Summary:")
+        parts.append(session_summary.strip())
+
+    return {"role": "system", "content": "\n".join(parts)}
+
+
+def build_task_message(
+    task: TaskSpec,
+    plan_steps: list[str],
+    working_state_content: str | None = None,
+    interaction_state_lines: list[str] | None = None,
+) -> dict[str, Any]:
+    lines: list[str] = []
+    lines.append("Task:")
+    lines.append(f"goal: {task.goal}")
+
+    if task.constraints:
+        lines.append("constraints:")
+        for c in task.constraints:
+            lines.append(f"- {c}")
+
+    lines.append("allowed_tools:")
+    for tool in task.allowed_tools:
+        lines.append(f"- {tool}: {TOOL_REGISTRY[tool].description}")
+
+    if task.acceptance_criteria:
+        lines.append("acceptance_criteria:")
+        for c in task.acceptance_criteria:
+            lines.append(f"- {c}")
+
+    if task.verification_commands:
+        lines.append("verification_commands:")
+        for c in task.verification_commands:
+            lines.append(f"- {c}")
+
+    if plan_steps:
+        lines.append("plan:")
+        for step in plan_steps:
+            lines.append(f"- {step}")
+
+    if working_state_content and working_state_content.strip():
+        lines.append("")
+        lines.append("Working State:")
+        lines.append(working_state_content.strip())
+
+    if interaction_state_lines:
+        lines.append("")
+        lines.append("Interaction History:")
+        lines.extend(interaction_state_lines)
+
+    return {"role": "user", "content": "\n".join(lines)}
+
+
+def build_assistant_message(
+    content: str,
+    tool_calls: list[dict[str, Any]],
+) -> dict[str, Any]:
+    msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+    if tool_calls:
+        msg["tool_calls"] = tool_calls
+    return msg
+
+
+def build_tool_result_message(
+    tool_call_id: str,
+    tool_name: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    content = _format_tool_result(tool_name, result)
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "name": tool_name,
+        "content": content,
+    }
+
+
+def build_suggestion_message(suggestion_text: str) -> dict[str, Any]:
+    return {"role": "user", "content": f"[Suggestion] {suggestion_text}"}
+
+
+def build_final_response_request_message() -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": (
+            "The runtime has enough successful evidence. "
+            "Produce a concise final answer now; do not call tools again."
+        ),
+    }
+
+
+def _format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
+    status = result.get("status", "unknown")
+    if status == "error":
+        error = result.get("error") or {}
+        error_type = error.get("type", "unknown")
+        message = error.get("message", "")
+        return f"error ({error_type}): {message}"
+
+    # Remove status key from display, keep everything else
+    display = {k: v for k, v in result.items() if k != "status"}
+    if not display:
+        return "success"
+    try:
+        return json.dumps(display, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(display)

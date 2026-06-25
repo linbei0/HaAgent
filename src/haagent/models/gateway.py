@@ -13,9 +13,6 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
-from haagent.runtime.task_contract import TaskSpec
-
-
 class ModelCallError(RuntimeError):
     """Raised when a model provider fails explicitly."""
 
@@ -24,6 +21,7 @@ class ModelCallError(RuntimeError):
 class ToolCall:
     name: str
     args: dict[str, Any]
+    id: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,12 +35,10 @@ class ModelGateway(Protocol):
 
     def generate(
         self,
-        task: TaskSpec,
-        model_input: str,
+        messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
-        observations: list[dict[str, Any]],
     ) -> ModelResponse:
-        """Generate a model response for a task."""
+        """Generate a model response given a conversation messages list."""
 
 
 Transport = Callable[[dict[str, object], str], dict[str, object]]
@@ -83,19 +79,17 @@ class OpenAIResponsesGateway:
 
     def generate(
         self,
-        task: TaskSpec,
-        model_input: str,
+        messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
-        observations: list[dict[str, Any]],
     ) -> ModelResponse:
         """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
         if not self._api_key:
             raise ModelCallError("OPENAI_API_KEY is required for OpenAIResponsesGateway")
 
-        # provider 失败必须显式暴露给 orchestrator，禁止静默回退到 fake model。
+        # Responses API uses "input" — convert messages to input format
         payload: dict[str, object] = {
             "model": self._model,
-            "input": model_input,
+            "input": _messages_to_responses_input(messages),
         }
         if tool_schemas:
             payload["tools"] = tool_schemas
@@ -138,10 +132,8 @@ class OpenAIChatCompletionsGateway:
 
     def generate(
         self,
-        task: TaskSpec,
-        model_input: str,
+        messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
-        observations: list[dict[str, Any]],
     ) -> ModelResponse:
         """调用 OpenAI Chat Completions 兼容 API，并归一化为 ModelResponse。"""
         if not self._api_key:
@@ -151,12 +143,7 @@ class OpenAIChatCompletionsGateway:
 
         payload: dict[str, object] = {
             "model": self._model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": model_input,
-                },
-            ],
+            "messages": messages,
         }
         if tool_schemas:
             payload["tools"] = _chat_tool_schemas(tool_schemas)
@@ -165,6 +152,16 @@ class OpenAIChatCompletionsGateway:
         except Exception as error:
             raise ModelCallError(str(error)) from error
         return _parse_chat_completion_response(response)
+
+
+def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError as error:
+        raise ModelCallError("invalid tool arguments JSON") from error
+    if not isinstance(parsed, dict):
+        raise ModelCallError("tool arguments must be a JSON object")
+    return parsed
 
 
 def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
@@ -190,18 +187,9 @@ def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
         arguments = item.get("arguments")
         if not isinstance(arguments, str):
             raise ModelCallError("missing tool arguments")
-        tool_calls.append(ToolCall(name=name, args=_parse_tool_arguments(arguments)))
+        call_id = str(item.get("call_id") or item.get("id") or "")
+        tool_calls.append(ToolCall(name=name, args=_parse_tool_arguments(arguments), id=call_id))
     return tool_calls
-
-
-def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError as error:
-        raise ModelCallError("invalid tool arguments JSON") from error
-    if not isinstance(parsed, dict):
-        raise ModelCallError("tool arguments must be a JSON object")
-    return parsed
 
 
 def _chat_tool_schemas(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -262,8 +250,38 @@ def _parse_chat_tool_calls(raw_tool_calls: object) -> list[ToolCall]:
         arguments = function.get("arguments")
         if not isinstance(arguments, str):
             raise ModelCallError("missing tool arguments")
-        tool_calls.append(ToolCall(name=name, args=_parse_tool_arguments(arguments)))
+        tool_call_id = str(item.get("id") or "")
+        tool_calls.append(ToolCall(name=name, args=_parse_tool_arguments(arguments), id=tool_call_id))
     return tool_calls
+
+
+def _messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Chat Completions messages to Responses API input format."""
+    result = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system":
+            result.append({"role": "system", "content": msg.get("content", "")})
+        elif role == "user":
+            result.append({"role": "user", "content": msg.get("content", "")})
+        elif role == "assistant":
+            item: dict[str, Any] = {"role": "assistant", "content": msg.get("content", "")}
+            for tc in msg.get("tool_calls", []):
+                result.append({
+                    "type": "function_call",
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"]["arguments"],
+                    "call_id": tc.get("id", ""),
+                })
+            if item["content"]:
+                result.append(item)
+        elif role == "tool":
+            result.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id", ""),
+                "output": msg.get("content", ""),
+            })
+    return result
 
 
 def _normalize_responses_endpoint(base_url: str | None) -> str:

@@ -41,12 +41,21 @@ def generate(
     model_input: str = "standardized context",
     tool_schemas: list[dict[str, object]] | None = None,
     observations: list[dict[str, object]] | None = None,
+    messages: list[dict[str, object]] | None = None,
 ) -> ModelResponse:
+    if messages is None:
+        messages = [{"role": "user", "content": model_input}]
+        if observations:
+            for obs in observations:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": "",
+                    "name": obs.get("tool_name", ""),
+                    "content": str(obs.get("result", "")),
+                })
     return gateway.generate(
-        make_task(),
-        model_input=model_input,
-        tool_schemas=tool_schemas or [],
-        observations=observations or [],
+        messages,
+        tool_schemas or [],
     )
 
 
@@ -110,7 +119,8 @@ def test_fake_model_gateway_records_current_inputs() -> None:
     assert response.content == "done"
     assert gateway.calls[-1]["model_input"] == "context text"
     assert gateway.calls[-1]["tool_schemas"] == [{"name": "fake_tool"}]
-    assert gateway.calls[-1]["observations"] == [{"tool_name": "fake_tool"}]
+    tool_msgs = [m for m in gateway.calls[-1]["messages"] if m.get("role") == "tool"]
+    assert any(m.get("name") == "fake_tool" for m in tool_msgs)
 
 
 def test_provider_profile_loads_named_profile_and_api_key_env(tmp_path: Path) -> None:
@@ -287,7 +297,7 @@ def test_openai_gateway_uses_unified_response_shape() -> None:
 
     assert response == ModelResponse(content="provider text", tool_calls=[])
     assert captured["api_key"] == "test-key"
-    assert captured["payload"] == {"model": "gpt-test", "input": "standardized context"}
+    assert captured["payload"] == {"model": "gpt-test", "input": [{"role": "user", "content": "standardized context"}]}
 
 
 def test_openai_gateway_defaults_to_official_responses_endpoint() -> None:
@@ -518,7 +528,7 @@ def test_openai_gateway_payload_uses_model_input_and_tools() -> None:
 
     assert captured["payload"] == {
         "model": "gpt-test",
-        "input": "standardized context",
+        "input": [{"role": "user", "content": "standardized context"}],
         "tools": [{"name": "fake_tool", "description": "test", "parameters": {}}],
     }
 

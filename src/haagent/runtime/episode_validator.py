@@ -648,25 +648,8 @@ def _validate_context_json(index: int, context_index: dict[str, Any], context_js
     label = str(context_index["manifest_path"])
     if not isinstance(context_json.get("context_id"), str):
         raise EpisodeValidationError(f"{label} context_id must be a string")
-    budget = context_json.get("budget")
-    if not isinstance(budget, dict):
-        raise EpisodeValidationError(f"{label} budget must be an object")
-    _validate_context_budget_object(
-        budget,
-        label=f"{label} budget",
-        count_fields={
-            "character_count": "int",
-            "character_limit": "int",
-        },
-        status_field="status",
-    )
-    sources = context_json.get("sources")
-    if not isinstance(sources, list):
-        raise EpisodeValidationError(f"{label} sources must be a list")
-    for source_index, source in enumerate(sources):
-        _validate_context_source(label, source_index, source)
-    _validate_next_action(label, context_json.get("next_action"))
-    _validate_context_index_budget(index, context_index, sources)
+    if not isinstance(context_json.get("message_count"), int):
+        raise EpisodeValidationError(f"{label} message_count must be an int")
 
 
 def _validate_next_action(label: str, next_action: Any) -> None:

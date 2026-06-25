@@ -21,8 +21,8 @@ from haagent.runtime.state import RunStatus
 class BadArgsGateway:
     provider_name = "bad-args"
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if observations:
+    def generate(self, messages, tool_schemas):
+        if any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
@@ -33,8 +33,8 @@ class ShellOnceGateway:
     def __init__(self) -> None:
         self._called = False
 
-    def generate(self, task, model_input, tool_schemas, observations):
-        if self._called or observations:
+    def generate(self, messages, tool_schemas):
+        if self._called or any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         self._called = True
         return ModelResponse("shell", [ToolCall("shell", {"command": "echo approval"})])
@@ -128,25 +128,7 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
         "content": "Fake model observed tool results.",
         "tool_call_count": 0,
     }
-    assert eval_case["next_actions"] == [
-        {
-            "context_id": "0001",
-            "status": "none",
-            "reason": "none",
-            "based_on_observation_index": None,
-            "based_on_tool_name": None,
-        },
-        {
-            "context_id": "0002",
-            "status": "continue",
-            "reason": (
-                "Continue from the latest successful tool observation. "
-                "If the acceptance criteria are satisfied, produce the final answer."
-            ),
-            "based_on_observation_index": 0,
-            "based_on_tool_name": "fake_tool",
-        },
-    ]
+    assert eval_case["next_actions"] == []
 
 
 def test_failed_episode_exports_failure_information(tmp_path: Path) -> None:
@@ -499,22 +481,6 @@ def test_exporting_same_episode_is_deterministic(tmp_path: Path) -> None:
 
     assert first_export == second_export
     assert first_export["sandbox_summary"] == second_export["sandbox_summary"]
-
-
-def test_export_eval_case_rejects_missing_next_action(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    first_context_path = result.episode_path / "contexts" / "0001.json"
-    first_context = json.loads(first_context_path.read_text(encoding="utf-8"))
-    first_context.pop("next_action")
-    first_context_path.write_text(json.dumps(first_context), encoding="utf-8")
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="contexts/0001.json next_action must be an object",
-    ):
-        export_eval_case(result.episode_path)
 
 
 def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None:

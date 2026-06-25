@@ -22,13 +22,13 @@ class ScriptedGateway:
         self._responses = responses
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, task, model_input, tool_schemas, observations):
+    def generate(self, messages, tool_schemas):
+        model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.calls.append(
             {
-                "task": task,
                 "model_input": model_input,
                 "tool_schemas": list(tool_schemas),
-                "observations": list(observations),
+                "messages": list(messages),
             },
         )
         index = len(self.calls) - 1
@@ -126,7 +126,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     assert "apply_patch_set" in report.tasks[0].tools
     assert "shell" in report.tasks[1].tools
     assert report.tasks[2].failure_reason == "none"
-    assert "Patch text is not unique" in _context_text(report.tasks[2].episode_path)
+    assert "Patch text is not unique" in _transcript_text(report.tasks[2].episode_path)
     first_tool_call = _tool_calls(report.tasks[0].episode_path)[2]
     assert first_tool_call["tool_name"] == "apply_patch_set"
     assert first_tool_call["policy"]["approval"]["status"] == "granted"
@@ -153,4 +153,15 @@ def _tool_calls(episode_path: Path) -> list[dict[str, Any]]:
 
 
 def _context_text(episode_path: Path) -> str:
-    return "\n".join(path.read_text(encoding="utf-8") for path in sorted((episode_path / "contexts").glob("*.txt")))
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((episode_path / "contexts").glob("*.json"))
+        if not path.name.endswith("-manifest.json")
+    )
+
+
+def _transcript_text(episode_path: Path) -> str:
+    transcript_path = episode_path / "transcript.jsonl"
+    if not transcript_path.exists():
+        return ""
+    return transcript_path.read_text(encoding="utf-8")

@@ -210,20 +210,7 @@ def _last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | N
 
 
 def _next_actions_summary(episode_path: Path, context_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    contexts = context_manifest.get("contexts", [])
-    return [_next_action_summary(episode_path, context) for context in contexts]
-
-
-def _next_action_summary(episode_path: Path, context: dict[str, Any]) -> dict[str, Any]:
-    context_id = str(context["context_id"])
-    next_action = _read_context_json(episode_path / context["manifest_path"])["next_action"]
-    return {
-        "context_id": context_id,
-        "status": next_action["status"],
-        "reason": next_action["reason"],
-        "based_on_observation_index": next_action["based_on_observation_index"],
-        "based_on_tool_name": next_action["based_on_tool_name"],
-    }
+    return []
 
 
 def _read_context_json(path: Path) -> dict[str, Any]:

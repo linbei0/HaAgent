@@ -181,28 +181,10 @@ def _format_bool(value: Any) -> str:
 def _format_next_actions(episode_path: Path, contexts: list[dict[str, Any]]) -> list[str]:
     if not contexts:
         return ["- none"]
-    lines = []
-    for context in contexts:
-        context_id = str(context.get("context_id", "unknown"))
-        next_action = _read_context_next_action(episode_path / str(context["manifest_path"]))
-        tool_name = next_action.get("based_on_tool_name")
-        based_on_tool_name = str(tool_name) if tool_name is not None else "none"
-        lines.append(
-            (
-                f"- {context_id}: status={next_action.get('status', 'unknown')} "
-                f"based_on_tool_name={based_on_tool_name} "
-                f"reason={next_action.get('reason', '')}"
-            ),
-        )
-    return lines
-
-
-def _read_context_next_action(path: Path) -> dict[str, Any]:
-    context_manifest = _read_json(path)
-    next_action = context_manifest.get("next_action")
-    if not isinstance(next_action, dict):
-        raise EpisodeInspectError(f"{path.name} next_action must be an object")
-    return next_action
+    return [
+        f"- {context.get('context_id', 'unknown')}: messages accumulated in conversation history"
+        for context in contexts
+    ]
 
 
 def _format_model_calls(model_calls: list[dict[str, Any]]) -> list[str]:

@@ -23,13 +23,13 @@ class ScriptedGateway:
         self._steps = steps
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, task, model_input, tool_schemas, observations):
+    def generate(self, messages, tool_schemas):
+        model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.calls.append(
             {
-                "task": task,
                 "model_input": model_input,
                 "tool_schemas": list(tool_schemas),
-                "observations": list(observations),
+                "messages": list(messages),
             },
         )
         index = min(len(self.calls) - 1, len(self._steps) - 1)
