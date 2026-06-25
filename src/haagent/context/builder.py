@@ -245,20 +245,23 @@ class ContextBuilder:
             }
         latest_result = self._observations[-1].get("result", {})
         status = latest_result.get("status") if isinstance(latest_result, dict) else None
-        if latest_tool_name == "loop_guidance" and isinstance(latest_result, dict):
-            next_action_status = str(latest_result.get("status") or "continue")
-            reason = str(latest_result.get("message") or "Continue using the loop guidance.")
+        if latest_tool_name in {"loop_suggestion", "safety_warning"} and isinstance(latest_result, dict):
+            next_action_status = "continue"
+            reason = str(latest_result.get("message") or "Continue with the next step.")
         elif latest_tool_name == "verification" and status == "error":
             next_action_status = "handle_error"
             reason = "Use the verification failure summary to repair the workspace, then stop for verification again."
+        elif status == "suggestion":
+            next_action_status = "continue"
+            reason = str(latest_result.get("message") or "Continue with the next step.")
+        elif status == "warning":
+            next_action_status = "continue"
+            reason = str(latest_result.get("recovery_suggestion") or "Change strategy and continue.")
         elif status == "success":
             next_action_status = "continue"
             reason = (
                 "Continue from the latest successful tool observation. "
-                "A successful tool result has already been received; do not repeat the same "
-                "successful tool call unless new information is truly needed. If the acceptance "
-                "criteria are satisfied, produce the final answer instead of continuing with "
-                "another tool call."
+                "If the acceptance criteria are satisfied, produce the final answer."
             )
         elif status == "error":
             next_action_status = "handle_error"

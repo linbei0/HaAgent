@@ -1,101 +1,50 @@
 """
-tests/test_loop_guidance.py - Agent loop 推进策略测试
+tests/test_loop_guidance.py - Agent loop 工具建议测试
 
-验证工具结果和 no-tool 回复会生成短小、可审计的下一步 guidance。
+验证 suggestion_for_observation 只产生"建议"，不做强制干预。
 """
 
 from __future__ import annotations
 
-from haagent.runtime.loop_guidance import (
-    LoopGuidanceState,
-    guidance_for_no_tool_response,
-    guidance_for_observation,
-)
+from haagent.runtime.loop_guidance import suggestion_for_observation
 
 
-def test_guidance_for_successful_file_search_selects_file_to_read() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "file_search",
-            "args": {"query": "greet"},
-            "result": {
-                "status": "success",
-                "matches": [{"path": "src/app.py", "line": 1, "text": "def greet"}],
-            },
-        },
-        LoopGuidanceState(),
+def _obs(tool_name: str, args: dict, result: dict) -> dict:
+    return {"tool_name": tool_name, "args": args, "result": result}
+
+
+# --- 成功路径：只对特定工具生成建议 ---
+
+def test_file_search_success_suggests_file_read() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "file_search",
+            {"query": "greet"},
+            {"status": "success", "matches": [{"path": "src/app.py", "line": 1, "text": "def greet"}]},
+        )
     )
 
-    assert guidance is not None
-    assert guidance.status == "continue"
-    assert "file_read" in guidance.message
-    assert "src/app.py" in guidance.message
+    assert suggestion is not None
+    assert suggestion.trigger == "tool_success"
+    assert "file_read" in suggestion.message
+    assert "src/app.py" in suggestion.message
 
 
-def test_repeated_read_only_file_read_requires_final_answer() -> None:
-    state = LoopGuidanceState()
-
-    first = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "README.md"},
-            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
-        },
-        state,
-        goal="介绍一下项目",
-    )
-    second = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "README.md"},
-            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
-        },
-        state,
-        goal="介绍一下项目",
+def test_file_search_no_results_suggests_refine() -> None:
+    suggestion = suggestion_for_observation(
+        _obs("file_search", {"query": "missing"}, {"status": "success", "matches": []})
     )
 
-    assert first is not None
-    assert first.status == "continue"
-    assert second is not None
-    assert second.status == "final_answer_required"
-    assert second.trigger == "repeated_read_only_exploration"
-    assert "final answer" in second.message
-    assert "Do not call tools" in second.message
-    assert "do not repeat" in second.message
+    assert suggestion is not None
+    assert "file_list" in suggestion.message or "Refine" in suggestion.message
 
 
-def test_repeated_read_only_guidance_does_not_interrupt_edit_tasks() -> None:
-    state = LoopGuidanceState()
-
-    guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "README.md"},
-            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
-        },
-        state,
-        goal="修改 README.md",
-    )
-    second = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "README.md"},
-            "result": {"status": "success", "path": "README.md", "content": "# Demo"},
-        },
-        state,
-        goal="修改 README.md",
-    )
-
-    assert second is not None
-    assert second.status == "continue"
-
-
-def test_guidance_for_successful_context_find_selects_candidate_to_read() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "context_find",
-            "args": {"query": "greeting"},
-            "result": {
+def test_context_find_success_suggests_read_candidate() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "context_find",
+            {"query": "greeting"},
+            {
                 "status": "success",
                 "candidates": [
                     {
@@ -103,223 +52,166 @@ def test_guidance_for_successful_context_find_selects_candidate_to_read() -> Non
                         "line": 1,
                         "excerpt": "def greet",
                         "recommended_file_read": {"path": "src/app.py", "keyword": "greet", "limit": 80},
-                    },
+                    }
                 ],
             },
-        },
-        LoopGuidanceState(),
+        )
     )
 
-    assert guidance is not None
-    assert guidance.status == "continue"
-    assert "context_find" in guidance.message
-    assert "file_read" in guidance.message
-    assert "src/app.py" in guidance.message
+    assert suggestion is not None
+    assert "context_find" in suggestion.message
+    assert "file_read" in suggestion.message
+    assert "src/app.py" in suggestion.message
 
 
-def test_guidance_for_file_read_after_file_change_pushes_final_answer() -> None:
-    state = LoopGuidanceState(has_file_change=True)
-
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "README.md"},
-            "result": {
-                "status": "success",
-                "path": "README.md",
-                "content": "# Demo\n\nTiny demo.\n\nTiny project.\n",
-            },
-        },
-        state,
+def test_context_find_empty_suggests_change_keywords() -> None:
+    suggestion = suggestion_for_observation(
+        _obs("context_find", {"query": "missing feature"}, {"status": "success", "candidates": []})
     )
 
-    assert guidance is not None
-    assert "If the read-back content satisfies the request" in guidance.message
-    assert "produce the final answer" in guidance.message
-    assert "do not keep editing" in guidance.message
+    assert suggestion is not None
+    assert "change keywords" in suggestion.message.lower() or "Change keywords" in suggestion.message
+    assert "request_user_input" in suggestion.message
 
 
-def test_guidance_for_empty_context_find_changes_keywords_or_asks_user() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "context_find",
-            "args": {"query": "missing feature"},
-            "result": {"status": "success", "candidates": []},
-        },
-        LoopGuidanceState(),
+def test_file_write_success_suggests_read_back() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "file_write",
+            {"path": "README.md"},
+            {"status": "success", "path": "README.md"},
+        )
     )
 
-    assert guidance is not None
-    assert guidance.status == "continue"
-    assert "change keywords" in guidance.message
-    assert "request_user_input" in guidance.message
+    assert suggestion is not None
+    assert "README.md" in suggestion.message
+    assert "verification" in suggestion.message or "reading back" in suggestion.message or "Read back" in suggestion.message
 
 
-def test_guidance_for_missing_file_prefers_suggestion_path() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "app.py"},
-            "result": {
+def test_request_user_input_success_suggests_continue() -> None:
+    suggestion = suggestion_for_observation(
+        _obs("request_user_input", {}, {"status": "success", "answer": "yes"})
+    )
+
+    assert suggestion is not None
+    assert "same question" in suggestion.message or "continue" in suggestion.message.lower()
+
+
+def test_file_read_success_produces_no_suggestion() -> None:
+    """file_read 是中性操作，不应该产生建议来干预 Agent。"""
+    suggestion = suggestion_for_observation(
+        _obs(
+            "file_read",
+            {"path": "README.md"},
+            {"status": "success", "path": "README.md", "content": "# Demo"},
+        )
+    )
+
+    assert suggestion is None
+
+
+def test_file_list_success_produces_no_suggestion() -> None:
+    suggestion = suggestion_for_observation(
+        _obs("file_list", {}, {"status": "success", "tree": "./"})
+    )
+
+    assert suggestion is None
+
+
+# --- 错误路径：根据错误类型提供有用建议 ---
+
+def test_file_read_error_with_suggestion_uses_suggested_path() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "file_read",
+            {"path": "app.py"},
+            {
                 "status": "error",
-                "error": {
-                    "type": "tool_argument_invalid",
-                    "message": "path does not exist: app.py",
-                },
+                "error": {"type": "tool_argument_invalid", "message": "path does not exist: app.py"},
                 "suggestions": ["src/app.py"],
             },
-        },
-        LoopGuidanceState(),
+        )
     )
 
-    assert guidance is not None
-    assert guidance.status == "handle_error"
-    assert guidance.message == "File path failed; try the suggested path with file_read: src/app.py."
+    assert suggestion is not None
+    assert suggestion.trigger == "tool_error"
+    assert "src/app.py" in suggestion.message
 
 
-def test_guidance_for_patch_miss_reads_current_file_before_retry() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "apply_patch",
-            "args": {"path": "README.md", "old_text": "missing", "new_text": "new"},
-            "result": {
+def test_apply_patch_miss_suggests_read_before_retry() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "apply_patch",
+            {"path": "README.md", "old_text": "missing", "new_text": "new"},
+            {
                 "status": "error",
                 "error": {"type": "patch_not_applied", "message": "old_text not found"},
             },
-        },
-        LoopGuidanceState(),
+        )
     )
 
-    assert guidance is not None
-    assert "file_read README.md" in guidance.message
-    assert "narrow old_text" in guidance.message
+    assert suggestion is not None
+    assert "README.md" in suggestion.message
+    assert "narrow old_text" in suggestion.message
 
 
-def test_guidance_for_patch_set_failure_reads_current_file_before_retry() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "apply_patch_set",
-            "args": {
-                "replacements": [
-                    {"path": "README.md", "old_text": "missing", "new_text": "new"},
-                    {"path": "src/app.py", "old_text": "x", "new_text": "y"},
-                ],
-            },
-            "result": {
-                "status": "error",
-                "error": {"type": "patch_text_not_found", "message": "old_text was not found"},
-                "replacement_count": 2,
-                "replacements": [
-                    {"index": 0, "path": "README.md", "status": "error", "reason": "old_text was not found"},
-                    {"index": 1, "path": "src/app.py", "status": "skipped"},
-                ],
-            },
-        },
-        LoopGuidanceState(),
-    )
-
-    assert guidance is not None
-    assert "file_read README.md" in guidance.message
-    assert "then retry apply_patch_set" in guidance.message
-
-
-def test_guidance_for_patch_set_duplicate_match_expands_context() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "apply_patch_set",
-            "args": {"replacements": [{"path": "README.md", "old_text": "same", "new_text": "new"}]},
-            "result": {
+def test_apply_patch_set_not_unique_suggests_expand_context() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "apply_patch_set",
+            {"replacements": [{"path": "README.md", "old_text": "same", "new_text": "new"}]},
+            {
                 "status": "error",
                 "error": {"type": "patch_text_not_unique", "message": "old_text must match exactly once"},
                 "replacement_count": 1,
-                "replacements": [
-                    {"index": 0, "path": "README.md", "status": "error", "reason": "old_text repeated"}
-                ],
+                "replacements": [{"index": 0, "path": "README.md", "status": "error", "reason": "repeated"}],
             },
-        },
-        LoopGuidanceState(),
+        )
     )
 
-    assert guidance is not None
-    assert "file_read README.md" in guidance.message
-    assert "expand old_text context" in guidance.message
+    assert suggestion is not None
+    assert "README.md" in suggestion.message
+    assert "unique" in suggestion.message.lower() or "longer" in suggestion.message.lower()
 
 
-def test_guidance_for_shell_failure_uses_output_without_mechanical_retry() -> None:
-    guidance = guidance_for_observation(
-        {
-            "tool_name": "shell",
-            "args": {"command": "pytest -q"},
-            "result": {
-                "status": "error",
-                "exit_code": 1,
-                "stdout": "x" * 1000,
-                "stderr": "AssertionError: bad value",
-            },
-        },
-        LoopGuidanceState(),
+def test_error_without_specific_handler_returns_none() -> None:
+    """没有专门处理逻辑的错误不应该产生建议，让 SafetyGuard 处理。"""
+    suggestion = suggestion_for_observation(
+        _obs(
+            "shell",
+            {"command": "pytest"},
+            {"status": "error", "exit_code": 1, "stderr": "AssertionError"},
+        )
     )
 
-    assert guidance is not None
-    assert "Use stderr/stdout" in guidance.message
-    assert "do not rerun the same command unchanged" in guidance.message
-    assert "x" * 300 not in guidance.message
+    assert suggestion is None
 
 
-def test_consecutive_failures_require_new_strategy_or_user_input() -> None:
-    state = LoopGuidanceState()
-    first = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "missing.py"},
-            "result": {"status": "error", "error": {"type": "tool_argument_invalid", "message": "missing"}},
-        },
-        state,
-    )
-    second = guidance_for_observation(
-        {
-            "tool_name": "file_read",
-            "args": {"path": "missing.py"},
-            "result": {"status": "error", "error": {"type": "tool_argument_invalid", "message": "missing"}},
-        },
-        state,
-    )
+# --- 关键回归测试：不再有强制终止逻辑 ---
 
-    assert first is not None
-    assert second is not None
-    assert "Do not repeat the same failing tool call" in second.message
-    assert "request_user_input" in second.message
+def test_repeated_file_reads_never_force_stop() -> None:
+    """重复读取文件不应该触发任何强制终止——这是最关键的回归测试。"""
+    for _ in range(10):
+        suggestion = suggestion_for_observation(
+            _obs(
+                "file_read",
+                {"path": "README.md"},
+                {"status": "success", "path": "README.md", "content": "# Demo"},
+            )
+        )
+        assert suggestion is None, "file_read 不应该产生任何建议来干预 Agent"
 
 
-def test_no_tool_review_pushes_file_modification_to_tools() -> None:
-    guidance = guidance_for_no_tool_response(
-        "Here is the code you should put in README.md:\n```markdown\nupdated\n```",
-        "修改 README 文件",
-        LoopGuidanceState(),
-    )
-
-    assert guidance is not None
-    assert guidance.status == "continue"
-    assert "file_write/apply_patch" in guidance.message
-
-
-def test_no_tool_review_pushes_unverified_completion_to_validation() -> None:
-    guidance = guidance_for_no_tool_response(
-        "Done, tests pass.",
-        "修改 Python 文件并运行测试",
-        LoopGuidanceState(),
-    )
-
-    assert guidance is not None
-    assert "verify" in guidance.message
-    assert "shell/code_run" in guidance.message
-
-
-def test_no_tool_review_allows_normal_final_answer() -> None:
-    guidance = guidance_for_no_tool_response(
-        "Project has src/app.py and tests/test_app.py.",
-        "总结项目结构",
-        LoopGuidanceState(),
-    )
-
-    assert guidance is None
+def test_summary_task_with_read_only_tools_never_force_stop() -> None:
+    """原始 bug 场景：'生成介绍文档' 不应该被强制终止。"""
+    for tool_name in ["file_read", "file_read", "file_read", "file_list"]:
+        suggestion = suggestion_for_observation(
+            _obs(
+                tool_name,
+                {"path": "docs/something.md"} if tool_name == "file_read" else {},
+                {"status": "success", "content": "..." if tool_name == "file_read" else ""},
+            )
+        )
+        # file_read 和 file_list 都不应该产生建议
+        if tool_name in {"file_read", "file_list"}:
+            assert suggestion is None

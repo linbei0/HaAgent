@@ -126,7 +126,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     assert "apply_patch_set" in report.tasks[0].tools
     assert "shell" in report.tasks[1].tools
     assert report.tasks[2].failure_reason == "none"
-    assert "Patch text was ambiguous" in _context_text(report.tasks[2].episode_path)
+    assert "Patch text is not unique" in _context_text(report.tasks[2].episode_path)
     first_tool_call = _tool_calls(report.tasks[0].episode_path)[2]
     assert first_tool_call["tool_name"] == "apply_patch_set"
     assert first_tool_call["policy"]["approval"]["status"] == "granted"

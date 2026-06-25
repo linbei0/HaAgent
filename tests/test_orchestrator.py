@@ -1170,7 +1170,7 @@ def test_orchestrator_completes_after_two_tool_rounds(tmp_path: Path) -> None:
     assert second_context.index("Plan:") < second_context.index("Observations:")
     assert second_context.index("Observations:") < second_context.index("Pending next step:")
     assert "Pending next step:" in second_context
-    assert "Use the successful tool result to choose the next concrete step" in second_context
+    assert "Continue from the latest successful tool observation" in second_context
     assert any(
         source["source_type"] == "observation" and source["name"] == "fake_tool"
         for source in second_manifest["sources"]
@@ -1184,9 +1184,9 @@ def test_orchestrator_completes_after_two_tool_rounds(tmp_path: Path) -> None:
         for source in second_manifest["sources"]
     )
     assert second_manifest["next_action"]["status"] == "continue"
-    assert second_manifest["next_action"]["based_on_observation_index"] == 1
-    assert second_manifest["next_action"]["based_on_tool_name"] == "loop_guidance"
-    assert "successful tool result" in second_manifest["next_action"]["reason"]
+    assert second_manifest["next_action"]["based_on_observation_index"] == 0
+    assert second_manifest["next_action"]["based_on_tool_name"] == "fake_tool"
+    assert "successful tool observation" in second_manifest["next_action"]["reason"]
     for context_id in ["0001", "0002", "0003"]:
         context_manifest = json.loads(
             (result.episode_path / "contexts" / f"{context_id}.json").read_text(encoding="utf-8"),

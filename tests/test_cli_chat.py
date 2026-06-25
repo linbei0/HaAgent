@@ -91,25 +91,6 @@ class WriteThenKeepsReadingUnlessFinalGateway:
         return ModelResponse("checking again", [ToolCall("file_read", {"path": "notes.txt"})])
 
 
-class RepeatReadOnlyUntilFinalGateway:
-    provider_name = "repeat-read-only"
-
-    def __init__(self, *, empty_final: bool = False, tool_on_final: bool = False) -> None:
-        self.empty_final = empty_final
-        self.tool_on_final = tool_on_final
-        self.model_inputs: list[str] = []
-        self.tool_schema_names: list[list[str]] = []
-
-    def generate(self, task, model_input, tool_schemas, observations):
-        self.model_inputs.append(model_input)
-        self.tool_schema_names.append([schema["name"] for schema in tool_schemas])
-        if not tool_schemas:
-            if self.tool_on_final:
-                return ModelResponse("still wants tools", [ToolCall("file_read", {"path": "README.md"})])
-            return ModelResponse("" if self.empty_final else "HaAgent 是本地个人 AI 助手。", [])
-        return ModelResponse("reading", [ToolCall("file_read", {"path": "README.md"})])
-
-
 class BadToolGateway:
     provider_name = "bad-tool"
 
@@ -447,67 +428,6 @@ def test_agent_session_requests_final_response_after_file_write_without_verifica
     assert gateway.tool_schema_names[1] == []
 
 
-def test_agent_session_requests_final_response_after_repeated_read_only_exploration(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "README.md").write_text("# Demo\n\nTiny project.\n", encoding="utf-8")
-    gateway = RepeatReadOnlyUntilFinalGateway()
-    session = AgentSession(
-        workspace_root=tmp_path,
-        runs_root=tmp_path / ".runs",
-        model_gateway=gateway,
-        max_turns=5,
-    )
-
-    result = session.run_prompt_events("介绍一下项目")
-
-    assert result.status == "completed"
-    assert result.final_response == "HaAgent 是本地个人 AI 助手。"
-    assert gateway.tool_schema_names[-1] == []
-    assert "final answer" in gateway.model_inputs[-1]
-    assert "do not call tools" in gateway.model_inputs[-1]
-
-
-def test_agent_session_fails_if_final_response_turn_still_calls_tools(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "README.md").write_text("# Demo\n\nTiny project.\n", encoding="utf-8")
-    gateway = RepeatReadOnlyUntilFinalGateway(tool_on_final=True)
-    session = AgentSession(
-        workspace_root=tmp_path,
-        runs_root=tmp_path / ".runs",
-        model_gateway=gateway,
-        max_turns=5,
-    )
-
-    result = session.run_prompt_events("介绍一下项目")
-
-    assert result.status == "failed"
-    assert result.failed_stage == "executing"
-    assert result.failure_category == "Model Failure"
-    assert "final response turn" in result.reason
-
-
-def test_agent_session_fails_if_final_response_turn_is_empty(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "README.md").write_text("# Demo\n\nTiny project.\n", encoding="utf-8")
-    gateway = RepeatReadOnlyUntilFinalGateway(empty_final=True)
-    session = AgentSession(
-        workspace_root=tmp_path,
-        runs_root=tmp_path / ".runs",
-        model_gateway=gateway,
-        max_turns=5,
-    )
-
-    result = session.run_prompt_events("介绍一下项目")
-
-    assert result.status == "failed"
-    assert result.failed_stage == "executing"
-    assert result.failure_category == "Model Failure"
-    assert "empty final response" in result.reason
-
-
 def test_agent_session_writes_session_package_and_turn_record(tmp_path: Path) -> None:
     session = AgentSession(
         workspace_root=tmp_path,
@@ -788,8 +708,7 @@ def test_agent_session_events_show_single_turn_order_and_tool_success(tmp_path: 
         "approval_requested",
         "approval_granted",
         "tool_finished",
-        "loop_guidance_added",
-        "no_tool_reviewed",
+        "loop_suggestion_added",
         "assistant_message",
         "turn_finished",
         "session_finished",
@@ -870,8 +789,7 @@ def test_agent_session_user_input_request_continues_with_answer(tmp_path: Path) 
         "user_input_requested",
         "user_input_received",
         "tool_finished",
-        "loop_guidance_added",
-        "no_tool_reviewed",
+        "loop_suggestion_added",
         "assistant_message",
         "turn_finished",
     ]

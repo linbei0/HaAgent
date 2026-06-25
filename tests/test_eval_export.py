@@ -140,11 +140,11 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
             "context_id": "0002",
             "status": "continue",
             "reason": (
-                "Use the successful tool result to choose the next concrete step "
-                "or produce a final answer if criteria are satisfied."
+                "Continue from the latest successful tool observation. "
+                "If the acceptance criteria are satisfied, produce the final answer."
             ),
-            "based_on_observation_index": 1,
-            "based_on_tool_name": "loop_guidance",
+            "based_on_observation_index": 0,
+            "based_on_tool_name": "fake_tool",
         },
     ]
 

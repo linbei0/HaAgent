@@ -45,8 +45,8 @@ def observation_summary(observation: dict[str, object]) -> dict[str, object]:
         return _apply_patch_set_observation_summary(args, result)
     if tool_name == "verification":
         return _verification_observation_summary(args, result)
-    if tool_name == "loop_guidance":
-        return _loop_guidance_observation_summary(args, result)
+    if tool_name in {"loop_suggestion", "safety_warning"}:
+        return _loop_suggestion_observation_summary(args, result)
     return _generic_observation_summary(args, result)
 
 
@@ -297,7 +297,7 @@ def _verification_observation_summary(
     }
 
 
-def _loop_guidance_observation_summary(
+def _loop_suggestion_observation_summary(
     args: dict[str, Any],
     result: dict[str, Any],
 ) -> dict[str, object]:

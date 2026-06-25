@@ -241,7 +241,6 @@ def test_run_prompt_events_forwards_chat_events(tmp_path: Path, monkeypatch) -> 
     assert [event.event_type for event in events] == [
         "session_started",
         "turn_started",
-        "no_tool_reviewed",
         "assistant_message",
         "turn_finished",
         "session_finished",

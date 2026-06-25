@@ -313,37 +313,6 @@ def test_real_task_smoke_failed_task_is_clear_in_inspect(tmp_path: Path) -> None
     assert "file_read: path does not exist: missing.py" in summary
 
 
-def test_real_task_smoke_no_tool_reply_for_edit_is_pushed_to_use_tool(tmp_path: Path) -> None:
-    workspace = _make_project_workspace(tmp_path)
-    gateway = ScriptedGateway(
-        [
-            ModelResponse("Add this line to README.md: pushed by guidance", []),
-            ModelResponse(
-                "apply guidance",
-                [
-                    ToolCall(
-                        "apply_patch",
-                        {
-                            "path": "README.md",
-                            "old_text": "Tiny project.",
-                            "new_text": "Tiny project.\n\npushed by guidance",
-                        },
-                    ),
-                ],
-            ),
-            ModelResponse("README changed.", []),
-        ],
-    )
-
-    result = _run_chat(workspace, gateway, "修改 README，增加 pushed by guidance", approvals=True)
-
-    assert result.status == "completed"
-    assert "pushed by guidance" in (workspace / "README.md").read_text(encoding="utf-8")
-    events = _transcript_events(result.episode_path)
-    assert "no_tool_reviewed" in events
-    assert "loop_guidance_added" in events
-
-
 def test_real_task_smoke_recovers_from_wrong_file_path_with_suggestions(tmp_path: Path) -> None:
     workspace = _make_project_workspace(tmp_path)
     gateway = ScriptedGateway(
@@ -362,7 +331,7 @@ def test_real_task_smoke_recovers_from_wrong_file_path_with_suggestions(tmp_path
     assert calls[0]["error"]["type"] == "tool_argument_invalid"
     assert calls[0]["result"] is None
     assert Path(calls[1]["result"]["path"]).parts[-2:] == ("src", "app.py")
-    assert "loop_guidance_added" in _transcript_events(result.episode_path)
+    assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 
 
 def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path) -> None:
@@ -409,7 +378,7 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
         "file_read",
         "apply_patch",
     ]
-    assert "loop_guidance_added" in _transcript_events(result.episode_path)
+    assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 
 
 def test_real_task_smoke_patch_set_failure_does_not_partially_write(tmp_path: Path) -> None:
@@ -509,11 +478,10 @@ def test_real_task_smoke_repeated_patch_set_fragment_reads_then_uses_longer_cont
     assert (workspace / "README.md").read_text(encoding="utf-8") == "# Demo\n\nTiny demo.\n\nTiny project.\n"
 
 
-def test_real_task_smoke_unverified_done_is_pushed_to_run_validation(tmp_path: Path) -> None:
+def test_real_task_smoke_agent_runs_validation_then_completes(tmp_path: Path) -> None:
     workspace = _make_project_workspace(tmp_path)
     gateway = ScriptedGateway(
         [
-            ModelResponse("Done, tests pass.", []),
             ModelResponse("run validation", [ToolCall("shell", {"command": "python -m pytest -q", "timeout_seconds": 20})]),
             ModelResponse("Validated with pytest.", []),
         ],
@@ -525,7 +493,6 @@ def test_real_task_smoke_unverified_done_is_pushed_to_run_validation(tmp_path: P
     calls = _tool_calls(result.episode_path)
     assert calls[0]["tool_name"] == "shell"
     assert calls[0]["result"]["exit_code"] == 0
-    assert "no_tool_reviewed" in _transcript_events(result.episode_path)
 
 
 def test_real_task_smoke_finds_context_before_edit_without_path(tmp_path: Path) -> None:
@@ -563,7 +530,7 @@ def test_real_task_smoke_finds_context_before_edit_without_path(tmp_path: Path) 
         "file_read",
         "apply_patch",
     ]
-    assert "loop_guidance_added" in _transcript_events(result.episode_path)
+    assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 
 
 def _run_chat(

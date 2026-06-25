@@ -31,12 +31,12 @@ from haagent.runtime.human_interaction_resolver import (
     HumanInteractionResolver,
 )
 from haagent.runtime.loop_guidance import (
-    LoopGuidance,
-    LoopGuidanceState,
-    guidance_for_no_tool_response,
-    guidance_for_observation,
-    guidance_observation,
+    ToolSuggestion,
+    safety_violation_observation,
+    suggestion_for_observation,
+    suggestion_observation,
 )
+from haagent.runtime.safety_guard import SafetyGuard
 from haagent.runtime.plan import build_plan
 from haagent.runtime.state import RunStatus
 from haagent.runtime.task_contract import TaskLoadError, load_task, resolve_workspace_root
@@ -139,7 +139,9 @@ class RunOrchestrator:
             completion_observations: list[dict[str, object]] = []
             passed_verification_commands: set[str] = set()
             final_response_requested = False
-            guidance_state = LoopGuidanceState()
+            has_file_change = False
+            has_shell_verification = False
+            safety_guard = SafetyGuard()
             interaction_resolver = HumanInteractionResolver()
             for turn in range(1, self._max_turns + 1):
                 context = ContextBuilder(
@@ -225,40 +227,14 @@ class RunOrchestrator:
                             },
                         )
                         return _finish_run(writer, RunStatus.FAILED, state_history)
-                    no_tool_guidance = None if final_response_requested else guidance_for_no_tool_response(
-                        model_response.content,
-                        task.goal,
-                        guidance_state,
-                    )
                     writer.append_transcript(
                         {
                             "event": "no_tool_reviewed",
                             "turn": turn,
-                            "guidance_added": no_tool_guidance is not None,
-                            "trigger": no_tool_guidance.trigger if no_tool_guidance else None,
+                            "guidance_added": False,
+                            "trigger": None,
                         },
                     )
-                    self._emit_event(
-                        {
-                            "event_type": "no_tool_reviewed",
-                            "turn": turn,
-                            "guidance_added": no_tool_guidance is not None,
-                            "trigger": no_tool_guidance.trigger if no_tool_guidance else None,
-                        },
-                    )
-                    if no_tool_guidance is not None:
-                        observations = [_record_guidance(writer, self._emit_event, turn, no_tool_guidance)]
-                        if turn == self._max_turns:
-                            transition(RunStatus.FAILED)
-                            writer.write_failure_attribution(
-                                {
-                                    "stage": "executing",
-                                    "category": FailureCategory.LOOP_LIMIT.value,
-                                    "evidence": "no-tool response still needed loop guidance at max_turns",
-                                },
-                            )
-                            return _finish_run(writer, RunStatus.FAILED, state_history)
-                        continue
                     self._emit_event(
                         {
                             "event_type": "assistant_message",
@@ -338,18 +314,57 @@ class RunOrchestrator:
                             **observation,
                         },
                     )
+                    violation = safety_guard.check(
+                        tool_call.name,
+                        tool_call.args,
+                        tool_result,
+                    )
+                    if violation is not None and violation.should_abort:
+                        abort_obs = safety_violation_observation(
+                            violation.message, violation.recovery_suggestion
+                        )
+                        writer.append_transcript(
+                            {"event": "safety_abort", "turn": turn, **abort_obs}
+                        )
+                        self._emit_event(
+                            {
+                                "event_type": "safety_abort",
+                                "turn": turn,
+                                "violation_type": violation.type,
+                                "message": violation.message,
+                            }
+                        )
+                        transition(RunStatus.FAILED)
+                        writer.write_failure_attribution(
+                            {
+                                "stage": "executing",
+                                "category": FailureCategory.LOOP_LIMIT.value,
+                                "evidence": violation.message,
+                            }
+                        )
+                        return _finish_run(writer, RunStatus.FAILED, state_history)
+
                     if tool_result.get("status") == "error":
-                        guidance = guidance_for_observation(observation, guidance_state, goal=task.goal)
                         if _tool_error_is_terminal(tool_result):
                             router.raise_for_error(tool_result)
-                        if guidance is not None:
+                        suggestion = suggestion_for_observation(observation)
+                        if violation is not None:
+                            safety_obs = safety_violation_observation(
+                                violation.message, violation.recovery_suggestion
+                            )
+                            writer.append_transcript(
+                                {"event": "safety_warning", "turn": turn, **safety_obs}
+                            )
+                            observations = [observation, safety_obs]
+                        elif suggestion is not None:
                             observations = [
                                 observation,
-                                _record_guidance(writer, self._emit_event, turn, guidance),
+                                _record_suggestion(writer, self._emit_event, turn, suggestion),
                             ]
                         else:
                             observations = [observation]
                         break
+
                     self._emit_event(
                         {
                             "event_type": "tool_finished",
@@ -360,15 +375,18 @@ class RunOrchestrator:
                         },
                     )
                     observations.append(observation)
-                    guidance = guidance_for_observation(observation, guidance_state, goal=task.goal)
-                    if guidance is not None:
-                        observations.append(_record_guidance(writer, self._emit_event, turn, guidance))
-                        if guidance.status == "final_answer_required":
-                            final_response_requested = True
-                    if tool_call.name in {"apply_patch", "apply_patch_set"}:
+                    suggestion = suggestion_for_observation(observation)
+                    if suggestion is not None:
+                        observations.append(
+                            _record_suggestion(writer, self._emit_event, turn, suggestion)
+                        )
+                    if tool_call.name in {"apply_patch", "apply_patch_set", "file_write"}:
                         completion_observations = [observation]
+                        has_file_change = True
                     else:
                         completion_observations.append(observation)
+                    if tool_call.name in {"shell", "code_run"} and tool_result.get("exit_code") == 0:
+                        has_shell_verification = True
                     _update_in_band_verification_progress(
                         tool_call.name,
                         tool_call.args,
@@ -379,9 +397,7 @@ class RunOrchestrator:
                 if _all_declared_verification_commands_passed(
                     task.verification_commands,
                     passed_verification_commands,
-                ) or _in_band_verification_passed_after_file_change(
-                    guidance_state,
-                ) or _successful_file_change_without_declared_verification(
+                ) or (has_file_change and has_shell_verification and not task.verification_commands) or _successful_file_change_without_declared_verification(
                     completion_observations,
                     task.verification_commands,
                 ):
@@ -474,9 +490,6 @@ def _verification_loop_limit_evidence(max_turns: int, verification_result) -> st
     )
 
 
-def _in_band_verification_passed_after_file_change(guidance_state: LoopGuidanceState) -> bool:
-    return guidance_state.has_file_change and guidance_state.has_verification_evidence
-
 
 def _successful_file_change_without_declared_verification(
     completion_observations: list[dict[str, object]],
@@ -494,23 +507,22 @@ def _successful_file_change_without_declared_verification(
     )
 
 
-def _record_guidance(
+def _record_suggestion(
     writer: EpisodeWriter,
     emit_event: Callable[[dict[str, object]], None],
     turn: int,
-    guidance: LoopGuidance,
+    suggestion: ToolSuggestion,
 ) -> dict[str, object]:
     event = {
-        "event_type": "loop_guidance_added",
+        "event_type": "loop_suggestion_added",
         "turn": turn,
-        "status": guidance.status,
-        "trigger": guidance.trigger,
-        "tool_name": guidance.tool_name,
-        "message": guidance.message,
+        "trigger": suggestion.trigger,
+        "tool_name": suggestion.tool_name,
+        "message": suggestion.message,
     }
-    writer.append_transcript({"event": "loop_guidance_added", **_transcript_event(event)})
+    writer.append_transcript({"event": "loop_suggestion_added", **_transcript_event(event)})
     emit_event(event)
-    return guidance_observation(guidance)
+    return suggestion_observation(suggestion)
 
 
 def _record_guardrail(
