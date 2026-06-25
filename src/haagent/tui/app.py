@@ -6,16 +6,96 @@ haagent/tui/app.py - HaAgent Textual 首版界面
 
 from __future__ import annotations
 
+import threading
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, RichLog, Static
+from textual.screen import ModalScreen
+from textual.widgets import Button, Input, RichLog, Static
 
 from haagent.app.assistant_service import AssistantService, AssistantWorkspaceStatus
+from haagent.runtime.command import redact_secret_like_text
 from haagent.runtime.chat_session import ChatEvent
+from haagent.runtime.human_interaction import (
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+)
+
+
+@dataclass
+class _PendingInteraction:
+    request: HumanInteractionRequest
+    done: threading.Event = field(default_factory=threading.Event)
+    response: HumanInteractionResponse | None = None
+
+
+class ToolApprovalModal(ModalScreen[bool]):
+    CSS = """
+    ToolApprovalModal {
+        align: center middle;
+    }
+
+    #approval-dialog {
+        width: 72;
+        height: auto;
+        padding: 1 2;
+        border: solid $warning;
+        background: $surface;
+    }
+
+    #approval-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #approval-body {
+        margin-bottom: 1;
+    }
+
+    #approval-buttons {
+        align-horizontal: center;
+        height: auto;
+    }
+
+    #approval-allow,
+    #approval-deny {
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        ("y", "allow", "允许"),
+        ("n", "deny", "拒绝"),
+        ("escape", "deny", "拒绝"),
+    ]
+
+    def __init__(self, request: HumanInteractionRequest) -> None:
+        super().__init__()
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="approval-dialog"):
+            yield Static("Tool Approval", id="approval-title")
+            yield Static(Text(_approval_body(self.request)), id="approval-body")
+            with Horizontal(id="approval-buttons"):
+                yield Button("Allow y", id="approval-allow", variant="success")
+                yield Button("Deny n", id="approval-deny", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#approval-deny", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "approval-allow")
+
+    def action_allow(self) -> None:
+        self.dismiss(True)
+
+    def action_deny(self) -> None:
+        self.dismiss(False)
 
 
 class HaAgentTuiApp(App[None]):
@@ -74,6 +154,7 @@ class HaAgentTuiApp(App[None]):
         ("ctrl+q", "quit", "退出"),
         ("q", "quit", "退出"),
         ("?", "help", "帮助"),
+        ("escape", "cancel_interaction", "取消"),
         ("pageup", "conversation_page_up", "上翻"),
         ("pagedown", "conversation_page_down", "下翻"),
     ]
@@ -87,6 +168,8 @@ class HaAgentTuiApp(App[None]):
         self._conversation_placeholder_rendered = False
         self._tool_lines: list[str] = []
         self._last_failure: dict[str, str] | None = None
+        self._pending_interaction: _PendingInteraction | None = None
+        self._default_prompt_placeholder = "输入 prompt，Enter 发送"
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status-bar")
@@ -94,7 +177,7 @@ class HaAgentTuiApp(App[None]):
             yield RichLog(id="conversation", wrap=True, auto_scroll=True)
             yield Static("", id="side-bar")
         with Vertical(id="input-panel"):
-            yield Input(placeholder="输入 prompt，Enter 发送", id="prompt-input")
+            yield Input(placeholder=self._default_prompt_placeholder, id="prompt-input")
         yield Static(Text("[Enter]发送 [PgUp/PgDn]滚动 [Tab]焦点 [?]帮助 [Ctrl+Q]退出"), id="footer-bar")
 
     def on_mount(self) -> None:
@@ -111,6 +194,9 @@ class HaAgentTuiApp(App[None]):
         if not prompt:
             return
         event.input.value = ""
+        if self._pending_interaction is not None and self._pending_interaction.request.interaction_type == "user_input":
+            self._complete_interaction(HumanInteractionResponse(approved=True, answer=prompt))
+            return
         self._append_block("You", prompt)
         self._state = "running"
         self._refresh()
@@ -129,12 +215,18 @@ class HaAgentTuiApp(App[None]):
     def action_conversation_page_down(self) -> None:
         self.query_one("#conversation", RichLog).scroll_page_down(animate=False, force=True)
 
+    def action_cancel_interaction(self) -> None:
+        if self._pending_interaction is None:
+            return
+        self._complete_interaction(HumanInteractionResponse(approved=False, answer=""))
+
     @work(thread=True, exclusive=True)
     def _run_prompt(self, prompt: str) -> None:
         try:
             result = self.service.run_prompt_events(
                 prompt,
                 event_sink=lambda event: self.call_from_thread(self._handle_chat_event, event),
+                interaction_handler=self._handle_interaction,
             )
         except Exception as error:
             self.call_from_thread(self._handle_prompt_error, error)
@@ -161,11 +253,32 @@ class HaAgentTuiApp(App[None]):
             self._append_line(line)
         elif event_type == "approval_requested":
             self._state = "waiting approval"
-            self._append_block("Waiting", "工具请求需要审批；首版 TUI 暂不实现 allow/deny 流程。")
+            tool_name = _payload_text(payload, "tool_name", "unknown")
+            line = f"{tool_name} pending approval"
+            self._tool_lines.append(line)
+            self._append_line(f"Tool {line}")
         elif event_type == "user_input_requested":
             self._state = "waiting input"
             question = _payload_text(payload, "question", event.message)
-            self._append_block("Waiting", f"需要补充信息：{question}")
+            self._set_answer_required(question)
+            self._append_block("Answer required", question)
+        elif event_type == "approval_granted":
+            tool_name = _payload_text(payload, "tool_name", "unknown")
+            self._state = "running"
+            self._tool_lines.append(f"{tool_name} approved")
+            self._append_line(f"Approval granted: {tool_name}")
+        elif event_type == "approval_denied":
+            tool_name = _payload_text(payload, "tool_name", "unknown")
+            self._tool_lines.append(f"{tool_name} denied")
+            self._append_line(f"Approval denied: {tool_name}")
+        elif event_type == "user_input_received":
+            tool_name = _payload_text(payload, "tool_name", "request_user_input")
+            approved = payload.get("approved")
+            self._state = "running"
+            if approved is False:
+                self._append_line(f"Answer declined: {tool_name}")
+            else:
+                self._append_line(f"Answer submitted: {tool_name}")
         elif event_type == "failure":
             self._state = "failed"
             reason = _payload_text(payload, "reason", event.message)
@@ -180,6 +293,46 @@ class HaAgentTuiApp(App[None]):
             }
             self._append_block("Failure", _failure_body(failed_stage, category, reason, episode_path))
         self._refresh()
+
+    def _handle_interaction(self, request: HumanInteractionRequest) -> HumanInteractionResponse:
+        pending = _PendingInteraction(request)
+        self.call_from_thread(self._begin_interaction, pending)
+        pending.done.wait()
+        return pending.response or HumanInteractionResponse(approved=False, answer="")
+
+    def _begin_interaction(self, pending: _PendingInteraction) -> None:
+        self._pending_interaction = pending
+        request = pending.request
+        if request.interaction_type == "approval":
+            self._state = "waiting approval"
+            self.push_screen(ToolApprovalModal(request), self._complete_approval)
+        else:
+            self._state = "waiting input"
+            self._set_answer_required(request.question)
+        self._refresh()
+
+    def _complete_approval(self, approved: bool | None) -> None:
+        self._complete_interaction(HumanInteractionResponse(approved=bool(approved), answer=""))
+
+    def _complete_interaction(self, response: HumanInteractionResponse) -> None:
+        pending = self._pending_interaction
+        if pending is None:
+            return
+        pending.response = response
+        pending.done.set()
+        self._pending_interaction = None
+        self._restore_prompt_input()
+        self._state = "running"
+        self._refresh()
+
+    def _set_answer_required(self, question: str) -> None:
+        prompt_input = self.query_one("#prompt-input", Input)
+        prompt_input.placeholder = f"回答 Agent 的问题：{_safe_summary(question, 90)}"
+        prompt_input.focus()
+
+    def _restore_prompt_input(self) -> None:
+        prompt_input = self.query_one("#prompt-input", Input)
+        prompt_input.placeholder = self._default_prompt_placeholder
 
     def _finish_prompt(self, status: str) -> None:
         if status == "completed" and self._state not in {"waiting approval", "waiting input"}:
@@ -281,7 +434,7 @@ class HaAgentTuiApp(App[None]):
             f"  id: {session}\n"
             f"  turns: {turn_count}\n"
             f"  state: {self._state}\n\n"
-            "Tools\n"
+            "Tools This Turn\n"
             f"{tool_summary}\n\n"
             "Last Failure\n"
             f"{failure_summary}"
@@ -297,6 +450,70 @@ class HaAgentTuiApp(App[None]):
         side_bar = self.query_one("#side-bar", Static)
         terminal_width = width if width is not None else self.size.width
         side_bar.set_class(terminal_width < 120, "hidden")
+
+
+def _approval_body(request: HumanInteractionRequest) -> str:
+    args_summary = _format_args_summary(request.args_summary)
+    impact_summary = _impact_summary(request.tool_name, request.args_summary)
+    lines = [
+        "工具请求需要确认",
+        "",
+        f"tool      {_safe_summary(request.tool_name, 80)}",
+        f"question  {_safe_summary(request.question, 160)}",
+    ]
+    if request.reason:
+        lines.append(f"reason    {_safe_summary(request.reason, 160)}")
+    if request.risk_level:
+        lines.append(f"risk      {_safe_summary(request.risk_level, 40)}")
+    lines.extend(
+        [
+            f"args      {args_summary}",
+            f"impact    {impact_summary}",
+            "",
+            "高风险内容首版只展示摘要，不展示完整 patch、stdout 或 stderr。",
+        ],
+    )
+    return "\n".join(lines)
+
+
+def _format_args_summary(args_summary: dict[str, object]) -> str:
+    if not args_summary:
+        return "none"
+    pieces = []
+    for key, value in args_summary.items():
+        if isinstance(value, list):
+            safe_items = ", ".join(_safe_summary(str(item), 80) for item in value[:3])
+            if len(value) > 3:
+                safe_items += ", ..."
+            pieces.append(f"{key}=[{safe_items}]")
+        else:
+            pieces.append(f"{key}={_safe_summary(str(value), 120)}")
+    return "; ".join(pieces)
+
+
+def _impact_summary(tool_name: str, args_summary: dict[str, object]) -> str:
+    if tool_name in {"file_write", "apply_patch"}:
+        path = _safe_summary(str(args_summary.get("path", "unknown")), 120)
+        return f"会修改本地文件；path={path}"
+    if tool_name == "apply_patch_set":
+        paths = args_summary.get("paths")
+        if isinstance(paths, list) and paths:
+            return f"会修改本地文件；paths={_safe_summary(', '.join(str(path) for path in paths[:3]), 160)}"
+        return "会修改本地文件；paths=unknown"
+    if tool_name == "shell":
+        command = _safe_summary(str(args_summary.get("command", "unknown")), 160)
+        return f"会执行本地命令；是否修改本地文件取决于命令；command={command}"
+    if tool_name == "code_run":
+        return "会执行本地代码；可能读取或修改 workspace 内文件"
+    return "影响范围以工具参数摘要为准"
+
+
+def _safe_summary(value: str, limit: int) -> str:
+    redacted, _ = redact_secret_like_text(value)
+    normalized = " ".join(redacted.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "... [truncated]"
 
 
 def _payload_text(payload: dict[str, object], key: str, default: str) -> str:

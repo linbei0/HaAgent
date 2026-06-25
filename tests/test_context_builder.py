@@ -539,6 +539,53 @@ def test_context_builder_compacts_request_user_input_observation(tmp_path: Path)
     assert '"truncated": true' in result.model_input
 
 
+def test_context_builder_keeps_resolved_interactions_after_observation_window_moves(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    builder = ContextBuilder(
+        task=make_task(["request_user_input", "file_read"]),
+        workspace_root=tmp_path,
+        provider_name="fake",
+        episode_writer=writer,
+        observations=[
+            {
+                "tool_name": "file_read",
+                "args": {"path": "docs/harness-requirements.md", "offset": 0, "limit": 20},
+                "result": {
+                    "status": "success",
+                    "path": "docs/harness-requirements.md",
+                    "content": "requirements",
+                },
+            },
+        ],
+        interaction_state=[
+            {
+                "type": "user_input",
+                "tool": "request_user_input",
+                "status": "answered",
+                "question": "Which file?",
+                "answer_excerpt": "docs/harness-requirements.md",
+                "answer_chars": len("docs/harness-requirements.md"),
+                "turn": 1,
+            },
+        ],
+    )
+
+    result = builder.build()
+    manifest = json.loads((writer.path / "contexts" / "0001.json").read_text(encoding="utf-8"))
+
+    assert "Human Interaction State:" in result.model_input
+    assert "type=user_input tool=request_user_input status=answered" in result.model_input
+    assert "Which file?" in result.model_input
+    assert "docs/harness-requirements.md" in result.model_input
+    assert "Resolved Human Interactions:" not in result.model_input
+    assert "Treat these interaction requests" not in result.model_input
+    assert "The model needs durable human-interaction state" not in result.model_input
+    assert any(
+        source["source_type"] == "interaction_state" and source["name"] == "human_interaction_state"
+        for source in manifest["sources"]
+    )
+
+
 def test_context_builder_compacts_long_file_read_observation(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     long_content = "\n".join([f"line-{index:03d}-" + ("x" * 20) for index in range(80)])

@@ -26,6 +26,10 @@ from haagent.runtime.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
 )
+from haagent.runtime.human_interaction_resolver import (
+    HumanInteractionResolution,
+    HumanInteractionResolver,
+)
 from haagent.runtime.loop_guidance import (
     LoopGuidance,
     LoopGuidanceState,
@@ -136,6 +140,7 @@ class RunOrchestrator:
             passed_verification_commands: set[str] = set()
             final_response_requested = False
             guidance_state = LoopGuidanceState()
+            interaction_resolver = HumanInteractionResolver()
             for turn in range(1, self._max_turns + 1):
                 context = ContextBuilder(
                     task=task,
@@ -146,6 +151,7 @@ class RunOrchestrator:
                     final_response_requested=final_response_requested,
                     session_summary=self._session_summary,
                     working_state=self._working_state,
+                    interaction_state=interaction_resolver.state_records(),
                 ).build()
                 tool_schemas = [] if final_response_requested else export_tool_schemas(task.allowed_tools)
                 # 每一轮模型调用都绑定独立 context_id，便于复盘工具观察如何进入下一轮。
@@ -304,7 +310,7 @@ class RunOrchestrator:
                         tool_call.name,
                         tool_call.args,
                         interaction_handler=(
-                            _interaction_bridge(self, writer, turn)
+                            _interaction_bridge(self, writer, turn, interaction_resolver)
                             if self._interaction_handler is not None
                             else None
                         ),
@@ -543,8 +549,17 @@ def _interaction_bridge(
     orchestrator: RunOrchestrator,
     writer: EpisodeWriter,
     turn: int,
+    interaction_resolver: HumanInteractionResolver,
 ) -> HumanInteractionHandler:
     def handle(request: HumanInteractionRequest) -> HumanInteractionResponse:
+        if resolution := interaction_resolver.resolve(request):
+            reused_event = _interaction_reused_event(turn, resolution)
+            writer.append_interaction_event(
+                "interaction_reused",
+                _transcript_event(reused_event),
+            )
+            orchestrator._emit_event(reused_event)
+            return resolution.to_response()
         requested_event = _interaction_requested_event(turn, request)
         writer.append_interaction_event(
             str(requested_event["event_type"]),
@@ -561,6 +576,7 @@ def _interaction_bridge(
             _transcript_event(response_event),
         )
         orchestrator._emit_event(response_event)
+        interaction_resolver.record(request, response, turn=turn)
         return response
 
     return handle
@@ -577,6 +593,23 @@ def _interaction_requested_event(turn: int, request: HumanInteractionRequest) ->
         "risk_level": request.risk_level,
         "args_summary": request.args_summary,
         "approved": None,
+    }
+
+
+def _interaction_reused_event(
+    turn: int,
+    resolution: HumanInteractionResolution,
+) -> dict[str, object]:
+    return {
+        "event_type": "interaction_reused",
+        "turn": turn,
+        "interaction_type": resolution.interaction_type,
+        "tool_name": resolution.tool_name,
+        "question": resolution.question,
+        "status": resolution.status,
+        "approved": resolution.approved,
+        "resolved_turn": resolution.turn,
+        "signature": resolution.signature,
     }
 
 

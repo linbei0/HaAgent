@@ -65,6 +65,7 @@ class ContextBuilder:
         final_response_requested: bool = False,
         session_summary: str | None = None,
         working_state: dict[str, object] | None = None,
+        interaction_state: list[dict[str, object]] | None = None,
     ) -> None:
         self._task = task
         self._workspace_root = workspace_root
@@ -74,6 +75,7 @@ class ContextBuilder:
         self._final_response_requested = final_response_requested
         self._session_summary = session_summary
         self._working_state = working_state
+        self._interaction_state = list(interaction_state or [])
         self._project_instructions: str | None = None
         self._plan: dict[str, object] | None = None
 
@@ -139,6 +141,7 @@ class ContextBuilder:
                 *self._format_project_instructions(),
                 *self._format_session_summary_block(),
                 *self._format_working_state_block(),
+                *self._format_interaction_state_block(),
                 "",
                 "Facts:",
                 f"goal: {self._task.goal}",
@@ -199,6 +202,8 @@ class ContextBuilder:
             working_state=self._working_state,
             working_state_model_content=working_state_model_content,
             working_state_raw_content=working_state_raw_content,
+            interaction_state=self._interaction_state,
+            interaction_state_lines=self._format_interaction_state(),
             episode_path=self._episode_writer.path,
         )
 
@@ -337,6 +342,14 @@ class ContextBuilder:
             return []
         return ["", *content.splitlines()]
 
+    def _format_interaction_state_block(self) -> list[str]:
+        if not self._interaction_state:
+            return []
+        return ["", "Human Interaction State:", *self._format_interaction_state()]
+
+    def _format_interaction_state(self) -> list[str]:
+        return [f"- {_interaction_state_summary(record)}" for record in self._interaction_state[-8:]]
+
     def _working_state_model_content(self) -> str:
         try:
             return format_working_state_for_model(self._working_state)
@@ -369,6 +382,30 @@ def _format_list(items: list[str]) -> list[str]:
     if not items:
         return ["- none"]
     return [f"- {item}" for item in items]
+
+
+def _interaction_state_summary(record: dict[str, object]) -> str:
+    parts = [
+        f"type={_safe_state_value(record.get('type'), 'interaction')}",
+        f"tool={_safe_state_value(record.get('tool'), 'unknown')}",
+        f"status={_safe_state_value(record.get('status'), 'unknown')}",
+    ]
+    question = str(record.get("question") or "")
+    if question:
+        parts.append(f"question={json.dumps(question, ensure_ascii=False)}")
+    if "answer_excerpt" in record:
+        parts.append(f"answer_excerpt={json.dumps(str(record['answer_excerpt']), ensure_ascii=False)}")
+        parts.append(f"answer_chars={record.get('answer_chars', 0)}")
+    if "approved" in record:
+        parts.append(f"approved={str(bool(record['approved'])).lower()}")
+    if "turn" in record:
+        parts.append(f"turn={record['turn']}")
+    return " ".join(parts)
+
+
+def _safe_state_value(value: object, fallback: str) -> str:
+    text = str(value or fallback)
+    return " ".join(text.split())
 
 
 def _now_iso() -> str:

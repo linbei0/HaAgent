@@ -12,6 +12,7 @@ from haagent.models.gateway import ModelCallError
 from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.models.gateway import OpenAIChatCompletionsGateway
 from haagent.models.gateway import OpenAIResponsesGateway
+from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestrator import RunOrchestrator
 from haagent.runtime.state import RunStatus
 from haagent.verification.engine import VerificationResult
@@ -630,6 +631,48 @@ policy:
     }
 
 
+def test_orchestrator_carries_granted_approval_into_later_contexts(tmp_path: Path, monkeypatch) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(
+        task_path,
+        ["shell"],
+        policy_block="""
+policy:
+  approval_allowed_tools:
+    - shell
+""".strip(),
+    )
+    gateway = SequenceGateway(
+        [
+            ModelResponse("try shell", [ToolCall("shell", {"command": "echo approved"})]),
+            ModelResponse("done", []),
+        ],
+    )
+
+    def approved_shell(args, workspace_root):
+        return {"status": "success", "exit_code": 0, "stdout": "approved\n", "stderr": ""}
+
+    monkeypatch.setattr("haagent.tools.router.shell", approved_shell)
+
+    result = RunOrchestrator(
+        runs_root=runs_dir,
+        model_gateway=gateway,
+        interaction_handler=lambda request: HumanInteractionResponse(approved=True),
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    second_context = (result.episode_path / "contexts" / "0002.txt").read_text(encoding="utf-8")
+    transcript = _read_transcript(result.episode_path)
+    assert any(record.get("event") == "approval_granted" for record in transcript)
+    assert "Human Interaction State:" in second_context
+    assert "type=approval tool=shell status=approved" in second_context
+    assert "Approve high risk tool shell?" in second_context
+    assert "approved=true" in second_context
+    assert "Resolved Human Interactions:" not in second_context
+    assert "The model needs durable human-interaction state" not in second_context
+
+
 def test_orchestrator_passes_policy_approved_tools_to_router(
     tmp_path: Path,
     monkeypatch,
@@ -1161,6 +1204,220 @@ def test_orchestrator_completes_after_two_tool_rounds(tmp_path: Path) -> None:
         "0003",
     ]
     assert all(context["budget"]["source_count"] > 0 for context in run_manifest["contexts"])
+
+
+def test_orchestrator_carries_resolved_user_input_into_later_contexts(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "harness-requirements.md").write_text("requirements\n", encoding="utf-8")
+    write_task(task_path, ["request_user_input", "file_read"])
+    gateway = SequenceGateway(
+        [
+            ModelResponse(
+                "ask",
+                [
+                    ToolCall(
+                        "request_user_input",
+                        {"question": "Which file?", "reason": "Need target before continuing"},
+                    ),
+                ],
+            ),
+            ModelResponse(
+                "read",
+                [ToolCall("file_read", {"path": "docs/harness-requirements.md", "limit": 20})],
+            ),
+            ModelResponse("done", []),
+        ],
+    )
+
+    result = RunOrchestrator(
+        runs_root=runs_dir,
+        model_gateway=gateway,
+        interaction_handler=lambda request: HumanInteractionResponse(
+            approved=True,
+            answer="docs/harness-requirements.md",
+        ),
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    third_context = (result.episode_path / "contexts" / "0003.txt").read_text(encoding="utf-8")
+    third_manifest = json.loads(
+        (result.episode_path / "contexts" / "0003.json").read_text(encoding="utf-8"),
+    )
+    assert "Human Interaction State:" in third_context
+    assert "type=user_input tool=request_user_input status=answered" in third_context
+    assert "Which file?" in third_context
+    assert "docs/harness-requirements.md" in third_context
+    assert "Resolved Human Interactions:" not in third_context
+    assert "Treat these interaction requests" not in third_context
+    assert "The model needs durable human-interaction state" not in third_context
+    assert any(
+        source["source_type"] == "interaction_state" and source["name"] == "human_interaction_state"
+        for source in third_manifest["sources"]
+    )
+
+
+def test_orchestrator_suppresses_repeated_satisfied_user_input_question(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "harness-requirements.md").write_text("requirements\n", encoding="utf-8")
+    write_task(task_path, ["request_user_input", "file_read"])
+    gateway = SequenceGateway(
+        [
+            ModelResponse(
+                "ask",
+                [ToolCall("request_user_input", {"question": "Which file?", "reason": "Need target"})],
+            ),
+            ModelResponse(
+                "ask again",
+                [ToolCall("request_user_input", {"question": "Which file?", "reason": "Need target"})],
+            ),
+            ModelResponse(
+                "read",
+                [ToolCall("file_read", {"path": "docs/harness-requirements.md", "limit": 20})],
+            ),
+            ModelResponse("done", []),
+        ],
+    )
+    requests = []
+
+    def answer_once(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="docs/harness-requirements.md")
+
+    result = RunOrchestrator(
+        runs_root=runs_dir,
+        model_gateway=gateway,
+        max_turns=4,
+        interaction_handler=answer_once,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    assert len(requests) == 1
+    third_context = (result.episode_path / "contexts" / "0003.txt").read_text(encoding="utf-8")
+    transcript = _read_transcript(result.episode_path)
+    reused = [record for record in transcript if record.get("event") == "interaction_reused"]
+    assert len(reused) == 1
+    assert reused[0]["interaction_type"] == "user_input"
+    assert reused[0]["status"] == "answered"
+    assert "Repeated request_user_input question" not in third_context
+    assert "docs/harness-requirements.md" in third_context
+
+
+def test_orchestrator_reuses_declined_user_input_without_reasking(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(task_path, ["request_user_input"])
+    gateway = SequenceGateway(
+        [
+            ModelResponse(
+                "ask",
+                [ToolCall("request_user_input", {"question": "Which file?", "reason": "Need target"})],
+            ),
+            ModelResponse(
+                "ask again",
+                [ToolCall("request_user_input", {"question": "Which file?", "reason": "Need target"})],
+            ),
+            ModelResponse("done", []),
+        ],
+    )
+    requests = []
+
+    def decline_once(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=False, answer="")
+
+    result = RunOrchestrator(
+        runs_root=runs_dir,
+        model_gateway=gateway,
+        max_turns=3,
+        interaction_handler=decline_once,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    assert len(requests) == 1
+    transcript = _read_transcript(result.episode_path)
+    reused = [record for record in transcript if record.get("event") == "interaction_reused"]
+    assert len(reused) == 1
+    assert reused[0]["status"] == "declined"
+
+
+def test_orchestrator_reuses_granted_approval_without_reprompting(tmp_path: Path, monkeypatch) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(
+        task_path,
+        ["shell"],
+        policy_block="""
+policy:
+  approval_allowed_tools:
+    - shell
+""".strip(),
+    )
+    gateway = SequenceGateway(
+        [
+            ModelResponse("shell 1", [ToolCall("shell", {"command": "echo approved"})]),
+            ModelResponse("shell 2", [ToolCall("shell", {"command": "echo approved"})]),
+            ModelResponse("done", []),
+        ],
+    )
+    requests = []
+
+    def approved_shell(args, workspace_root):
+        return {"status": "success", "exit_code": 0, "stdout": "approved\n", "stderr": ""}
+
+    def approve_once(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True)
+
+    monkeypatch.setattr("haagent.tools.router.shell", approved_shell)
+
+    result = RunOrchestrator(
+        runs_root=runs_dir,
+        model_gateway=gateway,
+        max_turns=3,
+        interaction_handler=approve_once,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    assert len(requests) == 1
+    transcript = _read_transcript(result.episode_path)
+    reused = [record for record in transcript if record.get("event") == "interaction_reused"]
+    assert len(reused) == 1
+    assert reused[0]["interaction_type"] == "approval"
+    assert reused[0]["status"] == "approved"
+
+
+def test_orchestrator_does_not_reuse_different_user_input_question(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    runs_dir = tmp_path / ".runs"
+    write_task(task_path, ["request_user_input"])
+    gateway = SequenceGateway(
+        [
+            ModelResponse("ask file", [ToolCall("request_user_input", {"question": "Which file?"})]),
+            ModelResponse("ask format", [ToolCall("request_user_input", {"question": "Which format?"})]),
+            ModelResponse("done", []),
+        ],
+    )
+    requests = []
+
+    def answer(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer=request.question)
+
+    result = RunOrchestrator(
+        runs_root=runs_dir,
+        model_gateway=gateway,
+        max_turns=3,
+        interaction_handler=answer,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    assert [request.question for request in requests] == ["Which file?", "Which format?"]
+    transcript = _read_transcript(result.episode_path)
+    assert not [record for record in transcript if record.get("event") == "interaction_reused"]
 
 
 def test_orchestrator_verifies_immediately_when_model_returns_no_tools(tmp_path: Path) -> None:

@@ -7,7 +7,7 @@ haagent/context/source_catalog.py - Context source catalog
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from haagent.context.manifest import ContextSource, ContextSourceBudget
@@ -38,6 +38,8 @@ class ContextSourceCatalog:
     working_state_model_content: str
     working_state_raw_content: str
     episode_path: Path
+    interaction_state: list[dict[str, object]] = field(default_factory=list)
+    interaction_state_lines: list[str] = field(default_factory=list)
 
     def sources_with_budget(self) -> list[ContextSource]:
         return [self._source_with_budget(source) for source in self._sources()]
@@ -97,6 +99,15 @@ class ContextSourceCatalog:
                     "The model needs concise current goal, findings, progress, and next steps without full history.",
                 ),
             )
+        if self.interaction_state:
+            sources.append(
+                ContextSource(
+                    "interaction_state",
+                    "human_interaction_state",
+                    "Human interaction state recorded during this run",
+                    "Structured human interaction facts are included in the current context.",
+                ),
+            )
         sources.extend(
             ContextSource(
                 "tool_catalog",
@@ -147,6 +158,13 @@ class ContextSourceCatalog:
             return "\n".join(["Session Summary:", *self.session_summary_lines])
         if source.source_type == "working_state":
             return self.working_state_model_content
+        if source.source_type == "interaction_state":
+            return "\n".join(
+                [
+                    "Human Interaction State:",
+                    *self.interaction_state_lines,
+                ],
+            )
         if source.source_type == "task":
             return _task_source_content(source.name, self.task)
         if source.source_type == "tool_workflow":
@@ -173,6 +191,8 @@ class ContextSourceCatalog:
             return self.session_summary or ""
         if source.source_type == "working_state":
             return self.working_state_raw_content
+        if source.source_type == "interaction_state":
+            return json.dumps(self.interaction_state, ensure_ascii=False, sort_keys=True)
         if source.source_type == "observation":
             for observation in self.observations:
                 if observation_tool_name(observation) == source.name:

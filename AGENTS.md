@@ -115,3 +115,11 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 - Chat/natural-language entry points must not bypass the runtime contracts. If they generate temporary task contracts internally, those contracts must be recorded in the episode for later inspection.
 - REPL chat may carry only bounded session summaries into the next model input; it must not copy full history, full episode traces, or full tool outputs.
 - Harness audit data should not be copied wholesale into model input. Use compact observations and bounded source budgets.
+
+## Context and Prompt Engineering
+
+- Do not fix runtime, tool, session, UI, provider, or context-state bugs by adding symptom-specific prompt instructions to model input.
+- Before adding any model-visible instruction, first determine whether the behavior should be enforced by code, state machines, schemas, tool contracts, validation, or deterministic context facts.
+- Model input should contain durable task facts, bounded observations, compact state, and reusable workflow rules. It should not accumulate one-off corrective instructions for individual failures.
+- If a new prompt/context line is necessary, it must be general, reusable across task types, token-conscious, and backed by tests that prove why code-level enforcement is not the right boundary.
+- Prefer neutral structured facts over imperative prompt patches. For example, expose a compact state record only when the model needs that fact; do not add instructions that merely tell the model not to repeat a previously observed mistake.

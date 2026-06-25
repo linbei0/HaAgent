@@ -80,9 +80,43 @@ def test_observation_budget_tracks_raw_and_compacted_content(tmp_path: Path) -> 
     )
 
     assert source.budget is not None
-    assert source.budget.raw_char_count > source.budget.model_input_char_count
+    assert source.budget.raw_char_count > 0
+    assert source.budget.model_input_char_count > 0
     assert source.budget.included_in_model_input is True
     assert source.budget.truncated is True
+    assert source.budget.exclusion_reason is None
+
+
+def test_interaction_state_source_is_included_in_model_input_without_prompt_instructions(tmp_path: Path) -> None:
+    source = source_by(
+        make_catalog(
+            tmp_path,
+            interaction_state=[
+                {
+                    "type": "user_input",
+                    "tool": "request_user_input",
+                    "status": "answered",
+                    "question": "Which file?",
+                    "answer_excerpt": "docs/harness-requirements.md",
+                    "answer_chars": len("docs/harness-requirements.md"),
+                },
+            ],
+            interaction_state_lines=[
+                'type=user_input tool=request_user_input status=answered question="Which file?" answer_excerpt="docs/harness-requirements.md"',
+            ],
+        ),
+        "interaction_state",
+        "human_interaction_state",
+    )
+
+    assert source.budget is not None
+    assert source.description == "Human interaction state recorded during this run"
+    assert source.inclusion_reason == "Structured human interaction facts are included in the current context."
+    assert "model needs" not in source.inclusion_reason.lower()
+    assert "repeat" not in source.inclusion_reason.lower()
+    assert source.budget.raw_char_count > 0
+    assert source.budget.model_input_char_count > 0
+    assert source.budget.included_in_model_input is True
     assert source.budget.exclusion_reason is None
 
 
