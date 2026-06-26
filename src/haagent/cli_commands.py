@@ -27,6 +27,8 @@ from haagent.cli_render import (
     read_chat_interaction,
     run_chat_repl,
 )
+from haagent.memory import CandidateQueue, CandidateQueueError, MemoryStore, MemoryStoreError
+from haagent.memory.governance import MemoryGovernanceError
 from haagent.cli_runtime import CliRuntime, SmokeDefinition
 from haagent.models import provider_profile
 from haagent.models.credentials import CredentialError, save_insecure_api_key, save_keyring_api_key
@@ -195,6 +197,69 @@ def handle_sessions(args) -> int:
         print(f"first_request={summary.first_request}")
         print(f"session_path={summary.session_path}")
     return 0
+
+
+def handle_memory(args) -> int:
+    workspace_root = args.workspace_root if args.workspace_root is not None else Path.cwd()
+    try:
+        session_path = _memory_session_path(args.session, args.runs_root, workspace_root)
+        queue = CandidateQueue(session_path)
+        store = MemoryStore(workspace_root=workspace_root)
+        if args.memory_action == "list":
+            candidates = queue.list(status=None if args.all else "pending")
+            if not candidates:
+                print("no memory candidates")
+                return 0
+            for candidate in candidates:
+                print(f"candidate_id={candidate.candidate_id}")
+                print(f"status={candidate.status}")
+                print(f"scope={candidate.scope}")
+                print(f"category={candidate.category}")
+                print(f"title={candidate.title}")
+                if candidate.risk_flags:
+                    print(f"risk_flags={','.join(candidate.risk_flags)}")
+            return 0
+        if args.memory_action == "confirm":
+            record = store.confirm_candidate(
+                queue,
+                args.candidate_id,
+                edited_title=args.title,
+                edited_body=args.body,
+                edited_tags=args.tag,
+                actor="user",
+            )
+            print(f"memory_id={record.memory_id}")
+            print(f"scope={record.scope}")
+            print(f"category={record.category}")
+            print(f"title={record.title}")
+            return 0
+        if args.memory_action == "reject":
+            rejected = store.reject_candidate(
+                queue,
+                args.candidate_id,
+                reason=args.reason,
+                actor="user",
+            )
+            print(f"candidate_id={rejected.candidate_id}")
+            print(f"status={rejected.status}")
+            return 0
+    except (CandidateQueueError, MemoryStoreError, MemoryGovernanceError, ChatSessionError) as error:
+        print(f"error: {error}")
+        return 1
+    print(f"error: unsupported memory action: {args.memory_action}")
+    return 1
+
+
+def _memory_session_path(session: str | None, runs_root: Path, workspace_root: Path) -> Path:
+    if session is not None:
+        raw = Path(session)
+        if raw.is_absolute() or raw.exists() or raw.name != session:
+            return raw.resolve()
+        return (runs_root / "sessions" / session).resolve()
+    latest = find_latest_session(runs_root, workspace_root)
+    if latest is None:
+        raise ChatSessionError("当前目录没有可审查的 memory candidate session")
+    return latest.session_path
 
 
 def handle_tui(args) -> int:

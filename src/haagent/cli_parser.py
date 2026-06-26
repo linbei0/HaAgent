@@ -16,6 +16,7 @@ from haagent.cli_commands import (
     handle_eval,
     handle_export_eval,
     handle_inspect,
+    handle_memory,
     handle_run,
     handle_sessions,
     handle_setup,
@@ -59,6 +60,25 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     )
     _add_runs_root(sessions_parser, help_text="directory for assistant session packages (default: .runs)")
     sessions_parser.set_defaults(handler=handle_sessions)
+
+    memory_parser = subparsers.add_parser("memory", help="review long-term memory candidates")
+    memory_subparsers = memory_parser.add_subparsers(dest="memory_action", required=True)
+    memory_list = memory_subparsers.add_parser("list", help="list pending memory candidates")
+    _add_memory_common_args(memory_list)
+    memory_list.add_argument("--all", action="store_true", help="include confirmed and rejected candidates")
+    memory_list.set_defaults(handler=handle_memory)
+    memory_confirm = memory_subparsers.add_parser("confirm", help="confirm a pending memory candidate")
+    memory_confirm.add_argument("candidate_id", help="candidate id to confirm")
+    _add_memory_common_args(memory_confirm)
+    memory_confirm.add_argument("--title", help="edited title to commit")
+    memory_confirm.add_argument("--body", help="edited body to commit")
+    memory_confirm.add_argument("--tag", action="append", help="edited tag; repeat for multiple tags")
+    memory_confirm.set_defaults(handler=handle_memory)
+    memory_reject = memory_subparsers.add_parser("reject", help="reject a pending memory candidate")
+    memory_reject.add_argument("candidate_id", help="candidate id to reject")
+    _add_memory_common_args(memory_reject)
+    memory_reject.add_argument("--reason", default="rejected by user", help="rejection reason")
+    memory_reject.set_defaults(handler=handle_memory)
 
     tui_parser = subparsers.add_parser("tui", help="open the HaAgent terminal UI")
     tui_parser.add_argument(
@@ -217,6 +237,16 @@ def _add_runs_root(parser: argparse.ArgumentParser, *, help_text: str) -> None:
         default=Path(".runs"),
         help=help_text,
     )
+
+
+def _add_memory_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workspace-root",
+        type=Path,
+        help="workspace root for memory review (default: current directory)",
+    )
+    parser.add_argument("--session", help="session id or session package path")
+    _add_runs_root(parser, help_text="directory for assistant session packages (default: .runs)")
 
 
 def _add_model_provider(

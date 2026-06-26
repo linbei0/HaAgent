@@ -138,6 +138,13 @@ def print_chat_event(event: ChatEvent) -> None:
         content = event.payload.get("content")
         if content:
             pieces.append(f"message={shell_token(summary_value(str(content)))}")
+    elif event.event_type == "memory_candidates_created":
+        count = event.payload.get("count")
+        if count is not None:
+            pieces.append(f"count={count}")
+        message = event.payload.get("message")
+        if message:
+            pieces.append(f"message={shell_token(str(message))}")
     elif event.event_type == "guardrail_triggered":
         for key in ["scope", "rule_id", "severity", "message"]:
             value = event.payload.get(key)

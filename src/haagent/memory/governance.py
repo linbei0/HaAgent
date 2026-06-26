@@ -161,6 +161,13 @@ def redact_candidate_evidence(evidence: CandidateEvidence) -> CandidateEvidence:
         turn_index=evidence.turn_index,
         episode_path=redact_sensitive(evidence.episode_path) if evidence.episode_path is not None else None,
         source_path=redact_sensitive(evidence.source_path) if evidence.source_path is not None else None,
+        source_summary=redact_sensitive(evidence.source_summary) if evidence.source_summary is not None else None,
+        basis=redact_sensitive(evidence.basis) if evidence.basis is not None else None,
+        category_rationale=(
+            redact_sensitive(evidence.category_rationale)
+            if evidence.category_rationale is not None
+            else None
+        ),
     )
 
 

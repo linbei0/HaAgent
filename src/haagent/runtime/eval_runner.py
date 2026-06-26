@@ -105,6 +105,7 @@ def _run_chat_session_case(
             runs_root=runs_root,
             model_gateway=model_gateway,
             max_turns=max_turns,
+            memory_extraction_enabled=False,
         )
         result = None
         for index, prompt in enumerate(prompts):

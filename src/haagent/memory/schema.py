@@ -41,6 +41,9 @@ class CandidateEvidence:
     turn_index: int | None = None
     episode_path: str | None = None
     source_path: str | None = None
+    source_summary: str | None = None
+    basis: str | None = None
+    category_rationale: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -50,6 +53,9 @@ class CandidateEvidence:
             "turn_index": self.turn_index,
             "episode_path": self.episode_path,
             "source_path": self.source_path,
+            "source_summary": self.source_summary,
+            "basis": self.basis,
+            "category_rationale": self.category_rationale,
         }
 
     @classmethod
@@ -63,6 +69,9 @@ class CandidateEvidence:
             turn_index=_optional_int(raw, "turn_index"),
             episode_path=_optional_str(raw, "episode_path"),
             source_path=_optional_str(raw, "source_path"),
+            source_summary=_optional_str(raw, "source_summary"),
+            basis=_optional_str(raw, "basis"),
+            category_rationale=_optional_str(raw, "category_rationale"),
         )
 
 

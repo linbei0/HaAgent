@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +17,7 @@ from typing import Any, Callable
 import yaml
 
 from haagent.models.gateway import ModelGateway
+from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.runtime.episode_validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
@@ -87,6 +88,9 @@ class ChatTurnResult:
     failure_category: str = "none"
     reason: str = "none"
     summary_error: str | None = None
+    memory_candidates_created: int = 0
+    memory_extraction_status: str = "skipped"
+    memory_extraction_reason: str = ""
 
     def output_lines(self) -> list[str]:
         lines = [
@@ -98,6 +102,8 @@ class ChatTurnResult:
         ]
         if self.summary_error is not None:
             lines.append(f"summary_error={_summary_value(self.summary_error)}")
+        if self.memory_candidates_created:
+            lines.append(f"memory_candidates={self.memory_candidates_created}")
         if self.status != "completed":
             lines.extend(
                 [
@@ -129,11 +135,13 @@ class AgentSession:
         model_gateway: ModelGateway | None = None,
         max_turns: int = CHAT_MAX_TURNS,
         session_id: str | None = None,
+        memory_extraction_enabled: bool = True,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.runs_root = runs_root
         self.model_gateway = model_gateway
         self.max_turns = max_turns
+        self.memory_extraction_enabled = memory_extraction_enabled
         self.session_id = session_id or _new_session_id()
         self.turn_count = 0
         self._summaries: list[str] = []
@@ -161,6 +169,7 @@ class AgentSession:
         instance.runs_root = session_path.parent.parent
         instance.model_gateway = model_gateway
         instance.max_turns = max_turns
+        instance.memory_extraction_enabled = True
         instance.session_id = str(metadata["session_id"])
         instance.turn_count = int(metadata["turn_count"])
         instance._summaries = _bounded_summaries([str(turn["summary"]) for turn in turns])
@@ -244,6 +253,34 @@ class AgentSession:
         self._summaries.append(turn_summary)
         self._summaries = _bounded_summaries(self._summaries)
         self._record_turn(clean_prompt, turn_result, turn_summary)
+        extraction_result = (
+            self._run_memory_extraction(clean_prompt, turn_result, runtime_events)
+            if self.memory_extraction_enabled
+            else None
+        )
+        if extraction_result is not None and extraction_result.created_count:
+            turn_result = replace(
+                turn_result,
+                memory_candidates_created=extraction_result.created_count,
+                memory_extraction_status=extraction_result.status,
+                memory_extraction_reason=extraction_result.reason,
+            )
+            self._emit_chat_event(
+                event_sink,
+                event_type="memory_candidates_created",
+                turn_index=turn_index,
+                message="发现可记忆候选，已放入候选队列，等待用户确认。",
+                payload={
+                    "count": extraction_result.created_count,
+                    "message": f"发现 {extraction_result.created_count} 条可记忆候选，已放入候选队列，等待你确认。",
+                },
+            )
+        elif extraction_result is not None and extraction_result.status == "error":
+            turn_result = replace(
+                turn_result,
+                memory_extraction_status=extraction_result.status,
+                memory_extraction_reason=extraction_result.reason,
+            )
         if turn_result.status != "completed":
             self._emit_chat_event(
                 event_sink,
@@ -278,6 +315,29 @@ class AgentSession:
                 payload={"status": turn_result.status},
             )
         return turn_result
+
+    def _run_memory_extraction(
+        self,
+        prompt: str,
+        result: ChatTurnResult,
+        runtime_events: list[dict[str, object]],
+    ):
+        return MemoryExtractor().extract(
+            MemoryExtractionRequest(
+                session_id=self.session_id,
+                session_path=self.session_path,
+                workspace_root=self.workspace_root,
+                turn_index=result.turn_index,
+                user_prompt=prompt,
+                final_response=result.final_response,
+                status=result.status,
+                verification_status=result.verification_status,
+                episode_path=result.episode_path,
+                working_state=self._working_state.to_dict(),
+                runtime_events=runtime_events,
+                model_gateway=self.model_gateway,
+            ),
+        )
 
     def status(self) -> dict[str, object]:
         return {

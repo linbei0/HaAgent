@@ -10,6 +10,13 @@ from haagent.memory.governance import (
     MemoryDuplicateError,
     MemoryGovernanceError,
 )
+from haagent.memory.extraction import (
+    ExtractedMemoryCandidate,
+    MemoryExtractionPolicy,
+    MemoryExtractionRequest,
+    MemoryExtractionResult,
+    MemoryExtractor,
+)
 from haagent.memory.schema import (
     CandidateEvidence,
     MemoryAuditEvent,
@@ -32,10 +39,15 @@ __all__ = [
     "CandidateEvidence",
     "CandidateQueue",
     "CandidateQueueError",
+    "ExtractedMemoryCandidate",
     "MemoryAuditEvent",
     "MemoryCandidate",
     "MemoryConflictError",
     "MemoryDuplicateError",
+    "MemoryExtractionPolicy",
+    "MemoryExtractionRequest",
+    "MemoryExtractionResult",
+    "MemoryExtractor",
     "MemoryGovernanceError",
     "MemoryIndex",
     "MemoryIndexItem",

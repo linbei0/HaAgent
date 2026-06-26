@@ -63,6 +63,7 @@ def run_dogfood_tasks(
             runs_root=root,
             model_gateway=model_gateway,
             max_turns=max_turns,
+            memory_extraction_enabled=False,
         )
         turn = session.run_prompt_events(
             task.prompt,
