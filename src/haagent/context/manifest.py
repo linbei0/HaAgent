@@ -38,6 +38,7 @@ class ContextManifest:
     system_chars: int
     task_chars: int
     next_action: dict[str, Any] | None = None
+    memory: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         manifest: dict[str, Any] = {
@@ -51,4 +52,6 @@ class ContextManifest:
         }
         if self.next_action is not None:
             manifest["next_action"] = self.next_action
+        if self.memory is not None:
+            manifest["memory"] = self.memory
         return manifest

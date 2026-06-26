@@ -19,6 +19,10 @@ from haagent.context.messages import (
     build_system_message,
     build_task_message,
 )
+from haagent.memory.retrieval import (
+    MemoryRetrievalRequest,
+    MemoryRetriever,
+)
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.task_contract import TaskSpec
 from haagent.runtime.working_state import (
@@ -102,6 +106,7 @@ class ContextBuilder:
             task=self._task,
             plan_steps=list(plan.get("planned_steps", [])),
             working_state_content=self._working_state_content(),
+            memory_block=self._memory_block(),
             interaction_state_lines=self._format_interaction_state(),
         )
         messages = [system_msg, task_msg]
@@ -123,6 +128,7 @@ class ContextBuilder:
             message_count=len(messages),
             system_chars=system_chars,
             task_chars=task_chars,
+            memory=self._memory_manifest(),
         )
         manifest_path = contexts_dir / f"{context_id}-manifest.json"
         manifest_path.write_text(
@@ -202,6 +208,34 @@ class ContextBuilder:
             return content or None
         except WorkingStateError as error:
             raise ContextBuildError(f"invalid working_state: {error}") from error
+
+    def _memory_result(self):
+        if not hasattr(self, "_cached_memory_result"):
+            query_parts = [
+                self._task.goal,
+                *self._task.constraints,
+                *self._task.acceptance_criteria,
+                *self._task.verification_commands,
+            ]
+            if self._working_state is not None:
+                query_parts.append(raw_working_state_text(self._working_state))
+            request = MemoryRetrievalRequest(
+                query="\n".join(part for part in query_parts if part),
+                workspace_root=self._workspace_root,
+            )
+            self._cached_memory_result = MemoryRetriever().retrieve(request)
+        return self._cached_memory_result
+
+    def _memory_block(self) -> str | None:
+        block = self._memory_result().to_model_block()
+        return block or None
+
+    def _memory_manifest(self) -> dict | None:
+        result = self._memory_result()
+        manifest = result.to_manifest_dict()
+        if not result.memories and not any(manifest["diagnostics"].values()):
+            return None
+        return manifest
 
     def _format_interaction_state(self) -> list[str]:
         return [f"- {_interaction_state_summary(r)}" for r in self._interaction_state[-8:]]

@@ -19,6 +19,13 @@ from haagent.memory.schema import (
     MemoryRecord,
     MemoryTombstone,
 )
+from haagent.memory.retrieval import (
+    MemoryRetrievalBudget,
+    MemoryRetrievalRequest,
+    MemoryRetrievalResult,
+    MemoryRetriever,
+    RetrievedMemory,
+)
 from haagent.memory.store import MemoryStore, MemoryStoreError
 
 __all__ = [
@@ -32,8 +39,13 @@ __all__ = [
     "MemoryGovernanceError",
     "MemoryIndex",
     "MemoryIndexItem",
+    "MemoryRetrievalBudget",
+    "MemoryRetrievalRequest",
+    "MemoryRetrievalResult",
+    "MemoryRetriever",
     "MemoryRecord",
     "MemoryStore",
     "MemoryStoreError",
     "MemoryTombstone",
+    "RetrievedMemory",
 ]

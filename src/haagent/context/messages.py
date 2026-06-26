@@ -53,6 +53,7 @@ def build_task_message(
     task: TaskSpec,
     plan_steps: list[str],
     working_state_content: str | None = None,
+    memory_block: str | None = None,
     interaction_state_lines: list[str] | None = None,
 ) -> dict[str, Any]:
     lines: list[str] = []
@@ -87,6 +88,10 @@ def build_task_message(
         lines.append("")
         lines.append("Working State:")
         lines.append(working_state_content.strip())
+
+    if memory_block and memory_block.strip():
+        lines.append("")
+        lines.append(memory_block.strip())
 
     if interaction_state_lines:
         lines.append("")
