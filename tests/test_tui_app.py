@@ -42,6 +42,7 @@ class FakeAssistantService:
         extra_events: list[ChatEvent] | None = None,
         memory_candidates: list[MemoryCandidate] | None = None,
         memory_error: Exception | None = None,
+        current_session_id: str = "session-test",
     ) -> None:
         self.workspace_root = workspace_root
         self.profile_name = profile_name
@@ -61,6 +62,7 @@ class FakeAssistantService:
         self.extra_events = list(extra_events or [])
         self.memory_candidates = list(memory_candidates or [])
         self.memory_error = memory_error
+        self.current_session_id = current_session_id
         self.started = threading.Event()
         self.release = threading.Event()
         self.prompts: list[str] = []
@@ -83,7 +85,7 @@ class FakeAssistantService:
             credential_store_available=self.credential_store_available,
             credential_store_error=self.credential_store_error,
             profile_error=self.profile_error,
-            current_session_id="session-test",
+            current_session_id=self.current_session_id,
             current_turn_count=len(self.prompts),
         )
 
@@ -265,12 +267,12 @@ def _user_input_request() -> HumanInteractionRequest:
     )
 
 
-def _memory_candidate(candidate_id: str = "cand_abc123") -> MemoryCandidate:
+def _memory_candidate(candidate_id: str = "cand_abc123", title: str = "用户身份与爱好") -> MemoryCandidate:
     return MemoryCandidate(
         candidate_id=candidate_id,
         scope="user",
         category="user_preferences",
-        title="用户身份与爱好",
+        title=title,
         body="用户叫小明，喜欢唱跳rap篮球。",
         evidence=CandidateEvidence(
             source_type="extraction",
@@ -308,14 +310,16 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
             side = _text(app, "#side-bar")
-            assert str(tmp_path) in status
+            assert "ws:" in status
+            assert str(tmp_path) not in status
             assert "profile: local" in status
             assert "openai-chat/deepseek-chat" in status
-            assert "key: available via keyring" in status
-            assert "DEEPSEEK_API_KEY" in status
+            assert "key: ok" in status
+            assert "DEEPSEEK_API_KEY" not in status
             assert "session-test" in status
             assert "Profile" in side
             assert "base_url: https://api.deepseek.com" in side
+            assert "api_key_env: DEEPSEEK_API_KEY" in side
             assert "Ctrl+Q 退出" in _text(app, "#conversation")
             footer = _text(app, "#footer-bar")
             assert "[Ctrl+Q]退出" in footer
@@ -324,6 +328,95 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
             assert "[Tab]焦点" in str(app.query_one("#footer-bar").render())
 
     asyncio.run(run())
+
+
+def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None:
+    long_workspace = tmp_path / "very" / "long" / "workspace-name-that-should-not-fill-the-status-bar"
+    long_model = "provider-model-name-with-many-segments-and-context-window-very-long"
+    long_session = "session-20260627-abcdef1234567890abcdef1234567890"
+
+    async def run_80() -> None:
+        service = FakeAssistantService(
+            workspace_root=long_workspace,
+            model=long_model,
+            current_session_id=long_session,
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)):
+            status = _text(app, "#status-bar")
+            side = app.query_one("#side-bar")
+            assert len(status) <= 80
+            assert "ws:" in status
+            assert "profile: local" in status
+            assert "openai-chat/" in status
+            assert "key: ok" in status
+            assert "sid:" in status
+            assert "turn:" in status
+            assert "state: idle" in status
+            assert str(long_workspace) not in status
+            assert long_model not in status
+            assert long_session not in status
+            assert "DEEPSEEK_API_KEY" not in status
+            assert side.has_class("hidden")
+
+    async def run_120() -> None:
+        service = FakeAssistantService(
+            workspace_root=long_workspace,
+            model=long_model,
+            current_session_id=long_session,
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)):
+            status = _text(app, "#status-bar")
+            side = app.query_one("#side-bar")
+            assert len(status) <= 120
+            assert "ws:" in status
+            assert "profile: local" in status
+            assert "key: ok" in status
+            assert "sid:" in status
+            assert str(long_workspace) not in status
+            assert long_model not in status
+            assert long_session not in status
+            assert "DEEPSEEK_API_KEY" not in status
+            assert not side.has_class("hidden")
+            assert "base_url: https://api.deepseek.com" in _text(app, "#side-bar")
+            assert "api_key_env: DEEPSEEK_API_KEY" in _text(app, "#side-bar")
+
+    asyncio.run(run_80())
+    asyncio.run(run_120())
+
+
+def test_tui_responsive_minimum_size_and_layout_breakpoints(tmp_path: Path) -> None:
+    async def run_too_small() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(70, 20)):
+            assert "终端尺寸过小" in _all_text(app)
+            assert "请调整到至少 80x24" in _all_text(app)
+            assert app.query_one("#main").has_class("hidden")
+            assert app.query_one("#input-panel").has_class("hidden")
+
+    async def run_80() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)):
+            assert app.query_one("#resize-message").has_class("hidden")
+            assert not app.query_one("#main").has_class("hidden")
+            assert app.query_one("#side-bar").has_class("hidden")
+            assert "[Ctrl+Q]退出" in _text(app, "#footer-bar")
+
+    async def run_120() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)):
+            assert app.query_one("#resize-message").has_class("hidden")
+            assert not app.query_one("#main").has_class("hidden")
+            assert not app.query_one("#side-bar").has_class("hidden")
+            assert "Profile" in _text(app, "#side-bar")
+
+    asyncio.run(run_too_small())
+    asyncio.run(run_80())
+    asyncio.run(run_120())
 
 
 def test_tui_profile_missing_shows_setup_message(tmp_path: Path) -> None:
@@ -358,7 +451,7 @@ def test_tui_api_key_missing_shows_env_name(tmp_path: Path) -> None:
             status = _text(app, "#status-bar")
             conversation = _text(app, "#conversation")
             assert "key: missing" in status
-            assert "DEEPSEEK_API_KEY" in status
+            assert "DEEPSEEK_API_KEY" not in status
             assert "DEEPSEEK_API_KEY" in conversation
 
     asyncio.run(run())
@@ -374,7 +467,7 @@ def test_tui_api_key_available_via_env(tmp_path: Path) -> None:
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
             side = _text(app, "#side-bar")
-            assert "key: available via env" in status
+            assert "key: ok" in status
             assert "key: available via env" in side
 
     asyncio.run(run())
@@ -413,6 +506,130 @@ def test_tui_ctrl_q_exits_even_when_prompt_input_is_focused(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_tui_q_does_not_exit_while_prompt_input_is_focused(tmp_path: Path) -> None:
+    async def run_empty_input() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            assert input_widget.has_focus
+            await pilot.press("q")
+            await pilot.pause(0.1)
+            assert app.is_running
+            assert input_widget.value == "q"
+
+    async def run_existing_input() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "abc"
+            await pilot.press("q")
+            await pilot.pause(0.1)
+            assert app.is_running
+            assert input_widget.value == "abcq"
+
+    asyncio.run(run_empty_input())
+    asyncio.run(run_existing_input())
+
+
+def test_tui_help_uses_modal_without_polluting_conversation(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            before = _text(app, "#conversation")
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            after = _text(app, "#conversation")
+            rendered = _all_text(app)
+            assert after == before
+            assert "HaAgent Help" in rendered
+            assert "聊天模式" in rendered
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert "HaAgent Help" not in _all_text(app)
+
+    asyncio.run(run())
+
+
+def test_tui_help_modal_is_contextual_for_memory_modes(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("m")
+            await pilot.pause(0.1)
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            assert "记忆候选列表" in _all_text(app)
+            assert "j/k" in _all_text(app)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            assert "记忆候选详情" in _all_text(app)
+            assert "返回列表" in _all_text(app)
+
+    asyncio.run(run())
+
+
+def test_tui_help_modal_is_contextual_for_pending_input(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_user_input_request())
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Inspect"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            before = _text(app, "#conversation")
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            after_help = _text(app, "#conversation")
+            rendered = _all_text(app)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            if app._pending_interaction is not None:
+                app._complete_interaction(HumanInteractionResponse(approved=False, answer=""))
+                await pilot.pause(0.2)
+            assert after_help == before
+            assert "等待补充输入" in rendered
+            assert "Enter" in rendered
+
+    asyncio.run(run())
+
+
+def test_tui_help_modal_is_contextual_for_approval_modal(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_approval_request())
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Run checks"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            before = _text(app, "#conversation")
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            after_help = _text(app, "#conversation")
+            rendered = _all_text(app)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            if "Tool Approval" in _all_text(app):
+                await pilot.press("n")
+                await pilot.pause(0.2)
+            assert after_help == before
+            assert "审批确认" in rendered
+            assert "y" in rendered
+            assert "n" in rendered
+
+    asyncio.run(run())
+
+
 def test_tui_submit_prompt_calls_service_and_renders_assistant_event(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
@@ -441,17 +658,21 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             await pilot.press("enter")
             await pilot.pause(0.2)
             modal_text = _all_text(app)
+            deny_has_focus = app.screen.query_one("#approval-deny").has_focus
+            status = _text(app, "#status-bar")
+            side = _text(app, "#side-bar")
+            conversation = _text(app, "#conversation")
+            await pilot.press("n")
+            await pilot.pause(0.1)
             assert "Tool Approval" in modal_text
             assert "shell" in modal_text
             assert "Approve high risk tool shell?" in modal_text
             assert "uv run pytest -q" in modal_text
             assert "会执行本地命令" in modal_text
-            assert app.screen.query_one("#approval-deny").has_focus
-            assert "state: waiting approval" in _text(app, "#status-bar")
-            assert "shell pending approval" in _text(app, "#side-bar")
-            assert "Tool shell pending approval" in _text(app, "#conversation")
-            await pilot.press("n")
-            await pilot.pause(0.1)
+            assert deny_has_focus
+            assert "state: waiting approval" in status
+            assert "shell pending approval" in side
+            assert "Tool shell pending approval" in conversation
 
     asyncio.run(run())
 
@@ -505,13 +726,20 @@ def test_tui_user_input_requested_enters_answer_required_state(tmp_path: Path) -
             input_widget.value = "Inspect"
             await pilot.press("enter")
             await pilot.pause(0.2)
-            assert "state: waiting input" in _text(app, "#status-bar")
-            assert "Answer required" in _text(app, "#conversation")
-            assert "Which file should I inspect?" in _text(app, "#conversation")
-            assert "回答 Agent 的问题" in input_widget.placeholder
-            assert input_widget.has_focus
+            status = _text(app, "#status-bar")
+            conversation = _text(app, "#conversation")
+            placeholder = input_widget.placeholder
+            input_has_focus = input_widget.has_focus
             await pilot.press("escape")
             await pilot.pause(0.1)
+            if app._pending_interaction is not None:
+                app._complete_interaction(HumanInteractionResponse(approved=False, answer=""))
+                await pilot.pause(0.1)
+            assert "state: waiting input" in status
+            assert "Answer required" in conversation
+            assert "Which file should I inspect?" in conversation
+            assert "回答 Agent 的问题" in placeholder
+            assert input_has_focus
 
     asyncio.run(run())
 
@@ -649,6 +877,120 @@ def test_tui_memory_panel_lists_and_shows_candidate_details(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_tui_memory_navigation_selects_second_candidate_for_confirm_and_reject(tmp_path: Path) -> None:
+    async def confirm_run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            memory_candidates=[
+                _memory_candidate("cand_first", "第一条偏好"),
+                _memory_candidate("cand_second", "第二条偏好"),
+            ],
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("m")
+            await pilot.pause(0.1)
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            side = _text(app, "#side-bar")
+            assert "> cand_second" in side
+            assert "  cand_first" in side
+            await pilot.press("a")
+            await pilot.pause(0.1)
+            assert service.confirmed_candidate_ids == ["cand_second"]
+
+    async def reject_run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            memory_candidates=[
+                _memory_candidate("cand_first", "第一条偏好"),
+                _memory_candidate("cand_second", "第二条偏好"),
+            ],
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("m")
+            await pilot.pause(0.1)
+            await pilot.press("j")
+            await pilot.pause(0.1)
+            assert "> cand_second" in _text(app, "#side-bar")
+            await pilot.press("r")
+            await pilot.pause(0.1)
+            assert service.rejected_candidate_ids == [("cand_second", "rejected from TUI")]
+
+    asyncio.run(confirm_run())
+    asyncio.run(reject_run())
+
+
+def test_tui_memory_navigation_supports_home_end_and_keeps_selection_after_detail(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            memory_candidates=[
+                _memory_candidate("cand_first", "第一条偏好"),
+                _memory_candidate("cand_middle", "中间偏好"),
+                _memory_candidate("cand_last", "最后偏好"),
+            ],
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("m")
+            await pilot.pause(0.1)
+            await pilot.press("G")
+            await pilot.pause(0.1)
+            assert "> cand_last" in _text(app, "#side-bar")
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert "candidate_id: cand_last" in _text(app, "#side-bar")
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert "> cand_last" in _text(app, "#side-bar")
+
+            await pilot.press("g")
+            await pilot.pause(0.1)
+            assert "> cand_first" in _text(app, "#side-bar")
+            footer = _text(app, "#footer-bar")
+            assert "[↑/↓ j/k]移动" in footer
+            assert "[g/G]首尾" in footer
+
+    asyncio.run(run())
+
+
+def test_tui_memory_navigation_moves_one_candidate_per_keypress(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            memory_candidates=[
+                _memory_candidate("cand_first", "第一条偏好"),
+                _memory_candidate("cand_second", "第二条偏好"),
+                _memory_candidate("cand_third", "第三条偏好"),
+                _memory_candidate("cand_fourth", "第四条偏好"),
+            ],
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("m")
+            await pilot.pause(0.1)
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert "> cand_second" in _text(app, "#side-bar")
+
+            await pilot.press("j")
+            await pilot.pause(0.1)
+            assert "> cand_third" in _text(app, "#side-bar")
+
+            await pilot.press("up")
+            await pilot.pause(0.1)
+            assert "> cand_second" in _text(app, "#side-bar")
+
+            await pilot.press("k")
+            await pilot.pause(0.1)
+            assert "> cand_first" in _text(app, "#side-bar")
+
+    asyncio.run(run())
+
+
 def test_tui_memory_mode_is_readable_without_sidebar(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])
@@ -746,7 +1088,7 @@ def test_tui_conversation_auto_scrolls_to_latest_content(tmp_path: Path) -> None
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
-        async with app.run_test(size=(80, 12)) as pilot:
+        async with app.run_test(size=(80, 24)) as pilot:
             conversation = app.query_one("#conversation")
             for index in range(30):
                 app._append_block("Assistant", f"line {index}")
@@ -763,7 +1105,7 @@ def test_tui_conversation_wraps_long_messages_for_scroll_height(tmp_path: Path) 
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
-        async with app.run_test(size=(120, 20)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             conversation = app.query_one("#conversation")
             long_reply = (
                 "# 我能做什么？ 我是 **HaAgent**，一个运行在当前工作目录下的本地个人 AI 助手。"
@@ -785,7 +1127,7 @@ def test_tui_renders_full_long_assistant_message_from_event_sink(tmp_path: Path)
         long_reply = ("HaAgent 可以读取文件、整理内容、编辑文档、分析项目。" * 40) + "完整结尾"
         service = FakeAssistantService(workspace_root=tmp_path, assistant_content=long_reply)
         app = HaAgentTuiApp(service)
-        async with app.run_test(size=(120, 20)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
             input_widget = app.query_one("#prompt-input")
             input_widget.value = "介绍能力"
             await pilot.press("enter")

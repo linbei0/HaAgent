@@ -76,6 +76,13 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
   - real partial-failure states, such as a run failing before verification files are written.
 - If compatibility seems necessary, state who depends on it, what real failure it prevents, and why fail-fast behavior is not better.
 
+## Boundary and Matching Policy
+
+- Do not use brittle hard-coded matching as a runtime, tool, memory, UI, provider, or context-state boundary. In particular, do not route or block behavior by matching user-language phrase lists, AI-output wording, profile/memory filename token lists, content vocabulary, or shell/code strings. User language habits vary, model outputs are stochastic, and these checks create false confidence while missing easy bypasses.
+- Prefer explicit capability and protocol boundaries: structured tool schemas, typed events, task/session state, approval policy, normalized workspace paths, exact storage roots, service methods, and validated metadata. If the system needs a durable decision, make that decision a field, state transition, API call, or path/capability check rather than a guess over free text.
+- Matching is acceptable only when it operates on a stable technical surface and is not interpreting intent: schema enum values, exact tool names, known protocol fields, normalized path containment, parser selection by file extension, or security-focused secret detection. Keep these rules narrow, named, tested, and documented.
+- Before adding any new string/regex/table-based rule, state what stable contract it represents, why a structured boundary is not better, what false positives/false negatives are acceptable, and which tests prove that ordinary user phrasing or model randomness cannot change the outcome.
+
 ## Testing Instructions
 
 - Add or update pytest coverage for every behavior change.

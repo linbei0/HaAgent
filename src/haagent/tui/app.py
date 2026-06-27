@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -33,6 +34,46 @@ class _PendingInteraction:
     request: HumanInteractionRequest
     done: threading.Event = field(default_factory=threading.Event)
     response: HumanInteractionResponse | None = None
+
+
+class HelpModal(ModalScreen[None]):
+    CSS = """
+    HelpModal {
+        align: center middle;
+    }
+
+    #help-dialog {
+        width: 72;
+        height: auto;
+        padding: 1 2;
+        border: solid $primary;
+        background: $surface;
+    }
+
+    #help-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #help-body {
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [("escape", "dismiss_help", "关闭")]
+
+    def __init__(self, context: str) -> None:
+        super().__init__()
+        self.context = context
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-dialog"):
+            yield Static("HaAgent Help", id="help-title")
+            yield Static(_help_body(self.context), id="help-body")
+            yield Static("[Esc]关闭")
+
+    def action_dismiss_help(self) -> None:
+        self.dismiss(None)
 
 
 class ToolApprovalModal(ModalScreen[bool]):
@@ -73,6 +114,7 @@ class ToolApprovalModal(ModalScreen[bool]):
         ("y", "allow", "允许"),
         ("n", "deny", "拒绝"),
         ("escape", "deny", "拒绝"),
+        ("?", "help", "帮助"),
     ]
 
     def __init__(self, request: HumanInteractionRequest) -> None:
@@ -93,24 +135,43 @@ class ToolApprovalModal(ModalScreen[bool]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "approval-allow")
 
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"?", "question_mark"} or event.character == "?":
+            event.stop()
+            self.action_help()
+
     def action_allow(self) -> None:
         self.dismiss(True)
 
     def action_deny(self) -> None:
         self.dismiss(False)
 
+    def action_help(self) -> None:
+        self.app.push_screen(HelpModal("approval"))
+
 
 class PromptInput(Input):
     def on_key(self, event: events.Key) -> None:
-        if event.key != "m" or self.value:
+        if self.value:
             return
         app = self.app
-        if isinstance(app, HaAgentTuiApp) and app._pending_interaction is None:
+        if not isinstance(app, HaAgentTuiApp):
+            return
+        if event.key in {"?", "question_mark"} or event.character == "?":
+            event.stop()
+            app.action_help()
+            return
+        if event.key != "m" or app._pending_interaction is not None:
+            return
+        if isinstance(app, HaAgentTuiApp):
             event.stop()
             app.action_toggle_memory()
 
 
 class HaAgentTuiApp(App[None]):
+    MIN_WIDTH = 80
+    MIN_HEIGHT = 24
+
     CSS = """
     Screen {
         layout: vertical;
@@ -157,6 +218,13 @@ class HaAgentTuiApp(App[None]):
         background: $surface;
     }
 
+    #resize-message {
+        height: 1fr;
+        content-align: center middle;
+        padding: 1 2;
+        border: solid $warning;
+    }
+
     .hidden {
         display: none;
     }
@@ -164,7 +232,6 @@ class HaAgentTuiApp(App[None]):
 
     BINDINGS = [
         ("ctrl+q", "quit", "退出"),
-        ("q", "quit", "退出"),
         ("?", "help", "帮助"),
         Binding("m", "toggle_memory", "记忆", priority=True),
         ("enter", "memory_enter", "详情"),
@@ -196,6 +263,7 @@ class HaAgentTuiApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status-bar")
+        yield Static("终端尺寸过小\n请调整到至少 80x24 后继续使用 HaAgent TUI。", id="resize-message", classes="hidden")
         with Horizontal(id="main"):
             yield RichLog(id="conversation", wrap=True, auto_scroll=True)
             yield Static("", id="side-bar")
@@ -211,9 +279,14 @@ class HaAgentTuiApp(App[None]):
         self.query_one("#prompt-input", Input).focus()
 
     def on_resize(self, event: events.Resize) -> None:
-        self._update_responsive_layout(width=event.size.width)
+        self._update_responsive_layout(width=event.size.width, height=event.size.height)
 
     def on_key(self, event: events.Key) -> None:
+        if self._memory_mode and self._pending_interaction is None:
+            handled = self._handle_memory_key(event.key)
+            if handled:
+                event.stop()
+                return
         if self._pending_interaction is not None:
             return
         prompt_input = self.query_one("#prompt-input", Input)
@@ -246,11 +319,7 @@ class HaAgentTuiApp(App[None]):
         self._run_prompt(prompt)
 
     def action_help(self) -> None:
-        self._append_block(
-            "Help",
-            "Enter 发送，Tab 切换焦点，m 记忆候选，Enter 详情，a/y 确认，r 拒绝，Esc 返回，Ctrl+Q 退出。",
-        )
-        self._refresh_conversation()
+        self.push_screen(HelpModal(self._help_context()))
 
     def action_quit(self) -> None:
         self.exit(None)
@@ -290,6 +359,22 @@ class HaAgentTuiApp(App[None]):
             return
         self._memory_detail_mode = not self._memory_detail_mode
         self._refresh()
+
+    def action_memory_up(self) -> None:
+        self._move_memory_selection(-1)
+
+    def action_memory_down(self) -> None:
+        self._move_memory_selection(1)
+
+    def action_memory_first(self) -> None:
+        if self._memory_mode and self._memory_candidates and not self._memory_detail_mode:
+            self._memory_selected = 0
+            self._refresh()
+
+    def action_memory_last(self) -> None:
+        if self._memory_mode and self._memory_candidates and not self._memory_detail_mode:
+            self._memory_selected = len(self._memory_candidates) - 1
+            self._refresh()
 
     def action_confirm_memory(self) -> None:
         if not self._memory_mode or not self._memory_candidates:
@@ -491,6 +576,15 @@ class HaAgentTuiApp(App[None]):
         self.query_one("#side-bar", Static).update(self._side_bar(status))
         self.query_one("#footer-bar", Static).update(Text(self._footer_text()))
 
+    def _help_context(self) -> str:
+        if self._pending_interaction is not None:
+            if self._pending_interaction.request.interaction_type == "user_input":
+                return "pending_input"
+            return "approval"
+        if self._memory_mode:
+            return "memory_detail" if self._memory_detail_mode else "memory_list"
+        return "chat"
+
     def _refresh_conversation(self) -> None:
         conversation = self.query_one("#conversation", RichLog)
         if self._memory_mode:
@@ -519,18 +613,28 @@ class HaAgentTuiApp(App[None]):
         conversation.scroll_to(y=conversation.max_scroll_y, animate=False, immediate=True, force=True)
 
     def _status_line(self, status: AssistantWorkspaceStatus) -> str:
+        width = max(1, self.size.width or 120)
         profile = status.profile_name or "missing"
         provider = status.provider or "-"
         model = status.model or "-"
-        api_key_env = status.api_key_env or "-"
-        key_state = _key_state(status)
+        key_state = _compact_key_state(status)
         session = status.current_session_id or "-"
         turn_count = status.current_turn_count if status.current_turn_count is not None else 0
-        return (
-            f"workspace: {status.workspace_root}  profile: {profile}  "
-            f"{provider}/{model}  key: {key_state}({api_key_env})  session: {session}  "
-            f"turn: {turn_count}  state: {self._state}"
+        workspace_limit = 5 if width <= 80 else 16
+        profile_limit = 12
+        provider_limit = 14
+        model_limit = 4 if width <= 80 else 14
+        session_limit = 4 if width <= 80 else 12
+        line = (
+            f"ws:{_workspace_label(status.workspace_root, workspace_limit)} "
+            f"profile: {_truncate_end(profile, profile_limit)} "
+            f"{_truncate_end(provider, provider_limit)}/{_truncate_end(model, model_limit)} "
+            f"key: {key_state} "
+            f"sid:{_short_session(session, session_limit)} "
+            f"turn:{turn_count} "
+            f"state: {self._state}"
         )
+        return _truncate_status_line(line, width)
 
     def _side_bar(self, status: AssistantWorkspaceStatus) -> str:
         if self._memory_mode:
@@ -580,6 +684,28 @@ class HaAgentTuiApp(App[None]):
     def _selected_memory_candidate(self) -> MemoryCandidate:
         return self._memory_candidates[self._memory_selected]
 
+    def _handle_memory_key(self, key: str) -> bool:
+        if key in {"up", "k"}:
+            self.action_memory_up()
+            return True
+        if key in {"down", "j"}:
+            self.action_memory_down()
+            return True
+        if key == "g":
+            self.action_memory_first()
+            return True
+        if key in {"G", "shift+g", "upper_g"}:
+            self.action_memory_last()
+            return True
+        return False
+
+    def _move_memory_selection(self, delta: int) -> None:
+        if not self._memory_mode or self._memory_detail_mode or not self._memory_candidates:
+            return
+        next_index = self._memory_selected + delta
+        self._memory_selected = min(max(next_index, 0), len(self._memory_candidates) - 1)
+        self._refresh()
+
     def _memory_side_bar(self) -> str:
         return self._memory_panel_text()
 
@@ -601,14 +727,20 @@ class HaAgentTuiApp(App[None]):
             lines.append(
                 f"{marker} {candidate.candidate_id} [{candidate.scope}/{candidate.category}] {candidate.title}",
             )
-        lines.extend(["", "Enter 详情  a/y 确认  r 拒绝  Esc 返回"])
+        lines.extend(["", "↑/↓ j/k 移动  g/G 首尾  Enter 详情  a/y 确认  r 拒绝  Esc 返回"])
         return "\n".join(lines)
 
     def _footer_text(self) -> str:
+        if self.size.width < self.MIN_WIDTH or self.size.height < self.MIN_HEIGHT:
+            return "[Ctrl+Q]退出"
+        if self._pending_interaction is not None:
+            if self._pending_interaction.request.interaction_type == "user_input":
+                return "[Enter]提交回答 [Esc]取消 [?]帮助 [Ctrl+Q]退出"
+            return "[y]允许 [n]拒绝 [Esc]关闭 [?]帮助 [Ctrl+Q]退出"
         if self._memory_mode:
             if self._memory_detail_mode:
                 return "[Esc]返回列表 [a/y]确认 [r]拒绝 [?]帮助 [Ctrl+Q]退出"
-            return "[Enter]详情 [a/y]确认 [r]拒绝 [Esc]返回聊天 [?]帮助 [Ctrl+Q]退出"
+            return "[↑/↓ j/k]移动 [g/G]首尾 [Enter]详情 [a/y]确认 [r]拒绝 [Esc]返回聊天 [?]帮助 [Ctrl+Q]退出"
         return "[Enter]发送 [PgUp/PgDn]滚动 [m]记忆 [Tab]焦点 [?]帮助 [Ctrl+Q]退出"
 
     def _append_block(self, title: str, body: str) -> None:
@@ -617,10 +749,20 @@ class HaAgentTuiApp(App[None]):
     def _append_line(self, line: str) -> None:
         self._conversation_lines.append(line)
 
-    def _update_responsive_layout(self, width: int | None = None) -> None:
+    def _update_responsive_layout(self, width: int | None = None, height: int | None = None) -> None:
+        main = self.query_one("#main", Horizontal)
+        input_panel = self.query_one("#input-panel", Vertical)
+        footer = self.query_one("#footer-bar", Static)
+        resize_message = self.query_one("#resize-message", Static)
         side_bar = self.query_one("#side-bar", Static)
         terminal_width = width if width is not None else self.size.width
-        side_bar.set_class(terminal_width < 120, "hidden")
+        terminal_height = height if height is not None else self.size.height
+        too_small = terminal_width < self.MIN_WIDTH or terminal_height < self.MIN_HEIGHT
+        resize_message.set_class(not too_small, "hidden")
+        main.set_class(too_small, "hidden")
+        input_panel.set_class(too_small, "hidden")
+        footer.set_class(too_small, "hidden")
+        side_bar.set_class(too_small or terminal_width < 120, "hidden")
 
 
 def _approval_body(request: HumanInteractionRequest) -> str:
@@ -645,6 +787,70 @@ def _approval_body(request: HumanInteractionRequest) -> str:
         ],
     )
     return "\n".join(lines)
+
+
+def _help_body(context: str) -> str:
+    if context == "memory_list":
+        return "\n".join(
+            [
+                "记忆候选列表",
+                "",
+                "↑/↓ 或 j/k  移动选中项",
+                "g/G          跳到首项/末项",
+                "Enter        查看当前候选详情",
+                "a 或 y       确认当前候选",
+                "r            拒绝当前候选",
+                "Esc          返回聊天模式",
+                "Ctrl+Q       退出 TUI",
+            ],
+        )
+    if context == "memory_detail":
+        return "\n".join(
+            [
+                "记忆候选详情",
+                "",
+                "Esc          返回列表，并保留当前选中项",
+                "a 或 y       确认当前候选",
+                "r            拒绝当前候选",
+                "?            打开此帮助",
+                "Ctrl+Q       退出 TUI",
+            ],
+        )
+    if context == "pending_input":
+        return "\n".join(
+            [
+                "等待补充输入",
+                "",
+                "Enter        提交回答并继续同一轮任务",
+                "Esc          取消回答",
+                "?            打开此帮助",
+                "Ctrl+Q       退出 TUI",
+            ],
+        )
+    if context == "approval":
+        return "\n".join(
+            [
+                "审批确认",
+                "",
+                "y            允许当前工具调用",
+                "n            拒绝当前工具调用",
+                "Esc          拒绝并关闭审批",
+                "?            打开此帮助",
+                "Ctrl+Q       退出 TUI",
+            ],
+        )
+    return "\n".join(
+        [
+            "聊天模式",
+            "",
+            "Enter        发送当前输入",
+            "PgUp/PgDn    滚动对话",
+            "m            打开记忆候选审查",
+            "Tab          切换焦点",
+            "?            打开此帮助",
+            "Ctrl+Q       退出 TUI",
+        ],
+    )
 
 
 def _memory_candidate_detail(candidate: MemoryCandidate) -> str:
@@ -725,6 +931,10 @@ def _key_state(status: AssistantWorkspaceStatus) -> str:
     return "missing"
 
 
+def _compact_key_state(status: AssistantWorkspaceStatus) -> str:
+    return "ok" if status.api_key_available else "missing"
+
+
 def _keyring_status(status: AssistantWorkspaceStatus) -> str:
     if status.credential_store_available is False:
         reason = status.credential_store_error or "unknown"
@@ -758,6 +968,35 @@ def _format_last_failure(failure: dict[str, str] | None) -> str:
         f"  reason: {failure['reason']}\n"
         f"  episode: {failure['episode_path']}"
     )
+
+
+def _workspace_label(path: Path, limit: int) -> str:
+    name = path.name or str(path)
+    if len(name) <= limit:
+        return name
+    return _truncate_end(name, limit)
+
+
+def _short_session(session_id: str, limit: int) -> str:
+    if len(session_id) <= limit:
+        return session_id
+    return _truncate_end(session_id, limit)
+
+
+def _truncate_end(value: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    return value[: limit - 3] + "..."
+
+
+def _truncate_status_line(value: str, width: int) -> str:
+    if width <= 0 or len(value) <= width:
+        return value
+    return _truncate_end(value, width)
 
 
 def run_tui(service: AssistantService) -> int:
