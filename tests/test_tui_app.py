@@ -17,6 +17,9 @@ from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
 from haagent.runtime.chat_session import ChatEvent
 from haagent.runtime.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.app import HaAgentTuiApp
+from haagent.tui.keys import footer_text, help_body, key_help_lines
+from haagent.tui.renderers import memory_panel_text, status_line
+from haagent.tui.state import ResponsiveLayout, layout_for_size
 from textual.widgets import RichLog
 
 
@@ -291,6 +294,67 @@ def _memory_candidate(candidate_id: str = "cand_abc123", title: str = "用户身
         tags=["profile"],
         risk_flags=[],
     )
+
+
+def test_tui_status_line_renderer_truncates_to_terminal_width(tmp_path: Path) -> None:
+    status = FakeAssistantService(
+        workspace_root=tmp_path / "very-long-workspace-name-for-status-rendering",
+        model="very-long-model-name-for-status-rendering",
+        current_session_id="session-abcdefghijklmnopqrstuvwxyz",
+    ).get_workspace_status()
+
+    line_80 = status_line(status, ui_state="waiting approval", width=80)
+    line_120 = status_line(status, ui_state="running", width=120)
+
+    assert len(line_80) <= 80
+    assert len(line_120) <= 120
+    assert "state: waiting approval" in line_80
+    assert "state: running" in line_120
+
+
+def test_tui_keymap_help_and_footer_share_context_definitions() -> None:
+    for context in ("chat", "memory_list", "memory_detail", "pending_input", "approval", "too_small"):
+        footer = footer_text(context)
+        help_text = help_body(context)
+        for key, _description in key_help_lines(context, include_footer_only=False):
+            assert key in help_text
+        for key, _description in key_help_lines(context, footer_only=True):
+            assert key in footer
+
+
+def test_tui_memory_panel_renderer_marks_selection_and_detail() -> None:
+    candidates = [
+        _memory_candidate("cand_first", "第一条"),
+        _memory_candidate("cand_second", "第二条"),
+    ]
+
+    list_text = memory_panel_text(
+        candidates=candidates,
+        selected_index=1,
+        detail_mode=False,
+        notice="发现候选",
+        error=None,
+    )
+    detail_text = memory_panel_text(
+        candidates=candidates,
+        selected_index=1,
+        detail_mode=True,
+        notice=None,
+        error=None,
+    )
+
+    assert "  发现候选" in list_text
+    assert "  cand_first" in list_text
+    assert "> cand_second" in list_text
+    assert "candidate_id: cand_second" in detail_text
+    assert "candidate_id: cand_first" not in detail_text
+
+
+def test_tui_responsive_layout_state_is_testable_without_widgets() -> None:
+    assert layout_for_size(79, 24) == ResponsiveLayout(too_small=True, show_side_bar=False)
+    assert layout_for_size(80, 23) == ResponsiveLayout(too_small=True, show_side_bar=False)
+    assert layout_for_size(80, 24) == ResponsiveLayout(too_small=False, show_side_bar=False)
+    assert layout_for_size(120, 24) == ResponsiveLayout(too_small=False, show_side_bar=True)
 
 
 def test_tui_parser_accepts_explicit_command() -> None:
