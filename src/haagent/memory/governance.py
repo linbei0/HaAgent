@@ -105,6 +105,8 @@ def scan_persisted_candidate_fields(
             evidence.session_id or "",
             evidence.episode_path or "",
             evidence.source_path or "",
+            evidence.evidence_quote or "",
+            evidence.fingerprint or "",
             *(tags or []),
         ],
     )
@@ -153,6 +155,8 @@ def redact_candidate_evidence(evidence: CandidateEvidence) -> CandidateEvidence:
             if evidence.category_rationale is not None
             else None
         ),
+        evidence_quote=redact_sensitive(evidence.evidence_quote) if evidence.evidence_quote is not None else None,
+        fingerprint=redact_sensitive(evidence.fingerprint) if evidence.fingerprint is not None else None,
     )
 
 

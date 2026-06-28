@@ -66,6 +66,26 @@ def test_tool_router_handlers_match_tool_registry(tmp_path: Path) -> None:
     assert set(router._handlers) == set(TOOL_REGISTRY)
 
 
+def test_start_memory_update_sets_runtime_flag_and_writes_trace(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["start_memory_update"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+    )
+
+    result = router.dispatch("start_memory_update", {"reason": "用户给出长期偏好"})
+
+    assert result == {
+        "status": "success",
+        "memory_update_requested": True,
+        "reason": "用户给出长期偏好",
+    }
+    record = _read_single_tool_call(writer)
+    assert record["tool_name"] == "start_memory_update"
+    assert record["result"]["memory_update_requested"] is True
+
+
 def test_tool_router_rejects_disallowed_tool(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=[], episode_writer=writer, workspace_root=tmp_path)

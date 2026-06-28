@@ -24,6 +24,7 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "context_find",
         "file_read",
         "request_user_input",
+        "start_memory_update",
         "file_write",
         "code_run",
         "apply_patch",
@@ -114,6 +115,17 @@ def test_request_user_input_schema_requires_question() -> None:
     assert schema["parameters"]["required"] == ["question"]
     assert schema["parameters"]["properties"]["question"]["type"] == "string"
     assert schema["parameters"]["properties"]["reason"]["type"] == "string"
+
+
+def test_start_memory_update_schema_is_low_risk_internal_signal() -> None:
+    schemas = export_tool_schemas(["start_memory_update"])
+    schema = schemas[0]
+
+    assert schema["name"] == "start_memory_update"
+    assert "不直接写正式记忆" in schema["description"]
+    assert schema["parameters"]["required"] == []
+    assert schema["parameters"]["properties"]["reason"]["type"] == "string"
+    assert TOOL_REGISTRY["start_memory_update"].risk_level == "low"
 
 
 def test_file_write_schema_describes_modes() -> None:

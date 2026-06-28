@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from haagent.memory.prompts import START_MEMORY_UPDATE_TOOL_DESCRIPTION
+
 
 ALLOWED_JSON_SCHEMA_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 ALLOWED_RISK_LEVELS = {"low", "medium", "high"}
@@ -162,6 +164,22 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
                 },
             },
             "required": ["question"],
+            "additionalProperties": False,
+        },
+    ),
+    "start_memory_update": ToolDefinition(
+        name="start_memory_update",
+        description=START_MEMORY_UPDATE_TOOL_DESCRIPTION,
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "short reason describing the durable information that may be worth settlement",
+                },
+            },
+            "required": [],
             "additionalProperties": False,
         },
     ),

@@ -44,6 +44,8 @@ class CandidateEvidence:
     source_summary: str | None = None
     basis: str | None = None
     category_rationale: str | None = None
+    evidence_quote: str | None = None
+    fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +58,8 @@ class CandidateEvidence:
             "source_summary": self.source_summary,
             "basis": self.basis,
             "category_rationale": self.category_rationale,
+            "evidence_quote": self.evidence_quote,
+            "fingerprint": self.fingerprint,
         }
 
     @classmethod
@@ -72,6 +76,8 @@ class CandidateEvidence:
             source_summary=_optional_str(raw, "source_summary"),
             basis=_optional_str(raw, "basis"),
             category_rationale=_optional_str(raw, "category_rationale"),
+            evidence_quote=_optional_str(raw, "evidence_quote"),
+            fingerprint=_optional_str(raw, "fingerprint"),
         )
 
 

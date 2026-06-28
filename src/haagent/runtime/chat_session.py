@@ -43,6 +43,7 @@ CHAT_ALLOWED_TOOLS = [
     "context_find",
     "file_read",
     "request_user_input",
+    "start_memory_update",
     "file_write",
     "code_run",
     "apply_patch",
@@ -258,11 +259,9 @@ class AgentSession:
         self._summaries.append(turn_summary)
         self._summaries = _bounded_summaries(self._summaries)
         self._record_turn(clean_prompt, turn_result, turn_summary)
-        extraction_result = (
-            self._run_memory_extraction(clean_prompt, turn_result, runtime_events)
-            if self.memory_extraction_enabled
-            else None
-        )
+        extraction_result = None
+        if self.memory_extraction_enabled and _memory_update_requested(runtime_events):
+            extraction_result = self._run_memory_extraction(clean_prompt, turn_result, runtime_events)
         if extraction_result is not None and extraction_result.created_count:
             turn_result = replace(
                 turn_result,
@@ -593,6 +592,8 @@ def _runtime_event_message(event_type: str, payload: dict[str, object]) -> str:
         return _summary_value(str(payload.get("question", "")))
     if event_type == "user_input_received":
         return "user input received"
+    if event_type == "tool_finished" and payload.get("tool_name") == "start_memory_update":
+        return "memory update requested"
     if event_type == "assistant_message":
         return _summary_value(str(payload.get("content", "")))
     if event_type == "guardrail_triggered":
@@ -614,6 +615,13 @@ def _runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[
     if event_type == "tool_finished":
         tool_name = str(payload.get("tool_name", "unknown"))
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        if tool_name == "start_memory_update":
+            return {
+                "model_turn": payload.get("turn"),
+                "tool_name": tool_name,
+                "memory_update_requested": bool(result.get("memory_update_requested")),
+                "reason": _summary_value(str(result.get("reason", "")), 240),
+            }
         return {
             "model_turn": payload.get("turn"),
             "tool_name": tool_name,
@@ -753,6 +761,16 @@ def _summary_value(value: str, limit: int = 300) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit] + "... [truncated]"
+
+
+def _memory_update_requested(runtime_events: list[dict[str, object]]) -> bool:
+    for event in runtime_events:
+        if event.get("event_type") != "tool_finished" or event.get("tool_name") != "start_memory_update":
+            continue
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        if result.get("status") == "success" and result.get("memory_update_requested") is True:
+            return True
+    return False
 
 
 def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:

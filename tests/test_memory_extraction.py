@@ -137,6 +137,10 @@ def test_explicit_remember_creates_pending_candidate_not_memory(tmp_path: Path) 
                         "source_summary": "用户明确要求记住依赖管理事实。",
                         "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
                         "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "HaAgent 使用 uv 管理依赖",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "HaAgent 使用 uv 管理依赖",
                     }
                 ]
             },
@@ -178,8 +182,10 @@ def test_stable_sop_or_decision_uses_gateway_and_creates_candidate(tmp_path: Pat
                         "title": "Memory write path",
                         "body": "长期记忆必须先进入候选队列，用户确认后再确定性落库。",
                         "source_summary": "用户确认长期记忆写入路径。",
-                        "basis": "用户说这是项目约定，助手最终答复确认该决策。",
+                        "basis": "用户原文可定位。",
                         "category_rationale": "这是关于长期记忆架构的明确决策。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "长期记忆必须先进入候选队列",
                         "tags": ["memory", "governance"],
                     }
                 ]
@@ -203,7 +209,7 @@ def test_stable_sop_or_decision_uses_gateway_and_creates_candidate(tmp_path: Pat
     assert pending[0].title == "Memory write path"
     assert gateway.calls
     assert gateway.calls[0]["tool_schemas"] == []
-    assert "Memory Extraction" in gateway.calls[0]["messages"][0]["content"]
+    assert "Memory Settlement" in gateway.calls[0]["messages"][0]["content"]
 
 
 def test_ordinary_one_off_task_runs_bounded_extraction_but_queues_nothing(tmp_path: Path) -> None:
@@ -221,6 +227,268 @@ def test_ordinary_one_off_task_runs_bounded_extraction_but_queues_nothing(tmp_pa
     assert result.status == "skipped"
     assert len(gateway.calls) == 1
     assert not CandidateQueue(request.session_path).path.exists()
+
+
+def test_agent_session_does_not_extract_without_start_memory_update(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gateway = SequentialGateway([ModelResponse("你好，有什么我可以帮你？", [])])
+    session = AgentSession(workspace_root=workspace, runs_root=tmp_path / ".runs", model_gateway=gateway)
+    events = []
+
+    result = session.run_prompt_events("你好", event_sink=events.append)
+
+    assert result.status == "completed"
+    assert result.memory_candidates_created == 0
+    assert result.memory_extraction_status == "skipped"
+    assert len(gateway.calls) == 1
+    assert not CandidateQueue(session.session_path).path.exists()
+    assert not any(event.event_type == "memory_candidates_created" for event in events)
+
+
+def test_agent_session_extracts_only_after_start_memory_update(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gateway = SequentialGateway(
+        [
+            ModelResponse(
+                "我会把这个偏好放入候选记忆等待你确认。",
+                [ToolCall(name="start_memory_update", args={"reason": "用户给出长期回答语言偏好"}, id="call_memory")],
+            ),
+            ModelResponse("已处理。", []),
+            ModelResponse(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "scope": "user",
+                                "category": "user_preferences",
+                                "title": "回答语言偏好",
+                                "body": "用户希望以后回答尽量使用中文。",
+                                "source_summary": "用户明确表达长期回答语言偏好。",
+                                "basis": "用户原文可定位。",
+                                "category_rationale": "这是跨 workspace 可复用的用户偏好。",
+                                "evidence_source": "user_prompt",
+                                "evidence_quote": "以后回答我尽量用中文",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                [],
+            ),
+        ],
+    )
+    session = AgentSession(workspace_root=workspace, runs_root=tmp_path / ".runs", model_gateway=gateway)
+
+    result = session.run_prompt("以后回答我，尽量用中文。")
+
+    assert result.status == "completed"
+    assert result.memory_candidates_created == 1
+    assert len(gateway.calls) == 3
+    pending = CandidateQueue(session.session_path).list(status="pending")
+    assert pending[0].evidence.source_type == "user_prompt"
+    assert pending[0].evidence.evidence_quote == "以后回答我尽量用中文"
+    assert pending[0].evidence.fingerprint
+
+
+def test_final_response_cannot_be_evidence_source(tmp_path: Path) -> None:
+    gateway = RecordingGateway(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "scope": "user",
+                        "category": "user_preferences",
+                        "title": "饮食喜好",
+                        "body": "用户喜欢吃饭。",
+                        "source_summary": "候选只能从助手回答找到。",
+                        "basis": "助手最终回答包含这句话。",
+                        "category_rationale": "用户偏好。",
+                        "evidence_source": "final_response",
+                        "evidence_quote": "你喜欢吃饭",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    request = _request(tmp_path, prompt="我的爱好是什么？", final_response="你喜欢吃饭。", gateway=gateway)
+
+    result = MemoryExtractor().extract(request)
+
+    assert result.created_count == 0
+    assert result.rejected_count == 1
+    assert CandidateQueue(request.session_path).list(status="pending") == []
+
+
+def test_evidence_quote_must_be_locatable(tmp_path: Path) -> None:
+    gateway = RecordingGateway(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "scope": "user",
+                        "category": "user_preferences",
+                        "title": "饮食喜好",
+                        "body": "用户喜欢吃饭。",
+                        "source_summary": "模型改写了用户偏好。",
+                        "basis": "quote 不在用户原文中。",
+                        "category_rationale": "用户偏好。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "用户喜欢吃饭",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    request = _request(tmp_path, prompt="我喜欢面条。", gateway=gateway)
+
+    result = MemoryExtractor().extract(request)
+
+    assert result.created_count == 0
+    assert result.rejected_count == 1
+
+
+def test_evidence_quote_allows_light_normalization(tmp_path: Path) -> None:
+    gateway = RecordingGateway(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "scope": "user",
+                        "category": "user_preferences",
+                        "title": "回答语言偏好",
+                        "body": "用户希望以后回答尽量使用中文。",
+                        "source_summary": "用户明确表达回答语言偏好。",
+                        "basis": "用户原文可定位。",
+                        "category_rationale": "这是跨 workspace 可复用的用户偏好。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "以后回答我尽量用中文",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    request = _request(tmp_path, prompt="以后回答我，尽量用中文。", gateway=gateway)
+
+    result = MemoryExtractor().extract(request)
+
+    assert result.created_count == 1
+    assert result.rejected_count == 0
+
+
+def test_sop_candidate_requires_execution_or_verification_evidence(tmp_path: Path) -> None:
+    gateway = RecordingGateway(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "scope": "workspace",
+                        "category": "sop",
+                        "title": "测试命令",
+                        "body": "修改记忆系统后运行 uv run pytest tests/test_memory_extraction.py -q。",
+                        "source_summary": "助手建议了一个 SOP。",
+                        "basis": "没有工具或验证证据。",
+                        "category_rationale": "可复用流程。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "修复记忆系统问题",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    request = _request(tmp_path, prompt="修复记忆系统问题", final_response="以后可以运行测试命令。", gateway=gateway)
+
+    result = MemoryExtractor().extract(request)
+
+    assert result.created_count == 0
+    assert result.rejected_count == 1
+
+
+def test_sop_candidate_can_use_verified_tool_result_evidence(tmp_path: Path) -> None:
+    gateway = RecordingGateway(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "scope": "workspace",
+                        "category": "sop",
+                        "title": "记忆测试命令",
+                        "body": "修改记忆系统后可运行 uv run pytest tests/test_memory_extraction.py -q 验证。",
+                        "source_summary": "shell 验证命令执行成功。",
+                        "basis": "工具结果中有可定位证据。",
+                        "category_rationale": "这是经过验证的可复用 SOP。",
+                        "evidence_source": "verification_result",
+                        "evidence_quote": "17 passed",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    request = _request(
+        tmp_path,
+        prompt="修复记忆系统问题",
+        gateway=gateway,
+        verification_status="success",
+    )
+    request = MemoryExtractionRequest(
+        **{
+            **request.__dict__,
+            "runtime_events": [
+                {
+                    "event_type": "tool_finished",
+                    "tool_name": "shell",
+                    "result": {"status": "success", "exit_code": 0, "stdout_excerpt": "17 passed"},
+                }
+            ],
+        }
+    )
+
+    result = MemoryExtractor().extract(request)
+
+    assert result.created_count == 1
+    assert result.rejected_count == 0
+
+
+def test_rejected_duplicate_fingerprint_is_suppressed_without_candidate_audit(tmp_path: Path) -> None:
+    gateway = RecordingGateway(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "scope": "user",
+                        "category": "user_preferences",
+                        "title": "回答语言偏好",
+                        "body": "用户希望以后回答尽量使用中文。",
+                        "source_summary": "用户明确表达回答语言偏好。",
+                        "basis": "用户原文可定位。",
+                        "category_rationale": "这是跨 workspace 可复用的用户偏好。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "以后回答我尽量用中文",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+    request = _request(tmp_path, prompt="以后回答我，尽量用中文。", gateway=gateway)
+    first = MemoryExtractor().extract(request)
+    queue = CandidateQueue(request.session_path)
+    store = MemoryStore(workspace_root=request.workspace_root, user_memory_root=tmp_path / "user-memory")
+    store.reject_candidate(queue, first.created_candidates[0].candidate_id, reason="not durable")
+
+    second = MemoryExtractor().extract(request)
+
+    assert second.created_count == 0
+    assert second.rejected_count == 1
+    audit_path = tmp_path / "user-memory" / "audit.jsonl"
+    audit_events = [json.loads(line)["event_type"] for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert audit_events == ["candidate_created", "memory_rejected"]
 
 
 def test_secret_output_does_not_enter_candidate_or_diagnostics(tmp_path: Path) -> None:
@@ -266,6 +534,8 @@ def test_uncertain_words_do_not_trigger_phrase_based_rejection(tmp_path: Path) -
                         "source_summary": "用户要求记录一句包含不确定语气的项目事实。",
                         "basis": "用户原话包含“可能”，但这是可审查候选，不应靠短语表直接拒绝。",
                         "category_rationale": "候选是否可信由 evidence 和用户确认决定，不由自然语言短语 gate 决定。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "以后记住项目包管理器",
                     }
                 ]
             },
@@ -296,6 +566,8 @@ def test_duplicate_confirmed_or_pending_memory_is_not_queued_again(tmp_path: Pat
                         "source_summary": "用户明确要求记住依赖管理事实。",
                         "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
                         "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "HaAgent 使用 uv 管理依赖",
                     }
                 ]
             },
@@ -372,6 +644,8 @@ def test_extracted_pending_candidate_is_not_retrieved(tmp_path: Path) -> None:
                         "source_summary": "用户要求记住 retrieval 边界。",
                         "basis": "用户说 pending candidates must never enter retrieval。",
                         "category_rationale": "这是当前 workspace 的稳定事实。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "Pending candidates must never enter retrieval",
                     }
                 ]
             },
@@ -407,6 +681,8 @@ def test_extraction_writes_session_diagnostics(tmp_path: Path) -> None:
                         "source_summary": "用户明确要求记住依赖管理事实。",
                         "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
                         "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                        "evidence_source": "user_prompt",
+                        "evidence_quote": "HaAgent 使用 uv 管理依赖",
                     }
                 ]
             },
@@ -429,6 +705,10 @@ def test_agent_session_emits_candidate_notice(tmp_path: Path) -> None:
     workspace.mkdir()
     gateway = SequentialGateway(
         [
+            ModelResponse(
+                "我会把这作为候选记忆等待你确认。",
+                [ToolCall(name="start_memory_update", args={"reason": "用户给出长期项目事实"}, id="call_memory")],
+            ),
             ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
@@ -442,6 +722,8 @@ def test_agent_session_emits_candidate_notice(tmp_path: Path) -> None:
                                 "source_summary": "用户明确要求记住依赖管理事实。",
                                 "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
                                 "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                                "evidence_source": "user_prompt",
+                                "evidence_quote": "HaAgent 使用 uv 管理依赖",
                             }
                         ]
                     },
@@ -467,7 +749,11 @@ def test_memory_request_keeps_regular_tools_available_and_extracts_candidate(tmp
     workspace.mkdir()
     gateway = SequentialGateway(
         [
-            ModelResponse("我会把这作为候选记忆等待你确认。", []),
+            ModelResponse(
+                "我会把这作为候选记忆等待你确认。",
+                [ToolCall(name="start_memory_update", args={"reason": "用户给出长期身份偏好"}, id="call_memory")],
+            ),
+            ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
                     {
@@ -480,6 +766,8 @@ def test_memory_request_keeps_regular_tools_available_and_extracts_candidate(tmp
                                 "source_summary": "用户明确要求记住自己的名字和爱好。",
                                 "basis": "用户说：我叫小明，爱好是唱跳rap篮球，记住我的爱好。",
                                 "category_rationale": "这是跨 workspace 可复用的用户偏好和身份信息。",
+                                "evidence_source": "user_prompt",
+                                "evidence_quote": "我叫小明，爱好是唱跳rap篮球",
                             }
                         ]
                     },
@@ -509,7 +797,11 @@ def test_food_preference_memory_request_is_handled_by_extraction_not_phrase_rout
     workspace.mkdir()
     gateway = SequentialGateway(
         [
-            ModelResponse("我会把你的喜好作为候选记忆等待你确认。", []),
+            ModelResponse(
+                "我会把你的喜好作为候选记忆等待你确认。",
+                [ToolCall(name="start_memory_update", args={"reason": "用户给出长期饮食偏好"}, id="call_memory")],
+            ),
+            ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
                     {
@@ -522,6 +814,8 @@ def test_food_preference_memory_request_is_handled_by_extraction_not_phrase_rout
                                 "source_summary": "用户明确要求记住自己的饮食喜好。",
                                 "basis": "用户说：我爱吃包子，记住我的喜好。",
                                 "category_rationale": "这是跨 workspace 可复用的用户偏好。",
+                                "evidence_source": "user_prompt",
+                                "evidence_quote": "我爱吃包子",
                             }
                         ]
                     },
@@ -558,6 +852,11 @@ def test_agent_session_allows_profile_file_write_then_extracts_pending_candidate
                         },
                         id="call_profile",
                     ),
+                    ToolCall(
+                        name="start_memory_update",
+                        args={"reason": "用户提供了长期个人资料"},
+                        id="call_memory",
+                    ),
                 ],
             ),
             ModelResponse("我会把这些作为候选记忆等待你确认。", []),
@@ -573,6 +872,8 @@ def test_agent_session_allows_profile_file_write_then_extracts_pending_candidate
                                 "source_summary": "用户提供了自己的名字和爱好。",
                                 "basis": "用户说：请整理这个个人资料：我叫小明，喜欢唱跳rap篮球。",
                                 "category_rationale": "这是跨 workspace 可复用的用户偏好和身份信息。",
+                                "evidence_source": "user_prompt",
+                                "evidence_quote": "我叫小明，喜欢唱跳rap篮球",
                             }
                         ]
                     },
@@ -613,6 +914,10 @@ def test_memory_cli_lists_confirms_and_rejects_candidates(tmp_path: Path, monkey
         runs_root=runs_root,
         model_gateway=SequentialGateway(
             [
+                ModelResponse(
+                    "done",
+                    [ToolCall(name="start_memory_update", args={"reason": "用户给出长期项目事实"}, id="call_memory_1")],
+                ),
                 ModelResponse("done", []),
                 ModelResponse(
                     json.dumps(
@@ -626,12 +931,18 @@ def test_memory_cli_lists_confirms_and_rejects_candidates(tmp_path: Path, monkey
                                     "source_summary": "用户明确要求记住依赖管理事实。",
                                     "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
                                     "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                                    "evidence_source": "user_prompt",
+                                    "evidence_quote": "HaAgent 使用 uv 管理依赖",
                                 }
                             ]
                         },
                         ensure_ascii=False,
                     ),
                     [],
+                ),
+                ModelResponse(
+                    "done",
+                    [ToolCall(name="start_memory_update", args={"reason": "用户给出长期审核要求"}, id="call_memory_2")],
                 ),
                 ModelResponse("done", []),
                 ModelResponse(
@@ -646,6 +957,8 @@ def test_memory_cli_lists_confirms_and_rejects_candidates(tmp_path: Path, monkey
                                     "source_summary": "用户明确要求记住长期记忆审核要求。",
                                     "basis": "用户说：记住这个：HaAgent 的长期记忆候选需要人工审核。",
                                     "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                                    "evidence_source": "user_prompt",
+                                    "evidence_quote": "HaAgent 的长期记忆候选需要人工审核",
                                 }
                             ]
                         },

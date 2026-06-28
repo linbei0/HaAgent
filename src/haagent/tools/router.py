@@ -51,6 +51,7 @@ class ToolRouter:
             "context_find": lambda args: context_find(args, self._workspace_root),
             "file_read": lambda args: file_read(args, self._workspace_root),
             "request_user_input": self._request_user_input_without_handler,
+            "start_memory_update": self._start_memory_update,
             "file_write": lambda args: file_write(args, self._workspace_root),
             "code_run": lambda args: code_run(args, self._workspace_root),
             "apply_patch": lambda args: apply_patch(args, self._workspace_root),
@@ -121,6 +122,13 @@ class ToolRouter:
 
     def _request_user_input_without_handler(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._request_user_input(args, None)
+
+    def _start_memory_update(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "success",
+            "memory_update_requested": True,
+            "reason": str(args.get("reason", "")),
+        }
 
     def _request_user_input(
         self,

@@ -7,6 +7,8 @@ haagent/memory/extraction.py - 长期记忆候选提取
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -28,6 +30,7 @@ from haagent.memory.schema import (
     CandidateEvidence,
     MemoryCandidate,
 )
+from haagent.memory.prompts import build_memory_extraction_prompt
 from haagent.memory.store import MemoryStore
 from haagent.models.gateway import ModelCallError, ModelGateway
 
@@ -53,6 +56,8 @@ class ExtractedMemoryCandidate:
     source_summary: str
     basis: str
     category_rationale: str
+    evidence_source: str
+    evidence_quote: str
     tags: list[str] = field(default_factory=list)
 
 
@@ -116,23 +121,34 @@ class MemoryExtractor:
 
         created: list[MemoryCandidate] = []
         rejected = 0
+        rejection_reasons: dict[str, int] = {}
         for candidate in extracted[: request.policy.max_candidates]:
             if not _candidate_has_required_evidence(candidate):
                 rejected += 1
+                _count_rejection(rejection_reasons, "missing_required_fields")
+                continue
+            evidence_fingerprint = _candidate_fingerprint(candidate)
+            evidence_error = _candidate_evidence_error(candidate, request)
+            if evidence_error is not None:
+                rejected += 1
+                _count_rejection(rejection_reasons, evidence_error)
                 continue
             if _candidate_has_blocked_risk(candidate):
                 rejected += 1
+                _count_rejection(rejection_reasons, "blocked_risk")
                 continue
             try:
                 validate_scope_category(candidate.scope, candidate.category)
             except MemoryGovernanceError:
                 rejected += 1
+                _count_rejection(rejection_reasons, "invalid_scope_category")
                 continue
-            if _is_duplicate(candidate, queue, store):
+            if _is_duplicate(candidate, queue, store, evidence_fingerprint):
                 rejected += 1
+                _count_rejection(rejection_reasons, "duplicate_fingerprint_or_content")
                 continue
             evidence = CandidateEvidence(
-                source_type="extraction",
+                source_type=candidate.evidence_source,
                 evidence_summary=_bounded(
                     f"{candidate.source_summary} {candidate.basis}",
                     request.policy.max_evidence_chars,
@@ -143,6 +159,8 @@ class MemoryExtractor:
                 source_summary=_bounded(candidate.source_summary, request.policy.max_evidence_chars),
                 basis=_bounded(candidate.basis, request.policy.max_evidence_chars),
                 category_rationale=_bounded(candidate.category_rationale, request.policy.max_evidence_chars),
+                evidence_quote=_bounded(candidate.evidence_quote, request.policy.max_evidence_chars),
+                fingerprint=evidence_fingerprint,
             )
             try:
                 created.append(
@@ -160,9 +178,12 @@ class MemoryExtractor:
                 )
             except MemoryGovernanceError:
                 rejected += 1
+                _count_rejection(rejection_reasons, "governance_error")
 
         status = "created" if created else "skipped"
         reason = "" if created else "all candidates rejected"
+        if rejection_reasons:
+            diagnostics["rejection_reasons"] = rejection_reasons
         return MemoryExtractionResult(status, reason, created, rejected, diagnostics=diagnostics)
 
     def _write_diagnostics(self, request: MemoryExtractionRequest, result: MemoryExtractionResult) -> None:
@@ -213,6 +234,8 @@ def _model_candidates(request: MemoryExtractionRequest) -> list[ExtractedMemoryC
                 source_summary=str(raw.get("source_summary") or "").strip(),
                 basis=str(raw.get("basis") or "").strip(),
                 category_rationale=str(raw.get("category_rationale") or "").strip(),
+                evidence_source=str(raw.get("evidence_source") or "").strip(),
+                evidence_quote=str(raw.get("evidence_quote") or "").strip(),
                 tags=tags,
             ),
         )
@@ -226,18 +249,14 @@ def _build_model_prompt(request: MemoryExtractionRequest) -> str:
         _runtime_event_summary(event)
         for event in request.runtime_events[-policy.max_runtime_events :]
     ]
-    return "\n".join(
-        [
-            "Memory Extraction: propose only durable long-term memory candidates.",
-            "Return JSON only: {\"candidates\":[{\"scope\":\"workspace|user\",\"category\":\"facts|sop|glossary|decisions|user_preferences|habits|constraints\",\"title\":\"...\",\"body\":\"...\",\"source_summary\":\"...\",\"basis\":\"...\",\"category_rationale\":\"...\",\"tags\":[\"...\"]}]}",
-            "Never include secrets, guesses, raw transcript, raw tool output, temporary debug state, or one-off task chatter.",
-            f"session_id={request.session_id} turn_index={request.turn_index} verification={request.verification_status}",
-            f"user_prompt={_bounded(request.user_prompt, policy.max_prompt_chars)}",
-            f"assistant_final_response={_bounded(request.final_response, policy.max_response_chars)}",
-            f"working_state={_bounded(working_state, policy.max_working_state_chars)}",
-            "runtime_events:",
-            *runtime,
-        ],
+    return build_memory_extraction_prompt(
+        session_id=request.session_id,
+        turn_index=request.turn_index,
+        verification_status=request.verification_status,
+        user_prompt=_bounded(request.user_prompt, policy.max_prompt_chars),
+        final_response=_bounded(request.final_response, policy.max_response_chars),
+        working_state=_bounded(working_state, policy.max_working_state_chars),
+        runtime_events=runtime,
     )
 
 
@@ -266,6 +285,8 @@ def _candidate_has_required_evidence(candidate: ExtractedMemoryCandidate) -> boo
             candidate.source_summary,
             candidate.basis,
             candidate.category_rationale,
+            candidate.evidence_source,
+            candidate.evidence_quote,
         ]
     )
 
@@ -278,6 +299,8 @@ def _candidate_has_blocked_risk(candidate: ExtractedMemoryCandidate) -> bool:
             candidate.source_summary,
             candidate.basis,
             candidate.category_rationale,
+            candidate.evidence_source,
+            candidate.evidence_quote,
             *candidate.tags,
         ],
     )
@@ -287,20 +310,29 @@ def _candidate_has_blocked_risk(candidate: ExtractedMemoryCandidate) -> bool:
     return bool(flags or text_risk_flags(candidate.source_summary, candidate.basis))
 
 
-def _is_duplicate(candidate: ExtractedMemoryCandidate, queue: CandidateQueue, store: MemoryStore) -> bool:
+def _is_duplicate(
+    candidate: ExtractedMemoryCandidate,
+    queue: CandidateQueue,
+    store: MemoryStore,
+    fingerprint: str,
+) -> bool:
     content_hash = memory_content_hash(candidate.title, candidate.body)
     candidate_title = normalize_title(candidate.title)
     candidate_body = " ".join(candidate.body.split()).strip().lower()
     for record in store.list_records(scope=candidate.scope, category=candidate.category):
+        if record.evidence.fingerprint == fingerprint:
+            return True
         if record.content_hash == content_hash:
             return True
         if " ".join(record.body.split()).strip().lower() == candidate_body:
             return True
         if _similar_title(candidate_title, normalize_title(record.title)):
             return True
-    for pending in queue.list(status="pending"):
+    for pending in queue.list():
         if pending.scope != candidate.scope or pending.category != candidate.category:
             continue
+        if pending.evidence.fingerprint == fingerprint:
+            return True
         if memory_content_hash(pending.title, pending.body) == content_hash:
             return True
         if " ".join(pending.body.split()).strip().lower() == candidate_body:
@@ -317,12 +349,14 @@ def _similar_title(left: str, right: str) -> bool:
 def _runtime_event_summary(event: dict[str, object]) -> str:
     event_type = str(event.get("event_type", "unknown"))
     tool_name = str(event.get("tool_name", ""))
-    return _bounded(f"- event={event_type} tool={tool_name}", 160)
+    payload = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+    return _bounded(f"- event={event_type} tool={tool_name} payload={redact_sensitive(payload)}", 320)
 
 
 def _base_diagnostics(request: MemoryExtractionRequest) -> dict[str, object]:
     return {
-        "source_chars": len(request.user_prompt) + len(request.final_response),
+        "source_chars": len(request.user_prompt),
+        "final_response_chars": len(request.final_response),
         "verification_status": request.verification_status,
         "episode_path": str(request.episode_path),
     }
@@ -333,3 +367,93 @@ def _bounded(value: str, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit] + "... [truncated]"
+
+
+ALLOWED_EVIDENCE_SOURCES = {"user_prompt", "tool_result", "file_content", "verification_result"}
+BLOCKED_EVIDENCE_SOURCES = {
+    "assistant_response",
+    "final_response",
+    "model_inference",
+    "memory_recall",
+    "unknown",
+}
+SOP_EVIDENCE_SOURCES = {"tool_result", "file_content", "verification_result"}
+
+
+def _candidate_evidence_error(
+    candidate: ExtractedMemoryCandidate,
+    request: MemoryExtractionRequest,
+) -> str | None:
+    source = candidate.evidence_source
+    if source in BLOCKED_EVIDENCE_SOURCES:
+        return f"blocked_evidence_source:{source}"
+    if source not in ALLOWED_EVIDENCE_SOURCES:
+        return f"invalid_evidence_source:{source or 'missing'}"
+    if candidate.category == "sop" and source not in SOP_EVIDENCE_SOURCES:
+        return "sop_requires_execution_evidence"
+    source_text = _source_text_for_evidence(source, request)
+    if not source_text:
+        return f"evidence_source_unavailable:{source}"
+    if not _quote_is_locatable(source_text, candidate.evidence_quote):
+        return "evidence_quote_not_found"
+    return None
+
+
+def _source_text_for_evidence(source: str, request: MemoryExtractionRequest) -> str:
+    if source == "user_prompt":
+        return request.user_prompt
+    if source == "tool_result":
+        return "\n".join(_tool_result_sources(request.runtime_events))
+    if source == "file_content":
+        return "\n".join(_tool_result_sources(request.runtime_events, tool_names={"file_read"}))
+    if source == "verification_result":
+        if request.verification_status != "success":
+            return ""
+        return "\n".join(
+            _tool_result_sources(request.runtime_events, tool_names={"shell", "code_run"}),
+        )
+    return ""
+
+
+def _tool_result_sources(
+    runtime_events: list[dict[str, object]],
+    tool_names: set[str] | None = None,
+) -> list[str]:
+    texts: list[str] = []
+    for event in runtime_events:
+        if event.get("event_type") != "tool_finished":
+            continue
+        tool_name = str(event.get("tool_name", ""))
+        if tool_names is not None and tool_name not in tool_names:
+            continue
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        if result.get("status") != "success":
+            continue
+        texts.append(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+    return texts
+
+
+def _quote_is_locatable(source_text: str, quote: str) -> bool:
+    normalized_source = _normalize_evidence_text(source_text)
+    normalized_quote = _normalize_evidence_text(quote)
+    return bool(normalized_quote and normalized_quote in normalized_source)
+
+
+def _normalize_evidence_text(value: str) -> str:
+    lowered = value.lower()
+    return "".join(re.findall(r"[a-z0-9\u3400-\u4dbf\u4e00-\u9fff]+", lowered))
+
+
+def _candidate_fingerprint(candidate: ExtractedMemoryCandidate) -> str:
+    parts = [
+        candidate.category,
+        candidate.body,
+        candidate.evidence_source,
+        candidate.evidence_quote,
+    ]
+    normalized = "\n".join(_normalize_evidence_text(part) for part in parts)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _count_rejection(rejection_reasons: dict[str, int], reason: str) -> None:
+    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
