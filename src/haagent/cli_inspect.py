@@ -65,7 +65,7 @@ def render_episode_summary(episode_path: Path) -> str:
         "",
         "Contexts",
     ]
-    lines.extend(_format_contexts(context_manifest.get("contexts", [])))
+    lines.extend(_format_contexts(episode_path, context_manifest.get("contexts", [])))
     lines.extend(["", "Plan"])
     lines.extend(_format_plan(plan))
     lines.extend(["", "Sandbox"])
@@ -102,16 +102,44 @@ def _summary_provider(episode_metadata: dict[str, Any]) -> str:
     return str(episode_metadata.get("provider", "unknown"))
 
 
-def _format_contexts(contexts: list[dict[str, Any]]) -> list[str]:
+def _format_contexts(episode_path: Path, contexts: list[dict[str, Any]]) -> list[str]:
     if not contexts:
         return ["- none"]
-    return [
-        (
+    lines: list[str] = []
+    for context in contexts:
+        lines.append(
             f"- {context['context_id']}: "
-            f"{context['model_input_path']} | {context['manifest_path']}"
+            f"{context['model_input_path']} | {context['manifest_path']}",
         )
-        for context in contexts
+        lines.extend(_format_context_compaction(episode_path, context))
+    return lines
+
+
+def _format_context_compaction(episode_path: Path, context: dict[str, Any]) -> list[str]:
+    manifest_path = context.get("manifest_path")
+    if not isinstance(manifest_path, str):
+        return []
+    try:
+        context_manifest = _read_json(episode_path / manifest_path)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    compaction = context_manifest.get("compaction")
+    if not isinstance(compaction, dict):
+        return []
+    lines = [
+        "  compaction: "
+        f"original={compaction.get('original_chars', 0)} "
+        f"final={compaction.get('final_chars', 0)} "
+        f"saved={compaction.get('saved_chars', 0)} "
+        f"selected={compaction.get('selected_count', 0)} "
+        f"collapsed={compaction.get('collapsed_count', 0)} "
+        f"skipped={compaction.get('skipped_count', 0)}",
     ]
+    skipped_reasons = compaction.get("skipped_reasons")
+    if isinstance(skipped_reasons, dict) and skipped_reasons:
+        reason_parts = [f"{reason}={count}" for reason, count in sorted(skipped_reasons.items())]
+        lines.append(f"  skipped_reasons: {', '.join(reason_parts)}")
+    return lines
 
 
 def _format_plan(plan: dict[str, Any]) -> list[str]:

@@ -545,6 +545,72 @@ verification_commands: []
     assert "modifies_original_workspace: true" in output
 
 
+def test_cli_inspect_outputs_context_compaction_summary(tmp_path: Path) -> None:
+    episode_path = tmp_path / "episode-compact"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    contexts_dir = episode_path / "contexts"
+    contexts_dir.mkdir()
+    (contexts_dir / "0001.json").write_text(
+        json.dumps([{"role": "system", "content": "compact model input"}]),
+        encoding="utf-8",
+    )
+    (contexts_dir / "0001-manifest.json").write_text(
+        json.dumps(
+            {
+                "context_id": "0001",
+                "provider": "fake",
+                "workspace_root": str(tmp_path),
+                "generated_at": "2026-06-19T00:00:00+00:00",
+                "message_count": 1,
+                "system_chars": 19,
+                "task_chars": 0,
+                "compaction": {
+                    "original_chars": 1000,
+                    "final_chars": 300,
+                    "saved_chars": 700,
+                    "selected_count": 2,
+                    "collapsed_count": 1,
+                    "skipped_count": 1,
+                    "selected_chars": 250,
+                    "collapsed_saved_chars": 500,
+                    "skipped_chars": 200,
+                    "skipped_reasons": {"over_total_budget": 1},
+                    "diagnostics": [],
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    (episode_path / "context-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": "2.0",
+                "generated_at": "2026-06-19T00:00:00+00:00",
+                "context_count": 1,
+                "summary": {"provider": "fake", "goal": "Inspect me"},
+                "contexts": [
+                    {
+                        "context_id": "0001",
+                        "model_input_path": "contexts/0001.json",
+                        "manifest_path": "contexts/0001-manifest.json",
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    output = cli_inspect.render_episode_summary(episode_path)
+
+    assert "- 0001: contexts/0001.json | contexts/0001-manifest.json" in output
+    assert "compaction: original=1000 final=300 saved=700 selected=2 collapsed=1 skipped=1" in output
+    assert "skipped_reasons: over_total_budget=1" in output
+
+
 def test_cli_inspect_outputs_tool_argument_errors(tmp_path: Path, capsys) -> None:
     task_path = tmp_path / "task.yaml"
     task_path.write_text(

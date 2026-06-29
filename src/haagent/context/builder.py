@@ -89,6 +89,7 @@ class ContextBuilder:
         session_summary: str | None = None,
         working_state: dict | None = None,
         interaction_state: list[dict] | None = None,
+        compaction_budget: ContextBudget | None = None,
     ) -> None:
         self._task = task
         self._workspace_root = workspace_root
@@ -97,6 +98,7 @@ class ContextBuilder:
         self._session_summary = session_summary
         self._working_state = working_state
         self._interaction_state = list(interaction_state or [])
+        self._compaction_budget = compaction_budget or ContextBudget()
 
     def build(self) -> BuiltContext:
         """构建初始对话消息（system + task），写入 contexts/ 快照。"""
@@ -107,7 +109,10 @@ class ContextBuilder:
         contexts_dir = self._episode_writer.path / "contexts"
         contexts_dir.mkdir(parents=True, exist_ok=True)
 
-        compaction = compact_context_sections(self._build_compaction_sections(project_instructions, plan))
+        compaction = compact_context_sections(
+            self._build_compaction_sections(project_instructions, plan),
+            self._compaction_budget,
+        )
         selected_sections = {section.key: section.content for section in compaction.sections}
         interaction_state_lines = selected_sections.get("interaction_history", "").splitlines()
         system_msg = build_system_message(
@@ -154,7 +159,7 @@ class ContextBuilder:
                 context_id=context_id,
                 model_input_path=f"contexts/{context_id}.json",
                 manifest_path=f"contexts/{context_id}-manifest.json",
-                budget=_context_index_budget(context_id, compaction),
+                budget=_context_index_budget(context_id, compaction, self._compaction_budget),
             ),
         )
         return BuiltContext(
@@ -263,16 +268,7 @@ class ContextBuilder:
         return [f"- {_interaction_state_summary(r)}" for r in self._interaction_state[-8:]]
 
     def _build_compaction_sections(self, project_instructions: str | None, plan: dict) -> list[ContextSection]:
-        sections = [
-            ContextSection(
-                key="task_envelope",
-                title="Task Envelope",
-                content=_task_envelope_content(self._task, plan),
-                source="task",
-                priority=100,
-                kind="task",
-            ),
-        ]
+        sections: list[ContextSection] = []
         if project_instructions and project_instructions.strip():
             sections.append(
                 ContextSection(
@@ -356,45 +352,44 @@ class ContextBuilder:
         self._episode_writer.write_context_manifest(run_manifest)
 
 
-def _format_list(items: list[str]) -> list[str]:
-    if not items:
-        return ["- none"]
-    return [f"- {item}" for item in items]
-
-
-def _task_envelope_content(task: TaskSpec, plan: dict) -> str:
-    lines = [f"goal: {task.goal}"]
-    lines.append("constraints:")
-    lines.extend(_format_list(task.constraints))
-    lines.append("acceptance_criteria:")
-    lines.extend(_format_list(task.acceptance_criteria))
-    lines.append("verification_commands:")
-    lines.extend(_format_list(task.verification_commands))
-    lines.append("plan:")
-    lines.extend(_format_list(list(plan.get("planned_steps", []))))
-    return "\n".join(lines)
-
-
 def _compaction_manifest(compaction: ContextCompactionResult) -> dict:
+    selected_count = sum(1 for record in compaction.diagnostics if record.decision == "selected")
+    collapsed_records = [record for record in compaction.diagnostics if record.decision == "collapsed"]
+    skipped_records = [record for record in compaction.diagnostics if record.decision == "skipped"]
     return {
         "original_chars": compaction.original_chars,
         "final_chars": compaction.final_chars,
         "saved_chars": compaction.original_chars - compaction.final_chars,
+        "selected_count": selected_count,
+        "collapsed_count": len(collapsed_records),
+        "skipped_count": len(skipped_records),
+        "selected_chars": sum(
+            record.final_chars for record in compaction.diagnostics if record.decision in {"selected", "collapsed"}
+        ),
+        "collapsed_saved_chars": sum(record.original_chars - record.final_chars for record in collapsed_records),
+        "skipped_chars": sum(record.original_chars for record in skipped_records),
+        "skipped_reasons": _reason_counts(skipped_records),
         "diagnostics": [_selection_record_dict(record) for record in compaction.diagnostics],
     }
 
 
-def _context_index_budget(context_id: str, compaction: ContextCompactionResult) -> dict:
+def _context_index_budget(context_id: str, compaction: ContextCompactionResult, budget: ContextBudget) -> dict:
     included_count = sum(1 for record in compaction.diagnostics if record.decision != "skipped")
-    max_chars = ContextBudget().max_total_chars
     return {
         "context_id": context_id,
         "total_chars": compaction.final_chars,
-        "max_chars": max_chars,
+        "max_chars": budget.max_total_chars,
         "source_count": len(compaction.diagnostics),
         "included_source_count": included_count,
-        "status": "within_limit" if compaction.final_chars <= max_chars else "over_limit",
+        "status": "within_limit" if compaction.final_chars <= budget.max_total_chars else "over_limit",
     }
+
+
+def _reason_counts(records: list[ContextSelectionRecord]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record.reason] = counts.get(record.reason, 0) + 1
+    return counts
 
 
 def _selection_record_dict(record: ContextSelectionRecord) -> dict:

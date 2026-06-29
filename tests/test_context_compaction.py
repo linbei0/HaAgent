@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from haagent.context.builder import ContextBuilder
-from haagent.context.compaction import ContextBudget, ContextSection, compact_context_sections
+from haagent.context.compaction import (
+    ContextBudget,
+    ContextSection,
+    compact_context_sections,
+)
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.task_contract import TaskSpec
 
@@ -126,9 +130,60 @@ def test_context_builder_returns_compaction_diagnostics_and_manifest(tmp_path: P
 
     assert context.diagnostics
     assert "compaction" in manifest
-    assert manifest["compaction"]["diagnostics"][0]["decision"] in {"selected", "collapsed", "skipped"}
+    compaction = manifest["compaction"]
+    assert compaction["selected_count"] == 1
+    assert compaction["collapsed_count"] == 0
+    assert compaction["skipped_count"] == 0
+    assert compaction["selected_chars"] == len("summary from previous turns")
+    assert compaction["collapsed_saved_chars"] == 0
+    assert compaction["skipped_chars"] == 0
+    assert compaction["skipped_reasons"] == {}
+    assert compaction["diagnostics"][0]["decision"] == "selected"
+    assert {record["key"] for record in compaction["diagnostics"]} == {"session_summary"}
     assert "diagnostics" not in context.model_input
     assert "compaction" not in context.model_input
+
+
+def test_context_builder_diagnostics_match_real_model_input(tmp_path: Path) -> None:
+    project_instructions = "HEAD-" + ("middle-" * 700) + "TAIL"
+    skipped_memory = "SKIPPED-MEMORY-" * 400
+    writer = _make_writer(tmp_path)
+    (tmp_path / "AGENTS.md").write_text(project_instructions, encoding="utf-8")
+
+    compact_budget = ContextBudget(
+        max_total_chars=90,
+        max_section_chars=200,
+        max_tool_observation_chars=1200,
+        keep_recent_observations=4,
+        collapse_head_chars=20,
+        collapse_tail_chars=20,
+    )
+    context = ContextBuilder(
+        task=_task("summarize project"),
+        workspace_root=tmp_path,
+        provider_name="test-provider",
+        episode_writer=writer,
+        session_summary="SESSION-KEPT",
+        interaction_state=[
+            {
+                "type": "question",
+                "tool": "request_user_input",
+                "status": "answered",
+                "question": "Continue?",
+                "answer_excerpt": skipped_memory,
+            },
+        ],
+        compaction_budget=compact_budget,
+    ).build()
+
+    assert "SKIPPED-MEMORY-" not in context.model_input
+    assert project_instructions not in context.model_input
+    bounded_project_instructions = project_instructions[:4000]
+    assert bounded_project_instructions[:20] in context.model_input
+    assert bounded_project_instructions[-20:] in context.model_input
+    assert "...[collapsed " in context.model_input
+    assert "SESSION-KEPT" in context.model_input
+    assert "task_envelope" not in {record.key for record in context.diagnostics}
 
 
 def _make_writer(tmp_path: Path) -> EpisodeWriter:
