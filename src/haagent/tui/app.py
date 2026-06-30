@@ -474,6 +474,10 @@ class HaAgentTuiApp(App[None]):
             self.action_focus_tools()
             if self.query_one("#side-bar", SideBar).has_class("hidden"):
                 self.action_open_tool_details()
+        elif command.action == "skills":
+            self._handle_skills_command(result.argument)
+        elif command.action == "skill":
+            self._handle_skill_command(result.argument)
         elif command.action == "web":
             self._handle_web_command(result.argument)
         elif command.action == "permissions":
@@ -497,6 +501,50 @@ class HaAgentTuiApp(App[None]):
         state = "开启" if enabled else "关闭"
         self._append_block("Command", f"联网已{state}；后续任务可使用 web_search / web_fetch。")
         self._refresh()
+
+    def _handle_skills_command(self, argument: str) -> None:
+        value = argument.strip().lower()
+        try:
+            if value == "trust":
+                summary = self.service.trust_project_skills()
+                self._append_block("Skills", "已信任当前 workspace 的项目 skills。\n" + _skills_summary_text(summary))
+            elif value == "untrust":
+                summary = self.service.untrust_project_skills()
+                self._append_block("Skills", "已取消信任当前 workspace 的项目 skills。\n" + _skills_summary_text(summary))
+            elif not value:
+                self._append_block("Skills", _skills_summary_text(self.service.list_skills()))
+            else:
+                self._append_block("Command", "用法：/skills、/skills trust 或 /skills untrust")
+        except Exception as error:
+            self._append_block("Skills warning", f"skills 操作失败：{error}")
+        self._refresh()
+
+    def _handle_skill_command(self, argument: str) -> None:
+        text = argument.strip()
+        if not text:
+            self._append_block("Command", "用法：/skill <name> [request]")
+            self._refresh()
+            return
+        skill_name, _, request = text.partition(" ")
+        try:
+            skill = self.service.read_skill_for_user(skill_name)
+        except Exception as error:
+            self._append_block("Skills warning", f"读取 skill 失败：{error}")
+            self._refresh()
+            return
+        prompt = "\n".join(
+            [
+                f"Use skill {skill.command_name} explicitly.",
+                "",
+                "Skill content:",
+                skill.content,
+                "",
+                "User request:",
+                request.strip() or f"Follow the {skill.command_name} skill for this task.",
+            ],
+        )
+        self._append_block("Skills", f"已加载 skill：{skill.name}")
+        self._start_prompt(prompt)
 
     def _show_permissions(self) -> None:
         status = self.service.get_workspace_status()
@@ -1289,3 +1337,25 @@ def _permission_mode_label(mode: str) -> str:
     if mode == "full_access":
         return "完全访问权限"
     return "请求批准"
+
+
+def _skills_summary_text(summary) -> str:
+    lines: list[str] = []
+    skills = list(getattr(summary, "skills", []) or [])
+    if skills:
+        for item in skills:
+            name = str(item.get("name", "unknown"))
+            source = str(item.get("source", "unknown"))
+            description = str(item.get("description", ""))
+            suffix = " user-only" if item.get("disable_model_invocation") else ""
+            lines.append(f"- {name} [{source}]: {description}{suffix}".rstrip())
+    else:
+        lines.append("暂无可用 skills。")
+    blocked = list(getattr(summary, "blocked_project_skill_roots", []) or [])
+    if blocked:
+        lines.append("")
+        lines.append("项目 skills 未信任：")
+        for path in blocked:
+            lines.append(f"- {path}")
+        lines.append("输入 /skills trust 信任当前 workspace 的项目 skills。")
+    return "\n".join(lines)

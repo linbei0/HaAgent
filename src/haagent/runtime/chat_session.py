@@ -49,6 +49,7 @@ from haagent.runtime.working_state import (
     update_working_state,
     write_working_state,
 )
+from haagent.skills import load_skill_registry
 
 
 CHAT_ALLOWED_TOOLS = [
@@ -65,6 +66,7 @@ CHAT_ALLOWED_TOOLS = [
     "shell",
 ]
 CHAT_WEB_TOOLS = ["web_search", "web_fetch"]
+CHAT_SKILL_TOOLS = ["skill_list", "skill_read"]
 CHAT_APPROVED_TOOLS = ["file_write", "code_run", "apply_patch", "apply_patch_set", "shell"]
 CHAT_MAX_TURNS = 20
 
@@ -707,6 +709,8 @@ def _write_chat_task_yaml(
     allowed_tools = list(CHAT_ALLOWED_TOOLS)
     if enable_web:
         allowed_tools.extend(CHAT_WEB_TOOLS)
+    if load_skill_registry(workspace_root=workspace_root).list_skills():
+        allowed_tools.extend(CHAT_SKILL_TOOLS)
     task = {
         "goal": request,
         "workspace_root": str(workspace_root.resolve()),

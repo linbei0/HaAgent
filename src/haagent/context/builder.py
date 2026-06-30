@@ -44,6 +44,7 @@ from haagent.runtime.working_state import (
     format_working_state_for_model,
     raw_working_state_text,
 )
+from haagent.skills import discover_project_skill_dirs, is_project_root_trusted, load_skill_registry, load_skill_settings
 from haagent.tools.registry import TOOL_REGISTRY
 
 
@@ -131,6 +132,7 @@ class ContextBuilder:
             project_instructions=selected_sections.get("project_instructions") or None,
             tool_workflow_hints=self._tool_workflow_hints(),
             session_summary=selected_sections.get("session_summary") or None,
+            skills_block=selected_sections.get("skills") or None,
         )
         task_msg = build_task_message(
             task=self._task,
@@ -182,6 +184,7 @@ class ContextBuilder:
                 memory_manifest=self._memory_manifest(),
                 compaction=compaction,
                 observation_records=_compact_observation_records(self._observations),
+                skills_manifest=self._skills_manifest(),
             ),
             compact_readiness=compact_readiness,
             auto_compact_trigger=auto_compact_trigger,
@@ -367,6 +370,18 @@ class ContextBuilder:
                     kind="interaction",
                 ),
             )
+        skills_block = self._skills_block()
+        if skills_block and skills_block.strip():
+            sections.append(
+                ContextSection(
+                    key="skills",
+                    title="Available Skills",
+                    content=skills_block.strip(),
+                    source="skills",
+                    priority=50,
+                    kind="skills",
+                ),
+            )
         return sections
 
     def _write_run_manifest(self, index: ContextIndex) -> None:
@@ -385,10 +400,56 @@ class ContextBuilder:
                 "workspace_root": str(self._workspace_root),
                 "goal": self._task.goal,
                 "allowed_tools": self._task.allowed_tools,
+                "skills": self._skills_manifest(),
             },
             "contexts": contexts,
         }
         self._episode_writer.write_context_manifest(run_manifest)
+
+    def _skills_manifest(self) -> dict:
+        if hasattr(self, "_cached_skills_manifest"):
+            return self._cached_skills_manifest
+        if not {"skill_list", "skill_read"} & set(self._task.allowed_tools):
+            self._cached_skills_manifest = {
+                "available_count": 0,
+                "available": [],
+                "blocked_project_skill_roots": [],
+            }
+            return self._cached_skills_manifest
+        settings = load_skill_settings()
+        registry = load_skill_registry(workspace_root=self._workspace_root, settings=settings)
+        skills = registry.list_skills()
+        blocked_roots = [] if is_project_root_trusted(self._workspace_root, settings) else [
+            str(path) for path in discover_project_skill_dirs(self._workspace_root)
+        ]
+        self._cached_skills_manifest = {
+            "available_count": len(skills),
+            "available": [
+                {
+                    "name": skill.name,
+                    "description": skill.description,
+                    "source": skill.source,
+                    "command_name": skill.command_name or skill.name,
+                    "disable_model_invocation": skill.disable_model_invocation,
+                }
+                for skill in skills
+            ],
+            "blocked_project_skill_roots": blocked_roots,
+        }
+        return self._cached_skills_manifest
+
+    def _skills_block(self) -> str | None:
+        manifest = self._skills_manifest()
+        items = manifest["available"]
+        if not items:
+            return None
+        lines = []
+        for item in items[:20]:
+            flags = " user-only" if item["disable_model_invocation"] else ""
+            lines.append(f"- {item['name']} [{item['source']}]: {item['description']}{flags}")
+        if len(items) > 20:
+            lines.append(f"- ... {len(items) - 20} more skills available via skill_list")
+        return "\n".join(lines)
 
 
 def _compaction_manifest(compaction: ContextCompactionResult) -> dict:
@@ -430,11 +491,13 @@ def _source_diagnostics(
     memory_manifest: dict | None,
     compaction: ContextCompactionResult,
     observation_records: list[ObservationCompactionRecord],
+    skills_manifest: dict | None = None,
 ) -> dict:
     return {
         "session_summary": _session_summary_source_diagnostics(session_summary, compaction),
         "memory": _memory_source_diagnostics(memory_manifest, compaction),
         "observations": _observation_source_diagnostics(observation_records),
+        "skills": _skills_source_diagnostics(skills_manifest, compaction),
     }
 
 
@@ -511,6 +574,23 @@ def _observation_source_diagnostics(records: list[ObservationCompactionRecord]) 
         "final_chars": final_chars,
         "saved_chars": original_chars - final_chars,
         "reason": "context_builder_does_not_include_observation_sections",
+    }
+
+
+def _skills_source_diagnostics(skills_manifest: dict | None, compaction: ContextCompactionResult) -> dict:
+    manifest = skills_manifest if isinstance(skills_manifest, dict) else {}
+    available = manifest.get("available") if isinstance(manifest.get("available"), list) else []
+    blocked = (
+        manifest.get("blocked_project_skill_roots")
+        if isinstance(manifest.get("blocked_project_skill_roots"), list)
+        else []
+    )
+    record = _diagnostic_record(compaction, "skills")
+    return {
+        "available_count": len(available),
+        "blocked_project_skill_roots": [str(path) for path in blocked],
+        "included_in_model_input": record is not None and record.decision != "skipped",
+        "model_input_chars": record.final_chars if record is not None and record.decision != "skipped" else 0,
     }
 
 

@@ -70,6 +70,8 @@ class FakeAssistantService:
         enable_web: bool = False,
         external_roots: list[dict[str, str]] | None = None,
         permission_mode: str = "request_approval",
+        skills: list[dict[str, object]] | None = None,
+        blocked_project_skill_roots: list[str] | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.profile_name = profile_name
@@ -95,6 +97,11 @@ class FakeAssistantService:
         self.enable_web = enable_web
         self.external_roots = list(external_roots or [])
         self.permission_mode = permission_mode
+        self.skills = list(skills or [])
+        self.blocked_project_skill_roots = list(blocked_project_skill_roots or [])
+        self.trusted_skills_count = 0
+        self.untrusted_skills_count = 0
+        self.read_skill_names: list[str] = []
         self.next_turn_target_paths: list[str] = []
         self.started = threading.Event()
         self.release = threading.Event()
@@ -333,6 +340,32 @@ class FakeAssistantService:
         self.workspace_root = Path(path).resolve()
         self.external_roots = []
         return self._session_status(self.current_session_id)
+
+    def list_skills(self):
+        return SimpleNamespace(
+            skills=list(self.skills),
+            blocked_project_skill_roots=list(self.blocked_project_skill_roots),
+        )
+
+    def trust_project_skills(self):
+        self.trusted_skills_count += 1
+        self.blocked_project_skill_roots = []
+        return self.list_skills()
+
+    def untrust_project_skills(self):
+        self.untrusted_skills_count += 1
+        return self.list_skills()
+
+    def read_skill_for_user(self, name: str):
+        self.read_skill_names.append(name)
+        match = next((item for item in self.skills if item.get("name") == name or item.get("command_name") == name), None)
+        if match is None:
+            raise RuntimeError(f"skill not found: {name}")
+        return SimpleNamespace(
+            name=str(match.get("name")),
+            command_name=str(match.get("command_name") or match.get("name")),
+            content=f"# {match.get('name')}\nFollow this workflow.",
+        )
 
     def list_memory_candidates(self, status: str | None = "pending") -> list[MemoryCandidate]:
         if self.memory_error is not None:
@@ -686,6 +719,8 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "sessions",
         "memory",
         "tools",
+        "skills",
+        "skill",
         "new",
         "resume",
         "model",
@@ -693,6 +728,71 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "permissions",
     }
     assert "models" not in {command.name for command in registry.commands()}
+
+
+def test_tui_skills_command_lists_skills_and_trusts_project_roots(tmp_path: Path) -> None:
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        skills=[
+            {
+                "name": "review",
+                "description": "Review workflow.",
+                "source": "user",
+                "command_name": "review",
+                "user_invocable": True,
+                "disable_model_invocation": False,
+            },
+        ],
+        blocked_project_skill_roots=[str(tmp_path / ".haagent" / "skills")],
+    )
+
+    async def run_test() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "/skills"
+            await pilot.press("enter")
+            assert "review [user]" in _text(app, "#conversation")
+            assert "项目 skills 未信任" in _text(app, "#conversation")
+
+            input_widget.value = "/skills trust"
+            await pilot.press("enter")
+            assert service.trusted_skills_count == 1
+            assert "已信任当前 workspace 的项目 skills" in _text(app, "#conversation")
+
+    asyncio.run(run_test())
+
+
+def test_tui_skill_command_starts_prompt_with_explicit_skill_context(tmp_path: Path) -> None:
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        skills=[
+            {
+                "name": "review",
+                "description": "Review workflow.",
+                "source": "user",
+                "command_name": "review",
+                "user_invocable": True,
+                "disable_model_invocation": False,
+            },
+        ],
+    )
+
+    async def run_test() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "/skill review check this"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert service.read_skill_names == ["review"]
+            assert service.prompts
+            assert service.prompts[0].startswith("Use skill review explicitly.")
+            assert "Follow this workflow." in service.prompts[0]
+            assert "check this" in service.prompts[0]
+
+    asyncio.run(run_test())
 
 
 def test_side_bar_shows_external_roots(tmp_path: Path) -> None:

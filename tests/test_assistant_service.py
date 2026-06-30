@@ -894,3 +894,31 @@ def test_session_creation_requires_usable_active_profile(tmp_path: Path, monkeyp
 
     with pytest.raises(AssistantServiceError, match="DEEPSEEK_API_KEY"):
         service.create_session()
+
+
+def test_service_lists_trusts_and_reads_skills(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    project_skill_dir = workspace / ".haagent" / "skills" / "project-flow"
+    project_skill_dir.mkdir(parents=True)
+    (project_skill_dir / "SKILL.md").write_text("# Project Flow\nProject-only workflow.\n", encoding="utf-8")
+    user_skill_dir = home / ".haagent" / "skills" / "grill-me"
+    user_skill_dir.mkdir(parents=True)
+    (user_skill_dir / "SKILL.md").write_text(
+        "---\nname: grill-me\ndescription: User-only skill.\ndisable-model-invocation: true\n---\n\n# Grill Me\nAsk sharp questions.\n",
+        encoding="utf-8",
+    )
+    service = AssistantService(workspace_root=workspace, gateway_factory=lambda profile: RecordingGateway())
+
+    initial = service.list_skills()
+    trusted = service.trust_project_skills()
+    content = service.read_skill_for_user("grill-me")
+
+    assert [skill["name"] for skill in initial.skills] == ["grill-me"]
+    assert initial.blocked_project_skill_roots == [str((workspace / ".haagent" / "skills").resolve())]
+    assert {skill["name"] for skill in trusted.skills} == {"grill-me", "Project Flow"}
+    assert content.command_name == "grill-me"
+    assert "Ask sharp questions." in content.content

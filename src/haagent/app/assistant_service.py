@@ -53,6 +53,8 @@ from haagent.runtime.chat_session import (
 )
 from haagent.runtime.human_interaction import HumanInteractionHandler
 from haagent.runtime.path_policy import PathAccess, PermissionMode
+from haagent.skills import trust_project_root, untrust_project_root
+from haagent.tools.skills import skill_list, skill_read
 from haagent.memory import (
     CandidateQueue,
     CandidateQueueError,
@@ -158,6 +160,19 @@ class AssistantModelTestResult:
     provider: str
     model: str
     message: str
+
+
+@dataclass(frozen=True)
+class AssistantSkillList:
+    skills: list[dict[str, object]]
+    blocked_project_skill_roots: list[str]
+
+
+@dataclass(frozen=True)
+class AssistantSkillContent:
+    name: str
+    command_name: str
+    content: str
 
 
 @dataclass(frozen=True)
@@ -515,6 +530,37 @@ class AssistantService:
         self.workspace_root = root
         self._session.switch_project_root(root)
         return _session_status(self._session)
+
+    def list_skills(self) -> AssistantSkillList:
+        result = skill_list({}, self.workspace_root)
+        if result.get("status") != "success":
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            raise AssistantServiceError(str(error.get("message", "failed to list skills")))
+        return AssistantSkillList(
+            skills=list(result.get("skills", [])),
+            blocked_project_skill_roots=[
+                str(path) for path in result.get("blocked_project_skill_roots", [])
+            ],
+        )
+
+    def trust_project_skills(self) -> AssistantSkillList:
+        trust_project_root(self.workspace_root)
+        return self.list_skills()
+
+    def untrust_project_skills(self) -> AssistantSkillList:
+        untrust_project_root(self.workspace_root)
+        return self.list_skills()
+
+    def read_skill_for_user(self, name: str) -> AssistantSkillContent:
+        result = skill_read({"name": name}, self.workspace_root, user_invoked=True)
+        if result.get("status") != "success":
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            raise AssistantServiceError(str(error.get("message", f"skill not found: {name}")))
+        return AssistantSkillContent(
+            name=str(result["name"]),
+            command_name=str(result.get("command_name") or result["name"]),
+            content=str(result["content"]),
+        )
 
     def run_prompt_events(
         self,

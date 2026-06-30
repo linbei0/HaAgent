@@ -183,6 +183,46 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
+    "skill_list": ToolDefinition(
+        name="skill_list",
+        description="list available local skills as compact metadata without loading skill bodies",
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "optional text filter matched against skill name and description",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "optional source filter: user or project",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "optional maximum number of skills to return; defaults to 20",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    ),
+    "skill_read": ToolDefinition(
+        name="skill_read",
+        description="read one local skill body by name after choosing it from skill_list or available skills",
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "skill name, command name, or alias",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    ),
     "web_search": ToolDefinition(
         name="web_search",
         description="search the public web using the configured search provider and return sourced compact results",

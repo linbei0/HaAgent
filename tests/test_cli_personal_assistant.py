@@ -149,7 +149,8 @@ def test_haagent_tui_default_workspace_is_current_directory(tmp_path: Path, monk
     assert captured["workspace_root"] == workspace
 
 
-def test_chat_task_does_not_include_web_tools_by_default(tmp_path: Path) -> None:
+def test_chat_task_does_not_include_web_tools_by_default(tmp_path: Path, monkeypatch) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     session = AgentSession(
@@ -163,6 +164,38 @@ def test_chat_task_does_not_include_web_tools_by_default(tmp_path: Path) -> None
 
     assert "web_search" not in task.allowed_tools
     assert "web_fetch" not in task.allowed_tools
+    assert "skill_list" not in task.allowed_tools
+    assert "skill_read" not in task.allowed_tools
+
+
+def test_chat_task_includes_skill_tools_when_user_skills_exist(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    skill_dir = home / ".haagent" / "skills" / "review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review workflow.\n---\n\nPRIVATE BODY",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gateway = RecordingGateway()
+    session = AgentSession(
+        workspace_root=workspace,
+        runs_root=workspace / ".runs",
+        model_gateway=gateway,
+    )
+
+    result = session.run_prompt("Review files")
+    task = load_task(result.episode_path / "task.yaml")
+    manifest = json.loads((result.episode_path / "contexts" / "0001-manifest.json").read_text(encoding="utf-8"))
+
+    assert "skill_list" in task.allowed_tools
+    assert "skill_read" in task.allowed_tools
+    assert "Available Skills:" in gateway.model_inputs[0]
+    assert "- review [user]: Review workflow." in gateway.model_inputs[0]
+    assert "PRIVATE BODY" not in gateway.model_inputs[0]
+    assert manifest["source_diagnostics"]["skills"]["available_count"] == 1
 
 
 def test_chat_task_includes_web_tools_when_explicitly_enabled(tmp_path: Path) -> None:

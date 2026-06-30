@@ -25,6 +25,8 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "file_read",
         "request_user_input",
         "start_memory_update",
+        "skill_list",
+        "skill_read",
         "web_search",
         "web_fetch",
         "file_write",
@@ -128,6 +130,17 @@ def test_start_memory_update_schema_is_low_risk_internal_signal() -> None:
     assert schema["parameters"]["required"] == []
     assert schema["parameters"]["properties"]["reason"]["type"] == "string"
     assert TOOL_REGISTRY["start_memory_update"].risk_level == "low"
+
+
+def test_skill_tool_schemas_are_low_risk_and_do_not_require_body_in_list() -> None:
+    list_schema, read_schema = export_tool_schemas(["skill_list", "skill_read"])
+
+    assert list_schema["parameters"]["required"] == []
+    assert set(list_schema["parameters"]["properties"]) == {"query", "source", "max_results"}
+    assert read_schema["parameters"]["required"] == ["name"]
+    assert set(read_schema["parameters"]["properties"]) == {"name"}
+    assert TOOL_REGISTRY["skill_list"].risk_level == "low"
+    assert TOOL_REGISTRY["skill_read"].risk_level == "low"
 
 
 def test_web_tool_schemas_describe_explicit_read_only_network_access() -> None:

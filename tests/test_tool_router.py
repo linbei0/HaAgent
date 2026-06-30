@@ -10,6 +10,7 @@ from pathlib import Path
 from haagent.runtime.human_interaction import HumanInteractionResponse
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.path_policy import ExternalRoot, PathPolicy
+from haagent.skills import SkillSettings
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.router import ToolRouter
 from haagent.tools.shell import shell
@@ -85,6 +86,100 @@ def test_start_memory_update_sets_runtime_flag_and_writes_trace(tmp_path: Path) 
     record = _read_single_tool_call(writer)
     assert record["tool_name"] == "start_memory_update"
     assert record["result"]["memory_update_requested"] is True
+
+
+def test_skill_list_returns_metadata_without_skill_body(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    skill_dir = home / ".haagent" / "skills" / "review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review workflow.\n---\n\nSECRET BODY",
+        encoding="utf-8",
+    )
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["skill_list"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("skill_list", {})
+
+    assert result["status"] == "success"
+    assert result["skills"] == [
+        {
+            "name": "review",
+            "description": "Review workflow.",
+            "source": "user",
+            "command_name": "review",
+            "user_invocable": True,
+            "disable_model_invocation": False,
+        }
+    ]
+    assert "SECRET BODY" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_skill_read_returns_skill_content_and_writes_trace(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    skill_dir = home / ".haagent" / "skills" / "review"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Review\nRead files before reviewing.\n", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["skill_read"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("skill_read", {"name": "review"})
+
+    assert result["status"] == "success"
+    assert result["name"] == "Review"
+    assert "Read files before reviewing." in result["content"]
+    record = _read_single_tool_call(writer)
+    assert record["tool_name"] == "skill_read"
+    assert record["status"] == "success"
+
+
+def test_skill_read_blocks_model_disabled_skill(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    skill_dir = home / ".haagent" / "skills" / "grill-me"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: grill-me\ndescription: User-only session.\ndisable-model-invocation: true\n---\n\n# Body\n",
+        encoding="utf-8",
+    )
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["skill_read"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("skill_read", {"name": "grill-me"})
+
+    assert result == {
+        "status": "error",
+        "error": {
+            "type": "skill_model_invocation_disabled",
+            "message": "skill can only be invoked explicitly by the user: /grill-me",
+        },
+    }
+
+
+def test_project_skill_list_marks_untrusted_project_roots(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    skill_dir = repo / ".haagent" / "skills" / "local"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# local\nlocal workflow\n", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["skill_list"],
+        episode_writer=writer,
+        workspace_root=repo,
+        skill_settings=SkillSettings(version=1, trusted_project_roots=()),
+    )
+
+    result = router.dispatch("skill_list", {})
+
+    assert result["status"] == "success"
+    assert result["skills"] == []
+    assert result["blocked_project_skill_roots"] == [str((repo / ".haagent" / "skills").resolve())]
 
 
 def test_medium_risk_web_fetch_runs_without_high_risk_approval(tmp_path: Path) -> None:

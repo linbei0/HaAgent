@@ -24,11 +24,13 @@ from haagent.runtime.policy import (
     evaluate_tool_call,
     grant_tool_approval,
 )
+from haagent.skills import SkillSettings
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
 from haagent.tools.code_run import code_run
 from haagent.tools.file_tools import apply_patch, apply_patch_set, context_find, file_list, file_read, file_search, file_write
 from haagent.tools.registry import TOOL_REGISTRY, validate_tool_registry
 from haagent.tools.shell import shell
+from haagent.tools.skills import skill_list, skill_read
 from haagent.tools.web import web_fetch, web_search
 
 
@@ -41,12 +43,14 @@ class ToolRouter:
         path_policy: PathPolicy | None = None,
         approval_allowed_tools: list[str] | None = None,
         approved_tools: list[str] | None = None,
+        skill_settings: SkillSettings | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
         self._approved_tools = list(approved_tools or [])
         self._episode_writer = episode_writer
         self._workspace_root = workspace_root.resolve()
+        self._skill_settings = skill_settings
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
         self._handlers: dict[str, ToolHandler] = {
             "fake_tool": self._fake_tool,
@@ -56,6 +60,8 @@ class ToolRouter:
             "file_read": lambda args: file_read(args, self._workspace_root, self._path_policy),
             "request_user_input": self._request_user_input_without_handler,
             "start_memory_update": self._start_memory_update,
+            "skill_list": lambda args: skill_list(args, self._workspace_root, self._skill_settings),
+            "skill_read": lambda args: skill_read(args, self._workspace_root, self._skill_settings),
             "web_search": web_search,
             "web_fetch": web_fetch,
             "file_write": lambda args: file_write(args, self._workspace_root, self._path_policy),

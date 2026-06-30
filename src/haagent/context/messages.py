@@ -23,6 +23,7 @@ def build_system_message(
     project_instructions: str | None,
     tool_workflow_hints: list[str],
     session_summary: str | None = None,
+    skills_block: str | None = None,
 ) -> dict[str, Any]:
     parts: list[str] = []
 
@@ -45,6 +46,11 @@ def build_system_message(
         parts.append("")
         parts.append("Session Summary:")
         parts.append(session_summary.strip())
+
+    if skills_block and skills_block.strip():
+        parts.append("")
+        parts.append("Available Skills:")
+        parts.append(skills_block.strip())
 
     return {"role": "system", "content": "\n".join(parts)}
 
