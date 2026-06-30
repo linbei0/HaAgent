@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
+import subprocess
 
 
 @dataclass(frozen=True)
@@ -16,25 +18,32 @@ class FileReferenceMatch:
     display_path: str
 
 
-def fuzzy_file_matches(workspace_root: Path, query: str, *, limit: int = 20) -> list[FileReferenceMatch]:
+@dataclass(frozen=True)
+class FileReferenceIndex:
+    root: Path
+    files: tuple[FileReferenceMatch, ...]
+
+    def matches(self, query: str, *, limit: int = 20) -> list[FileReferenceMatch]:
+        needle = query.strip().casefold()
+        matches = [
+            item
+            for item in self.files
+            if not needle or _fuzzy_contains(item.display_path.casefold(), needle)
+        ]
+        matches.sort(key=lambda item: (len(item.display_path), item.display_path.casefold()))
+        return matches[:limit]
+
+
+def build_file_reference_index(workspace_root: Path) -> FileReferenceIndex:
     root = workspace_root.resolve()
-    needle = query.strip().casefold()
-    matches: list[FileReferenceMatch] = []
     if not root.exists():
-        return []
-    for path in root.rglob("*"):
-        if not path.is_file() or _is_hidden_run_artifact(root, path):
-            continue
-        resolved = path.resolve()
-        if not _is_relative_to(resolved, root):
-            continue
-        display = resolved.relative_to(root).as_posix()
-        haystack = display.casefold()
-        if needle and not _fuzzy_contains(haystack, needle):
-            continue
-        matches.append(FileReferenceMatch(path=resolved, display_path=display))
-    matches.sort(key=lambda item: (len(item.display_path), item.display_path.casefold()))
-    return matches[:limit]
+        return FileReferenceIndex(root=root, files=())
+    files = list(_iter_file_reference_candidates(root))
+    return FileReferenceIndex(root=root, files=tuple(files))
+
+
+def fuzzy_file_matches(workspace_root: Path, query: str, *, limit: int = 20) -> list[FileReferenceMatch]:
+    return build_file_reference_index(workspace_root).matches(query, limit=limit)
 
 
 def path_reference_token(workspace_root: Path, path: Path) -> str:
@@ -80,6 +89,70 @@ def _fuzzy_contains(haystack: str, needle: str) -> bool:
             return False
         position = found + 1
     return True
+
+
+def _iter_file_reference_candidates(root: Path):
+    rg_path = shutil.which("rg")
+    if rg_path is not None:
+        yield from _iter_rg_file_candidates(root, rg_path)
+        return
+    yield from _iter_python_file_candidates(root)
+
+
+def _iter_rg_file_candidates(root: Path, rg_path: str):
+    command = [rg_path, "--files", "--color", "never", "--no-messages"]
+    if _looks_like_git_repo(root):
+        command.append("--hidden")
+    process = subprocess.Popen(
+        command,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        if process.stdout is None:
+            return
+        for raw_line in process.stdout:
+            display = raw_line.strip().replace("\\", "/")
+            if not display:
+                continue
+            path = (root / display).resolve()
+            if not _is_relative_to(path, root) or _is_hidden_run_artifact(root, path):
+                continue
+            yield FileReferenceMatch(path=path, display_path=display)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
+
+
+def _iter_python_file_candidates(root: Path):
+    for path in root.rglob("*"):
+        if not path.is_file() or _is_hidden_run_artifact(root, path):
+            continue
+        resolved = path.resolve()
+        if not _is_relative_to(resolved, root):
+            continue
+        display = resolved.relative_to(root).as_posix()
+        yield FileReferenceMatch(path=resolved, display_path=display)
+
+
+def _looks_like_git_repo(path: Path) -> bool:
+    current = path
+    for _ in range(6):
+        if (current / ".git").exists():
+            return True
+        if current.parent == current:
+            break
+        current = current.parent
+    return False
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

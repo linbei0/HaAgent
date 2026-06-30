@@ -47,6 +47,14 @@ Screen.theme-monochrome {
     padding: 0 1;
 }
 
+#file-ref-dialog {
+    width: 1fr;
+    height: 9;
+    padding: 0 1;
+    border: solid $primary;
+    background: $surface;
+}
+
 #prompt-input {
     width: 1fr;
     height: 4;
@@ -151,8 +159,7 @@ ConfirmModal,
 ExternalDirectoryDecisionModal,
 SessionOverlay,
 SearchOverlay,
-CommandSuggestionOverlay,
-FileReferenceOverlay {
+CommandSuggestionOverlay {
     align: center middle;
 }
 
@@ -164,8 +171,7 @@ FileReferenceOverlay {
 #external-directory-dialog,
 #sessions-dialog,
 #search-dialog,
-#command-suggestions-dialog,
-#file-ref-dialog {
+#command-suggestions-dialog {
     width: 72;
     height: auto;
     padding: 1 2;
@@ -178,8 +184,7 @@ FileReferenceOverlay {
 #external-directory-dialog,
 #sessions-dialog,
 #search-dialog,
-#command-suggestions-dialog,
-#file-ref-dialog {
+#command-suggestions-dialog {
     border: solid $primary;
 }
 

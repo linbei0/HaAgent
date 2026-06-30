@@ -12,6 +12,7 @@ from pathlib import Path
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.widgets import TextArea
 
 from haagent.app.assistant_service import AssistantService
 from haagent.models.gateway_registry import catalog_provider_capability
@@ -24,7 +25,7 @@ from haagent.tui.commands import command_registry, parse_slash_command
 from haagent.tui.copy import BLOCK_TITLES
 from haagent.tui.failures import FailureView, failure_from_payload
 from haagent.tui.file_ref_modal import FileReferenceOverlay
-from haagent.tui.file_refs import query_after_at, replace_at_query
+from haagent.tui.file_refs import FileReferenceIndex, build_file_reference_index, query_after_at, replace_at_query
 from haagent.tui.keys import APP_BINDINGS, footer_text
 from haagent.tui.modals import ConfirmModal, ExternalDirectoryDecisionModal, HelpModal, PermissionsModal, ToolApprovalModal, ToolDetailsModal
 from haagent.tui.models import (
@@ -138,6 +139,8 @@ class HaAgentTuiApp(App[None]):
         self._model_catalog_providers: list[object] | None = None
         self._commands = command_registry()
         self._theme_choice = select_theme()
+        self._file_ref_overlay: FileReferenceOverlay | None = None
+        self._file_ref_index: FileReferenceIndex | None = None
 
     def compose(self) -> ComposeResult:
         yield StatusBar("", id="status-bar")
@@ -157,6 +160,7 @@ class HaAgentTuiApp(App[None]):
         self._refresh()
         self._update_responsive_layout()
         self.query_one("#prompt-input", PromptInput).focus()
+        self._warm_file_reference_index()
 
     def _restore_initial_session(self) -> None:
         initial_resume = getattr(self.service, "initial_resume", None)
@@ -181,6 +185,9 @@ class HaAgentTuiApp(App[None]):
         self._update_responsive_layout(width=event.size.width, height=event.size.height)
 
     def on_key(self, event: events.Key) -> None:
+        if self._file_ref_overlay is not None and event.key in {"escape", "up", "down", "enter"}:
+            self.action_handle_file_ref_key(event)
+            return
         if self._memory_mode and self._pending_interaction is None:
             if self._handle_memory_key(event.key):
                 event.stop()
@@ -203,6 +210,15 @@ class HaAgentTuiApp(App[None]):
         elif event.key == "r" and self._memory_mode:
             event.stop()
             self.action_reject_memory()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area.id != "prompt-input" or self._file_ref_overlay is None:
+            return
+        query = query_after_at(self._prompt_value(event.text_area))
+        if query is None:
+            self._close_file_ref_overlay()
+            return
+        self._file_ref_overlay.update_query(query)
 
     def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         self._submit_prompt(event.input)
@@ -290,7 +306,34 @@ class HaAgentTuiApp(App[None]):
         if query is None:
             return
         status = self.service.get_workspace_status()
-        self.push_screen(FileReferenceOverlay(status.workspace_root, query), self._handle_file_reference_result)
+        if self._file_ref_overlay is None:
+            overlay = FileReferenceOverlay(status.workspace_root, query, self._file_ref_index)
+            self._file_ref_overlay = overlay
+            self.query_one("#input-panel", Vertical).mount(overlay, before=prompt_input)
+            self.query_one("#input-panel", Vertical).styles.height = 14
+        else:
+            self._file_ref_overlay.update_query(query)
+        prompt_input.focus()
+
+    def action_handle_file_ref_key(self, event: events.Key) -> None:
+        overlay = self._file_ref_overlay
+        if overlay is None:
+            return
+        token = overlay.handle_key(event)
+        if token is None:
+            return
+        if token:
+            self._handle_file_reference_result(token)
+        self._close_file_ref_overlay()
+
+    def action_accept_file_ref(self) -> None:
+        overlay = self._file_ref_overlay
+        if overlay is None:
+            return
+        token = overlay.selected_token()
+        if token:
+            self._handle_file_reference_result(token)
+            self._close_file_ref_overlay()
 
     def action_quit(self) -> None:
         self.exit(None)
@@ -798,6 +841,26 @@ class HaAgentTuiApp(App[None]):
         if token is not None:
             self._set_prompt_value(prompt_input, replace_at_query(self._prompt_value(prompt_input), token))
         prompt_input.focus()
+
+    def _close_file_ref_overlay(self) -> None:
+        overlay = self._file_ref_overlay
+        self._file_ref_overlay = None
+        if overlay is not None and overlay.is_mounted:
+            overlay.remove()
+        self.query_one("#input-panel", Vertical).styles.height = 5
+        self.query_one("#prompt-input", PromptInput).focus()
+
+    def file_reference_is_open(self) -> bool:
+        return self._file_ref_overlay is not None
+
+    @work(thread=True, exclusive=True)
+    def _warm_file_reference_index(self) -> None:
+        status = self.service.get_workspace_status()
+        index = build_file_reference_index(status.workspace_root)
+        self.call_from_thread(self._set_file_reference_index, index)
+
+    def _set_file_reference_index(self, index: FileReferenceIndex) -> None:
+        self._file_ref_index = index
 
     def _restore_prompt_focus(self, _result: object | None = None) -> None:
         self.query_one("#prompt-input", PromptInput).focus()

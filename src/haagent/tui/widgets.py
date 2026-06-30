@@ -40,8 +40,14 @@ class PromptInput(TextArea):
 
     def on_key(self, event: events.Key) -> None:
         app = self.app
-        if (event.key == "@" or event.character == "@") and self.value:
+        if getattr(app, "file_reference_is_open", lambda: False)() and event.key in {"escape", "up", "down", "enter"}:
+            event.prevent_default()
+            app.action_handle_file_ref_key(event)
+            return
+        if event.key == "@" or event.character == "@":
             event.stop()
+            event.prevent_default()
+            self.insert("@")
             app.action_open_file_refs()
             return
         if self.value:
@@ -58,6 +64,9 @@ class PromptInput(TextArea):
         self.app.action_cancel_current_task()
 
     def action_submit_from_input(self) -> None:
+        if getattr(self.app, "file_reference_is_open", lambda: False)():
+            self.app.action_accept_file_ref()
+            return
         self.app.action_submit_prompt()
 
     def action_insert_newline_from_input(self) -> None:

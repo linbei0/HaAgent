@@ -20,7 +20,7 @@ from haagent.tui.app import HaAgentTuiApp, find_untrusted_absolute_paths
 from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
 from haagent.tui.changes import changed_files_from_tool_event, path_stays_in_workspace
 from haagent.tui.failures import failure_next_steps
-from haagent.tui.file_refs import fuzzy_file_matches, path_reference_token
+from haagent.tui.file_refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
 from haagent.tui.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
 from haagent.tui.models import ModelCatalogLoadingOverlay
 from haagent.tui.copy import MODAL_TITLES, PANEL_TITLES
@@ -39,6 +39,7 @@ from haagent.tui.theme import (
 from haagent.tui.tool_timeline import ToolTimelineState, redact_mapping_for_display
 from haagent.tui.widgets import PromptInput
 from textual.widgets import RichLog, TextArea
+from textual.screen import Screen
 
 
 class FakeAssistantService:
@@ -1874,6 +1875,102 @@ def test_tui_file_reference_fuzzy_search_stays_inside_workspace(tmp_path: Path) 
     assert token == '@file("docs/Project Plan.md")'
 
 
+def test_tui_file_reference_index_uses_fast_file_walker(tmp_path: Path, monkeypatch) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "Project Plan.md").write_text("plan", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.py").write_text("print('hi')", encoding="utf-8")
+    candidates = [
+        FileReferenceMatch(path=docs / "Project Plan.md", display_path="docs/Project Plan.md"),
+        FileReferenceMatch(path=src / "main.py", display_path="src/main.py"),
+    ]
+
+    monkeypatch.setattr("haagent.tui.file_refs._iter_file_reference_candidates", lambda root: iter(candidates))
+
+    index = build_file_reference_index(tmp_path)
+    assert [item.display_path for item in index.matches("plan")] == ["docs/Project Plan.md"]
+    assert [item.display_path for item in index.matches("main")] == ["src/main.py"]
+
+
+def test_tui_file_reference_overlay_scrolls_selected_match_into_view(tmp_path: Path) -> None:
+    from haagent.tui.file_ref_modal import FileReferenceOverlay
+
+    overlay = FileReferenceOverlay(tmp_path, "")
+    overlay.index = FileReferenceIndex(
+        root=tmp_path.resolve(),
+        files=tuple(
+            FileReferenceMatch(path=tmp_path / f"file-{index:02}.txt", display_path=f"file-{index:02}.txt")
+            for index in range(12)
+        ),
+    )
+    overlay.loading = False
+    overlay._reload()
+
+    for _ in range(4):
+        overlay._move(1)
+
+    body = overlay._body()
+    assert "> file-04.txt" in body
+    assert "  file-00.txt" not in body
+    assert "  file-03.txt" in body
+
+
+def test_tui_file_reference_overlay_uses_preloaded_index_without_loading(tmp_path: Path) -> None:
+    from haagent.tui.file_ref_modal import FileReferenceOverlay
+
+    index = FileReferenceIndex(
+        root=tmp_path.resolve(),
+        files=(FileReferenceMatch(path=tmp_path / "README.md", display_path="README.md"),),
+    )
+    overlay = FileReferenceOverlay(tmp_path, "", index)
+    overlay.on_mount()
+
+    assert overlay.loading is False
+    assert "正在搜索文件" not in overlay._body()
+    assert "README.md" in overlay._body()
+
+
+def test_tui_file_reference_overlay_filters_loaded_index_without_rescanning(tmp_path: Path, monkeypatch) -> None:
+    from haagent.tui.file_ref_modal import FileReferenceOverlay
+
+    def fail_rglob(self, pattern):
+        raise AssertionError("query updates should not rescan workspace")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+
+    overlay = FileReferenceOverlay(tmp_path, "")
+    overlay.index = FileReferenceIndex(
+        root=tmp_path.resolve(),
+        files=(
+            FileReferenceMatch(path=tmp_path / "README.md", display_path="README.md"),
+            FileReferenceMatch(path=tmp_path / "docs" / "Project Plan.md", display_path="docs/Project Plan.md"),
+        ),
+    )
+
+    overlay.update_query("plan")
+
+    assert [item.display_path for item in overlay.matches] == ["docs/Project Plan.md"]
+
+
+def test_tui_file_reference_overlay_ignores_index_after_unmount(tmp_path: Path, monkeypatch) -> None:
+    from haagent.tui.file_ref_modal import FileReferenceOverlay
+
+    overlay = FileReferenceOverlay(tmp_path, "")
+    index = build_file_reference_index(tmp_path)
+    overlay.on_unmount()
+
+    def fail_reload():
+        raise AssertionError("unmounted overlay should not refresh stale worker results")
+
+    monkeypatch.setattr(overlay, "_reload", fail_reload)
+
+    overlay._handle_index_ready(index)
+
+    assert overlay.index is None
+
+
 def test_tui_tool_timeline_state_tracks_started_done_failed_and_redacts_secret(tmp_path: Path) -> None:
     secret = "sk-test1234567890abcdef1234567890abcdef"
     state = ToolTimelineState()
@@ -2762,17 +2859,30 @@ def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> No
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "Project Plan.md").write_text("plan", encoding="utf-8")
+    (tmp_path / "README.md").write_text("readme", encoding="utf-8")
 
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             input_widget = app.query_one("#prompt-input", PromptInput)
-            input_widget.value = "Read @pla"
+            input_widget.value = "Read "
             await pilot.press("@")
             await pilot.pause(0.1)
+            assert input_widget.value == "Read @"
+            assert type(app.screen) is Screen
+            assert app.query_one("#prompt-input", PromptInput) is input_widget
             assert "文件引用" in _all_text(app)
             assert "docs/Project Plan.md" in _all_text(app)
+            assert "README.md" in _all_text(app)
+            assert "> README.md" in _all_text(app)
+            await pilot.press("down")
+            await pilot.pause(0.1)
+            assert "> README.md" not in _all_text(app)
+            await pilot.press("p", "l", "a")
+            await pilot.pause(0.1)
+            assert "搜索: pla" in _all_text(app)
+            assert "README.md" not in _all_text(app)
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert input_widget.value == 'Read @file("docs/Project Plan.md")'
@@ -2784,6 +2894,8 @@ def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> No
             await pilot.press("escape")
             await pilot.pause(0.1)
             assert "文件引用" not in _all_text(app)
+            assert app.query_one("#prompt-input", PromptInput) is input_widget
+            assert input_widget.has_focus
 
     asyncio.run(run())
 
