@@ -8,7 +8,6 @@ haagent/runtime/orchestrator.py - Run Orchestrator 状态机
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,6 +55,7 @@ from haagent.runtime.loop_guidance import (
 from haagent.runtime.safety_guard import SafetyGuard
 from haagent.runtime.plan import build_plan
 from haagent.runtime.path_policy import default_path_policy, load_path_policy
+from haagent.runtime.run_recorder import RunRecorder, RunResult
 from haagent.runtime.state import RunStatus
 from haagent.runtime.task_contract import TaskLoadError, load_task, resolve_workspace_root
 from haagent.runtime.workspace_preflight import build_workspace_preflight
@@ -63,13 +63,6 @@ from haagent.tools.base import ToolRoutingError, tool_error
 from haagent.tools.registry import export_tool_schemas
 from haagent.tools.router import ToolRouter
 from haagent.verification.engine import DEFAULT_COMMAND_TIMEOUT_SECONDS, VerificationEngine
-
-
-@dataclass(frozen=True)
-class RunResult:
-    status: RunStatus
-    state_history: list[RunStatus]
-    episode_path: Path
 
 
 class RunOrchestrator:
@@ -107,12 +100,9 @@ class RunOrchestrator:
 
     def run(self, task_path: Path) -> RunResult:
         """执行一次 run，并把所有阶段变化写入 transcript.jsonl。"""
-        state_history: list[RunStatus] = []
         writer = EpisodeWriter.create(self._runs_root, task_path)
-
-        def transition(status: RunStatus) -> None:
-            state_history.append(status)
-            writer.append_transcript({"event": "state_transition", "status": status.value})
+        recorder = RunRecorder(writer)
+        transition = recorder.transition
 
         transition(RunStatus.CREATED)
 
@@ -170,7 +160,7 @@ class RunOrchestrator:
                         "evidence": guardrail_evidence(input_guardrail),
                     },
                 )
-                return _finish_run(writer, RunStatus.FAILED, state_history)
+                return recorder.finish(RunStatus.FAILED)
 
             router = ToolRouter(
                 task.allowed_tools,
@@ -286,7 +276,7 @@ class RunOrchestrator:
                             "evidence": guardrail_evidence(output_guardrail),
                         },
                     )
-                    return _finish_run(writer, RunStatus.FAILED, state_history)
+                    return recorder.finish(RunStatus.FAILED)
 
                 if final_response_requested and model_response.tool_calls:
                     transition(RunStatus.FAILED)
@@ -297,7 +287,7 @@ class RunOrchestrator:
                             "evidence": "model returned tool calls during final response turn",
                         },
                     )
-                    return _finish_run(writer, RunStatus.FAILED, state_history)
+                    return recorder.finish(RunStatus.FAILED)
 
                 if not model_response.tool_calls:
                     if final_response_requested and not model_response.content.strip():
@@ -309,7 +299,7 @@ class RunOrchestrator:
                                 "evidence": "model returned empty final response during final response turn",
                             },
                         )
-                        return _finish_run(writer, RunStatus.FAILED, state_history)
+                        return recorder.finish(RunStatus.FAILED)
                     writer.append_transcript(
                         {
                             "event": "no_tool_reviewed",
@@ -333,7 +323,7 @@ class RunOrchestrator:
                     if verification_result.status == "success":
                         transition(RunStatus.COMPLETED)
                         writer.write_failure_attribution(None)
-                        return _finish_run(writer, RunStatus.COMPLETED, state_history)
+                        return recorder.finish(RunStatus.COMPLETED)
 
                     # Verification failed — inject result as user message and continue
                     verification_obs = _verification_observation(verification_result)
@@ -355,10 +345,10 @@ class RunOrchestrator:
                                 ),
                             },
                         )
-                        return _finish_run(writer, RunStatus.FAILED, state_history)
+                        return recorder.finish(RunStatus.FAILED)
                     continue
 
-                if state_history[-1] is not RunStatus.EXECUTING:
+                if recorder.state_history[-1] is not RunStatus.EXECUTING:
                     transition(RunStatus.EXECUTING)
 
                 # Assign IDs to tool calls if missing (fake/test gateways may omit them)
@@ -451,7 +441,7 @@ class RunOrchestrator:
                                 "evidence": violation.message,
                             }
                         )
-                        return _finish_run(writer, RunStatus.FAILED, state_history)
+                        return recorder.finish(RunStatus.FAILED)
 
                     if tool_result.get("status") == "error":
                         if _tool_error_is_terminal(tool_result):
@@ -558,17 +548,17 @@ class RunOrchestrator:
                         "evidence": f"exceeded max_turns={self._max_turns}",
                     },
                 )
-                return _finish_run(writer, RunStatus.FAILED, state_history)
+                return recorder.finish(RunStatus.FAILED)
         except RunCancelled as error:
             transition(RunStatus.CANCELLED)
             writer.write_failure_attribution(
                 {
-                    "stage": state_history[-2].value if len(state_history) > 1 else "created",
+                    "stage": recorder.state_history[-2].value if len(recorder.state_history) > 1 else "created",
                     "category": FailureCategory.RUNTIME.value,
                     "evidence": str(error),
                 },
             )
-            return _finish_run(writer, RunStatus.CANCELLED, state_history)
+            return recorder.finish(RunStatus.CANCELLED)
         except ToolRoutingError as error:
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
@@ -578,7 +568,7 @@ class RunOrchestrator:
                     "evidence": str(error),
                 },
             )
-            return _finish_run(writer, RunStatus.FAILED, state_history)
+            return recorder.finish(RunStatus.FAILED)
         except ModelCallError as error:
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
@@ -588,7 +578,7 @@ class RunOrchestrator:
                     "evidence": str(error),
                 },
             )
-            return _finish_run(writer, RunStatus.FAILED, state_history)
+            return recorder.finish(RunStatus.FAILED)
         except ContextBuildError as error:
             transition(RunStatus.FAILED)
             category = (
@@ -603,7 +593,7 @@ class RunOrchestrator:
                     "evidence": str(error),
                 },
             )
-            return _finish_run(writer, RunStatus.FAILED, state_history)
+            return recorder.finish(RunStatus.FAILED)
         except TaskLoadError as error:
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
@@ -613,17 +603,17 @@ class RunOrchestrator:
                     "evidence": str(error),
                 },
             )
-            return _finish_run(writer, RunStatus.FAILED, state_history)
+            return recorder.finish(RunStatus.FAILED)
         except Exception as error:
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
                 {
-                    "stage": state_history[-2].value if len(state_history) > 1 else "created",
-                    "category": _unexpected_failure_category(error, state_history).value,
+                    "stage": recorder.state_history[-2].value if len(recorder.state_history) > 1 else "created",
+                    "category": _unexpected_failure_category(error, recorder.state_history).value,
                     "evidence": str(error),
                 },
             )
-            return _finish_run(writer, RunStatus.FAILED, state_history)
+            return recorder.finish(RunStatus.FAILED)
 
 
 def _verification_evidence(verification_result) -> str:
@@ -925,15 +915,6 @@ def _all_declared_verification_commands_passed(
 ) -> bool:
     expected_commands = set(verification_commands)
     return bool(expected_commands) and expected_commands.issubset(passed_verification_commands)
-
-
-def _finish_run(
-    writer: EpisodeWriter,
-    status: RunStatus,
-    state_history: list[RunStatus],
-) -> RunResult:
-    writer.write_episode_metadata(status=status.value)
-    return RunResult(status, state_history, writer.path)
 
 
 def _unexpected_failure_category(error: Exception, state_history: list[RunStatus]) -> FailureCategory:

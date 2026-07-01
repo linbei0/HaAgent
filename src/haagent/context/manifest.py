@@ -41,6 +41,7 @@ class ContextManifest:
     memory: dict[str, Any] | None = None
     compaction: dict[str, Any] | None = None
     source_diagnostics: dict[str, Any] | None = None
+    selection: dict[str, Any] | None = None
     compact_readiness: dict[str, Any] | None = None
     auto_compact_trigger: dict[str, Any] | None = None
     session_compaction: dict[str, Any] | None = None
@@ -65,6 +66,8 @@ class ContextManifest:
             manifest["compaction"] = self.compaction
         if self.source_diagnostics is not None:
             manifest["source_diagnostics"] = self.source_diagnostics
+        if self.selection is not None:
+            manifest["selection"] = self.selection
         if self.compact_readiness is not None:
             manifest["compact_readiness"] = self.compact_readiness
         if self.auto_compact_trigger is not None:

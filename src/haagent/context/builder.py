@@ -32,6 +32,13 @@ from haagent.context.observation_compaction import (
     ObservationCompactionRecord,
     compact_observation_with_record,
 )
+from haagent.context.selection import (
+    ContextCandidateInputs,
+    ContextSelector,
+    collect_context_candidates,
+    compaction_sections_from_selection,
+    selection_budget_for_initial_audit,
+)
 from haagent.memory.retrieval import (
     MemoryRetrievalRequest,
     MemoryRetriever,
@@ -112,6 +119,7 @@ class ContextBuilder:
         self._working_state = working_state
         self._interaction_state = list(interaction_state or [])
         self._compaction_budget = compaction_budget or ContextBudget()
+        self._selection_budget = selection_budget_for_initial_audit(self._compaction_budget)
 
     def build(self) -> BuiltContext:
         """构建初始对话消息（system + task），写入 contexts/ 快照。"""
@@ -122,8 +130,10 @@ class ContextBuilder:
         contexts_dir = self._episode_writer.path / "contexts"
         contexts_dir.mkdir(parents=True, exist_ok=True)
 
+        candidates = self._build_context_candidates(project_instructions)
+        selection = ContextSelector(self._selection_budget).select(candidates)
         compaction = compact_context_sections(
-            self._build_compaction_sections(project_instructions, plan),
+            compaction_sections_from_selection(selection),
             self._compaction_budget,
         )
         selected_sections = {section.key: section.content for section in compaction.sections}
@@ -186,6 +196,7 @@ class ContextBuilder:
                 observation_records=_compact_observation_records(self._observations),
                 skills_manifest=self._skills_manifest(),
             ),
+            selection=selection.to_manifest_dict(),
             compact_readiness=compact_readiness,
             auto_compact_trigger=auto_compact_trigger,
             session_compaction=self._session_compaction,
@@ -309,80 +320,17 @@ class ContextBuilder:
     def _format_interaction_state(self) -> list[str]:
         return [f"- {_interaction_state_summary(r)}" for r in self._interaction_state[-8:]]
 
-    def _build_compaction_sections(self, project_instructions: str | None, plan: dict) -> list[ContextSection]:
-        sections: list[ContextSection] = []
-        if project_instructions and project_instructions.strip():
-            sections.append(
-                ContextSection(
-                    key="project_instructions",
-                    title="Project Instructions",
-                    content=project_instructions.strip()[:PROJECT_INSTRUCTIONS_CHAR_LIMIT],
-                    source="project",
-                    priority=80,
-                    kind="project_instructions",
-                ),
-            )
-        session_summary = (self._session_summary or "").strip()
-        if session_summary:
-            sections.append(
-                ContextSection(
-                    key="session_summary",
-                    title="Session Summary",
-                    content=session_summary[:SESSION_SUMMARY_CHAR_LIMIT],
-                    source="session",
-                    priority=70,
-                    kind="session_summary",
-                ),
-            )
-        working_state = self._working_state_content()
-        if working_state and working_state.strip():
-            sections.append(
-                ContextSection(
-                    key="working_state",
-                    title="Working State",
-                    content=working_state.strip(),
-                    source="working_state",
-                    priority=75,
-                    kind="working_state",
-                ),
-            )
-        memory_block = self._memory_block()
-        if memory_block and memory_block.strip():
-            sections.append(
-                ContextSection(
-                    key="memory",
-                    title="Relevant Memory",
-                    content=memory_block.strip(),
-                    source="memory",
-                    priority=60,
-                    kind="memory",
-                ),
-            )
-        interaction_state = "\n".join(self._format_interaction_state())
-        if interaction_state.strip():
-            sections.append(
-                ContextSection(
-                    key="interaction_history",
-                    title="Interaction History",
-                    content=interaction_state.strip(),
-                    source="interaction_state",
-                    priority=55,
-                    kind="interaction",
-                ),
-            )
-        skills_block = self._skills_block()
-        if skills_block and skills_block.strip():
-            sections.append(
-                ContextSection(
-                    key="skills",
-                    title="Available Skills",
-                    content=skills_block.strip(),
-                    source="skills",
-                    priority=50,
-                    kind="skills",
-                ),
-            )
-        return sections
+    def _build_context_candidates(self, project_instructions: str | None):
+        return collect_context_candidates(
+            ContextCandidateInputs(
+                project_instructions=(project_instructions or "").strip()[:PROJECT_INSTRUCTIONS_CHAR_LIMIT],
+                session_summary=(self._session_summary or "").strip()[:SESSION_SUMMARY_CHAR_LIMIT],
+                working_state=self._working_state_content(),
+                memory_block=self._memory_block(),
+                interaction_state="\n".join(self._format_interaction_state()),
+                skills_block=self._skills_block(),
+            ),
+        )
 
     def _write_run_manifest(self, index: ContextIndex) -> None:
         manifest_path = self._episode_writer.path / "context-manifest.json"

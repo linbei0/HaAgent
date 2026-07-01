@@ -27,6 +27,7 @@ from haagent.tui.failures import FailureView, failure_from_payload
 from haagent.tui.file_ref_modal import FileReferenceOverlay
 from haagent.tui.file_refs import FileReferenceIndex, build_file_reference_index, query_after_at, replace_at_query
 from haagent.tui.keys import APP_BINDINGS, footer_text
+from haagent.tui.memory_presenter import MemoryPanelPresenter
 from haagent.tui.modals import ConfirmModal, ExternalDirectoryDecisionModal, HelpModal, PermissionsModal, ToolApprovalModal, ToolDetailsModal
 from haagent.tui.models import (
     ManualModelSetupWizard,
@@ -37,7 +38,6 @@ from haagent.tui.models import (
 )
 from haagent.tui.renderers import (
     failure_body,
-    memory_panel_text,
     payload_text,
     side_bar,
     status_line,
@@ -1401,13 +1401,13 @@ class HaAgentTuiApp(App[None]):
         self._refresh()
 
     def _memory_panel_text(self) -> str:
-        return memory_panel_text(
+        return MemoryPanelPresenter(
             candidates=self._memory_candidates,
             selected_index=self._memory_selected,
             detail_mode=self._memory_detail_mode,
             notice=self._memory_notice,
             error=self._memory_error,
-        )
+        ).render()
 
     def _footer_text(self) -> str:
         return footer_text(self._help_context())

@@ -7,26 +7,26 @@ haagent/runtime/chat_session.py - 自然语言 Agent 会话
 from __future__ import annotations
 
 import json
-import tempfile
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
-
 from haagent.models.gateway import ModelGateway
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.runtime.cancellation import CancellationToken
+from haagent.runtime.chat_turn import (
+    ChatEventMapper,
+    ChatTurnRequest,
+    ChatTurnRunner,
+    summary_value as _summary_value,
+)
 from haagent.runtime.episode_validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
 )
-from haagent.runtime.human_interaction import (
-    HumanInteractionHandler,
-    interaction_args_summary,
-)
+from haagent.runtime.human_interaction import HumanInteractionHandler
 from haagent.runtime.orchestrator import RunOrchestrator
 from haagent.runtime.path_policy import (
     ExternalRoot,
@@ -49,25 +49,6 @@ from haagent.runtime.working_state import (
     update_working_state,
     write_working_state,
 )
-from haagent.skills import load_skill_registry
-
-
-CHAT_ALLOWED_TOOLS = [
-    "file_list",
-    "file_search",
-    "context_find",
-    "file_read",
-    "request_user_input",
-    "start_memory_update",
-    "file_write",
-    "code_run",
-    "apply_patch",
-    "apply_patch_set",
-    "shell",
-]
-CHAT_WEB_TOOLS = ["web_search", "web_fetch", "skill_market_search"]
-CHAT_SKILL_TOOLS = ["skill_list", "skill_read"]
-CHAT_APPROVED_TOOLS = ["file_write", "code_run", "apply_patch", "apply_patch_set", "shell"]
 CHAT_MAX_TURNS = 20
 
 
@@ -285,19 +266,13 @@ class AgentSession:
             runtime_events.append(event)
             self._emit_runtime_event(event_sink, turn_index, event)
 
-        with tempfile.TemporaryDirectory(prefix="haagent-chat-") as task_dir:
-            task_path = Path(task_dir) / "task.yaml"
-            _write_chat_task_yaml(
-                task_path,
-                clean_prompt,
-                self.workspace_root,
-                path_policy=self.path_policy,
-                enable_web=self.enable_web,
-                target_paths=self._next_turn_target_paths,
-            )
-            self._next_turn_target_paths = []
-            session_memory = self._session_memory()
-            result = RunOrchestrator(
+        target_paths = list(self._next_turn_target_paths)
+        self._next_turn_target_paths = []
+        session_memory = self._session_memory()
+        result = ChatTurnRunner().run(
+            ChatTurnRequest(
+                prompt=clean_prompt,
+                workspace_root=self.workspace_root,
                 runs_root=self.runs_root,
                 model_gateway=self.model_gateway,
                 max_turns=self.max_turns,
@@ -305,10 +280,15 @@ class AgentSession:
                 session_compaction=session_memory.diagnostics,
                 tool_result_microcompact_count=self._tool_result_microcompact_count,
                 working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
+                path_policy=self.path_policy,
+                enable_web=self.enable_web,
+                target_paths=target_paths,
                 event_sink=on_runtime_event,
                 interaction_handler=interaction_handler,
                 cancellation_token=self._current_cancellation_token,
-            ).run(task_path)
+                orchestrator_factory=RunOrchestrator,
+            ),
+        )
 
         turn_result = self._build_turn_result(clean_prompt, result)
         self.turn_count += 1
@@ -604,15 +584,13 @@ class AgentSession:
         turn_index: int,
         event: dict[str, object],
     ) -> None:
-        event_type = str(event.get("event_type", "unknown"))
-        payload = dict(event)
-        payload.pop("event_type", None)
+        view = ChatEventMapper.to_chat_event(event, turn_index)
         self._emit_chat_event(
             event_sink,
-            event_type=event_type,
+            event_type=view.event_type,
             turn_index=turn_index,
-            message=_runtime_event_message(event_type, payload),
-            payload=_runtime_event_payload(event_type, payload),
+            message=view.message,
+            payload=view.payload,
         )
 
     def _build_turn_result(self, prompt: str, result) -> ChatTurnResult:
@@ -697,41 +675,6 @@ class AgentSession:
         )
 
 
-def _write_chat_task_yaml(
-    path: Path,
-    request: str,
-    workspace_root: Path,
-    *,
-    path_policy: PathPolicy | None = None,
-    enable_web: bool = False,
-    target_paths: list[str] | None = None,
-) -> None:
-    allowed_tools = list(CHAT_ALLOWED_TOOLS)
-    if enable_web:
-        allowed_tools.extend(CHAT_WEB_TOOLS)
-    if load_skill_registry(workspace_root=workspace_root).list_skills():
-        allowed_tools.extend(CHAT_SKILL_TOOLS)
-    task = {
-        "goal": request,
-        "workspace_root": str(workspace_root.resolve()),
-        "path_policy": serialize_path_policy(path_policy or default_path_policy(workspace_root)),
-        "target_paths": list(target_paths or []),
-        "constraints": [],
-        "allowed_tools": allowed_tools,
-        "acceptance_criteria": ["Complete the requested chat task."],
-        "verification_commands": [],
-        "policy": {
-            "approval_allowed_tools": list(CHAT_APPROVED_TOOLS),
-            "approved_tools": (
-                list(CHAT_APPROVED_TOOLS)
-                if (path_policy or default_path_policy(workspace_root)).permission_mode in {"auto_approve", "full_access"}
-                else []
-            ),
-        },
-    }
-    path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
-
-
 def _turn_summary(prompt: str, result: ChatTurnResult) -> str:
     return "\n".join(
         [
@@ -757,194 +700,6 @@ def _verification_status(commands: list[dict[str, Any]], verification_reached: b
     if any(command.get("status") != "success" for command in commands):
         return "failed"
     return "success"
-
-
-def _runtime_event_message(event_type: str, payload: dict[str, object]) -> str:
-    if event_type == "tool_started":
-        return f"starting tool {payload.get('tool_name', 'unknown')}"
-    if event_type == "tool_finished":
-        return f"finished tool {payload.get('tool_name', 'unknown')}"
-    if event_type == "tool_failed":
-        return f"failed tool {payload.get('tool_name', 'unknown')}"
-    if event_type == "approval_requested":
-        return f"approval requested for {payload.get('tool_name', 'unknown')}"
-    if event_type == "approval_granted":
-        return f"approval granted for {payload.get('tool_name', 'unknown')}"
-    if event_type == "approval_denied":
-        return f"approval denied for {payload.get('tool_name', 'unknown')}"
-    if event_type == "user_input_requested":
-        return _summary_value(str(payload.get("question", "")))
-    if event_type == "user_input_received":
-        return "user input received"
-    if event_type == "tool_finished" and payload.get("tool_name") == "start_memory_update":
-        return "memory update requested"
-    if event_type == "assistant_message":
-        return _summary_value(str(payload.get("content", "")))
-    if event_type == "guardrail_triggered":
-        return _summary_value(str(payload.get("message", "guardrail triggered")))
-    if event_type == "failure":
-        return _summary_value(str(payload.get("reason", "chat turn failed")))
-    return event_type
-
-
-def _runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[str, object]:
-    if event_type == "tool_started":
-        tool_name = str(payload.get("tool_name", "unknown"))
-        args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-        return {
-            "model_turn": payload.get("turn"),
-            "tool_name": tool_name,
-            "args_summary": _tool_args_summary(tool_name, args),
-        }
-    if event_type == "tool_finished":
-        tool_name = str(payload.get("tool_name", "unknown"))
-        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        if tool_name == "start_memory_update":
-            return {
-                "model_turn": payload.get("turn"),
-                "tool_name": tool_name,
-                "memory_update_requested": bool(result.get("memory_update_requested")),
-                "reason": _summary_value(str(result.get("reason", "")), 240),
-            }
-        return {
-            "model_turn": payload.get("turn"),
-            "tool_name": tool_name,
-            "status": str(result.get("status", "unknown")),
-            "result_summary": _tool_result_summary(tool_name, result),
-        }
-    if event_type == "tool_failed":
-        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-        result = {
-            "model_turn": payload.get("turn"),
-            "tool_name": str(payload.get("tool_name", "unknown")),
-            "error_type": str(error.get("type", "unknown")),
-            "message": _summary_value(str(error.get("message", ""))),
-            "error": {
-                "type": str(error.get("type", "unknown")),
-                "message": _summary_value(str(error.get("message", ""))),
-            },
-        }
-        return result
-    if event_type in {"approval_requested", "approval_granted", "approval_denied"}:
-        args_summary = payload.get("args_summary") if isinstance(payload.get("args_summary"), dict) else {}
-        return {
-            "model_turn": payload.get("turn"),
-            "tool_name": str(payload.get("tool_name", "unknown")),
-            "question": _summary_value(str(payload.get("question", "")), 240),
-            "approved": payload.get("approved"),
-            "args_summary": args_summary,
-        }
-    if event_type == "user_input_requested":
-        return {
-            "model_turn": payload.get("turn"),
-            "tool_name": str(payload.get("tool_name", "unknown")),
-            "question": _summary_value(str(payload.get("question", "")), 240),
-            "reason": _summary_value(str(payload.get("reason", "")), 240),
-        }
-    if event_type == "user_input_received":
-        return {
-            "model_turn": payload.get("turn"),
-            "tool_name": str(payload.get("tool_name", "unknown")),
-            "question": _summary_value(str(payload.get("question", "")), 240),
-            "answer_chars": payload.get("answer_chars"),
-            "approved": payload.get("approved"),
-        }
-    if event_type == "assistant_message":
-        return {
-            "model_turn": payload.get("turn"),
-            "content": str(payload.get("content", "")),
-        }
-    if event_type == "guardrail_triggered":
-        return {
-            "status": str(payload.get("status", "blocked")),
-            "scope": str(payload.get("scope", "unknown")),
-            "rule_id": str(payload.get("rule_id", "unknown")),
-            "severity": str(payload.get("severity", "unknown")),
-            "message": _summary_value(str(payload.get("message", ""))),
-        }
-    if event_type == "failure":
-        return {
-            "status": str(payload.get("status", "failed")),
-            "failed_stage": _summary_value(str(payload.get("failed_stage", "unknown"))),
-            "failure_category": _summary_value(str(payload.get("failure_category", "unknown"))),
-            "reason": _summary_value(str(payload.get("reason", ""))),
-            "episode_path": _summary_value(str(payload.get("episode_path", "")), 300),
-        }
-    return payload
-
-
-def _tool_args_summary(tool_name: str, args: dict[str, object]) -> dict[str, object]:
-    if tool_name in {"file_write", "code_run", "apply_patch", "apply_patch_set", "shell", "request_user_input"}:
-        return interaction_args_summary(tool_name, args)
-    if tool_name == "file_read":
-        return {
-            "path": _summary_value(str(args.get("path", "")), 160),
-            "offset": args.get("offset"),
-            "limit": args.get("limit"),
-            "keyword": _summary_value(str(args.get("keyword", "")), 80),
-        }
-    return {"args_keys": sorted(str(key) for key in args)}
-
-
-def _tool_result_summary(tool_name: str, result: dict[str, object]) -> dict[str, object]:
-    if tool_name == "file_read":
-        return {
-            "path": _summary_value(str(result.get("path", "")), 160),
-            "start_line": result.get("start_line"),
-            "end_line": result.get("end_line"),
-            "line_count": result.get("line_count"),
-            "truncated": bool(result.get("truncated")),
-        }
-    if tool_name == "file_write":
-        return {
-            "path": _summary_value(str(result.get("path", "")), 160),
-            "mode": result.get("mode"),
-            "bytes_written": result.get("bytes_written"),
-            "created": result.get("created"),
-        }
-    if tool_name == "apply_patch":
-        return {
-            "path": _summary_value(str(result.get("path", "")), 160),
-            "replacements": result.get("replacements"),
-        }
-    if tool_name == "apply_patch_set":
-        paths = result.get("paths") if isinstance(result.get("paths"), list) else []
-        return {
-            "paths": [_summary_value(str(path), 160) for path in paths],
-            "replacement_count": result.get("replacement_count"),
-        }
-    if tool_name == "code_run":
-        return {
-            "exit_code": result.get("exit_code"),
-            "stdout_excerpt": _summary_value(str(result.get("stdout_excerpt", "")), 300),
-            "stderr_excerpt": _summary_value(str(result.get("stderr_excerpt", "")), 300),
-            "stdout_chars": len(str(result.get("stdout_excerpt", ""))),
-            "stderr_chars": len(str(result.get("stderr_excerpt", ""))),
-            "truncated": bool(result.get("truncated")),
-        }
-    if tool_name == "shell":
-        return {
-            "exit_code": result.get("exit_code"),
-            "stdout_excerpt": _summary_value(str(result.get("stdout_excerpt", "")), 300),
-            "stderr_excerpt": _summary_value(str(result.get("stderr_excerpt", "")), 300),
-            "stdout_chars": len(str(result.get("stdout_excerpt", ""))),
-            "stderr_chars": len(str(result.get("stderr_excerpt", ""))),
-            "timeout": bool(result.get("timeout")),
-            "truncated": bool(result.get("truncated")),
-        }
-    return {
-        "status": str(result.get("status", "unknown")),
-        "result_keys": sorted(str(key) for key in result),
-    }
-
-
-def _summary_value(value: str, limit: int = 300) -> str:
-    normalized = " ".join(value.split())
-    if not normalized:
-        normalized = "none"
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[:limit] + "... [truncated]"
 
 
 def _memory_update_requested(runtime_events: list[dict[str, object]]) -> bool:
