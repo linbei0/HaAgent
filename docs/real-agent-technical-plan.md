@@ -133,7 +133,7 @@ TUI 支持最小 slash commands：
 - `/sessions`：搜索、恢复、继续最新或新建会话。
 - `/memory`：审查记忆候选。
 - `/web`：显式切换只读联网工具。
-- `/new`、`/resume`、`/cancel`、`/tools`、`/help`：管理当前会话、运行和帮助。
+- `/new`、`/resume`、`/cancel`、`/help`：管理当前会话、运行和帮助。
 
 ### 5.3 内部任务契约
 

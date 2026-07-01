@@ -60,15 +60,13 @@ def failure_next_steps(
     episode_path: str,
 ) -> list[str]:
     steps = [
-        "查看工具详情，确认失败发生在哪个工具或服务边界。",
+        "查看对话中的失败摘要，确认失败发生在哪个阶段或服务边界。",
         "重试前先调整请求或补充更明确的文件、命令、范围。",
     ]
     if episode_path and episode_path != "unknown":
         steps.append(f"需要复盘时查看 episode trace：{episode_path}。")
     if failed_stage in {"executing", "verifying"}:
         steps.append("如果你信任当前 workspace，可手动运行相关检查命令确认状态。")
-    if "Tool" in failure_category or "tool" in failure_category:
-        steps.append("打开 /tools 或工具详情 overlay 查看参数摘要和错误摘要。")
     return steps
 
 

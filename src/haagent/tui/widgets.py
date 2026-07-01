@@ -1,7 +1,7 @@
 """
 haagent/tui/widgets.py - TUI 基础组件
 
-封装输入、状态栏、对话区、侧栏、footer 和尺寸提示等稳定 UI 区域。
+封装输入、状态栏、对话区、footer 和尺寸提示等稳定 UI 区域。
 """
 
 from __future__ import annotations
@@ -46,6 +46,23 @@ class PromptInput(TextArea):
             event.prevent_default()
             app.action_handle_file_ref_key(event)
             return
+        if getattr(app, "_memory_mode", False) and getattr(app, "_pending_interaction", None) is None:
+            handled = False
+            if event.key == "enter":
+                app.action_memory_enter()
+                handled = True
+            elif event.key in {"a", "y"}:
+                app.action_confirm_memory()
+                handled = True
+            elif event.key == "r":
+                app.action_reject_memory()
+                handled = True
+            else:
+                handled = app._handle_memory_key(event.key)
+            if handled:
+                event.stop()
+                event.prevent_default()
+                return
         if event.key == "@" or event.character == "@":
             event.stop()
             event.prevent_default()
@@ -78,6 +95,9 @@ class PromptInput(TextArea):
             return
         if getattr(self.app, "file_reference_is_open", lambda: False)():
             self.app.action_accept_file_ref()
+            return
+        if getattr(self.app, "_memory_mode", False):
+            self.app.action_memory_enter()
             return
         self.app.action_submit_prompt()
 
@@ -118,34 +138,6 @@ class ConversationView(TextArea):
         self.load_text(new_text)
 
 
-class SideBar(Static):
-    can_focus = True
-
-    class MoveSelection(Message):
-        def __init__(self, delta: int) -> None:
-            self.delta = delta
-            super().__init__()
-
-    class OpenDetails(Message):
-        pass
-
-    def update_content(self, text: str) -> None:
-        self.update(text)
-
-    def on_key(self, event: events.Key) -> None:
-        if getattr(self.app, "_memory_mode", False):
-            return
-        if event.key == "up":
-            event.stop()
-            self.post_message(self.MoveSelection(-1))
-        elif event.key == "down":
-            event.stop()
-            self.post_message(self.MoveSelection(1))
-        elif event.key == "enter":
-            event.stop()
-            self.post_message(self.OpenDetails())
-
-
 class FooterBar(Static):
     def update_footer(self, text: str) -> None:
         self.update(Text(text))
@@ -158,3 +150,8 @@ class ResizeMessage(Static):
 def _end_location(text: str) -> tuple[int, int]:
     lines = text.split("\n")
     return (len(lines) - 1, len(lines[-1]))
+    class Submitted(events.Message):
+        def __init__(self, input: PromptInput, value: str) -> None:
+            self.input = input
+            self.value = value
+            super().__init__()

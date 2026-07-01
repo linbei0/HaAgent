@@ -18,13 +18,12 @@ from haagent.runtime.chat_session import ChatEvent
 from haagent.runtime.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.app import HaAgentTuiApp, find_untrusted_absolute_paths
 from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
-from haagent.tui.changes import changed_files_from_tool_event, path_stays_in_workspace
 from haagent.tui.failures import failure_next_steps
 from haagent.tui.file_refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
 from haagent.tui.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
 from haagent.tui.models import ModelCatalogLoadingOverlay
 from haagent.tui.copy import MODAL_TITLES, PANEL_TITLES
-from haagent.tui.renderers import memory_panel_text, side_bar, status_line
+from haagent.tui.renderers import memory_panel_text, status_line
 from haagent.tui.search import ConversationSearchState
 from haagent.tui.sessions import SessionOverlayState
 from haagent.tui.state import ResponsiveLayout, layout_for_size
@@ -36,7 +35,6 @@ from haagent.tui.theme import (
     semantic_tokens,
     status_semantic,
 )
-from haagent.tui.tool_timeline import ToolTimelineState, redact_mapping_for_display
 from haagent.tui.widgets import PromptInput
 from textual.widgets import RichLog, TextArea
 from textual.screen import Screen
@@ -613,7 +611,6 @@ def test_tui_status_renderers_show_explicit_web_state(tmp_path: Path) -> None:
 
     assert "web:off" in status_line(offline, ui_state="idle", width=120)
     assert "web:on" in status_line(online, ui_state="idle", width=120)
-    assert "web: on" in side_bar(online, ui_state="idle", last_failure=None)
 
 
 def test_tui_keymap_help_and_footer_share_context_definitions() -> None:
@@ -638,6 +635,20 @@ def test_tui_chat_memory_entry_is_only_slash_command() -> None:
     assert "[m]记忆" not in chat_footer
     assert "m" not in binding_keys
     assert "m" not in input_binding_keys
+
+
+def test_tui_tools_entry_points_are_removed() -> None:
+    registry = command_registry()
+    chat_footer = footer_text("chat")
+    chat_help = help_body("chat")
+    binding_actions = {binding.action if hasattr(binding, "action") else binding[1] for binding in APP_BINDINGS}
+
+    assert parse_slash_command("/tools", registry).error == "未知命令：/tools"
+    assert "tools" not in {command.name for command in registry.commands()}
+    assert "/tools" not in chat_footer
+    assert "/tools" not in chat_help
+    assert "任务工作台" not in chat_help
+    assert "focus_tools" not in binding_actions
 
 
 def test_tui_semantic_tokens_cover_required_statuses() -> None:
@@ -695,13 +706,13 @@ def test_tui_theme_selection_respects_env_and_no_color(monkeypatch) -> None:
 
 def test_tui_copy_titles_are_chinese_and_keep_protocol_names() -> None:
     assert PANEL_TITLES["conversation"] == "对话"
-    assert PANEL_TITLES["workbench"] == "任务工作台"
     assert PANEL_TITLES["sessions"] == "会话"
-    assert PANEL_TITLES["tools"] == "工具"
     assert PANEL_TITLES["memory"] == "记忆候选"
     assert PANEL_TITLES["search"] == "搜索"
     assert MODAL_TITLES["approval"] == "工具审批"
-    assert MODAL_TITLES["tool_details"] == "工具详情"
+    assert "workbench" not in PANEL_TITLES
+    assert "tools" not in PANEL_TITLES
+    assert "tool_details" not in MODAL_TITLES
 
 
 def test_tui_memory_panel_renderer_marks_selection_and_detail() -> None:
@@ -733,10 +744,10 @@ def test_tui_memory_panel_renderer_marks_selection_and_detail() -> None:
 
 
 def test_tui_responsive_layout_state_is_testable_without_widgets() -> None:
-    assert layout_for_size(79, 24) == ResponsiveLayout(too_small=True, show_side_bar=False)
-    assert layout_for_size(80, 23) == ResponsiveLayout(too_small=True, show_side_bar=False)
-    assert layout_for_size(80, 24) == ResponsiveLayout(too_small=False, show_side_bar=False)
-    assert layout_for_size(120, 24) == ResponsiveLayout(too_small=False, show_side_bar=True)
+    assert layout_for_size(79, 24) == ResponsiveLayout(too_small=True)
+    assert layout_for_size(80, 23) == ResponsiveLayout(too_small=True)
+    assert layout_for_size(80, 24) == ResponsiveLayout(too_small=False)
+    assert layout_for_size(120, 24) == ResponsiveLayout(too_small=False)
 
 
 def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
@@ -760,7 +771,6 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "help",
         "sessions",
         "memory",
-        "tools",
         "skills",
         "skill",
         "new",
@@ -1041,28 +1051,11 @@ def _edit_diff_request() -> HumanInteractionRequest:
     asyncio.run(run_test())
 
 
-def test_side_bar_shows_external_roots(tmp_path: Path) -> None:
-    external = tmp_path / "external"
-    status = FakeAssistantService(
-        workspace_root=tmp_path,
-        external_roots=[{"path": str(external), "access": "read", "source": "user"}],
-    ).get_workspace_status()
-
-    text = side_bar(status, ui_state="idle", last_failure=None)
-
-    assert "外部目录" in text
-    assert str(external) in text
-    assert "只读参考" in text
-
-
-def test_status_and_sidebar_show_permission_mode(tmp_path: Path) -> None:
+def test_status_line_shows_permission_mode(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path, permission_mode="auto_approve")
     status = service.get_workspace_status()
 
     assert "perm:auto" in status_line(status, ui_state="idle", width=120)
-    side = side_bar(status, ui_state="idle", last_failure=None)
-    assert "权限模式" in side
-    assert "自动批准" in side
 
 
 def test_untrusted_absolute_path_detection_ignores_authorized_roots(tmp_path: Path) -> None:
@@ -2317,136 +2310,6 @@ def test_tui_file_reference_overlay_ignores_index_after_unmount(tmp_path: Path, 
     assert overlay.index is None
 
 
-def test_tui_tool_timeline_state_tracks_started_done_failed_and_redacts_secret(tmp_path: Path) -> None:
-    secret = "sk-test1234567890abcdef1234567890abcdef"
-    state = ToolTimelineState()
-
-    state.apply_event(
-        ChatEvent(
-            event_type="tool_started",
-            session_id="session-test",
-            turn_index=1,
-            message="starting tool shell",
-            payload={
-                "tool_name": "shell",
-                "args_summary": {"command": f"echo {secret}", "cwd": "."},
-                "reason": "Run check",
-            },
-        ),
-    )
-    state.apply_event(
-        ChatEvent(
-            event_type="tool_finished",
-            session_id="session-test",
-            turn_index=1,
-            message="finished tool shell",
-            payload={
-                "tool_name": "shell",
-                "status": "success",
-                "result_summary": {
-                    "exit_code": 0,
-                    "stdout_excerpt": f"ok {secret}",
-                    "stderr_excerpt": "",
-                    "changed_files": [
-                        {
-                            "path": "notes.txt",
-                            "change_type": "modified",
-                            "additions": 1,
-                            "deletions": 1,
-                        },
-                    ],
-                },
-                "episode_path": str(tmp_path / ".runs" / "episode-ok"),
-            },
-        ),
-    )
-    state.apply_event(
-        ChatEvent(
-            event_type="tool_failed",
-            session_id="session-test",
-            turn_index=1,
-            message="failed tool file_read",
-            payload={
-                "tool_name": "file_read",
-                "args_summary": {"path": "missing.md"},
-                "error_type": "tool_argument_invalid",
-                "message": "path does not exist: missing.md",
-            },
-        ),
-    )
-
-    rendered = state.render()
-    detail = state.selected_item().detail_text()
-
-    assert "shell" in rendered
-    assert "done" in rendered
-    assert "file_read" in rendered
-    assert "failed" in rendered
-    assert "notes.txt" in detail
-    assert "additions" in detail
-    assert secret not in rendered
-    assert secret not in detail
-    assert "[REDACTED_TOKEN]" in detail
-
-
-def test_tui_changed_file_summary_prefers_structured_changed_files(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    write_summary = changed_files_from_tool_event(
-        "file_write",
-        args_summary={"path": "notes/today.md", "mode": "create", "content_chars": 20},
-        result_summary={
-            "path": str(workspace / "notes" / "today.md"),
-            "mode": "create",
-            "bytes_written": 20,
-            "created": True,
-            "changed_files": [
-                {
-                    "path": str(workspace / "notes" / "today.md"),
-                    "change_type": "added",
-                    "additions": 2,
-                    "deletions": 0,
-                    "bytes_written": 20,
-                },
-            ],
-        },
-        workspace_root=workspace,
-    )
-    patch_summary = changed_files_from_tool_event(
-        "apply_patch_set",
-        args_summary={"paths": ["docs/a.md", "docs/b.md"], "replacement_count": 2},
-        result_summary={
-            "paths": ["ignored.md"],
-            "replacement_count": 2,
-            "changed_files": [
-                {"path": "docs/a.md", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
-                {"path": "docs/b.md", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
-            ],
-        },
-        workspace_root=workspace,
-    )
-
-    assert [item.path for item in write_summary] == ["notes/today.md"]
-    assert write_summary[0].change_type == "added"
-    assert "+2 -0" in write_summary[0].summary
-    assert [item.path for item in patch_summary] == ["docs/a.md", "docs/b.md"]
-    assert all(item.change_type == "modified" for item in patch_summary)
-    assert all("+1 -1" in item.summary for item in patch_summary)
-
-
-def test_tui_workspace_path_containment_is_normalized(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    inside = workspace / "docs" / "plan.md"
-    outside = tmp_path / "outside.md"
-
-    assert path_stays_in_workspace("docs/plan.md", workspace)
-    assert path_stays_in_workspace(str(inside), workspace)
-    assert not path_stays_in_workspace("../outside.md", workspace)
-    assert not path_stays_in_workspace(str(outside), workspace)
-
-
 def test_tui_failure_next_steps_are_conservative() -> None:
     steps = failure_next_steps(
         failed_stage="executing",
@@ -2456,22 +2319,14 @@ def test_tui_failure_next_steps_are_conservative() -> None:
     )
     joined = "\n".join(steps)
 
-    assert "查看工具详情" in joined
     assert "重试" in joined
     assert "调整请求" in joined
     assert ".runs/episode-failed" in joined
+    assert "/tools" not in joined
+    assert "工具详情" not in joined
+    assert "工具时间线" not in joined
     assert "修复完成" not in joined
     assert "一定是" not in joined
-
-
-def test_tui_redact_mapping_for_display_hides_secret_values() -> None:
-    secret = "sk-test1234567890abcdef1234567890abcdef"
-
-    text = redact_mapping_for_display({"command": f"echo {secret}", "path": "notes.md"})
-
-    assert secret not in text
-    assert "[REDACTED_TOKEN]" in text
-    assert "notes.md" in text
 
 
 def test_tui_parser_accepts_explicit_command() -> None:
@@ -2490,7 +2345,7 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
-            side = _text(app, "#side-bar")
+            conversation = _text(app, "#conversation")
             assert "ws:" in status
             assert str(tmp_path) not in status
             assert "profile: local" in status
@@ -2498,16 +2353,13 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
             assert "key: ok" in status
             assert "DEEPSEEK_API_KEY" not in status
             assert "session-test" in status
-            assert "模型配置" in side
-            assert "base_url: https://api.deepseek.com" in side
-            assert "api_key_env: DEEPSEEK_API_KEY" in side
-            assert "Shift+Enter 换行" in _text(app, "#conversation")
+            assert list(app.query("#side-bar")) == []
+            assert "Shift+Enter 换行" in conversation
             footer = _text(app, "#footer-bar")
             assert "[Ctrl+Q]退出" in footer
             assert "[q]退出" not in footer
             assert "[Enter]发送" in str(app.query_one("#footer-bar").render())
             assert "[Shift+Enter]换行" in str(app.query_one("#footer-bar").render())
-            assert "[Tab]焦点" in str(app.query_one("#footer-bar").render())
             assert isinstance(app.query_one("#prompt-input"), TextArea)
 
     asyncio.run(run())
@@ -2522,21 +2374,14 @@ def test_tui_default_theme_applies_semantic_classes_and_chinese_titles(tmp_path:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
             status_widget = app.query_one("#status-bar")
-            side = _text(app, "#side-bar")
 
             assert app.theme == "haagent-dark"
             assert app.screen.has_class("theme-dark")
             assert status_widget.has_class("status-default")
             assert "状态: - 空闲" in _text(app, "#status-bar")
-            assert "任务工作台" in side
-            assert "当前阶段" in side
-            assert "工具时间线" in side
-            assert "待处理事项" in side
-            assert "变更文件" in side
-            assert "最近失败" in side
-            assert "工作区" in side
-            assert "模型配置" in side
-            assert "当前会话" in side
+            assert list(app.query("#side-bar")) == []
+            conversation = _text(app, "#conversation")
+            assert "Shift+Enter 换行" in conversation
 
     asyncio.run(run())
 
@@ -2553,7 +2398,7 @@ def test_tui_light_theme_can_be_enabled_without_losing_status_classes(tmp_path: 
             assert app.screen.has_class("theme-light")
             assert app.query_one("#status-bar").has_class("status-default")
             assert "状态: - 空闲" in _text(app, "#status-bar")
-            assert "任务工作台" in _text(app, "#side-bar")
+            assert list(app.query("#side-bar")) == []
 
     asyncio.run(run())
 
@@ -2626,11 +2471,11 @@ def test_tui_no_color_mode_keeps_symbols_text_and_selection(tmp_path: Path, monk
             await pilot.pause(0.1)
             await pilot.press("down")
             await pilot.pause(0.1)
-            side = _text(app, "#side-bar")
+            conversation = _text(app, "#conversation")
 
-            assert app.query_one("#side-bar").has_class("panel-focused")
-            assert "记忆候选" in side
-            assert "> cand_second" in side
+            assert list(app.query("#side-bar")) == []
+            assert "记忆候选" in conversation
+            assert "> cand_second" in conversation
             assert "确认" in _text(app, "#footer-bar")
 
     asyncio.run(run())
@@ -2644,17 +2489,15 @@ def test_tui_m_key_no_longer_opens_memory_mode(tmp_path: Path) -> None:
             await pilot.press("m")
             await pilot.pause(0.1)
 
-            side = _text(app, "#side-bar")
-            assert "记忆候选" not in side
-            assert not app.query_one("#side-bar").has_class("panel-focused")
+            assert "记忆候选" not in _text(app, "#conversation")
+            assert list(app.query("#side-bar")) == []
 
             prompt_input = app.query_one("#prompt-input")
             prompt_input.value = "/memory"
             await pilot.press("enter")
             await pilot.pause(0.1)
 
-            assert "记忆候选" in _text(app, "#side-bar")
-            assert app.query_one("#side-bar").has_class("panel-focused")
+            assert "记忆候选" in _text(app, "#conversation")
 
     asyncio.run(run())
 
@@ -2673,7 +2516,6 @@ def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(80, 24)):
             status = _text(app, "#status-bar")
-            side = app.query_one("#side-bar")
             assert len(status) <= 80
             assert "ws:" in status
             assert "profile: local" in status
@@ -2686,7 +2528,7 @@ def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None
             assert long_model not in status
             assert long_session not in status
             assert "DEEPSEEK_API_KEY" not in status
-            assert side.has_class("hidden")
+            assert list(app.query("#side-bar")) == []
 
     async def run_120() -> None:
         service = FakeAssistantService(
@@ -2697,7 +2539,6 @@ def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
-            side = app.query_one("#side-bar")
             assert len(status) <= 120
             assert "ws:" in status
             assert "profile: local" in status
@@ -2707,9 +2548,7 @@ def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None
             assert long_model not in status
             assert long_session not in status
             assert "DEEPSEEK_API_KEY" not in status
-            assert not side.has_class("hidden")
-            assert "base_url: https://api.deepseek.com" in _text(app, "#side-bar")
-            assert "api_key_env: DEEPSEEK_API_KEY" in _text(app, "#side-bar")
+            assert list(app.query("#side-bar")) == []
 
     asyncio.run(run_80())
     asyncio.run(run_120())
@@ -2731,7 +2570,7 @@ def test_tui_responsive_minimum_size_and_layout_breakpoints(tmp_path: Path) -> N
         async with app.run_test(size=(80, 24)):
             assert app.query_one("#resize-message").has_class("hidden")
             assert not app.query_one("#main").has_class("hidden")
-            assert app.query_one("#side-bar").has_class("hidden")
+            assert list(app.query("#side-bar")) == []
             assert "[Ctrl+Q]退出" in _text(app, "#footer-bar")
 
     async def run_120() -> None:
@@ -2740,8 +2579,8 @@ def test_tui_responsive_minimum_size_and_layout_breakpoints(tmp_path: Path) -> N
         async with app.run_test(size=(120, 40)):
             assert app.query_one("#resize-message").has_class("hidden")
             assert not app.query_one("#main").has_class("hidden")
-            assert not app.query_one("#side-bar").has_class("hidden")
-            assert "模型配置" in _text(app, "#side-bar")
+            assert list(app.query("#side-bar")) == []
+            assert "Shift+Enter 换行" in _text(app, "#conversation")
 
     asyncio.run(run_too_small())
     asyncio.run(run_80())
@@ -2798,9 +2637,9 @@ def test_tui_api_key_available_via_env(tmp_path: Path) -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
-            side = _text(app, "#side-bar")
+            conversation = _text(app, "#conversation")
             assert "key: ok" in status
-            assert "key: available via env" in side
+            assert "Shift+Enter 换行" in conversation
 
     asyncio.run(run())
 
@@ -2817,11 +2656,9 @@ def test_tui_keyring_unavailable_shows_reason(tmp_path: Path) -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
             conversation = _text(app, "#conversation")
-            side = _text(app, "#side-bar")
             assert "系统凭据库不可用：backend unavailable" in conversation
             assert "/model" in conversation
             assert "uv run haagent setup" not in conversation
-            assert "keyring unavailable: backend unavailable" in side
 
     asyncio.run(run())
 
@@ -3141,7 +2978,7 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             await pilot.press("n")
             await pilot.pause(0.1)
             assert service.created_sessions == ["session-new-1"]
-            assert "session-new-1" in _text(app, "#side-bar")
+            assert "当前会话：session-new-1" in _text(app, "#conversation")
 
             input_widget.value = "/sessions"
             await pilot.press("enter")
@@ -3293,10 +3130,10 @@ def test_tui_slash_command_suggestions_scroll_visible_window() -> None:
 
     rendered = state.render()
 
-    assert "> /permissions" in rendered
+    assert "/permissions" in rendered
     assert "/help" not in rendered
-    assert "/skills" in rendered
-    assert "/cancel" not in rendered
+    assert "/skill" in rendered
+    assert "> /cancel" in rendered
 
 
 def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> None:
@@ -3356,7 +3193,6 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             modal_text = _all_text(app)
             deny_has_focus = app.screen.query_one("#approval-deny").has_focus
             status = _text(app, "#status-bar")
-            side = _text(app, "#side-bar")
             conversation = _text(app, "#conversation")
             await pilot.press("n")
             await pilot.pause(0.1)
@@ -3367,13 +3203,11 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             assert "会执行本地命令" in modal_text
             assert deny_has_focus
             assert "state: waiting approval" in status
-            assert "shell ? 待审批 (pending approval)" in side
+            assert list(app.query("#side-bar")) == []
             assert "工具 shell ? 待审批" in conversation
 
     asyncio.run(run())
-
-
-def test_tui_workbench_shows_phase_timeline_pending_changes_and_failure(tmp_path: Path) -> None:
+def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
             workspace_root=tmp_path,
@@ -3406,180 +3240,17 @@ def test_tui_workbench_shows_phase_timeline_pending_changes_and_failure(tmp_path
             input_widget.value = "写一个 notes"
             await pilot.press("enter")
             await pilot.pause(0.2)
-            side = _text(app, "#side-bar")
             await pilot.press("n")
             await pilot.pause(0.2)
-            failed_side = _text(app, "#side-bar")
-
-            assert "任务工作台" in side
-            assert "当前阶段" in side
-            assert "waiting approval" in side
-            assert "工具时间线" in side
-            assert "file_write" in side
-            assert "done" in side
-            assert "待处理事项" in side
-            assert "shell" in side
-            assert "变更文件" in side
-            assert "notes.md" in side
-            assert "新增" in side
-            assert "最近失败" in failed_side
-            assert "request_user_input" not in failed_side
-            assert "查看工具详情" in _text(app, "#conversation")
-
-    asyncio.run(run())
-
-
-def test_tui_tool_detail_overlay_opens_scrolls_closes_and_redacts_secret(tmp_path: Path) -> None:
-    async def run() -> None:
-        secret = "sk-test1234567890abcdef1234567890abcdef"
-        service = FakeAssistantService(
-            workspace_root=tmp_path,
-            extra_events=[
-                ChatEvent(
-                    event_type="tool_started",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="starting tool shell",
-                    payload={
-                        "tool_name": "shell",
-                        "args_summary": {"command": f"echo {secret}", "cwd": "."},
-                        "reason": "检查命令输出",
-                    },
-                ),
-                ChatEvent(
-                    event_type="tool_finished",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="finished tool shell",
-                    payload={
-                        "tool_name": "shell",
-                        "status": "success",
-                        "result_summary": {
-                            "exit_code": 0,
-                            "stdout_excerpt": ("line\n" * 40) + secret,
-                            "stderr_excerpt": "",
-                        },
-                        "episode_path": str(tmp_path / ".runs" / "episode-shell"),
-                    },
-                ),
-            ],
-        )
-        app = HaAgentTuiApp(service)
-        async with app.run_test(size=(120, 40)) as pilot:
-            input_widget = app.query_one("#prompt-input")
-            input_widget.value = "运行命令"
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-            await pilot.press("tab")
-            await pilot.pause(0.1)
-            await pilot.press("enter")
-            await pilot.pause(0.1)
-            rendered = _all_text(app)
-            await pilot.press("pagedown")
-            await pilot.pause(0.1)
-            await pilot.press("escape")
-            await pilot.pause(0.1)
-
-            assert "工具详情" in rendered
-            assert "tool name: shell" in rendered
-            assert "status: ok 成功 (done)" in rendered
-            assert "reason: 检查命令输出" in rendered
-            assert "args:" in rendered
-            assert "stdout:" in rendered
-            assert "episode:" in rendered
-            assert str(tmp_path / ".runs" / "episode-shell") in rendered
-            assert secret not in rendered
-            assert "[REDACTED_TOKEN]" in rendered
-            assert "工具详情" not in _all_text(app)
-
-    asyncio.run(run())
-
-
-def test_tui_tool_timeline_keyboard_selection_opens_failed_detail(tmp_path: Path) -> None:
-    async def run() -> None:
-        service = FakeAssistantService(
-            workspace_root=tmp_path,
-            extra_events=[
-                ChatEvent(
-                    event_type="tool_started",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="starting tool file_read",
-                    payload={"tool_name": "file_read", "args_summary": {"path": "README.md"}},
-                ),
-                ChatEvent(
-                    event_type="tool_finished",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="finished tool file_read",
-                    payload={"tool_name": "file_read", "status": "success", "result_summary": {"path": "README.md"}},
-                ),
-                ChatEvent(
-                    event_type="tool_failed",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="failed tool file_write",
-                    payload={
-                        "tool_name": "file_write",
-                        "args_summary": {"path": "blocked.md"},
-                        "error_type": "tool_argument_invalid",
-                        "message": "parent directory does not exist",
-                    },
-                ),
-            ],
-        )
-        app = HaAgentTuiApp(service)
-        async with app.run_test(size=(120, 40)) as pilot:
-            input_widget = app.query_one("#prompt-input")
-            input_widget.value = "读取再写入"
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-            await pilot.press("tab")
-            await pilot.pause(0.1)
-            await pilot.press("down")
-            await pilot.pause(0.1)
-            assert "> file_write" in _text(app, "#side-bar")
-            await pilot.press("enter")
-            await pilot.pause(0.1)
-            rendered = _all_text(app)
-
-            assert "工具详情" in rendered
-            assert "tool name: file_write" in rendered
-            assert "status: ! 失败 (failed)" in rendered
-            assert "parent directory does not exist" in rendered
-
-    asyncio.run(run())
-
-
-def test_tui_tools_overlay_available_when_sidebar_collapsed(tmp_path: Path) -> None:
-    async def run() -> None:
-        service = FakeAssistantService(
-            workspace_root=tmp_path,
-            extra_events=[
-                ChatEvent(
-                    event_type="tool_started",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="starting tool file_read",
-                    payload={"tool_name": "file_read", "args_summary": {"path": "README.md"}},
-                ),
-            ],
-        )
-        app = HaAgentTuiApp(service)
-        async with app.run_test(size=(80, 24)) as pilot:
-            input_widget = app.query_one("#prompt-input")
-            input_widget.value = "读文件"
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-            assert app.query_one("#side-bar").has_class("hidden")
-            input_widget.value = "/tools"
-            await pilot.press("enter")
-            await pilot.pause(0.1)
-            rendered = _all_text(app)
-
-            assert "任务工作台" in rendered
-            assert "工具时间线" in rendered
-            assert "file_read" in rendered
+            conversation = _text(app, "#conversation")
+            assert list(app.query("#side-bar")) == []
+            assert "工具 file_write" in conversation
+            assert "运行中" in conversation
+            assert "工具 file_write ok 成功" in conversation
+            assert "审批已拒绝：shell" in conversation
+            assert "查看工具详情" not in conversation
+            assert "任务工作台" not in conversation
+            assert "工具时间线" not in conversation
 
     asyncio.run(run())
 
@@ -3602,8 +3273,6 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
             service.release.set()
             await pilot.pause(0.2)
             assert "state: cancelled" in _text(app, "#status-bar")
-            assert "当前阶段" in _text(app, "#side-bar")
-            assert "cancelled" in _text(app, "#side-bar")
             assert app._pending_interaction is None
             assert "任务已取消" in _text(app, "#conversation")
 
@@ -3616,32 +3285,27 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_tui_layout_sizes_keep_workbench_stable(tmp_path: Path) -> None:
+def test_tui_layout_sizes_do_not_render_side_bar(tmp_path: Path) -> None:
     async def run_80() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(80, 24)):
-            assert app.query_one("#side-bar").has_class("hidden")
-            assert "/tools" in _text(app, "#footer-bar")
+            assert list(app.query("#side-bar")) == []
+            assert "/tools" not in _text(app, "#footer-bar")
 
     async def run_120() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)):
-            side = _text(app, "#side-bar")
-            assert "任务工作台" in side
-            assert "当前阶段" in side
-            assert "工具时间线" in side
-            assert "变更文件" in side
+            assert list(app.query("#side-bar")) == []
+            assert not app.query_one("#main").has_class("hidden")
 
     async def run_200() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(200, 60)):
-            side = _text(app, "#side-bar")
-            assert "任务工作台" in side
-            assert "工作区" in side
-            assert "模型配置" in side
+            assert list(app.query("#side-bar")) == []
+            assert "Shift+Enter 换行" in _text(app, "#conversation")
 
     asyncio.run(run_80())
     asyncio.run(run_120())
@@ -3662,7 +3326,6 @@ def test_tui_approval_allow_returns_approved_true_to_same_prompt(tmp_path: Path)
             assert service.prompts == ["Run checks"]
             assert service.interaction_responses == [HumanInteractionResponse(approved=True, answer="")]
             assert "审批已允许：shell" in _text(app, "#conversation")
-            assert "shell ok 已允许 (approved)" in _text(app, "#side-bar")
             assert "assistant: Run checks" in _text(app, "#conversation")
 
     asyncio.run(run())
@@ -3682,7 +3345,6 @@ def test_tui_approval_deny_returns_approved_false_to_same_prompt(tmp_path: Path)
             assert service.prompts == ["Run checks"]
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
             assert "审批已拒绝：shell" in _text(app, "#conversation")
-            assert "shell ! 已拒绝 (denied)" in _text(app, "#side-bar")
             assert "state: failed" in _text(app, "#status-bar")
 
     asyncio.run(run())
@@ -3817,8 +3479,8 @@ def test_tui_memory_candidate_event_shows_notice(tmp_path: Path) -> None:
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert "发现 1 条可记忆候选，已放入候选队列，等待你确认。" in conversation
-            assert "记忆候选" in _text(app, "#side-bar")
-            assert "cand_abc123" in _text(app, "#side-bar")
+            assert "记忆候选" in conversation
+            assert "cand_abc123" in conversation
             assert "[a/y]确认" in _text(app, "#footer-bar")
 
     asyncio.run(run())
@@ -3830,19 +3492,19 @@ def test_tui_memory_panel_lists_and_shows_candidate_details(tmp_path: Path) -> N
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             await _open_memory_panel(app, pilot)
-            side = _text(app, "#side-bar")
+            conversation = _text(app, "#conversation")
             footer = _text(app, "#footer-bar")
-            assert "记忆候选" in side
-            assert "cand_abc123" in side
-            assert "用户身份与爱好" in side
+            assert "记忆候选" in conversation
+            assert "cand_abc123" in conversation
+            assert "用户身份与爱好" in conversation
             assert "[Enter]详情" in footer
 
             await pilot.press("enter")
             await pilot.pause(0.1)
-            side = _text(app, "#side-bar")
-            assert "source_summary: 用户明确要求记住自己的名字和爱好。" in side
-            assert "basis: 用户说：我叫小明，喜欢唱跳rap篮球，记住我的爱好。" in side
-            assert "category_rationale: 这是跨 workspace 可复用的用户偏好和身份信息。" in side
+            conversation = _text(app, "#conversation")
+            assert "source_summary: 用户明确要求记住自己的名字和爱好。" in conversation
+            assert "basis: 用户说：我叫小明，喜欢唱跳rap篮球，记住我的爱好。" in conversation
+            assert "category_rationale: 这是跨 workspace 可复用的用户偏好和身份信息。" in conversation
 
     asyncio.run(run())
 
@@ -3861,9 +3523,9 @@ def test_tui_memory_navigation_selects_second_candidate_for_confirm_and_reject(t
             await _open_memory_panel(app, pilot)
             await pilot.press("down")
             await pilot.pause(0.1)
-            side = _text(app, "#side-bar")
-            assert "> cand_second" in side
-            assert "  cand_first" in side
+            conversation = _text(app, "#conversation")
+            assert "> cand_second" in conversation
+            assert "  cand_first" in conversation
             await pilot.press("a")
             await pilot.pause(0.1)
             assert service.confirmed_candidate_ids == ["cand_second"]
@@ -3881,7 +3543,7 @@ def test_tui_memory_navigation_selects_second_candidate_for_confirm_and_reject(t
             await _open_memory_panel(app, pilot)
             await pilot.press("down")
             await pilot.pause(0.1)
-            assert "> cand_second" in _text(app, "#side-bar")
+            assert "> cand_second" in _text(app, "#conversation")
             await pilot.press("r")
             await pilot.pause(0.1)
             assert service.rejected_candidate_ids == [("cand_second", "rejected from TUI")]
@@ -3905,18 +3567,18 @@ def test_tui_memory_navigation_supports_home_end_and_keeps_selection_after_detai
             await _open_memory_panel(app, pilot)
             await pilot.press("G")
             await pilot.pause(0.1)
-            assert "> cand_last" in _text(app, "#side-bar")
+            assert "> cand_last" in _text(app, "#conversation")
 
             await pilot.press("enter")
             await pilot.pause(0.1)
-            assert "candidate_id: cand_last" in _text(app, "#side-bar")
+            assert "candidate_id: cand_last" in _text(app, "#conversation")
             await pilot.press("escape")
             await pilot.pause(0.1)
-            assert "> cand_last" in _text(app, "#side-bar")
+            assert "> cand_last" in _text(app, "#conversation")
 
             await pilot.press("g")
             await pilot.pause(0.1)
-            assert "> cand_first" in _text(app, "#side-bar")
+            assert "> cand_first" in _text(app, "#conversation")
             footer = _text(app, "#footer-bar")
             assert "[↑/↓]移动" in footer
             assert "j/k" not in footer
@@ -3941,19 +3603,19 @@ def test_tui_memory_navigation_moves_one_candidate_per_keypress(tmp_path: Path) 
             await _open_memory_panel(app, pilot)
             await pilot.press("down")
             await pilot.pause(0.1)
-            assert "> cand_second" in _text(app, "#side-bar")
+            assert "> cand_second" in _text(app, "#conversation")
 
             await pilot.press("down")
             await pilot.pause(0.1)
-            assert "> cand_third" in _text(app, "#side-bar")
+            assert "> cand_third" in _text(app, "#conversation")
 
             await pilot.press("up")
             await pilot.pause(0.1)
-            assert "> cand_second" in _text(app, "#side-bar")
+            assert "> cand_second" in _text(app, "#conversation")
 
             await pilot.press("up")
             await pilot.pause(0.1)
-            assert "> cand_first" in _text(app, "#side-bar")
+            assert "> cand_first" in _text(app, "#conversation")
 
     asyncio.run(run())
 
@@ -3972,18 +3634,18 @@ def test_tui_j_k_do_not_move_memory_selection(tmp_path: Path) -> None:
             await _open_memory_panel(app, pilot)
             await pilot.press("j")
             await pilot.pause(0.1)
-            assert "> cand_first" in _text(app, "#side-bar")
+            assert "> cand_first" in _text(app, "#conversation")
             await pilot.press("down")
             await pilot.pause(0.1)
-            assert "> cand_second" in _text(app, "#side-bar")
+            assert "> cand_second" in _text(app, "#conversation")
             await pilot.press("k")
             await pilot.pause(0.1)
-            assert "> cand_second" in _text(app, "#side-bar")
+            assert "> cand_second" in _text(app, "#conversation")
 
     asyncio.run(run())
 
 
-def test_tui_memory_mode_is_readable_without_sidebar(tmp_path: Path) -> None:
+def test_tui_memory_mode_is_readable_in_conversation(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])
         app = HaAgentTuiApp(service)
@@ -4012,7 +3674,7 @@ def test_tui_memory_confirm_uses_service_and_removes_pending_candidate(tmp_path:
             await pilot.pause(0.1)
             assert service.confirmed_candidate_ids == ["cand_abc123"]
             assert "已确认记忆候选：cand_abc123" in _text(app, "#conversation")
-            assert "暂无待确认候选" in _text(app, "#side-bar")
+            assert "暂无待确认候选" in _text(app, "#conversation")
 
     asyncio.run(run())
 
@@ -4027,7 +3689,7 @@ def test_tui_memory_reject_uses_service_and_removes_pending_candidate(tmp_path: 
             await pilot.pause(0.1)
             assert service.rejected_candidate_ids == [("cand_abc123", "rejected from TUI")]
             assert "已拒绝记忆候选：cand_abc123" in _text(app, "#conversation")
-            assert "暂无待确认候选" in _text(app, "#side-bar")
+            assert "暂无待确认候选" in _text(app, "#conversation")
 
     asyncio.run(run())
 
@@ -4038,7 +3700,7 @@ def test_tui_memory_panel_shows_empty_and_load_errors(tmp_path: Path) -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             await _open_memory_panel(app, pilot)
-            assert "暂无待确认候选" in _text(app, "#side-bar")
+            assert "暂无待确认候选" in _text(app, "#conversation")
 
     async def error_run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, memory_error=RuntimeError("queue broken"))
@@ -4180,7 +3842,7 @@ def test_tui_conversation_text_is_read_only_and_selectable(tmp_path: Path) -> No
     asyncio.run(run())
 
 
-def test_tui_failure_event_shows_reason_episode_and_sidebar_summary(tmp_path: Path) -> None:
+def test_tui_failure_event_shows_reason_episode_in_conversation(tmp_path: Path) -> None:
     async def run() -> None:
         episode_path = tmp_path / ".runs" / "episode-failed"
         service = FakeAssistantService(
@@ -4206,15 +3868,12 @@ def test_tui_failure_event_shows_reason_episode_and_sidebar_summary(tmp_path: Pa
             await pilot.press("enter")
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
-            side = _text(app, "#side-bar")
             assert "本轮没有完成：模型连续调用工具但没有给出最终回答。" in conversation
             assert "stage=executing" in conversation
             assert "category=Loop Limit Failure" in conversation
             assert "reason=exceeded max_turns=20" in conversation
             assert str(episode_path) in conversation.replace("\n", "")
-            assert "最近失败" in side
-            assert "Loop Limit Failure" in side
-            assert str(episode_path) in side
+            assert list(app.query("#side-bar")) == []
 
     asyncio.run(run())
 
@@ -4235,4 +3894,3 @@ def test_tui_running_state_does_not_block_ui(tmp_path: Path) -> None:
             assert "state: idle" in _text(app, "#status-bar")
 
     asyncio.run(run())
-

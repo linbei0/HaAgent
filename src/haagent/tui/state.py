@@ -14,13 +14,11 @@ from haagent.runtime.human_interaction import HumanInteractionRequest, HumanInte
 
 MIN_WIDTH = 80
 MIN_HEIGHT = 24
-SIDE_BAR_MIN_WIDTH = 120
 
 
 @dataclass(frozen=True)
 class ResponsiveLayout:
     too_small: bool
-    show_side_bar: bool
 
 
 @dataclass
@@ -32,7 +30,4 @@ class PendingInteraction:
 
 def layout_for_size(width: int, height: int) -> ResponsiveLayout:
     too_small = width < MIN_WIDTH or height < MIN_HEIGHT
-    return ResponsiveLayout(
-        too_small=too_small,
-        show_side_bar=not too_small and width >= SIDE_BAR_MIN_WIDTH,
-    )
+    return ResponsiveLayout(too_small=too_small)

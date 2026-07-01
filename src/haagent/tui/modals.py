@@ -20,7 +20,6 @@ from haagent.runtime.path_policy import PermissionMode
 from haagent.tui.copy import MODAL_TITLES
 from haagent.tui.keys import APPROVAL_BINDINGS, EDIT_DIFF_BINDINGS, HELP_DISMISS_BINDINGS, help_body
 from haagent.tui.renderers import approval_body, edit_diff_body
-from haagent.tui.tool_timeline import ToolTimelineItem
 
 
 class HelpModal(ModalScreen[None]):
@@ -119,23 +118,6 @@ class EditDiffModal(ModalScreen[str]):
 
     def action_help(self) -> None:
         self.app.push_screen(HelpModal("edit_diff"))
-
-
-class ToolDetailsModal(ModalScreen[None]):
-    BINDINGS = HELP_DISMISS_BINDINGS
-
-    def __init__(self, item: ToolTimelineItem) -> None:
-        super().__init__()
-        self.item = item
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="tool-details-dialog"):
-            yield Static(MODAL_TITLES["tool_details"], id="tool-details-title")
-            yield Static(Text(self.item.detail_text()), id="tool-details-body")
-            yield Static("[PgUp/PgDn]滚动 [Esc]关闭")
-
-    def action_dismiss_help(self) -> None:
-        self.dismiss(None)
 
 
 class ConfirmModal(ModalScreen[bool]):

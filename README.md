@@ -39,7 +39,7 @@ uv run haagent --resume <session-id>
 uv run haagent --web
 ```
 
-TUI 内常用命令包括 `/model`、`/sessions`、`/memory`、`/web`、`/new`、`/resume`、`/cancel`、`/tools` 和 `/help`。
+TUI 内常用命令包括 `/model`、`/sessions`、`/memory`、`/web`、`/new`、`/resume`、`/cancel` 和 `/help`。
 
 ## 联网搜索
 

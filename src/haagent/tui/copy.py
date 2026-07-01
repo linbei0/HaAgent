@@ -8,9 +8,7 @@ from __future__ import annotations
 
 PANEL_TITLES = {
     "conversation": "对话",
-    "workbench": "任务工作台",
     "sessions": "会话",
-    "tools": "工具",
     "memory": "记忆候选",
     "search": "搜索",
     "commands": "快捷命令",
@@ -20,19 +18,10 @@ PANEL_TITLES = {
     "current_session": "当前会话",
 }
 
-WORKBENCH_TITLES = {
-    "phase": "当前阶段",
-    "timeline": "工具时间线",
-    "pending": "待处理事项",
-    "changed": "变更文件",
-    "failure": "最近失败",
-}
-
 MODAL_TITLES = {
     "help": "HaAgent 帮助",
     "approval": "工具审批",
     "edit_diff": "文件改动审批",
-    "tool_details": "工具详情",
     "sessions": "会话",
     "search": "搜索",
     "commands": "快捷命令",

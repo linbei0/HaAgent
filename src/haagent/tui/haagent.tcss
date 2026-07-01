@@ -34,14 +34,6 @@ Screen.theme-monochrome {
     overflow-y: auto;
 }
 
-#side-bar {
-    width: 36;
-    height: 1fr;
-    padding: 1;
-    border: solid $panel;
-    overflow-y: auto;
-}
-
 #input-panel {
     height: 5;
     padding: 0 1;
@@ -83,7 +75,6 @@ Screen.theme-monochrome {
 }
 
 #conversation.panel-focused,
-#side-bar.panel-focused,
 #prompt-input.panel-focused {
     border: heavy $primary;
 }
@@ -154,14 +145,12 @@ Screen.theme-monochrome .status-danger {
 }
 
 Screen.theme-monochrome #conversation.panel-focused,
-Screen.theme-monochrome #side-bar.panel-focused,
 Screen.theme-monochrome #prompt-input.panel-focused {
     border: heavy $foreground;
 }
 
 HelpModal,
 ToolApprovalModal,
-ToolDetailsModal,
 PermissionsModal,
 ConfirmModal,
 ExternalDirectoryDecisionModal,
@@ -173,7 +162,6 @@ SkillPickerOverlay {
 
 #help-dialog,
 #approval-dialog,
-#tool-details-dialog,
 #permissions-dialog,
 #confirm-dialog,
 #external-directory-dialog,
@@ -187,7 +175,6 @@ SkillPickerOverlay {
 }
 
 #help-dialog,
-#tool-details-dialog,
 #permissions-dialog,
 #external-directory-dialog,
 #sessions-dialog,
@@ -207,7 +194,6 @@ SkillPickerOverlay {
 
 #help-title,
 #approval-title,
-#tool-details-title,
 #permissions-title,
 #confirm-title,
 #external-directory-title {
@@ -217,22 +203,10 @@ SkillPickerOverlay {
 
 #help-body,
 #approval-body,
-#tool-details-body,
 #permissions-body,
 #confirm-body,
 #external-directory-body {
     margin-bottom: 1;
-}
-
-#tool-details-dialog {
-    width: 86;
-    height: 80%;
-    border: solid $primary;
-}
-
-#tool-details-body {
-    height: 1fr;
-    overflow-y: auto;
 }
 
 #approval-buttons {

@@ -1,7 +1,7 @@
 """
 haagent/tui/renderers.py - TUI 文本渲染逻辑
 
-集中生成状态栏、侧栏、审批、失败和记忆候选文本，保持组件层轻量。
+集中生成状态栏、审批、失败和记忆候选文本，保持组件层轻量。
 """
 
 from __future__ import annotations
@@ -11,11 +11,8 @@ from typing import Any
 from haagent.app.assistant_service import AssistantWorkspaceStatus
 from haagent.memory import MemoryCandidate
 from haagent.runtime.human_interaction import HumanInteractionRequest
-from haagent.tui.changes import ChangedFileSummary, render_changed_files
-from haagent.tui.copy import EMPTY_LABELS, PANEL_TITLES, WORKBENCH_TITLES
-from haagent.tui.failures import FailureView
+from haagent.tui.copy import EMPTY_LABELS, PANEL_TITLES
 from haagent.tui.theme import status_badge, status_semantic
-from haagent.tui.tool_timeline import ToolTimelineState
 from haagent.tui.utils import safe_summary, short_session, truncate_end, truncate_status_line, workspace_label
 
 
@@ -66,55 +63,6 @@ def _compact_status_line(status: AssistantWorkspaceStatus, *, ui_state: str, wid
         state = f" state: {ui_state}"
     prefix_width = max(0, width - len(state))
     return f"{truncate_status_line(prefix, prefix_width)}{state}"
-
-
-def side_bar(
-    status: AssistantWorkspaceStatus,
-    *,
-    ui_state: str,
-    timeline: ToolTimelineState | None = None,
-    changed_files: list[ChangedFileSummary] | None = None,
-    pending_decision: str | None = None,
-    last_failure: FailureView | dict[str, str] | None,
-    memory_text: str | None = None,
-) -> str:
-    if memory_text is not None:
-        return memory_text
-    turn_count = status.current_turn_count if status.current_turn_count is not None else 0
-    timeline_text = timeline.render(limit=8) if timeline is not None else "  none"
-    changed_text = render_changed_files(changed_files or [])
-    return (
-        f"{PANEL_TITLES['workbench']}\n"
-        f"{WORKBENCH_TITLES['phase']}\n"
-        f"  {status_badge(ui_state)} ({ui_state})\n\n"
-        f"{WORKBENCH_TITLES['timeline']}\n"
-        f"{timeline_text}\n\n"
-        f"{WORKBENCH_TITLES['pending']}\n"
-        f"  {pending_decision or EMPTY_LABELS['none']}\n\n"
-        f"{WORKBENCH_TITLES['changed']}\n"
-        f"{changed_text}\n\n"
-        f"{WORKBENCH_TITLES['failure']}\n"
-        f"{format_last_failure(last_failure)}\n\n"
-        f"{PANEL_TITLES['workspace']}\n"
-        f"  root: {status.workspace_root}\n"
-        f"  runs: {status.runs_root}\n"
-        f"  web: {web_state(status)}\n"
-        f"  权限模式: {permission_mode_label(status)}\n"
-        f"{external_roots_text(status)}\n\n"
-        f"{PANEL_TITLES['profile']}\n"
-        f"  name: {status.profile_name or 'missing'}\n"
-        f"  provider: {status.provider or '-'}\n"
-        f"  base_url: {status.base_url or '-'}\n"
-        f"  model: {status.model or '-'}\n"
-        f"  api_key_env: {status.api_key_env or '-'}\n"
-        f"  key: {key_state(status)}\n"
-        f"  keyring: {keyring_status(status)}\n\n"
-        f"{PANEL_TITLES['current_session']}\n"
-        f"  id: {status.current_session_id or '-'}\n"
-        f"  turns: {turn_count}\n"
-        f"  state: {ui_state}\n"
-        f"  状态: {status_badge(ui_state)}"
-    )
 
 
 def approval_body(request: HumanInteractionRequest) -> str:
@@ -314,16 +262,3 @@ def failure_body(failed_stage: str, category: str, reason: str, episode_path: st
         ],
     )
     return "\n".join(lines)
-
-
-def format_last_failure(failure: FailureView | dict[str, str] | None) -> str:
-    if failure is None:
-        return f"  {EMPTY_LABELS['none']}"
-    if isinstance(failure, FailureView):
-        return failure.summary_text()
-    return (
-        f"  category: {failure['failure_category']}\n"
-        f"  stage: {failure['failed_stage']}\n"
-        f"  reason: {failure['reason']}\n"
-        f"  episode: {failure['episode_path']}"
-    )

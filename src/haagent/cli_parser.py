@@ -40,7 +40,7 @@ class _RootHelpParser(argparse.ArgumentParser):
             "  --continue           resume the latest session for the current workspace\n"
             "  --web                enable read-only web tools for the TUI session\n\n"
             "inside the TUI:\n"
-            "  use /model, /sessions, /memory, /web, /new, /resume, /cancel, /tools, /help\n"
+            "  use /model, /sessions, /memory, /web, /new, /resume, /cancel, /help\n"
         )
 
 
