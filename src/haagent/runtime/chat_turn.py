@@ -15,17 +15,16 @@ import yaml
 
 from haagent.models.gateway import ModelGateway
 from haagent.runtime.cancellation import CancellationToken
-from haagent.runtime.human_interaction import interaction_args_summary
 from haagent.runtime.human_interaction import HumanInteractionHandler
 from haagent.runtime.path_policy import PathPolicy, default_path_policy, serialize_path_policy
 from haagent.runtime.run_recorder import RunResult
 from haagent.skills import load_skill_registry
+from haagent.tools.presentation import summarize_tool_args, summarize_tool_result
 
 
 CHAT_ALLOWED_TOOLS = [
     "file_list",
     "file_search",
-    "context_find",
     "file_read",
     "request_user_input",
     "start_memory_update",
@@ -197,7 +196,7 @@ def runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[s
         return {
             "model_turn": payload.get("turn"),
             "tool_name": tool_name,
-            "args_summary": tool_args_summary(tool_name, args),
+            "args_summary": summarize_tool_args(tool_name, args),
         }
     if event_type == "tool_finished":
         tool_name = str(payload.get("tool_name", "unknown"))
@@ -213,7 +212,7 @@ def runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[s
             "model_turn": payload.get("turn"),
             "tool_name": tool_name,
             "status": str(result.get("status", "unknown")),
-            "result_summary": tool_result_summary(tool_name, result),
+            "result_summary": summarize_tool_result(tool_name, result),
         }
     if event_type == "tool_failed":
         error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
@@ -273,71 +272,6 @@ def runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[s
             "episode_path": summary_value(str(payload.get("episode_path", "")), 300),
         }
     return payload
-
-
-def tool_args_summary(tool_name: str, args: dict[str, object]) -> dict[str, object]:
-    if tool_name in {"file_write", "code_run", "apply_patch", "apply_patch_set", "shell", "request_user_input"}:
-        return interaction_args_summary(tool_name, args)
-    if tool_name == "file_read":
-        return {
-            "path": summary_value(str(args.get("path", "")), 160),
-            "offset": args.get("offset"),
-            "limit": args.get("limit"),
-            "keyword": summary_value(str(args.get("keyword", "")), 80),
-        }
-    return {"args_keys": sorted(str(key) for key in args)}
-
-
-def tool_result_summary(tool_name: str, result: dict[str, object]) -> dict[str, object]:
-    if tool_name == "file_read":
-        return {
-            "path": summary_value(str(result.get("path", "")), 160),
-            "start_line": result.get("start_line"),
-            "end_line": result.get("end_line"),
-            "line_count": result.get("line_count"),
-            "truncated": bool(result.get("truncated")),
-        }
-    if tool_name == "file_write":
-        return {
-            "path": summary_value(str(result.get("path", "")), 160),
-            "mode": result.get("mode"),
-            "bytes_written": result.get("bytes_written"),
-            "created": result.get("created"),
-        }
-    if tool_name == "apply_patch":
-        return {
-            "path": summary_value(str(result.get("path", "")), 160),
-            "replacements": result.get("replacements"),
-        }
-    if tool_name == "apply_patch_set":
-        paths = result.get("paths") if isinstance(result.get("paths"), list) else []
-        return {
-            "paths": [summary_value(str(path), 160) for path in paths],
-            "replacement_count": result.get("replacement_count"),
-        }
-    if tool_name == "code_run":
-        return {
-            "exit_code": result.get("exit_code"),
-            "stdout_excerpt": summary_value(str(result.get("stdout_excerpt", "")), 300),
-            "stderr_excerpt": summary_value(str(result.get("stderr_excerpt", "")), 300),
-            "stdout_chars": len(str(result.get("stdout_excerpt", ""))),
-            "stderr_chars": len(str(result.get("stderr_excerpt", ""))),
-            "truncated": bool(result.get("truncated")),
-        }
-    if tool_name == "shell":
-        return {
-            "exit_code": result.get("exit_code"),
-            "stdout_excerpt": summary_value(str(result.get("stdout_excerpt", "")), 300),
-            "stderr_excerpt": summary_value(str(result.get("stderr_excerpt", "")), 300),
-            "stdout_chars": len(str(result.get("stdout_excerpt", ""))),
-            "stderr_chars": len(str(result.get("stderr_excerpt", ""))),
-            "timeout": bool(result.get("timeout")),
-            "truncated": bool(result.get("truncated")),
-        }
-    return {
-        "status": str(result.get("status", "unknown")),
-        "result_keys": sorted(str(key) for key in result),
-    }
 
 
 def summary_value(value: str, limit: int = 300) -> str:

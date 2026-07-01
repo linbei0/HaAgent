@@ -88,37 +88,6 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
-    "context_find": ToolDefinition(
-        name="context_find",
-        description=(
-            "primary choice for locating relevant workspace files and snippets from a natural language "
-            "query when the user describes functionality without paths"
-        ),
-        risk_level="low",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "natural language query describing the context to find",
-                },
-                "file_glob": {
-                    "type": "string",
-                    "description": "optional file glob filter such as *.py or docs/*.md",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "optional maximum number of candidates; defaults to 5",
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "description": "optional total excerpt character budget; defaults to 1600",
-                },
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-    ),
     "file_read": ToolDefinition(
         name="file_read",
         description="read a workspace text file with offset, limit, or keyword context",

@@ -53,23 +53,16 @@ from haagent.runtime.chat_session import (
 )
 from haagent.runtime.human_interaction import HumanInteractionHandler
 from haagent.runtime.path_policy import PathAccess, PermissionMode
-from haagent.skills.marketplace import (
-    MarketplaceError,
-    MarketplaceSkillCard,
-    install_marketplace_skill_card,
-    search_marketplace,
-)
 from haagent.skills import trust_project_root, untrust_project_root
+from haagent.skills.marketplace import MarketplaceError, MarketplaceSkillCard, install_marketplace_skill_card, search_marketplace
 from haagent.tools.skills import skill_list, skill_read
 from haagent.memory import (
     CandidateQueue,
-    CandidateQueueError,
     MemoryCandidate,
     MemoryRecord,
     MemoryStore,
-    MemoryStoreError,
 )
-from haagent.memory.governance import MemoryGovernanceError
+from haagent.app import memory_usecases, model_profile_usecases, session_usecases, skill_usecases
 
 
 GatewayFactory = Callable[[ProviderProfile], ModelGateway]
@@ -247,6 +240,43 @@ class AssistantService:
         self._marketplace_results: dict[str, MarketplaceSkillCard] = {}
         self.initial_resume = initial_resume
         self.initial_continue = initial_continue
+        self.error_cls = AssistantServiceError
+        self.cancel_result_cls = AssistantCancelResult
+        self.session_status_cls = AssistantSessionStatus
+        self.model_profile_cls = AssistantModelProfile
+        self.model_test_result_cls = AssistantModelTestResult
+        self.skill_list_cls = AssistantSkillList
+        self.skill_content_cls = AssistantSkillContent
+        self.marketplace_search_cls = AssistantMarketplaceSearch
+        self.marketplace_install_cls = AssistantMarketplaceInstall
+        self.chat_session_error_cls = ChatSessionError
+        self.gateway_capability_for_profile = gateway_capability_for_profile
+        self.marketplace_skill_mapper = _marketplace_skill
+        self._session_status = _session_status
+        self._session_summary = _session_summary
+        self._session_turn = _session_turn
+        self.load_profile_record_for_result = _load_profile_record_for_result
+        self.secret_candidates = _secret_candidates
+        self.redact_secret_text = _redact_secret_text
+        self.skill_list_fn = lambda args, workspace_root, skill_settings=None: skill_list(
+            args,
+            workspace_root,
+            skill_settings,
+        )
+        self.skill_read_fn = lambda args, workspace_root, user_invoked=False, skill_settings=None: skill_read(
+            args,
+            workspace_root,
+            skill_settings,
+            user_invoked=user_invoked,
+        )
+        self.trust_project_root_fn = lambda workspace_root: trust_project_root(workspace_root)
+        self.untrust_project_root_fn = lambda workspace_root: untrust_project_root(workspace_root)
+        self.search_marketplace_fn = lambda query, *, providers=None, limit=10: search_marketplace(
+            query,
+            providers=providers,
+            limit=limit,
+        )
+        self.install_marketplace_skill_card_fn = lambda card: install_marketplace_skill_card(card)
 
     def get_workspace_status(self) -> AssistantWorkspaceStatus:
         profile_name: str | None = None
@@ -309,294 +339,76 @@ class AssistantService:
         return self.get_workspace_status()
 
     def create_session(self) -> AssistantSessionStatus:
-        try:
-            profile = self._load_session_profile()
-            self._session = self.session_cls(
-                workspace_root=self.workspace_root,
-                runs_root=self.runs_root,
-                model_gateway=self.gateway_factory(profile),
-                model_profile_name=profile.name,
-                model_name=profile.model,
-                model_base_url=profile.base_url,
-                max_turns=self.max_turns,
-                enable_web=self.enable_web,
-            )
-        except ProviderProfileError as error:
-            raise AssistantServiceError(str(error)) from error
-        return _session_status(self._session)
+        return session_usecases.create_session(self)
 
     def resume_session(self, session: str | Path) -> AssistantSessionStatus:
-        try:
-            profile = self._load_resume_profile(session)
-            self._session = self.session_cls.resume(
-                session,
-                runs_root=self.runs_root,
-                model_gateway=self.gateway_factory(profile),
-                model_profile_name=profile.name,
-                model_name=profile.model,
-                model_base_url=profile.base_url,
-                max_turns=self.max_turns,
-                enable_web=self.enable_web,
-            )
-        except (ChatSessionError, ProviderProfileError) as error:
-            raise AssistantServiceError(str(error)) from error
-        return _session_status(self._session)
+        return session_usecases.resume_session(self, session)
 
     def continue_latest_session(self) -> AssistantSessionStatus:
-        try:
-            latest = find_latest_session(self.runs_root, self.workspace_root)
-        except ChatSessionError as error:
-            raise AssistantServiceError(str(error)) from error
-        if latest is None:
-            raise AssistantServiceError("当前 workspace 没有可恢复会话")
-        return self.resume_session(latest.session_path)
+        return session_usecases.continue_latest_session(self)
 
     def list_sessions(self) -> list[AssistantSessionSummary]:
-        try:
-            return [_session_summary(summary) for summary in list_sessions(self.runs_root, self.workspace_root)]
-        except ChatSessionError as error:
-            raise AssistantServiceError(str(error)) from error
+        return session_usecases.list_sessions_for_workspace(self)
 
     def current_session_history(self) -> list[AssistantSessionTurn]:
-        if self._session is None:
-            return []
-        try:
-            return [_session_turn(turn) for turn in self._session.turn_summaries()]
-        except ChatSessionError as error:
-            raise AssistantServiceError(str(error)) from error
+        return session_usecases.current_session_history(self)
 
     def list_model_profiles(self) -> list[AssistantModelProfile]:
-        try:
-            active_profile_name = load_active_profile_name()
-        except ProviderProfileError:
-            active_profile_name = None
-        profiles: list[AssistantModelProfile] = []
-        for record in list_provider_profile_records():
-            credential = provider_profile_credential_status(
-                record.name,
-                environ=self.environ,
-                config_dir=user_config_dir(),
-            )
-            profiles.append(
-                AssistantModelProfile(
-                    name=record.name,
-                    provider=record.provider,
-                    base_url=record.base_url,
-                    model=record.model,
-                    api_key_env=record.api_key_env,
-                    credential_source=record.credential_source,
-                    active=record.name == active_profile_name,
-                    credential_available=credential.api_key_available,
-                    credential_source_used=credential.credential_source_used,
-                    capability=gateway_capability_for_profile(record),
-                )
-            )
-        return profiles
+        return model_profile_usecases.list_model_profiles(self)
 
     def set_default_model_profile(self, profile_name: str) -> None:
-        load_provider_profile_record(profile_name)
-        save_active_profile(profile_name, config_dir=user_config_dir())
+        model_profile_usecases.set_default_model_profile(self, profile_name)
 
     def configure_model_profile(self, request: ModelProfileConfigureRequest) -> ProviderProfileRecord:
-        record = ProviderProfileRecord(
-            name=request.name,
-            provider=request.provider,
-            base_url=request.base_url,
-            model=request.model,
-            api_key_env=request.api_key_env,
-            credential_source=request.credential_source,
-        )
-        try:
-            save_provider_profile_with_key(
-                record,
-                request.api_key,
-                credential_store=provider_profile_module.DEFAULT_CREDENTIAL_STORE,
-                config_dir=user_config_dir(),
-            )
-        except (ProviderProfileError, CredentialError) as error:
-            raise AssistantServiceError(str(error)) from error
-        return record
+        return model_profile_usecases.configure_model_profile(self, request)
 
     def delete_model_profile(self, profile_name: str) -> None:
-        try:
-            delete_provider_profile(profile_name, config_dir=user_config_dir())
-        except ProviderProfileError as error:
-            raise AssistantServiceError(str(error)) from error
+        model_profile_usecases.delete_model_profile_for_user(self, profile_name)
 
     def refresh_model_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
-        try:
-            return fetch_model_catalog(transport=transport, force_refresh=True)
-        except Exception as error:
-            raise AssistantServiceError(str(error)) from error
+        return model_profile_usecases.refresh_model_catalog(self, transport=transport)
 
     def get_model_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
-        try:
-            return fetch_model_catalog(
-                transport=transport,
-                max_cache_age=DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE,
-            )
-        except Exception as error:
-            raise AssistantServiceError(str(error)) from error
+        return model_profile_usecases.get_model_catalog(self, transport=transport)
 
     def test_model_profile(self, profile_name: str) -> AssistantModelTestResult:
-        try:
-            profile = load_provider_profile(
-                profile_name,
-                environ=self.environ,
-                config_dir=user_config_dir(),
-            )
-            gateway = self.gateway_factory(profile)
-            response = gateway.generate(
-                [{"role": "user", "content": "Reply with OK."}],
-                [],
-            )
-            return AssistantModelTestResult(
-                ok=True,
-                profile_name=profile.name,
-                provider=profile.provider,
-                model=profile.model,
-                message=_redact_secret_text(response.content, [profile.api_key]),
-            )
-        except (ProviderProfileError, CredentialError, ModelCallError) as error:
-            record = _load_profile_record_for_result(profile_name)
-            return AssistantModelTestResult(
-                ok=False,
-                profile_name=profile_name,
-                provider=record.provider if record is not None else "",
-                model=record.model if record is not None else "",
-                message=_redact_secret_text(str(error), _secret_candidates(self.environ)),
-            )
+        return model_profile_usecases.test_model_profile(self, profile_name)
 
     def switch_current_session_model(self, profile_name: str) -> AssistantSessionStatus:
-        try:
-            profile = load_provider_profile(
-                profile_name,
-                environ=self.environ,
-                config_dir=user_config_dir(),
-            )
-            if self._session is None:
-                self._pending_model_profile_name = profile.name
-                return AssistantSessionStatus(
-                    session_id="pending",
-                    workspace_root=self.workspace_root,
-                    runs_root=self.runs_root,
-                    session_path=self.runs_root,
-                    turn_count=0,
-                    provider=profile.provider,
-                    model_profile_name=profile.name,
-                    model=profile.model,
-                    base_url=profile.base_url,
-                    web_enabled=self.enable_web,
-                    permission_mode="request_approval",
-                )
-            gateway = self.gateway_factory(profile)
-            self._session.switch_model_gateway(
-                profile_name=profile.name,
-                provider=profile.provider,
-                model=profile.model,
-                base_url=profile.base_url,
-                gateway=gateway,
-            )
-        except (ProviderProfileError, ChatSessionError) as error:
-            raise AssistantServiceError(str(error)) from error
-        return _session_status(self._session)
+        return model_profile_usecases.switch_current_session_model(self, profile_name)
 
     def set_permission_mode(self, mode: PermissionMode) -> AssistantSessionStatus:
-        if mode not in {"request_approval", "auto_approve", "full_access"}:
-            raise AssistantServiceError("permission mode must be request_approval, auto_approve, or full_access")
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        self._session.set_permission_mode(mode)
-        return _session_status(self._session)
+        return session_usecases.set_permission_mode(self, mode)
 
     def set_next_turn_target_paths(self, paths: list[str | Path]) -> AssistantSessionStatus:
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        self._session.set_next_turn_target_paths([Path(path) for path in paths])
-        return _session_status(self._session)
+        return session_usecases.set_next_turn_target_paths(self, paths)
 
     def add_external_root(self, path: str | Path, access: PathAccess) -> AssistantSessionStatus:
-        if access not in {"read", "full"}:
-            raise AssistantServiceError("external root access must be read or full")
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        root = Path(path).resolve()
-        if not root.exists():
-            raise AssistantServiceError(f"外部目录不存在：{root}")
-        if not root.is_dir():
-            raise AssistantServiceError(f"外部路径必须是目录：{root}")
-        self._session.add_external_root(root, access)
-        return _session_status(self._session)
+        return session_usecases.add_external_root(self, path, access)
 
     def remove_external_root(self, path: str | Path) -> AssistantSessionStatus:
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        self._session.remove_external_root(Path(path))
-        return _session_status(self._session)
+        return session_usecases.remove_external_root(self, path)
 
     def set_external_root_access(self, path: str | Path, access: PathAccess) -> AssistantSessionStatus:
-        if access not in {"read", "full"}:
-            raise AssistantServiceError("external root access must be read or full")
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        self._session.set_external_root_access(Path(path), access)
-        return _session_status(self._session)
+        return session_usecases.set_external_root_access(self, path, access)
 
     def clear_external_roots(self) -> AssistantSessionStatus:
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        self._session.clear_external_roots()
-        return _session_status(self._session)
+        return session_usecases.clear_external_roots(self)
 
     def switch_project_root(self, path: str | Path) -> AssistantSessionStatus:
-        root = Path(path).resolve()
-        if not root.exists():
-            raise AssistantServiceError(f"项目目录不存在：{root}")
-        if not root.is_dir():
-            raise AssistantServiceError(f"项目路径必须是目录：{root}")
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        self.workspace_root = root
-        self._session.switch_project_root(root)
-        return _session_status(self._session)
+        return session_usecases.switch_project_root(self, path)
 
     def list_skills(self) -> AssistantSkillList:
-        result = skill_list({}, self.workspace_root)
-        if result.get("status") != "success":
-            error = result.get("error") if isinstance(result.get("error"), dict) else {}
-            raise AssistantServiceError(str(error.get("message", "failed to list skills")))
-        return AssistantSkillList(
-            skills=list(result.get("skills", [])),
-            blocked_project_skill_roots=[
-                str(path) for path in result.get("blocked_project_skill_roots", [])
-            ],
-        )
+        return skill_usecases.list_skills_for_user(self)
 
     def trust_project_skills(self) -> AssistantSkillList:
-        trust_project_root(self.workspace_root)
-        return self.list_skills()
+        return skill_usecases.trust_project_skills(self)
 
     def untrust_project_skills(self) -> AssistantSkillList:
-        untrust_project_root(self.workspace_root)
-        return self.list_skills()
+        return skill_usecases.untrust_project_skills(self)
 
     def read_skill_for_user(self, name: str) -> AssistantSkillContent:
-        result = skill_read({"name": name}, self.workspace_root, user_invoked=True)
-        if result.get("status") != "success":
-            error = result.get("error") if isinstance(result.get("error"), dict) else {}
-            raise AssistantServiceError(str(error.get("message", f"skill not found: {name}")))
-        return AssistantSkillContent(
-            name=str(result["name"]),
-            command_name=str(result.get("command_name") or result["name"]),
-            content=str(result["content"]),
-        )
+        return skill_usecases.read_skill_for_user(self, name)
 
     def search_skill_marketplace(
         self,
@@ -605,33 +417,15 @@ class AssistantService:
         providers: list[str] | None = None,
         limit: int = 10,
     ) -> AssistantMarketplaceSearch:
-        try:
-            result = search_marketplace(query, providers=providers, limit=limit)
-        except MarketplaceError as error:
-            raise AssistantServiceError(str(error)) from error
-        self._marketplace_results = {card.result_id: card for card in result.cards}
-        return AssistantMarketplaceSearch(
-            status=result.status,
-            query=result.query,
-            results=[_marketplace_skill(card) for card in result.cards],
-            warnings=list(result.warnings),
+        return skill_usecases.search_skill_marketplace(
+            self,
+            query,
+            providers=providers,
+            limit=limit,
         )
 
     def install_marketplace_skill(self, result_id: str) -> AssistantMarketplaceInstall:
-        card = self._marketplace_results.get(result_id)
-        if card is None:
-            raise AssistantServiceError(f"unknown marketplace result id: {result_id}")
-        try:
-            installed = install_marketplace_skill_card(card)
-        except MarketplaceError as error:
-            raise AssistantServiceError(str(error)) from error
-        return AssistantMarketplaceInstall(
-            name=installed.name,
-            command_name=installed.command_name,
-            skill_dir=installed.skill_dir,
-            skill_file=installed.skill_file,
-            source_url=installed.source_url,
-        )
+        return skill_usecases.install_marketplace_skill(self, result_id)
 
     def run_prompt_events(
         self,
@@ -641,10 +435,8 @@ class AssistantService:
         include_session_events: bool = True,
         interaction_handler: HumanInteractionHandler | None = None,
     ) -> ChatTurnResult:
-        if self._session is None:
-            self.create_session()
-        assert self._session is not None
-        return self._session.run_prompt_events(
+        return session_usecases.run_prompt_events(
+            self,
             prompt,
             event_sink=event_sink,
             include_session_events=include_session_events,
@@ -652,38 +444,19 @@ class AssistantService:
         )
 
     def cancel_current_run(self) -> AssistantCancelResult:
-        if self._session is None:
-            return AssistantCancelResult(status="idle", reason="no_active_session")
-        self._session.cancel_current_run()
-        return AssistantCancelResult(status="cancelled", reason="user_cancelled")
+        return session_usecases.cancel_current_run(self)
 
     def list_memory_candidates(self, status: str | None = "pending") -> list[MemoryCandidate]:
-        queue = self._memory_queue()
-        return queue.list(status=status)
+        return memory_usecases.list_memory_candidates(self, status=status)
 
     def get_memory_candidate(self, candidate_id: str) -> MemoryCandidate:
-        return self._memory_queue().get(candidate_id)
+        return memory_usecases.get_memory_candidate(self, candidate_id)
 
     def confirm_memory_candidate(self, candidate_id: str) -> MemoryRecord:
-        try:
-            return self._memory_store().confirm_candidate(
-                self._memory_queue(),
-                candidate_id,
-                actor="user",
-            )
-        except (CandidateQueueError, MemoryStoreError, MemoryGovernanceError) as error:
-            raise AssistantServiceError(str(error)) from error
+        return memory_usecases.confirm_memory_candidate(self, candidate_id)
 
     def reject_memory_candidate(self, candidate_id: str, reason: str) -> MemoryCandidate:
-        try:
-            return self._memory_store().reject_candidate(
-                self._memory_queue(),
-                candidate_id,
-                reason=reason,
-                actor="user",
-            )
-        except (CandidateQueueError, MemoryStoreError, MemoryGovernanceError) as error:
-            raise AssistantServiceError(str(error)) from error
+        return memory_usecases.reject_memory_candidate(self, candidate_id, reason)
 
     def _load_session_profile(self) -> ProviderProfile:
         if self._pending_model_profile_name is not None:

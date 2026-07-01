@@ -59,8 +59,9 @@ CONTEXT_MANIFEST_VERSION = "2.0"
 PROJECT_INSTRUCTIONS_CHAR_LIMIT = 4000
 SESSION_SUMMARY_CHAR_LIMIT = 2000
 TOOL_WORKFLOW_HINTS = [
-    "Prefer context_find before file_search when the user describes functionality without paths.",
-    "After context_find, use file_read on the most relevant candidate before editing.",
+    "Use file_list to inspect directory structure or narrow the search scope.",
+    "Use file_search for exact deterministic text search when you know the phrase, symbol, or filename fragment.",
+    "Then use file_read on candidate files before editing or summarizing.",
     "Use apply_patch_set for related edits across multiple files or multiple replacements.",
     "Use apply_patch only for a single isolated replacement.",
     'Use workspace-relative paths in tool arguments; use cwd=\'.\' or omit cwd for the workspace root.',
@@ -266,18 +267,18 @@ class ContextBuilder:
     def _tool_workflow_hints(self) -> list[str]:
         allowed_tools = set(self._task.allowed_tools)
         hints: list[str] = []
-        if {"context_find", "file_read"} <= allowed_tools:
-            hints.extend(TOOL_WORKFLOW_HINTS[:2])
+        if {"file_list", "file_search", "file_read"} <= allowed_tools:
+            hints.extend(TOOL_WORKFLOW_HINTS[:3])
         if "apply_patch_set" in allowed_tools:
-            hints.append(TOOL_WORKFLOW_HINTS[2])
-        if "apply_patch" in allowed_tools:
             hints.append(TOOL_WORKFLOW_HINTS[3])
-        if allowed_tools & {"shell", "code_run"}:
+        if "apply_patch" in allowed_tools:
             hints.append(TOOL_WORKFLOW_HINTS[4])
-        if allowed_tools & {"file_write", "apply_patch", "apply_patch_set"}:
+        if allowed_tools & {"shell", "code_run"}:
             hints.append(TOOL_WORKFLOW_HINTS[5])
+        if allowed_tools & {"file_write", "apply_patch", "apply_patch_set"}:
+            hints.append(TOOL_WORKFLOW_HINTS[6])
         if allowed_tools & {"web_search", "web_fetch"}:
-            hints.extend(TOOL_WORKFLOW_HINTS[6:])
+            hints.extend(TOOL_WORKFLOW_HINTS[7:])
         return hints or ["Use the allowed tools only as needed for the task."]
 
     def _working_state_content(self) -> str | None:

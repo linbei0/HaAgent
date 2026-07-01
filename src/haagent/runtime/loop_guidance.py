@@ -89,12 +89,6 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
             return f"Choose the most relevant search hit and read it next with file_read: {path}."
         return "No matches found. Refine the search query or use file_list to explore the directory structure."
 
-    if tool_name == "context_find":
-        read_args = _first_context_read_args(result)
-        if read_args:
-            return f"context_find found candidates. Choose the most relevant one and read it next with file_read: {read_args}."
-        return "context_find found no candidates. Change keywords, adjust file_glob, or ask the user with request_user_input."
-
     if tool_name in {"file_write", "apply_patch", "apply_patch_set"}:
         path = str(result.get("path") or args.get("path") or "")
         if tool_name == "apply_patch_set":
@@ -156,20 +150,6 @@ def _first_match_path(result: dict[str, Any]) -> str | None:
     if isinstance(first, dict):
         return str(first.get("path") or "") or None
     return None
-
-
-def _first_context_read_args(result: dict[str, Any]) -> str | None:
-    candidates = result.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        return None
-    first = candidates[0]
-    if not isinstance(first, dict):
-        return None
-    read_args = first.get("recommended_file_read")
-    if isinstance(read_args, dict):
-        return str(read_args)
-    path = first.get("path")
-    return str(path) if path else None
 
 
 def _first_patch_set_error_path(result: dict[str, Any]) -> str:

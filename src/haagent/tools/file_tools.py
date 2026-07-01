@@ -7,7 +7,6 @@ haagent/tools/file_tools.py - 文件类本地工具
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from difflib import SequenceMatcher
@@ -25,34 +24,6 @@ from haagent.tools.base import tool_error
 
 PATH_GUIDANCE = "path is relative to workspace_root"
 ROOT_GUIDANCE = 'root is relative to workspace_root; use "." or omit root'
-CONTEXT_FIND_DEFAULT_MAX_RESULTS = 5
-CONTEXT_FIND_DEFAULT_MAX_CHARS = 1600
-CONTEXT_FIND_READ_LIMIT = 80
-CONTEXT_KEYWORD_STOPWORDS = {
-    "the",
-    "and",
-    "for",
-    "with",
-    "from",
-    "this",
-    "that",
-    "find",
-    "search",
-    "file",
-    "code",
-    "function",
-    "implementation",
-    "帮我",
-    "找到",
-    "查找",
-    "相关",
-    "文件",
-    "代码",
-    "功能",
-    "实现",
-    "修改",
-    "说明",
-}
 NOISE_DIRECTORIES = {
     ".git",
     ".runs",
@@ -156,98 +127,6 @@ def file_search(args: dict[str, Any], workspace_root: Path, path_policy: PathPol
         except UnicodeDecodeError:
             continue
     return {"status": "success", "matches": matches}
-
-
-def context_find(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
-    query = args.get("query")
-    if not isinstance(query, str) or not query.strip():
-        return tool_error("tool_argument_invalid", "query must be a non-empty string")
-    file_glob = args.get("file_glob")
-    if file_glob is not None and not isinstance(file_glob, str):
-        return tool_error("tool_argument_invalid", "file_glob must be a string")
-    max_results = int(args.get("max_results", CONTEXT_FIND_DEFAULT_MAX_RESULTS))
-    max_chars = int(args.get("max_chars", CONTEXT_FIND_DEFAULT_MAX_CHARS))
-    if max_results <= 0:
-        return tool_error("tool_argument_invalid", "max_results must be positive")
-    if max_chars <= 0:
-        return tool_error("tool_argument_invalid", "max_chars must be positive")
-
-    # context_find 保持紧凑上下文搜索：默认搜项目根；显式授权外部目录通过 file_search/file_read 处理。
-    root = workspace_root.resolve()
-    keywords = extract_context_keywords(query)
-    scored: dict[str, dict[str, Any]] = {}
-    truncated = False
-    total_excerpt_chars = 0
-    for path in _iter_context_files(root, file_glob):
-        relative = path.relative_to(root).as_posix()
-        filename_hits = [keyword for keyword in keywords if keyword in relative.lower()]
-        if filename_hits:
-            _upsert_context_candidate(
-                scored,
-                relative,
-                line=1,
-                excerpt=relative,
-                keyword=filename_hits[0],
-                score=3 * len(filename_hits),
-                reason="filename",
-            )
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
-            continue
-        for line_number, line in enumerate(lines, 1):
-            lowered_line = line.lower()
-            text_hits = [keyword for keyword in keywords if keyword in lowered_line]
-            if not text_hits:
-                continue
-            _upsert_context_candidate(
-                scored,
-                relative,
-                line=line_number,
-                excerpt=line.strip(),
-                keyword=text_hits[0],
-                score=2 * len(text_hits),
-                reason="text",
-            )
-
-    candidates: list[dict[str, Any]] = []
-    for candidate in sorted(scored.values(), key=lambda item: (-item["score"], item["path"])):
-        if len(candidates) >= max_results:
-            truncated = True
-            break
-        excerpt = str(candidate["excerpt"])
-        remaining_chars = max_chars - total_excerpt_chars
-        if remaining_chars <= 0:
-            truncated = True
-            break
-        if len(excerpt) > remaining_chars:
-            excerpt = excerpt[:remaining_chars]
-            truncated = True
-        total_excerpt_chars += len(excerpt)
-        candidates.append({**candidate, "excerpt": excerpt})
-
-    return {
-        "status": "success",
-        "query": query,
-        "keywords": keywords,
-        "file_glob": file_glob,
-        "candidate_count": len(scored),
-        "candidates": candidates,
-        "total_excerpt_chars": total_excerpt_chars,
-        "truncated": truncated,
-    }
-
-
-def extract_context_keywords(query: str) -> list[str]:
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*|[\u4e00-\u9fff]{2,}", query.lower())
-    keywords: list[str] = []
-    for token in tokens:
-        if token in CONTEXT_KEYWORD_STOPWORDS or len(token) < 3:
-            continue
-        for keyword in _context_keyword_variants(token):
-            if keyword not in keywords:
-                keywords.append(keyword)
-    return keywords or [query.strip().lower()]
 
 
 def file_read(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
@@ -552,62 +431,6 @@ def _patch_set_error(
     result["replacement_count"] = len(replacements)
     result["replacements"] = replacement_summaries
     return result
-
-
-def _iter_context_files(root: Path, file_glob: str | None):
-    pattern = file_glob or "*"
-    for path in sorted(root.rglob(pattern), key=lambda item: item.relative_to(root).as_posix()):
-        if not path.is_file():
-            continue
-        relative_parts = path.relative_to(root).parts
-        if any(part in NOISE_DIRECTORIES for part in relative_parts):
-            continue
-        yield path
-
-
-def _context_keyword_variants(token: str) -> list[str]:
-    variants = [token]
-    if token.endswith("ing") and len(token) > 5:
-        variants.append(token[:-3])
-    return variants
-
-
-def _upsert_context_candidate(
-    candidates: dict[str, dict[str, Any]],
-    path: str,
-    *,
-    line: int,
-    excerpt: str,
-    keyword: str,
-    score: int,
-    reason: str,
-) -> None:
-    current = candidates.get(path)
-    if current is None:
-        candidates[path] = {
-            "path": path,
-            "line": line,
-            "excerpt": excerpt,
-            "score": score,
-            "reasons": [reason],
-            "recommended_file_read": {
-                "path": path,
-                "keyword": keyword,
-                "limit": CONTEXT_FIND_READ_LIMIT,
-            },
-        }
-        return
-    current["score"] += score
-    if reason not in current["reasons"]:
-        current["reasons"].append(reason)
-    if score > 0 and line < current["line"]:
-        current["line"] = line
-        current["excerpt"] = excerpt
-        current["recommended_file_read"] = {
-            "path": path,
-            "keyword": keyword,
-            "limit": CONTEXT_FIND_READ_LIMIT,
-        }
 
 
 def _collect_file_tree(

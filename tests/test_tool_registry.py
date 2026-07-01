@@ -21,7 +21,6 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "fake_tool",
         "file_list",
         "file_search",
-        "context_find",
         "file_read",
         "request_user_input",
         "start_memory_update",
@@ -102,14 +101,14 @@ def test_file_read_schema_supports_keyword() -> None:
     assert schema["parameters"]["properties"]["keyword"]["type"] == "string"
 
 
-def test_context_find_schema_supports_natural_language_lookup() -> None:
-    schemas = export_tool_schemas(["context_find"])
+def test_file_search_schema_stays_deterministic() -> None:
+    schemas = export_tool_schemas(["file_search"])
     schema = schemas[0]
 
-    assert "primary choice" in schema["description"]
+    assert "search workspace text" in schema["description"]
     assert schema["parameters"]["required"] == ["query"]
-    assert set(schema["parameters"]["properties"]) == {"query", "file_glob", "max_results", "max_chars"}
-    assert TOOL_REGISTRY["context_find"].risk_level == "low"
+    assert set(schema["parameters"]["properties"]) == {"query", "root"}
+    assert TOOL_REGISTRY["file_search"].risk_level == "low"
 
 
 def test_request_user_input_schema_requires_question() -> None:

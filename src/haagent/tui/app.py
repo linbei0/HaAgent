@@ -6,7 +6,6 @@ haagent/tui/app.py - HaAgent TUI 应用编排
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from textual import events, work
@@ -28,7 +27,10 @@ from haagent.tui.file_ref_modal import FileReferenceOverlay
 from haagent.tui.file_refs import FileReferenceIndex, build_file_reference_index, query_after_at, replace_at_query
 from haagent.tui.keys import APP_BINDINGS, footer_text
 from haagent.tui.memory_presenter import MemoryPanelPresenter
-from haagent.tui.modals import ConfirmModal, ExternalDirectoryDecisionModal, HelpModal, PermissionsModal, ToolApprovalModal, ToolDetailsModal
+from haagent.tui.modals import ConfirmModal, HelpModal, PermissionsModal, ToolApprovalModal, ToolDetailsModal
+from haagent.tui import path_authorization_flow
+from haagent.tui import permissions_flow
+from haagent.tui import skills_flow
 from haagent.tui.models import (
     ManualModelSetupWizard,
     ModelCatalogLoadingOverlay,
@@ -56,13 +58,8 @@ from haagent.tui.theme import (
 from haagent.tui.tool_timeline import ToolTimelineState
 from haagent.tui.search_modal import SearchOverlay
 from haagent.tui.sessions import SessionOverlay, SessionOverlayResult
-from haagent.tui.skill_picker import SkillPickerOverlay
 from haagent.tui.utils import safe_summary
 from haagent.tui.widgets import ConversationView, FooterBar, PromptInput, ResizeMessage, SideBar, StatusBar, _end_location
-
-
-WINDOWS_ABSOLUTE_PATH_PATTERN = re.compile(r'(?:"([A-Za-z]:[\\/][^"\r\n]+)"|([A-Za-z]:[\\/][^\s"\']+))')
-POSIX_ABSOLUTE_PATH_PATTERN = re.compile(r'(?:"(/[^"\r\n]+)"|(?<!\S)(/[^ \t\r\n"\']+))')
 
 
 def find_untrusted_absolute_paths(
@@ -71,40 +68,15 @@ def find_untrusted_absolute_paths(
     project_root: Path,
     external_roots: list[dict[str, str]] | None = None,
 ) -> list[Path]:
-    roots = [project_root.resolve()]
-    for item in external_roots or []:
-        raw_path = item.get("path")
-        if raw_path:
-            roots.append(Path(raw_path).resolve())
-    matches: list[Path] = []
-    for candidate in _absolute_path_candidates(text):
-        resolved = candidate.resolve()
-        if any(resolved == root or root in resolved.parents for root in roots):
-            continue
-        if resolved not in matches:
-            matches.append(resolved)
-    return matches
-
-
-def _absolute_path_candidates(text: str) -> list[Path]:
-    paths: list[Path] = []
-    for pattern in (WINDOWS_ABSOLUTE_PATH_PATTERN, POSIX_ABSOLUTE_PATH_PATTERN):
-        for match in pattern.finditer(text):
-            raw = next((group for group in match.groups() if group), "")
-            if raw:
-                paths.append(Path(raw.rstrip(".,;，。；")))
-    return paths
+    return path_authorization_flow.find_untrusted_absolute_paths(
+        text,
+        project_root=project_root,
+        external_roots=external_roots,
+    )
 
 
 def is_wide_external_root(path: Path) -> bool:
-    resolved = path.resolve()
-    home = Path.home().resolve()
-    risky_roots = {home, home / "Desktop", home / "Downloads", home / "Documents"}
-    if resolved.parent == resolved:
-        return True
-    if resolved.anchor and str(resolved) == resolved.anchor:
-        return True
-    return resolved in {root.resolve() for root in risky_roots}
+    return path_authorization_flow.is_wide_external_root(path)
 
 
 class HaAgentTuiApp(App[None]):
@@ -143,6 +115,8 @@ class HaAgentTuiApp(App[None]):
         self._file_ref_overlay: FileReferenceOverlay | None = None
         self._file_ref_index: FileReferenceIndex | None = None
         self._command_suggestion_overlay: CommandSuggestionOverlay | None = None
+        self.is_wide_external_root = is_wide_external_root
+        self.permission_mode_label = _permission_mode_label
 
     def compose(self) -> ComposeResult:
         yield StatusBar("", id="status-bar")
@@ -248,21 +222,7 @@ class HaAgentTuiApp(App[None]):
         if self._pending_interaction is not None and self._pending_interaction.request.interaction_type == "user_input":
             self._complete_interaction(HumanInteractionResponse(approved=True, answer=prompt))
             return
-        status = self.service.get_workspace_status()
-        untrusted_paths = find_untrusted_absolute_paths(
-            prompt,
-            project_root=status.workspace_root,
-            external_roots=status.external_roots or [],
-        )
-        if untrusted_paths:
-            if getattr(status, "permission_mode", "request_approval") == "full_access":
-                self._set_next_turn_target_path(untrusted_paths[0])
-                self._append_block("Permissions", "完全访问权限已启用；本轮不会限制工作区外路径。")
-                self._start_prompt(prompt)
-                return
-            self._pending_external_prompt = prompt
-            self._pending_external_path = untrusted_paths[0]
-            self.push_screen(ExternalDirectoryDecisionModal(untrusted_paths[0]), self._handle_external_directory_decision)
+        if path_authorization_flow.handle_prompt_path_authorization(self, prompt):
             return
         self._start_prompt(prompt)
 
@@ -518,293 +478,43 @@ class HaAgentTuiApp(App[None]):
         self._refresh()
 
     def _handle_skills_command(self, argument: str) -> None:
-        raw_value = argument.strip()
-        value = raw_value.lower()
-        try:
-            if value == "trust":
-                summary = self.service.trust_project_skills()
-                self._append_block("Skills", "已信任当前 workspace 的项目 skills。\n" + _skills_summary_text(summary))
-            elif value == "untrust":
-                summary = self.service.untrust_project_skills()
-                self._append_block("Skills", "已取消信任当前 workspace 的项目 skills。\n" + _skills_summary_text(summary))
-            elif value.startswith("search "):
-                query = raw_value.split(" ", 1)[1].strip()
-                if not query:
-                    self._append_block("Command", _skills_usage_text())
-                else:
-                    result = self.service.search_skill_marketplace(query, limit=10)
-                    self._append_block("Skills marketplace", _skill_marketplace_summary_text(result))
-            elif value.startswith("install "):
-                result_id = raw_value.split(" ", 1)[1].strip()
-                if not result_id:
-                    self._append_block("Command", _skills_usage_text())
-                else:
-                    self.push_screen(
-                        ConfirmModal(
-                            "安装远端 skill",
-                            (
-                                f"将安装 marketplace 搜索结果：{result_id}\n"
-                                "远端内容会作为外部引用写入用户级 skills；使用前仍需审阅来源页面。确认？"
-                            ),
-                        ),
-                        lambda confirmed, result_id=result_id: self._handle_skill_marketplace_install_confirmed(
-                            result_id,
-                            confirmed,
-                        ),
-                    )
-            elif not value:
-                self._open_skill_picker(mode="manage")
-            else:
-                self._append_block("Command", _skills_usage_text())
-        except Exception as error:
-            self._append_block("Skills warning", f"skills 操作失败：{error}")
-        self._refresh()
+        skills_flow.handle_skills_command(self, argument)
 
     def _handle_skill_marketplace_install_confirmed(self, result_id: str, confirmed: bool | None) -> None:
-        if not confirmed:
-            self._append_block("Skills marketplace", f"已取消安装 marketplace skill：{result_id}")
-            self._refresh()
-            return
-        try:
-            installed = self.service.install_marketplace_skill(result_id)
-        except Exception as error:
-            self._append_block("Skills warning", f"skills 操作失败：{error}")
-        else:
-            self._append_block("Skills marketplace", _skill_marketplace_install_text(installed))
-        self._refresh()
+        skills_flow.handle_skill_marketplace_install_confirmed(self, result_id, confirmed)
 
     def _handle_skill_command(self, argument: str) -> None:
-        text = argument.strip()
-        if not text:
-            self._open_skill_picker(mode="use")
-            return
-        skill_name, _, request = text.partition(" ")
-        try:
-            skill = self.service.read_skill_for_user(skill_name)
-        except Exception as error:
-            self._append_block("Skills warning", f"读取 skill 失败：{error}")
-            self._refresh()
-            return
-        prompt = "\n".join(
-            [
-                f"Use skill {skill.command_name} explicitly.",
-                "",
-                "Skill content:",
-                skill.content,
-                "",
-                "User request:",
-                request.strip() or f"Follow the {skill.command_name} skill for this task.",
-            ],
-        )
-        self._append_block("Skills", f"已加载 skill：{skill.name}")
-        self._start_prompt(prompt)
+        skills_flow.handle_skill_command(self, argument)
 
     def _open_skill_picker(self, *, mode: str) -> None:
-        try:
-            summary = self.service.list_skills()
-        except Exception as error:
-            self._append_block("Skills warning", f"读取 skills 失败：{error}")
-            self._refresh()
-            return
-        skills = list(getattr(summary, "skills", []) or [])
-        if not skills:
-            self._append_block("Skills", "暂无可用 skills。")
-            self._refresh()
-            return
-        blocked_roots = list(getattr(summary, "blocked_project_skill_roots", []) or [])
-        if mode == "manage":
-            self.push_screen(
-                SkillPickerOverlay(
-                    skills,
-                    blocked_project_skill_roots=blocked_roots,
-                    title="Skills",
-                    instruction="输入过滤，↑/↓ 浏览，Esc 关闭",
-                    footer="使用 /skill 选择并调用；/skills search 远端搜索；/skills trust 信任项目 skills。",
-                    select_on_enter=False,
-                ),
-                self._handle_skill_picker_result,
-            )
-            return
-        self.push_screen(
-            SkillPickerOverlay(skills, blocked_project_skill_roots=blocked_roots),
-            self._handle_skill_picker_result,
-        )
+        skills_flow.open_skill_picker(self, mode=mode)
 
     def _handle_skill_picker_result(self, skill: dict[str, object] | None) -> None:
-        if skill is None:
-            self.set_timer(0.01, self._restore_prompt_focus)
-            return
-        command_name = str(skill.get("command_name") or skill.get("name") or "").strip()
-        if not command_name:
-            self._append_block("Skills warning", "选择的 skill 缺少命令名。")
-            self._refresh()
-            self.set_timer(0.01, self._restore_prompt_focus)
-            return
-        prompt_input = self.query_one("#prompt-input", PromptInput)
-        self._set_prompt_value(prompt_input, f"/skill {command_name} ")
-        self.set_timer(0.01, self._restore_prompt_focus)
+        skills_flow.handle_skill_picker_result(self, skill)
 
     def _show_permissions(self) -> None:
-        status = self.service.get_workspace_status()
-        self.push_screen(
-            PermissionsModal(
-                status.workspace_root,
-                status.external_roots or [],
-                getattr(status, "permission_mode", "request_approval"),
-            ),
-            self._handle_permissions_result,
-        )
+        permissions_flow.show_permissions(self)
 
     def _handle_permissions_result(self, result: dict[str, object] | None) -> None:
-        if result is None:
-            self._restore_prompt_focus()
-            return
-        action = result.get("action")
-        try:
-            if action == "clear":
-                self.push_screen(
-                    ConfirmModal("清空外部目录授权", "清空后本会话将只保留当前项目根权限。确认？"),
-                    self._handle_clear_external_roots_confirmed,
-                )
-                return
-            if action == "set_mode":
-                mode = str(result.get("mode", "request_approval"))
-                if mode == "full_access":
-                    self.push_screen(
-                        ConfirmModal(
-                            "启用完全访问权限",
-                            "启用后，本会话不再限制工作区外文件读写和执行目录。\n你将承担该模式下的本地文件和命令风险。确认？",
-                        ),
-                        lambda confirmed, mode=mode: self._handle_permission_mode_confirmed(mode, confirmed),
-                    )
-                    return
-                self._set_permission_mode(mode)
-                return
-            path = Path(str(result.get("path", "")))
-            if action == "remove":
-                self.service.remove_external_root(path)
-                self._append_block("Permissions", f"已移除外部目录：{path}")
-            elif action == "set_access":
-                access = str(result.get("access"))
-                if access == "full" and is_wide_external_root(path):
-                    self.push_screen(
-                        ConfirmModal("完全信任高风险目录", f"将允许读取、修改并在该目录执行命令：\n{path}\n确认？"),
-                        lambda confirmed, path=path: self._handle_set_full_access_confirmed(path, confirmed),
-                    )
-                    return
-                self.service.set_external_root_access(path, access)
-                label = "只读参考" if access == "read" else "完全信任"
-                self._append_block("Permissions", f"已设为{label}：{path}")
-        except Exception as error:
-            self._append_block("Permissions warning", f"权限操作失败：{error}")
-        self._refresh()
-        self._restore_prompt_focus()
+        permissions_flow.handle_permissions_result(self, result)
 
     def _set_permission_mode(self, mode: str) -> None:
-        try:
-            self.service.set_permission_mode(mode)
-        except Exception as error:
-            self._append_block("Permissions warning", f"权限模式切换失败：{error}")
-        else:
-            self._append_block("Permissions", f"权限模式已切换为：{_permission_mode_label(mode)}")
-        self._refresh()
-        self._restore_prompt_focus()
+        permissions_flow.set_permission_mode(self, mode)
 
     def _handle_permission_mode_confirmed(self, mode: str, confirmed: bool) -> None:
-        if confirmed:
-            self._set_permission_mode(mode)
-            return
-        self._append_block("Permissions", "已取消启用完全访问权限。")
-        self._refresh()
-        self._restore_prompt_focus()
+        permissions_flow.handle_permission_mode_confirmed(self, mode, confirmed)
 
     def _handle_clear_external_roots_confirmed(self, confirmed: bool) -> None:
-        if confirmed:
-            try:
-                self.service.clear_external_roots()
-            except Exception as error:
-                self._append_block("Permissions warning", f"清空外部目录授权失败：{error}")
-            else:
-                self._append_block("Permissions", "已清空本会话外部目录授权。")
-        self._refresh()
-        self._restore_prompt_focus()
+        permissions_flow.handle_clear_external_roots_confirmed(self, confirmed)
 
     def _handle_set_full_access_confirmed(self, path: Path, confirmed: bool) -> None:
-        if confirmed:
-            try:
-                self.service.set_external_root_access(path, "full")
-            except Exception as error:
-                self._append_block("Permissions warning", f"权限操作失败：{error}")
-            else:
-                self._append_block("Permissions", f"已完全信任：{path}")
-        self._refresh()
-        self._restore_prompt_focus()
+        permissions_flow.handle_set_full_access_confirmed(self, path, confirmed)
 
     def _handle_external_directory_decision(self, decision: str | None) -> None:
-        prompt = self._pending_external_prompt
-        path = self._pending_external_path
-        self._pending_external_prompt = None
-        self._pending_external_path = None
-        if prompt is None or path is None:
-            self._restore_prompt_focus()
-            return
-        try:
-            if decision == "read":
-                self.service.add_external_root(path, "read")
-                self._set_next_turn_target_path(path)
-                self._append_block("Permissions", f"已作为只读参考加入：{path}")
-            elif decision == "full":
-                if is_wide_external_root(path):
-                    self._pending_full_trust_prompt = prompt
-                    self._pending_full_trust_path = path
-                    self.push_screen(
-                        ConfirmModal("完全信任高风险目录", f"将允许读取、修改并在该目录执行命令：\n{path}\n确认？"),
-                        self._handle_external_full_trust_confirmed,
-                    )
-                    return
-                self.service.add_external_root(path, "full")
-                self._set_next_turn_target_path(path)
-                self._append_block("Permissions", f"已完全信任：{path}")
-            elif decision == "switch":
-                self.service.switch_project_root(path)
-                self._append_block("Permissions", f"已切换工作区：{path}")
-            else:
-                self._append_block("Permissions", f"已取消外部目录授权：{path}")
-                self._refresh()
-                self._restore_prompt_focus()
-                return
-        except Exception as error:
-            self._append_block("Permissions warning", f"外部目录授权失败：{error}")
-            self._refresh()
-            self._restore_prompt_focus()
-            return
-        self._refresh()
-        self._start_prompt(prompt)
+        path_authorization_flow.handle_external_directory_decision(self, decision)
 
     def _handle_external_full_trust_confirmed(self, confirmed: bool) -> None:
-        prompt = self._pending_full_trust_prompt
-        path = self._pending_full_trust_path
-        self._pending_full_trust_prompt = None
-        self._pending_full_trust_path = None
-        if prompt is None or path is None:
-            self._restore_prompt_focus()
-            return
-        if not confirmed:
-            self._append_block("Permissions", f"已取消完全信任：{path}")
-            self._refresh()
-            self._restore_prompt_focus()
-            return
-        try:
-            self.service.add_external_root(path, "full")
-            self._set_next_turn_target_path(path)
-        except Exception as error:
-            self._append_block("Permissions warning", f"外部目录授权失败：{error}")
-            self._refresh()
-            self._restore_prompt_focus()
-            return
-        self._append_block("Permissions", f"已完全信任：{path}")
-        self._refresh()
-        self._start_prompt(prompt)
+        path_authorization_flow.handle_external_full_trust_confirmed(self, confirmed)
 
     def _set_next_turn_target_path(self, path: Path) -> None:
         setter = getattr(self.service, "set_next_turn_target_paths", None)
@@ -1490,99 +1200,3 @@ def _permission_mode_label(mode: str) -> str:
     return "请求批准"
 
 
-def _skills_summary_text(summary) -> str:
-    lines: list[str] = []
-    skills = list(getattr(summary, "skills", []) or [])
-    if skills:
-        for item in skills:
-            name = str(item.get("name", "unknown"))
-            source = str(item.get("source", "unknown"))
-            description = str(item.get("description", ""))
-            suffix = " user-only" if item.get("disable_model_invocation") else ""
-            lines.append(f"- {name} [{source}]: {description}{suffix}".rstrip())
-    else:
-        lines.append("暂无可用 skills。")
-    blocked = list(getattr(summary, "blocked_project_skill_roots", []) or [])
-    if blocked:
-        lines.append("")
-        lines.append("项目 skills 未信任：")
-        for path in blocked:
-            lines.append(f"- {path}")
-        lines.append("输入 /skills trust 信任当前 workspace 的项目 skills。")
-    return "\n".join(lines)
-
-
-def _skills_usage_text() -> str:
-    return "\n".join(
-        [
-            "用法：",
-            "- /skills",
-            "- /skills trust",
-            "- /skills untrust",
-            "- /skills search <query>",
-            "- /skills install <result-id>",
-        ],
-    )
-
-
-def _skill_marketplace_summary_text(result) -> str:
-    lines = [
-        f"查询：{getattr(result, 'query', '')}",
-        f"状态：{getattr(result, 'status', 'unknown')}",
-    ]
-    results = list(getattr(result, "results", []) or [])
-    if results:
-        lines.append("")
-        lines.append("结果：")
-        for item in results:
-            lines.append(_skill_marketplace_result_line(item))
-    else:
-        lines.append("")
-        lines.append("未找到 marketplace skills。")
-    warnings = list(getattr(result, "warnings", []) or [])
-    if warnings:
-        lines.append("")
-        lines.append("警告：")
-        for warning in warnings:
-            lines.append(f"- {warning}")
-    return "\n".join(lines)
-
-
-def _skill_marketplace_result_line(item) -> str:
-    result_id = str(getattr(item, "result_id", "unknown"))
-    provider = str(getattr(item, "provider", "unknown"))
-    name = str(getattr(item, "name", "unknown"))
-    source = str(getattr(item, "source", ""))
-    summary = str(getattr(item, "summary", ""))
-    detail_url = str(getattr(item, "detail_url", ""))
-    install_state = "可安装" if bool(getattr(item, "installable", False)) else "暂不支持直接安装"
-    quality = _skill_marketplace_quality_text(getattr(item, "quality", {}) or {})
-    pieces = [f"- {result_id} [{provider}] {name}"]
-    if source:
-        pieces.append(f"by {source}")
-    pieces.append(f"({install_state})")
-    if quality:
-        pieces.append(quality)
-    if summary:
-        pieces.append(f"- {summary}")
-    if detail_url:
-        pieces.append(f"- {detail_url}")
-    return " ".join(pieces)
-
-
-def _skill_marketplace_quality_text(quality) -> str:
-    if not isinstance(quality, dict) or not quality:
-        return ""
-    pairs = [f"{key}={value}" for key, value in sorted(quality.items())]
-    return "[" + ", ".join(pairs) + "]"
-
-
-def _skill_marketplace_install_text(installed) -> str:
-    lines = [
-        f"已安装 marketplace skill：{getattr(installed, 'name', 'unknown')}",
-        f"命令：${getattr(installed, 'command_name', 'unknown')}",
-        f"目录：{getattr(installed, 'skill_dir', '')}",
-        f"来源：{getattr(installed, 'source_url', '')}",
-        "远端内容已作为外部引用写入；使用前请审阅来源页面。",
-    ]
-    return "\n".join(lines)

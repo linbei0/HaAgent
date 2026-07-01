@@ -39,41 +39,6 @@ def test_file_search_no_results_suggests_refine() -> None:
     assert "file_list" in suggestion.message or "Refine" in suggestion.message
 
 
-def test_context_find_success_suggests_read_candidate() -> None:
-    suggestion = suggestion_for_observation(
-        _obs(
-            "context_find",
-            {"query": "greeting"},
-            {
-                "status": "success",
-                "candidates": [
-                    {
-                        "path": "src/app.py",
-                        "line": 1,
-                        "excerpt": "def greet",
-                        "recommended_file_read": {"path": "src/app.py", "keyword": "greet", "limit": 80},
-                    }
-                ],
-            },
-        )
-    )
-
-    assert suggestion is not None
-    assert "context_find" in suggestion.message
-    assert "file_read" in suggestion.message
-    assert "src/app.py" in suggestion.message
-
-
-def test_context_find_empty_suggests_change_keywords() -> None:
-    suggestion = suggestion_for_observation(
-        _obs("context_find", {"query": "missing feature"}, {"status": "success", "candidates": []})
-    )
-
-    assert suggestion is not None
-    assert "change keywords" in suggestion.message.lower() or "Change keywords" in suggestion.message
-    assert "request_user_input" in suggestion.message
-
-
 def test_file_write_success_suggests_read_back() -> None:
     suggestion = suggestion_for_observation(
         _obs(

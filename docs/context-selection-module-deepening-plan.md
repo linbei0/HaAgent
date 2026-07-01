@@ -338,7 +338,7 @@ def render_sections(sections: list[ContextSection]) -> str:
 第一阶段只选择最近 3 条重要 observation：
 
 - `file_read`：最近一次与当前任务相关的读取片段。
-- `context_find` / `file_search`：候选摘要。
+- `file_search`：候选摘要。
 - `shell` / `code_run`：失败或验证相关摘要。
 - `apply_patch` / `apply_patch_set`：变更结果摘要。
 
@@ -412,7 +412,7 @@ def render_sections(sections: list[ContextSection]) -> str:
 输入最近 runtime/tool events，先转 `observation_summary()`，再根据 tool/status 选：
 
 - 失败的 `shell` / `code_run` 优先。
-- 最近的 `file_read` / `context_find` 次优先。
+- 最近的 `file_read` / `file_search` 次优先。
 - 成功的 `file_write` / patch 作为变更状态。
 - 过旧或重复 observation 跳过。
 

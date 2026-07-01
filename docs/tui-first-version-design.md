@@ -92,9 +92,9 @@
 │ Assistant                                                                                                     │   name: deepseek                                     │
 │   首版应该围绕当前目录的自然语言助手体验，而不是 IDE。                                                           │   provider: openai-chat                              │
 │                                                                                                               │   base_url: https://api.deepseek.com                 │
-│ Tool context_find ✓                                                                                            │   model: deepseek-chat                               │
+│ Tool file_search ✓                                                                                             │   model: deepseek-chat                               │
 │   query: "AssistantService"                                                                                    │   api_key_env: DEEPSEEK_API_KEY                      │
-│   result: 4 relevant snippets                                                                                  │   key: available                                     │
+│   result: 4 exact matches                                                                                      │   key: available                                     │
 │                                                                                                               │                                                      │
 │ Tool apply_patch pending approval                                                                              │ Current Session                                      │
 │   action: modify  files: 1                                                                                     │   id: session-abc                                    │
@@ -102,7 +102,7 @@
 │                                                                                                               │   updated: 14:12                                     │
 │ Assistant                                                                                                     │                                                      │
 │   如果你批准，我会修改 docs/tui-plan.md。                                                                       │ Tools This Turn                                      │
-│                                                                                                               │   context_find ✓                                     │
+│                                                                                                               │   file_search ✓                                      │
 │                                                                                                               │   apply_patch approval                               │
 │                                                                                                               │                                                      │
 │                                                                                                               │ Recent Sessions                                      │

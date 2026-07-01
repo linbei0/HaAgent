@@ -51,8 +51,6 @@ def observation_summary(observation: dict[str, object]) -> dict[str, object]:
         return _file_write_observation_summary(args, result)
     if tool_name == "file_search":
         return _file_search_observation_summary(args, result)
-    if tool_name == "context_find":
-        return _context_find_observation_summary(args, result)
     if tool_name == "code_run":
         return _code_run_observation_summary(args, result)
     if tool_name == "shell":
@@ -216,41 +214,6 @@ def _file_search_observation_summary(
         "match_count": len(matches),
         "excerpt": excerpt,
         "truncated": truncated,
-    }
-
-
-def _context_find_observation_summary(
-    args: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, object]:
-    candidates = result.get("candidates")
-    if not isinstance(candidates, list):
-        candidates = []
-    compact_candidates: list[dict[str, object]] = []
-    truncated = bool(result.get("truncated"))
-    for candidate in candidates[:5]:
-        if not isinstance(candidate, dict):
-            continue
-        excerpt, excerpt_truncated = _compact_excerpt(_string_value(candidate.get("excerpt")))
-        compact_candidates.append(
-            {
-                "path": _string_value(candidate.get("path")),
-                "line": candidate.get("line"),
-                "score": candidate.get("score"),
-                "reasons": candidate.get("reasons", []),
-                "excerpt": excerpt,
-                "recommended_file_read": candidate.get("recommended_file_read", {}),
-            },
-        )
-        truncated = truncated or excerpt_truncated
-    return {
-        "status": _string_value(result.get("status")),
-        "query": _first_present_string(args.get("query"), result.get("query")),
-        "keywords": result.get("keywords", []),
-        "file_glob": _first_present_string(args.get("file_glob"), result.get("file_glob")),
-        "candidate_count": result.get("candidate_count", len(candidates)),
-        "candidates": compact_candidates,
-        "truncated": truncated or len(candidates) > len(compact_candidates),
     }
 
 
