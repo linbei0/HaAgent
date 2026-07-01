@@ -48,7 +48,6 @@ from haagent.tui.theme import (
     no_color_enabled,
     select_theme,
     semantic_tokens,
-    status_badge,
     status_semantic,
     textual_themes,
     theme_label,
@@ -56,7 +55,17 @@ from haagent.tui.theme import (
 from haagent.tui.search_modal import SearchOverlay
 from haagent.tui.sessions import SessionOverlay, SessionOverlayResult
 from haagent.tui.utils import safe_summary
-from haagent.tui.widgets import ConversationView, FooterBar, PromptInput, ResizeMessage, StatusBar, _end_location
+from haagent.tui.widgets import (
+    ConversationTimeline,
+    ConversationView,
+    FooterBar,
+    PromptInput,
+    ResizeMessage,
+    StatusBar,
+    ToolActivity,
+    ToolStatus,
+    _end_location,
+)
 
 
 def find_untrusted_absolute_paths(
@@ -91,6 +100,8 @@ class HaAgentTuiApp(App[None]):
         self._conversation_placeholder_rendered = False
         self._streaming_assistant_turn: int | None = None
         self._streaming_assistant_text = ""
+        self._active_turn_index: int | None = None
+        self._tool_details_enabled = False
         self._last_failure: FailureView | None = None
         self._pending_interaction: PendingInteraction | None = None
         self._default_prompt_placeholder = "输入消息；Enter 发送，Shift+Enter 换行"
@@ -117,7 +128,7 @@ class HaAgentTuiApp(App[None]):
         yield StatusBar("", id="status-bar")
         yield ResizeMessage("终端尺寸过小\n请调整到至少 80x24 后继续使用 HaAgent TUI。", id="resize-message", classes="hidden")
         with Horizontal(id="main"):
-            yield ConversationView(id="conversation", wrap=True, auto_scroll=True)
+            yield ConversationTimeline(id="conversation", wrap=True, auto_scroll=True)
         with Vertical(id="input-panel"):
             yield PromptInput(placeholder=self._default_prompt_placeholder, id="prompt-input", show_line_numbers=False)
         yield FooterBar(footer_text("chat"), id="footer-bar")
@@ -220,10 +231,18 @@ class HaAgentTuiApp(App[None]):
         self._start_prompt(prompt)
 
     def _start_prompt(self, prompt: str) -> None:
+        self._active_turn_index = self._next_turn_index()
         self._append_block("You", prompt)
         self._state = "running"
         self._refresh()
         self._run_prompt(prompt)
+
+    def _next_turn_index(self) -> int:
+        try:
+            status = self.service.get_workspace_status()
+        except Exception:
+            return 0
+        return (status.current_turn_count if status.current_turn_count is not None else 0) + 1
 
     def action_help(self) -> None:
         self.push_screen(HelpModal(self._help_context()))
@@ -431,6 +450,13 @@ class HaAgentTuiApp(App[None]):
         elif command.action == "memory":
             if not self._memory_mode:
                 self.action_toggle_memory()
+        elif command.action == "toggle_details":
+            self._tool_details_enabled = not self._tool_details_enabled
+            conversation = self.query_one("#conversation", ConversationTimeline)
+            conversation.set_tool_details(self._tool_details_enabled)
+            state = "开启" if self._tool_details_enabled else "关闭"
+            self._append_block("Command", f"工具详情已{state}")
+            self._refresh()
         elif command.action == "skills":
             self._handle_skills_command(result.argument)
         elif command.action == "skill":
@@ -521,7 +547,10 @@ class HaAgentTuiApp(App[None]):
             if result.action == "new":
                 self._conversation_lines = [f"当前会话：{status.session_id}"]
                 self._conversation_rendered_count = 0
-                self._conversation_placeholder_rendered = True
+                self._conversation_placeholder_rendered = False
+                conversation = self.query_one("#conversation", ConversationTimeline)
+                conversation.clear_timeline()
+                conversation.add_system("会话", f"当前会话：{status.session_id}")
             else:
                 self._show_session_history(status, prefix="当前会话")
         self._refresh()
@@ -790,11 +819,11 @@ class HaAgentTuiApp(App[None]):
         elif event_type == "approval_requested":
             self._state = "waiting approval"
             tool_name = payload_text(payload, "tool_name", "unknown")
-            self._append_line(f"工具 {tool_name} {status_badge('pending approval')} (pending approval)")
+            self._record_tool_activity(event.turn_index, tool_name, "approval", "等待审批")
         elif event_type == "edit_diff_requested":
             self._state = "waiting approval"
             tool_name = payload_text(payload, "tool_name", "unknown")
-            self._append_line(f"文件改动 {tool_name} {status_badge('pending approval')} (pending approval)")
+            self._record_tool_activity(event.turn_index, tool_name, "approval", "文件改动等待审批")
         elif event_type == "user_input_requested":
             self._state = "waiting input"
             question = payload_text(payload, "question", event.message)
@@ -834,7 +863,19 @@ class HaAgentTuiApp(App[None]):
             status = "done"
         elif event.event_type == "tool_failed":
             status = "failed"
-        self._record_tool_line(f"工具 {tool_name} {status_badge(status)} ({status})")
+        summary = payload_text(event.payload, "message", event.message or status)
+        self._record_tool_activity(event.turn_index, tool_name, status, summary)
+
+    def _record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        conversation.add_tool_activity(
+            ToolActivity(
+                tool_name=tool_name,
+                status=_tool_activity_status(status),
+                summary=safe_summary(summary, 96),
+                turn_index=turn_index,
+            ),
+        )
 
     def _handle_user_input_received(self, event: ChatEvent) -> None:
         tool_name = payload_text(event.payload, "tool_name", "request_user_input")
@@ -910,20 +951,21 @@ class HaAgentTuiApp(App[None]):
     def _merge_assistant_delta(self, turn_index: int, delta: str) -> None:
         if not delta:
             return
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        conversation.update_assistant_delta(turn_index, delta)
         if self._streaming_assistant_turn != turn_index:
             self._streaming_assistant_turn = turn_index
             self._streaming_assistant_text = delta
-            self._append_block("Assistant", self._streaming_assistant_text)
             return
         self._streaming_assistant_text += delta
-        self._replace_last_assistant_block(self._streaming_assistant_text)
 
     def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
+        conversation = self.query_one("#conversation", ConversationTimeline)
         if self._streaming_assistant_turn == turn_index:
             final_content = content or self._streaming_assistant_text
-            self._replace_last_assistant_block(final_content)
+            conversation.finalize_assistant(turn_index, final_content)
         else:
-            self._append_block("Assistant", content)
+            conversation.finalize_assistant(turn_index, content)
         self._streaming_assistant_turn = None
         self._streaming_assistant_text = ""
 
@@ -1020,22 +1062,17 @@ class HaAgentTuiApp(App[None]):
         self._refresh()
 
     def _refresh_conversation(self) -> None:
-        conversation = self.query_one("#conversation", ConversationView)
+        conversation = self.query_one("#conversation", ConversationTimeline)
         if self._memory_mode:
             conversation.show_memory(self._memory_panel_text())
             self._conversation_placeholder_rendered = False
             self._conversation_rendered_count = 0
             return
-        if not self._conversation_lines:
+        if not conversation.plain_text:
             if not self._conversation_placeholder_rendered:
                 conversation.show_placeholder()
                 self._conversation_placeholder_rendered = True
             return
-        if self._conversation_placeholder_rendered or self._conversation_rendered_count > len(self._conversation_lines):
-            conversation.clear()
-            self._conversation_rendered_count = 0
-            self._conversation_placeholder_rendered = False
-        conversation.append_lines(self._conversation_lines, start=self._conversation_rendered_count)
         self._conversation_rendered_count = len(self._conversation_lines)
         self.call_after_refresh(self._scroll_conversation_to_end)
 
@@ -1094,27 +1131,46 @@ class HaAgentTuiApp(App[None]):
 
     def _show_session_history(self, status, *, prefix: str) -> None:
         lines = []
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        conversation.clear_timeline()
         try:
             history = list(self.service.current_session_history())
         except Exception as error:
             lines.append(f"{prefix}历史读取失败：{error}")
+            conversation.add_system("会话", lines[-1])
             history = []
         if not history and not lines:
             lines.append("")
         for turn in history:
             lines.append(f"{BLOCK_TITLES['You']}\n  {turn.request}")
             lines.append(f"{BLOCK_TITLES['Assistant']}\n  {turn.summary}")
+            conversation.add_user(turn.request, turn_index=turn.turn_index)
+            conversation.add_assistant_message(turn.summary, turn_index=turn.turn_index)
             if turn.status != "completed":
                 lines.append(f"状态：{turn.status}")
+                conversation.add_system("状态", f"状态：{turn.status}", turn_index=turn.turn_index)
         self._conversation_lines = lines
         self._conversation_rendered_count = 0
-        self._conversation_placeholder_rendered = True
+        self._conversation_placeholder_rendered = False
 
     def _append_block(self, title: str, body: str) -> None:
-        self._conversation_lines.append(f"{BLOCK_TITLES.get(title, title)}\n  {body}")
+        display_title = BLOCK_TITLES.get(title, title)
+        self._conversation_lines.append(f"{display_title}\n  {body}")
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        turn_index = self._active_turn_index or 0
+        if title == "You":
+            conversation.add_user(body, turn_index=turn_index)
+        elif title == "Assistant":
+            conversation.add_assistant_message(body, turn_index=turn_index)
+        elif title == "Failure":
+            conversation.add_failure(body, turn_index=turn_index)
+        else:
+            conversation.add_system(display_title, body, turn_index=turn_index)
 
     def _append_line(self, line: str) -> None:
         self._conversation_lines.append(line)
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        conversation.add_system("系统", line, turn_index=self._active_turn_index or 0)
 
     def _apply_theme(self) -> None:
         for theme in textual_themes():
@@ -1157,6 +1213,12 @@ def _configurable_model_catalog_providers(providers: list[object]) -> list[objec
         if getattr(catalog_provider_capability(provider), "status", None) == "runnable"
         and list(getattr(provider, "models", []) or [])
     ]
+
+
+def _tool_activity_status(status: str) -> ToolStatus:
+    if status in {"running", "approval", "done", "failed"}:
+        return status
+    return "running"
 
 
 def _permission_mode_label(mode: str) -> str:

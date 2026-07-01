@@ -41,7 +41,8 @@ def status_line(status: AssistantWorkspaceStatus, *, ui_state: str, width: int) 
         f"turn:{turn_count} "
         f"sid:{short_session(status.current_session_id or '-', session_limit)}"
     )
-    state = f" 状态: {status_badge(ui_state)} state: {ui_state}"
+    running_label = " HaAgent 正在回答" if ui_state == "running" else ""
+    state = f" 状态: {status_badge(ui_state)}{running_label} state: {ui_state}"
     prefix_width = max(0, width - len(state))
     return f"{truncate_status_line(prefix, prefix_width)}{state}"
 

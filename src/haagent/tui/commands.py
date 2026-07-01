@@ -58,6 +58,7 @@ def command_registry() -> CommandRegistry:
             SlashCommand("cancel", "取消当前任务", "cancel_task"),
             SlashCommand("new", "新建 session", "new_session"),
             SlashCommand("resume", "继续最新 session", "resume_latest"),
+            SlashCommand("details", "显示或隐藏工具详情", "toggle_details"),
         ],
     )
 

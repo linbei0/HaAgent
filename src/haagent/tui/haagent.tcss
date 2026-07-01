@@ -29,10 +29,120 @@ Screen.theme-monochrome {
 #conversation {
     width: 1fr;
     height: 1fr;
-    padding: 1;
+    padding: 1 2;
     border: solid $panel;
+    background: $background;
+    color: $foreground;
     overflow-y: auto;
 }
+
+ConversationTimeline {
+    scrollbar-background: $background;
+    scrollbar-color: $primary;
+}
+
+.timeline-placeholder,
+.timeline-memory {
+    width: 1fr;
+    padding: 1 2;
+    color: $text-muted;
+}
+
+.timeline-item {
+    width: 92%;
+    height: auto;
+    margin-bottom: 1;
+    padding: 1 2;
+    background: $surface;
+    color: $foreground;
+    border-left: heavy $primary;
+}
+
+.timeline-user {
+    width: 78%;
+    margin-left: 0;
+    margin-top: 1;
+    background: $panel;
+    border-left: heavy $secondary;
+}
+
+.timeline-assistant {
+    width: 88%;
+    margin-left: 0;
+    margin-top: 1;
+    background: $surface;
+    border-left: heavy $primary;
+}
+
+.timeline-system {
+    width: 84%;
+    background: $background;
+    border-left: solid $secondary;
+    color: $text-muted;
+}
+
+.timeline-failure,
+.timeline-failed {
+    background: $surface;
+    border-left: heavy $error;
+}
+
+.timeline-header {
+    height: 1;
+    margin-bottom: 1;
+    margin-left: 2;
+    color: $primary;
+    text-style: bold;
+}
+
+.timeline-user .timeline-header {
+    color: $secondary;
+}
+
+.timeline-system .timeline-header {
+    color: $text-muted;
+}
+
+.timeline-failure .timeline-header,
+.timeline-failed .timeline-header {
+    color: $error;
+}
+
+.timeline-body,
+.timeline-answer {
+    width: 1fr;
+    height: auto;
+    margin-left: 2;
+    margin-bottom: 1;
+}
+
+.timeline-answer {
+    margin-top: 1;
+}
+
+.timeline-active {
+    height: 1;
+    margin-top: 1;
+    margin-left: 2;
+    color: $secondary;
+    text-style: bold;
+}
+
+.timeline-streaming {
+    border-left: heavy $secondary;
+}
+
+.timeline-tools {
+    width: 1fr;
+    height: auto;
+    margin-top: 1;
+    margin-left: 2;
+    padding: 1 2;
+    background: $background;
+    color: $text-muted;
+    border-left: solid $warning;
+}
+
 
 #input-panel {
     height: 5;
@@ -147,6 +257,19 @@ Screen.theme-monochrome .status-danger {
 Screen.theme-monochrome #conversation.panel-focused,
 Screen.theme-monochrome #prompt-input.panel-focused {
     border: heavy $foreground;
+}
+
+Screen.theme-monochrome .timeline-item,
+Screen.theme-monochrome .timeline-user,
+Screen.theme-monochrome .timeline-assistant,
+Screen.theme-monochrome .timeline-system,
+Screen.theme-monochrome .timeline-failure,
+Screen.theme-monochrome .timeline-failed,
+Screen.theme-monochrome .timeline-tools,
+Screen.theme-monochrome .timeline-header,
+Screen.theme-monochrome .timeline-active {
+    color: $foreground;
+    border-left: heavy $foreground;
 }
 
 HelpModal,
