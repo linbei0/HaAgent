@@ -139,6 +139,27 @@ def approval_body(request: HumanInteractionRequest) -> str:
     return "\n".join(lines)
 
 
+def edit_diff_body(request: HumanInteractionRequest, *, max_lines: int = 40) -> str:
+    args = request.args_summary
+    diff_preview = str(args.get("diff_preview", ""))
+    diff_lines = diff_preview.splitlines()
+    if len(diff_lines) > max_lines:
+        diff_lines = [*diff_lines[:max_lines], f"... diff preview truncated after {max_lines} lines"]
+    paths = args.get("paths") if isinstance(args.get("paths"), list) else []
+    lines = [
+        "文件改动需要确认",
+        "",
+        f"tool      {safe_summary(request.tool_name, 80)}",
+        f"path      {safe_summary(str(args.get('path') or ', '.join(str(path) for path in paths) or 'unknown'), 160)}",
+        f"change    {safe_summary(str(args.get('change_type', 'modified')), 80)}",
+        f"stats     +{args.get('additions', 0)} -{args.get('deletions', 0)}",
+    ]
+    if request.reason:
+        lines.append(f"reason    {safe_summary(request.reason, 160)}")
+    lines.extend(["", "diff preview", *diff_lines, "", "按 y 允许本次，a 始终允许当前会话内同类改动，n 拒绝。"])
+    return "\n".join(lines)
+
+
 def memory_panel_text(
     *,
     candidates: list[MemoryCandidate],

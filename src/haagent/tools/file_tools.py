@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from difflib import SequenceMatcher
+from difflib import SequenceMatcher, unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from haagent.memory.path_policy import (
     is_workspace_memory_store_path,
 )
 from haagent.runtime.path_policy import PathPolicy, default_path_policy, resolve_path_for_access
+from haagent.runtime.human_interaction import HumanInteractionHandler, HumanInteractionRequest
 from haagent.tools.base import tool_error
 
 
@@ -184,7 +185,12 @@ def file_read(args: dict[str, Any], workspace_root: Path, path_policy: PathPolic
     }
 
 
-def file_write(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def file_write(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    interaction_handler: HumanInteractionHandler | None = None,
+) -> dict[str, Any]:
     path_arg = args.get("path")
     content = args.get("content")
     mode = args.get("mode")
@@ -212,11 +218,35 @@ def file_write(args: dict[str, Any], workspace_root: Path, path_policy: PathPoli
     if mode == "append" and not existed:
         return tool_error("file_not_found", f"path does not exist for append: {path_arg}")
 
-    if mode == "append":
-        with path.open("a", encoding="utf-8") as file:
-            file.write(content)
-    else:
-        path.write_text(content, encoding="utf-8")
+    old_text = path.read_text(encoding="utf-8") if existed else ""
+    new_text = old_text + content if mode == "append" else content
+    change = _file_change_summary(
+        path=path,
+        old_text=old_text,
+        new_text=new_text,
+        change_type="added" if not existed else "modified",
+        bytes_written=len(content.encode("utf-8")),
+        additions=_append_additions(content) if mode == "append" else None,
+        deletions=0 if mode == "append" else None,
+    )
+    if approval_error := _request_edit_approval(
+        interaction_handler,
+        tool_name="file_write",
+        question=f"Approve file edit for {path_arg}?",
+        reason=f"file_write will {mode} {path_arg}",
+        args_summary={
+            "path": path_arg,
+            "mode": mode,
+            "change_type": change["change_type"],
+            "additions": change["additions"],
+            "deletions": change["deletions"],
+            "bytes_written": change["bytes_written"],
+            "diff_preview": _diff_preview(path_arg, old_text, new_text),
+        },
+    ):
+        return approval_error
+
+    path.write_text(new_text, encoding="utf-8")
 
     return {
         "status": "success",
@@ -224,10 +254,16 @@ def file_write(args: dict[str, Any], workspace_root: Path, path_policy: PathPoli
         "mode": mode,
         "bytes_written": len(content.encode("utf-8")),
         "created": not existed,
+        "changed_files": [change],
     }
 
 
-def apply_patch(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def apply_patch(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    interaction_handler: HumanInteractionHandler | None = None,
+) -> dict[str, Any]:
     """仅允许工作区内文件，并要求 old_text 唯一匹配后再写回。"""
     path_arg = args.get("path")
     old_text = args.get("old_text")
@@ -253,17 +289,47 @@ def apply_patch(args: dict[str, Any], workspace_root: Path, path_policy: PathPol
     if count > 1:
         return tool_error("patch_text_not_unique", "old_text must match exactly once")
 
-    path.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
-    return {"status": "success", "path": str(path), "replacements": 1}
+    updated_text = text.replace(old_text, new_text, 1)
+    change = _file_change_summary(
+        path=path,
+        old_text=text,
+        new_text=updated_text,
+        change_type="modified",
+        replacements=1,
+    )
+    if approval_error := _request_edit_approval(
+        interaction_handler,
+        tool_name="apply_patch",
+        question=f"Approve file edit for {path_arg}?",
+        reason=f"apply_patch will modify {path_arg}",
+        args_summary={
+            "path": path_arg,
+            "change_type": change["change_type"],
+            "additions": change["additions"],
+            "deletions": change["deletions"],
+            "replacements": 1,
+            "diff_preview": _diff_preview(path_arg, text, updated_text),
+        },
+    ):
+        return approval_error
+
+    path.write_text(updated_text, encoding="utf-8")
+    return {"status": "success", "path": str(path), "replacements": 1, "changed_files": [change]}
 
 
-def apply_patch_set(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def apply_patch_set(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    interaction_handler: HumanInteractionHandler | None = None,
+) -> dict[str, Any]:
     """原子校验多个唯一文本替换；全部可应用后才写文件。"""
     replacements = args.get("replacements")
     if not isinstance(replacements, list) or not replacements:
         return tool_error("tool_argument_invalid", "replacements must be a non-empty list")
 
     staged_texts: dict[Path, str] = {}
+    original_texts: dict[Path, str] = {}
     summaries: list[dict[str, object]] = []
     for index, replacement in enumerate(replacements):
         if not isinstance(replacement, dict):
@@ -330,6 +396,7 @@ def apply_patch_set(args: dict[str, Any], workspace_root: Path, path_policy: Pat
         text = staged_texts.get(path)
         if text is None:
             text = path.read_text(encoding="utf-8")
+            original_texts[path] = text
         match_count = text.count(old_text)
         if match_count == 0:
             return _patch_set_error(
@@ -364,6 +431,35 @@ def apply_patch_set(args: dict[str, Any], workspace_root: Path, path_policy: Pat
             },
         )
 
+    changed_files = [
+        _file_change_summary(
+            path=path,
+            old_text=original_texts[path],
+            new_text=text,
+            change_type="modified",
+            replacements=sum(1 for summary in summaries if summary["path"] == _display_path(path, workspace_root) or summary["path"] == str(path)),
+        )
+        for path, text in sorted(staged_texts.items(), key=lambda item: str(item[0]))
+    ]
+    if approval_error := _request_edit_approval(
+        interaction_handler,
+        tool_name="apply_patch_set",
+        question="Approve file edits?",
+        reason=f"apply_patch_set will modify {len(changed_files)} file(s)",
+        args_summary={
+            "replacement_count": len(summaries),
+            "paths": [_display_path(path, workspace_root) for path in sorted(staged_texts)],
+            "changed_files": changed_files,
+            "additions": sum(int(item["additions"]) for item in changed_files),
+            "deletions": sum(int(item["deletions"]) for item in changed_files),
+            "diff_preview": "\n".join(
+                _diff_preview(_display_path(path, workspace_root), original_texts[path], staged_texts[path])
+                for path in sorted(staged_texts)
+            ),
+        },
+    ):
+        return approval_error
+
     for path, text in staged_texts.items():
         path.write_text(text, encoding="utf-8")
 
@@ -374,6 +470,7 @@ def apply_patch_set(args: dict[str, Any], workspace_root: Path, path_policy: Pat
         "replacement_count": len(success_summaries),
         "paths": changed_paths,
         "replacements": success_summaries,
+        "changed_files": changed_files,
     }
 
 
@@ -396,6 +493,88 @@ def _display_path(path: Path, workspace_root: Path) -> str:
         return resolved.relative_to(root).as_posix()
     except ValueError:
         return str(resolved)
+
+
+def _file_change_summary(
+    *,
+    path: Path,
+    old_text: str,
+    new_text: str,
+    change_type: str,
+    bytes_written: int | None = None,
+    replacements: int | None = None,
+    additions: int | None = None,
+    deletions: int | None = None,
+) -> dict[str, object]:
+    diff_additions, diff_deletions = _diff_counts(old_text, new_text)
+    summary: dict[str, object] = {
+        "path": str(path),
+        "change_type": change_type,
+        "additions": diff_additions if additions is None else additions,
+        "deletions": diff_deletions if deletions is None else deletions,
+    }
+    if bytes_written is not None:
+        summary["bytes_written"] = bytes_written
+    if replacements is not None:
+        summary["replacements"] = replacements
+    return summary
+
+
+def _request_edit_approval(
+    interaction_handler: HumanInteractionHandler | None,
+    *,
+    tool_name: str,
+    question: str,
+    reason: str,
+    args_summary: dict[str, object],
+) -> dict[str, Any] | None:
+    if interaction_handler is None:
+        return None
+    response = interaction_handler(
+        HumanInteractionRequest(
+            interaction_type="edit_diff",
+            tool_name=tool_name,
+            question=question,
+            reason=reason,
+            risk_level="high",
+            args_summary=args_summary,
+        ),
+    )
+    if response.approved:
+        return None
+    return tool_error("approval_denied", f"edit approval denied for {tool_name}")
+
+
+def _diff_preview(path: str, old_text: str, new_text: str, *, max_lines: int = 80) -> str:
+    lines = list(
+        unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=path,
+            tofile=path,
+            lineterm="",
+        ),
+    )
+    if len(lines) <= max_lines:
+        return "".join(lines)
+    return "".join(lines[:max_lines]) + f"\n... diff truncated after {max_lines} lines"
+
+
+def _diff_counts(old_text: str, new_text: str) -> tuple[int, int]:
+    additions = 0
+    deletions = 0
+    for line in unified_diff(old_text.splitlines(keepends=True), new_text.splitlines(keepends=True), lineterm=""):
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
+
+
+def _append_additions(content: str) -> int:
+    return max(1, content.count("\n"))
 
 
 def _patch_set_error(

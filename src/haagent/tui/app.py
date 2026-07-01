@@ -27,7 +27,7 @@ from haagent.tui.file_ref_modal import FileReferenceOverlay
 from haagent.tui.file_refs import FileReferenceIndex, build_file_reference_index, query_after_at, replace_at_query
 from haagent.tui.keys import APP_BINDINGS, footer_text
 from haagent.tui.memory_presenter import MemoryPanelPresenter
-from haagent.tui.modals import ConfirmModal, HelpModal, PermissionsModal, ToolApprovalModal, ToolDetailsModal
+from haagent.tui.modals import ConfirmModal, EditDiffModal, HelpModal, PermissionsModal, ToolApprovalModal, ToolDetailsModal
 from haagent.tui import path_authorization_flow
 from haagent.tui import permissions_flow
 from haagent.tui import skills_flow
@@ -812,6 +812,13 @@ class HaAgentTuiApp(App[None]):
             self._timeline.apply_event(event)
             self._tool_lines.append(f"{tool_name} pending approval")
             self._append_line(f"工具 {tool_name} {status_badge('pending approval')} (pending approval)")
+        elif event_type == "edit_diff_requested":
+            self._state = "waiting approval"
+            tool_name = payload_text(payload, "tool_name", "unknown")
+            self._pending_decision = f"{tool_name}: 文件改动待确认"
+            self._timeline.apply_event(event)
+            self._tool_lines.append(f"{tool_name} pending edit approval")
+            self._append_line(f"文件改动 {tool_name} {status_badge('pending approval')} (pending approval)")
         elif event_type == "user_input_requested":
             self._state = "waiting input"
             question = payload_text(payload, "question", event.message)
@@ -831,6 +838,19 @@ class HaAgentTuiApp(App[None]):
             self._timeline.apply_event(event)
             self._tool_lines.append(f"{tool_name} denied")
             self._append_line(f"审批已拒绝：{tool_name}")
+        elif event_type == "edit_diff_granted":
+            tool_name = payload_text(payload, "tool_name", "unknown")
+            self._state = "running"
+            self._pending_decision = None
+            self._timeline.apply_event(event)
+            self._tool_lines.append(f"{tool_name} edit approved")
+            self._append_line(f"文件改动已允许：{tool_name}")
+        elif event_type == "edit_diff_denied":
+            tool_name = payload_text(payload, "tool_name", "unknown")
+            self._pending_decision = None
+            self._timeline.apply_event(event)
+            self._tool_lines.append(f"{tool_name} edit denied")
+            self._append_line(f"文件改动已拒绝：{tool_name}")
         elif event_type == "user_input_received":
             self._handle_user_input_received(event)
         elif event_type == "memory_candidates_created":
@@ -906,6 +926,9 @@ class HaAgentTuiApp(App[None]):
         if request.interaction_type == "approval":
             self._state = "waiting approval"
             self.push_screen(ToolApprovalModal(request), self._complete_approval)
+        elif request.interaction_type == "edit_diff":
+            self._state = "waiting approval"
+            self.push_screen(EditDiffModal(request), self._complete_edit_diff)
         else:
             self._state = "waiting input"
             self._set_answer_required(request.question)
@@ -913,6 +936,10 @@ class HaAgentTuiApp(App[None]):
 
     def _complete_approval(self, approved: bool | None) -> None:
         self._complete_interaction(HumanInteractionResponse(approved=bool(approved), answer=""))
+
+    def _complete_edit_diff(self, decision: str | None) -> None:
+        normalized = decision or "deny"
+        self._complete_interaction(HumanInteractionResponse(approved=normalized in {"once", "always"}, answer=normalized))
 
     def _complete_interaction(self, response: HumanInteractionResponse) -> None:
         pending = self._pending_interaction

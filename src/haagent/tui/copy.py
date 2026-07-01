@@ -31,6 +31,7 @@ WORKBENCH_TITLES = {
 MODAL_TITLES = {
     "help": "HaAgent 帮助",
     "approval": "工具审批",
+    "edit_diff": "文件改动审批",
     "tool_details": "工具详情",
     "sessions": "会话",
     "search": "搜索",

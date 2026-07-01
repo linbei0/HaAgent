@@ -18,8 +18,8 @@ from textual.widgets import Button, Static
 from haagent.runtime.human_interaction import HumanInteractionRequest
 from haagent.runtime.path_policy import PermissionMode
 from haagent.tui.copy import MODAL_TITLES
-from haagent.tui.keys import APPROVAL_BINDINGS, HELP_DISMISS_BINDINGS, help_body
-from haagent.tui.renderers import approval_body
+from haagent.tui.keys import APPROVAL_BINDINGS, EDIT_DIFF_BINDINGS, HELP_DISMISS_BINDINGS, help_body
+from haagent.tui.renderers import approval_body, edit_diff_body
 from haagent.tui.tool_timeline import ToolTimelineItem
 
 
@@ -74,6 +74,51 @@ class ToolApprovalModal(ModalScreen[bool]):
 
     def action_help(self) -> None:
         self.app.push_screen(HelpModal("approval"))
+
+
+class EditDiffModal(ModalScreen[str]):
+    BINDINGS = EDIT_DIFF_BINDINGS
+
+    def __init__(self, request: HumanInteractionRequest) -> None:
+        super().__init__()
+        self.request = request
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="approval-dialog"):
+            yield Static(MODAL_TITLES["edit_diff"], id="approval-title")
+            yield Static(Text(edit_diff_body(self.request)), id="approval-body")
+            with Horizontal(id="approval-buttons"):
+                yield Button("允许 y", id="edit-allow-once", variant="success", classes="action-success")
+                yield Button("始终 a", id="edit-allow-always", variant="primary")
+                yield Button("拒绝 n", id="edit-deny", variant="error", classes="action-danger")
+
+    def on_mount(self) -> None:
+        self.query_one("#edit-deny", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "edit-allow-once":
+            self.dismiss("once")
+        elif event.button.id == "edit-allow-always":
+            self.dismiss("always")
+        else:
+            self.dismiss("deny")
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"?", "question_mark"} or event.character == "?":
+            event.stop()
+            self.action_help()
+
+    def action_allow_once(self) -> None:
+        self.dismiss("once")
+
+    def action_allow_always(self) -> None:
+        self.dismiss("always")
+
+    def action_deny(self) -> None:
+        self.dismiss("deny")
+
+    def action_help(self) -> None:
+        self.app.push_screen(HelpModal("edit_diff"))
 
 
 class ToolDetailsModal(ModalScreen[None]):

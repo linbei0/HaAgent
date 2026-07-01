@@ -37,17 +37,20 @@ def summarize_tool_result(tool_name: str, result: dict[str, object]) -> dict[str
             "mode": result.get("mode"),
             "bytes_written": result.get("bytes_written"),
             "created": result.get("created"),
+            "changed_files": _changed_files_summary(result),
         }
     if tool_name == "apply_patch":
         return {
             "path": _summary_value(str(result.get("path", "")), 160),
             "replacements": result.get("replacements"),
+            "changed_files": _changed_files_summary(result),
         }
     if tool_name == "apply_patch_set":
         paths = result.get("paths") if isinstance(result.get("paths"), list) else []
         return {
             "paths": [_summary_value(str(path), 160) for path in paths],
             "replacement_count": result.get("replacement_count"),
+            "changed_files": _changed_files_summary(result),
         }
     if tool_name == "code_run":
         return {
@@ -81,3 +84,25 @@ def _summary_value(value: str, limit: int = 300) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit] + "... [truncated]"
+
+
+def _changed_files_summary(result: dict[str, object]) -> list[dict[str, object]]:
+    changed_files = result.get("changed_files")
+    if not isinstance(changed_files, list):
+        return []
+    summaries: list[dict[str, object]] = []
+    for item in changed_files:
+        if not isinstance(item, dict):
+            continue
+        summary: dict[str, object] = {
+            "path": _summary_value(str(item.get("path", "")), 160),
+            "change_type": str(item.get("change_type", "modified")),
+            "additions": item.get("additions"),
+            "deletions": item.get("deletions"),
+        }
+        if "bytes_written" in item:
+            summary["bytes_written"] = item.get("bytes_written")
+        if "replacements" in item:
+            summary["replacements"] = item.get("replacements")
+        summaries.append(summary)
+    return summaries

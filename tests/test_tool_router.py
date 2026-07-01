@@ -754,6 +754,10 @@ def test_apply_patch_set_replaces_multiple_unique_snippets_atomically(tmp_path: 
 
     assert result["status"] == "success"
     assert result["replacement_count"] == 2
+    assert result["changed_files"] == [
+        {"path": str(first), "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+        {"path": str(second), "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+    ]
     assert [item["status"] for item in result["replacements"]] == ["success", "success"]
     assert first.read_text(encoding="utf-8") == "alpha\nnew one\nomega\n"
     assert second.read_text(encoding="utf-8") == "before\nnew two\nafter\n"
@@ -878,15 +882,140 @@ def test_file_write_create_overwrite_and_append(tmp_path: Path) -> None:
     assert created["status"] == "success"
     assert created["created"] is True
     assert created["bytes_written"] == len("hello\n".encode("utf-8"))
+    assert created["changed_files"] == [
+        {
+            "path": str(tmp_path / "notes.txt"),
+            "change_type": "added",
+            "additions": 1,
+            "deletions": 0,
+            "bytes_written": len("hello\n".encode("utf-8")),
+        },
+    ]
     assert create_existing["status"] == "error"
     assert create_existing["error"]["type"] == "file_exists"
     assert overwritten["status"] == "success"
     assert overwritten["created"] is False
+    assert overwritten["changed_files"] == [
+        {
+            "path": str(tmp_path / "notes.txt"),
+            "change_type": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "bytes_written": len("new".encode("utf-8")),
+        },
+    ]
     assert appended["status"] == "success"
     assert appended["created"] is False
+    assert appended["changed_files"] == [
+        {
+            "path": str(tmp_path / "notes.txt"),
+            "change_type": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "bytes_written": len("\nmore".encode("utf-8")),
+        },
+    ]
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "new\nmore"
     trace_lines = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["tool_name"] for line in trace_lines] == ["file_write"] * 4
+
+
+def test_file_write_requests_edit_diff_before_writing_when_handler_is_available(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+    requests = []
+
+    def interaction_handler(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="once")
+
+    result = router.dispatch(
+        "file_write",
+        {"path": "notes.txt", "content": "hello\n", "mode": "create"},
+        interaction_handler=interaction_handler,
+    )
+
+    assert result["status"] == "success"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello\n"
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.interaction_type == "edit_diff"
+    assert request.tool_name == "file_write"
+    assert request.args_summary["path"] == "notes.txt"
+    assert request.args_summary["change_type"] == "added"
+    assert request.args_summary["additions"] == 1
+    assert request.args_summary["deletions"] == 0
+    assert "+hello" in request.args_summary["diff_preview"]
+
+
+def test_file_write_edit_diff_denial_does_not_modify_workspace(tmp_path: Path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("old\n", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+
+    def interaction_handler(request):
+        return HumanInteractionResponse(approved=False, answer="deny")
+
+    result = router.dispatch(
+        "file_write",
+        {"path": "notes.txt", "content": "new\n", "mode": "overwrite"},
+        interaction_handler=interaction_handler,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "approval_denied"
+    assert target.read_text(encoding="utf-8") == "old\n"
+
+
+def test_apply_patch_set_edit_diff_denial_preserves_atomicity(tmp_path: Path) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("alpha\nold one\nomega\n", encoding="utf-8")
+    second.write_text("before\nold two\nafter\n", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["apply_patch_set"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["apply_patch_set"],
+        approved_tools=["apply_patch_set"],
+    )
+
+    def interaction_handler(request):
+        assert request.interaction_type == "edit_diff"
+        assert request.args_summary["replacement_count"] == 2
+        assert "-old one" in request.args_summary["diff_preview"]
+        assert "+new two" in request.args_summary["diff_preview"]
+        return HumanInteractionResponse(approved=False, answer="deny")
+
+    result = router.dispatch(
+        "apply_patch_set",
+        {
+            "replacements": [
+                {"path": "first.txt", "old_text": "old one", "new_text": "new one"},
+                {"path": "second.txt", "old_text": "old two", "new_text": "new two"},
+            ],
+        },
+        interaction_handler=interaction_handler,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "approval_denied"
+    assert first.read_text(encoding="utf-8") == "alpha\nold one\nomega\n"
+    assert second.read_text(encoding="utf-8") == "before\nold two\nafter\n"
 
 
 def test_file_write_rejects_workspace_escape_and_missing_parent(tmp_path: Path) -> None:
@@ -1439,10 +1568,15 @@ def test_high_risk_tool_with_missing_approval_prompts_and_runs_when_granted(tmp_
 
     assert result["status"] == "success"
     assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "approved"
-    assert len(requests) == 1
+    assert len(requests) == 2
     assert requests[0].interaction_type == "approval"
     assert requests[0].tool_name == "file_write"
     assert requests[0].args_summary == {"content_chars": 8, "mode": "create", "path": "notes.txt"}
+    assert requests[1].interaction_type == "edit_diff"
+    assert requests[1].tool_name == "file_write"
+    assert requests[1].args_summary["path"] == "notes.txt"
+    assert requests[1].args_summary["additions"] == 1
+    assert requests[1].args_summary["deletions"] == 0
     record = _read_single_tool_call(writer)
     assert record["status"] == "success"
     assert record["policy"]["action"] == "allow"

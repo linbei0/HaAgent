@@ -135,6 +135,7 @@ class RunOrchestrator:
                 path_policy=path_policy,
                 approval_allowed_tools=task.policy["approval_allowed_tools"],
                 approved_tools=task.policy["approved_tools"],
+                cancellation_token=self._cancellation_token,
             )
             verification_engine: VerificationEngine | None = None
             passed_verification_commands: set[str] = set()
@@ -476,7 +477,12 @@ def _interaction_bridge(
 
 
 def _interaction_requested_event(turn: int, request: HumanInteractionRequest) -> dict[str, object]:
-    event_type = "approval_requested" if request.interaction_type == "approval" else "user_input_requested"
+    if request.interaction_type == "approval":
+        event_type = "approval_requested"
+    elif request.interaction_type == "edit_diff":
+        event_type = "edit_diff_requested"
+    else:
+        event_type = "user_input_requested"
     return {
         "event_type": event_type,
         "turn": turn,
@@ -516,6 +522,17 @@ def _interaction_response_event(
             "tool_name": request.tool_name,
             "question": request.question,
             "approved": response.approved,
+        }
+    if request.interaction_type == "edit_diff":
+        event_type = "edit_diff_granted" if response.approved else "edit_diff_denied"
+        return {
+            "event_type": event_type,
+            "turn": turn,
+            "tool_name": request.tool_name,
+            "question": request.question,
+            "answer": response.answer,
+            "approved": response.approved,
+            "args_summary": request.args_summary,
         }
     return {
         "event_type": "user_input_received",

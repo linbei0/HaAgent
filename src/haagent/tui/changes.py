@@ -33,6 +33,33 @@ def changed_files_from_tool_event(
     result_summary: dict[str, object],
     workspace_root: Path,
 ) -> list[ChangedFileSummary]:
+    structured = result_summary.get("changed_files")
+    if isinstance(structured, list):
+        items = []
+        for item in structured:
+            if not isinstance(item, dict):
+                continue
+            path = _display_path(str(item.get("path") or "unknown"), workspace_root)
+            additions = item.get("additions")
+            deletions = item.get("deletions")
+            if additions is not None and deletions is not None:
+                summary = f"+{additions} -{deletions}"
+            elif item.get("bytes_written") is not None:
+                summary = f"{item['bytes_written']} bytes"
+            elif item.get("replacements") is not None:
+                summary = f"{item['replacements']} replacements"
+            else:
+                summary = "changed"
+            items.append(
+                ChangedFileSummary(
+                    path=path,
+                    change_type=str(item.get("change_type") or "modified"),
+                    summary=summary,
+                ),
+            )
+        if items:
+            return items
+
     if tool_name == "file_write":
         path = _display_path(str(result_summary.get("path") or args_summary.get("path") or "unknown"), workspace_root)
         created = bool(result_summary.get("created"))

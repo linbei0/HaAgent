@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from haagent.runtime.cancellation import CancellationToken
+
 
 CWD_GUIDANCE = 'cwd is relative to workspace_root; use "." or omit cwd for workspace root'
 DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -53,47 +55,96 @@ class CommandResult:
         return asdict(self)
 
 
-def run_command(command: str, cwd: Path, timeout_seconds: float) -> CommandResult:
+def run_command(
+    command: str,
+    cwd: Path,
+    timeout_seconds: float,
+    cancellation_token: CancellationToken | None = None,
+) -> CommandResult:
     """运行 shell 命令，并用统一结构表达执行结果。"""
-    started = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            command,
-            shell=True,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as error:
-        output = build_output_summary(
-            _decode_timeout_output(error.stdout),
-            _decode_timeout_output(error.stderr),
-        )
-        return CommandResult(
-            command=command,
-            status="timeout",
-            exit_code=None,
-            stdout=output["stdout"],
-            stderr=output["stderr"],
-            stdout_excerpt=output["stdout_excerpt"],
-            stderr_excerpt=output["stderr_excerpt"],
-            stdout_truncated=output["stdout_truncated"],
-            stderr_truncated=output["stderr_truncated"],
-            truncated=output["truncated"],
-            timeout=True,
-            redacted=output["redacted"],
-            duration_seconds=time.perf_counter() - started,
-            timeout_seconds=timeout_seconds,
-        )
+    return run_process(
+        command=command,
+        popen_args=command,
+        shell=True,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+        cancellation_token=cancellation_token,
+    )
 
-    output = build_output_summary(completed.stdout, completed.stderr)
+
+def run_process(
+    *,
+    command: str,
+    popen_args: str | list[str],
+    shell: bool,
+    cwd: Path,
+    timeout_seconds: float,
+    cancellation_token: CancellationToken | None = None,
+) -> CommandResult:
+    """运行本地进程，支持超时和外部取消。"""
+    started = time.perf_counter()
+    process = subprocess.Popen(
+        popen_args,
+        shell=shell,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    while True:
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            stdout, stderr = _stop_process(process)
+            output = build_output_summary(stdout, stderr)
+            return CommandResult(
+                command=command,
+                status="cancelled",
+                exit_code=None,
+                stdout=output["stdout"],
+                stderr=output["stderr"],
+                stdout_excerpt=output["stdout_excerpt"],
+                stderr_excerpt=output["stderr_excerpt"],
+                stdout_truncated=output["stdout_truncated"],
+                stderr_truncated=output["stderr_truncated"],
+                truncated=output["truncated"],
+                timeout=False,
+                redacted=output["redacted"],
+                duration_seconds=time.perf_counter() - started,
+                timeout_seconds=timeout_seconds,
+            )
+        elapsed = time.perf_counter() - started
+        remaining = timeout_seconds - elapsed
+        if remaining <= 0:
+            stdout, stderr = _stop_process(process)
+            output = build_output_summary(stdout, stderr)
+            return CommandResult(
+                command=command,
+                status="timeout",
+                exit_code=None,
+                stdout=output["stdout"],
+                stderr=output["stderr"],
+                stdout_excerpt=output["stdout_excerpt"],
+                stderr_excerpt=output["stderr_excerpt"],
+                stdout_truncated=output["stdout_truncated"],
+                stderr_truncated=output["stderr_truncated"],
+                truncated=output["truncated"],
+                timeout=True,
+                redacted=output["redacted"],
+                duration_seconds=time.perf_counter() - started,
+                timeout_seconds=timeout_seconds,
+            )
+        try:
+            stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
+
+    output = build_output_summary(stdout, stderr)
     return CommandResult(
         command=command,
-        status="success" if completed.returncode == 0 else "failed",
-        exit_code=completed.returncode,
+        status="success" if process.returncode == 0 else "failed",
+        exit_code=process.returncode,
         stdout=output["stdout"],
         stderr=output["stderr"],
         stdout_excerpt=output["stdout_excerpt"],
@@ -106,6 +157,26 @@ def run_command(command: str, cwd: Path, timeout_seconds: float) -> CommandResul
         duration_seconds=time.perf_counter() - started,
         timeout_seconds=timeout_seconds,
     )
+
+
+def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    if process.poll() is None:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            process.terminate()
+    try:
+        return process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        if process.poll() is None:
+            process.kill()
+        stdout, stderr = process.communicate()
+        return stdout, stderr
 
 
 def resolve_execution_cwd(cwd_arg: str | None, workspace_root: Path) -> Path | str:

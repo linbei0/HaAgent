@@ -176,6 +176,12 @@ def runtime_event_message(event_type: str, payload: dict[str, object]) -> str:
         return f"approval granted for {payload.get('tool_name', 'unknown')}"
     if event_type == "approval_denied":
         return f"approval denied for {payload.get('tool_name', 'unknown')}"
+    if event_type == "edit_diff_requested":
+        return f"edit diff requested for {payload.get('tool_name', 'unknown')}"
+    if event_type == "edit_diff_granted":
+        return f"edit diff granted for {payload.get('tool_name', 'unknown')}"
+    if event_type == "edit_diff_denied":
+        return f"edit diff denied for {payload.get('tool_name', 'unknown')}"
     if event_type == "user_input_requested":
         return summary_value(str(payload.get("question", "")))
     if event_type == "user_input_received":
@@ -233,6 +239,16 @@ def runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[s
             "tool_name": str(payload.get("tool_name", "unknown")),
             "question": summary_value(str(payload.get("question", "")), 240),
             "approved": payload.get("approved"),
+            "args_summary": args_summary,
+        }
+    if event_type in {"edit_diff_requested", "edit_diff_granted", "edit_diff_denied"}:
+        args_summary = payload.get("args_summary") if isinstance(payload.get("args_summary"), dict) else {}
+        return {
+            "model_turn": payload.get("turn"),
+            "tool_name": str(payload.get("tool_name", "unknown")),
+            "question": summary_value(str(payload.get("question", "")), 240),
+            "approved": payload.get("approved"),
+            "answer": summary_value(str(payload.get("answer", "")), 80),
             "args_summary": args_summary,
         }
     if event_type == "user_input_requested":

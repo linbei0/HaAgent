@@ -22,6 +22,9 @@ TOOL_EVENT_TYPES = {
     "approval_requested",
     "approval_granted",
     "approval_denied",
+    "edit_diff_requested",
+    "edit_diff_granted",
+    "edit_diff_denied",
 }
 
 
@@ -73,7 +76,7 @@ class ToolTimelineState:
             return
         payload = event.payload
         tool_name = str(payload.get("tool_name", "unknown"))
-        if event.event_type in {"tool_started", "approval_requested"}:
+        if event.event_type in {"tool_started", "approval_requested", "edit_diff_requested"}:
             self.items.append(_item_from_event(event, tool_name))
             if len(self.items) == 1:
                 self.selected_index = 0
@@ -134,7 +137,7 @@ def _item_from_event(event: ChatEvent, tool_name: str) -> ToolTimelineItem:
     payload = event.payload
     args_summary = _mapping(payload.get("args_summary"))
     reason = str(payload.get("reason") or payload.get("question") or event.message or "")
-    status = "pending" if event.event_type == "approval_requested" else "running"
+    status = "pending" if event.event_type in {"approval_requested", "edit_diff_requested"} else "running"
     item = ToolTimelineItem(
         tool_name=tool_name,
         status=status,
@@ -155,9 +158,9 @@ def _update_item_from_event(item: ToolTimelineItem, event: ChatEvent) -> None:
     elif event.event_type == "tool_failed":
         if item.status != "denied":
             item.status = "failed"
-    elif event.event_type == "approval_granted":
+    elif event.event_type in {"approval_granted", "edit_diff_granted"}:
         item.status = "approved"
-    elif event.event_type == "approval_denied":
+    elif event.event_type in {"approval_denied", "edit_diff_denied"}:
         item.status = "denied"
     if payload.get("args_summary"):
         item.args_summary = _mapping(payload.get("args_summary"))

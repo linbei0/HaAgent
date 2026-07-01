@@ -10,7 +10,7 @@ from typing import Literal
 
 from textual.binding import Binding
 
-KeyContext = Literal["chat", "memory_list", "memory_detail", "pending_input", "approval", "too_small"]
+KeyContext = Literal["chat", "memory_list", "memory_detail", "pending_input", "approval", "edit_diff", "too_small"]
 
 APP_BINDINGS = [
     ("ctrl+q", "quit", "退出"),
@@ -27,6 +27,14 @@ APP_BINDINGS = [
 
 APPROVAL_BINDINGS = [
     ("y", "allow", "允许"),
+    ("n", "deny", "拒绝"),
+    ("escape", "deny", "拒绝"),
+    ("?", "help", "帮助"),
+]
+
+EDIT_DIFF_BINDINGS = [
+    ("y", "allow_once", "允许本次"),
+    ("a", "allow_always", "始终允许"),
     ("n", "deny", "拒绝"),
     ("escape", "deny", "拒绝"),
     ("?", "help", "帮助"),
@@ -81,6 +89,14 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("?", "打开此帮助"),
         ("Ctrl+Q", "退出 TUI"),
     ],
+    "edit_diff": [
+        ("y", "允许本次文件改动"),
+        ("a", "始终允许当前会话内同类文件改动"),
+        ("n", "拒绝文件改动"),
+        ("Esc", "拒绝并关闭审批"),
+        ("?", "打开此帮助"),
+        ("Ctrl+Q", "退出 TUI"),
+    ],
     "too_small": [
         ("Ctrl+Q", "退出 TUI"),
     ],
@@ -92,6 +108,7 @@ _HELP_TITLES: dict[KeyContext, str] = {
     "memory_detail": "记忆候选详情",
     "pending_input": "等待补充输入",
     "approval": "审批确认",
+    "edit_diff": "文件改动审批",
     "too_small": "终端尺寸过小",
 }
 
@@ -101,6 +118,7 @@ _FOOTER_KEYS: dict[KeyContext, list[str]] = {
     "memory_detail": ["Esc", "a/y", "r", "?", "Ctrl+Q"],
     "pending_input": ["Enter", "Shift+Enter", "Esc", "?", "Ctrl+Q"],
     "approval": ["y", "n", "Esc", "?", "Ctrl+Q"],
+    "edit_diff": ["y", "a", "n", "Esc", "?", "Ctrl+Q"],
     "too_small": ["Ctrl+Q"],
 }
 
@@ -196,6 +214,8 @@ def _footer_label(description: str) -> str:
         return "拒绝"
     if description.startswith("允许"):
         return "允许"
+    if description.startswith("始终"):
+        return "始终"
     if description.startswith("跳到"):
         return "首尾"
     if description.startswith("移动"):

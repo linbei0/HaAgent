@@ -44,12 +44,36 @@ def test_summarizes_file_write_args_and_result() -> None:
     }
     assert summarize_tool_result(
         "file_write",
-        {"path": "notes/today.md", "mode": "append", "bytes_written": 11, "created": True},
+        {
+            "path": "notes/today.md",
+            "mode": "append",
+            "bytes_written": 11,
+            "created": True,
+            "changed_files": [
+                {
+                    "path": "notes/today.md",
+                    "change_type": "modified",
+                    "additions": 1,
+                    "deletions": 0,
+                    "bytes_written": 11,
+                },
+            ],
+            "diff_preview": "+hello\n+world",
+        },
     ) == {
         "path": "notes/today.md",
         "mode": "append",
         "bytes_written": 11,
         "created": True,
+        "changed_files": [
+            {
+                "path": "notes/today.md",
+                "change_type": "modified",
+                "additions": 1,
+                "deletions": 0,
+                "bytes_written": 11,
+            },
+        ],
     }
 
 
@@ -62,9 +86,22 @@ def test_summarizes_apply_patch_args_and_result() -> None:
         "old_text_chars": 3,
         "path": "src/app.py",
     }
-    assert summarize_tool_result("apply_patch", {"path": "src/app.py", "replacements": 2}) == {
+    assert summarize_tool_result(
+        "apply_patch",
+        {
+            "path": "src/app.py",
+            "replacements": 2,
+            "changed_files": [
+                {"path": "src/app.py", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 2},
+            ],
+            "diff_preview": "-old\n+newer",
+        },
+    ) == {
         "path": "src/app.py",
         "replacements": 2,
+        "changed_files": [
+            {"path": "src/app.py", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 2},
+        ],
     }
 
 
@@ -81,8 +118,23 @@ def test_summarizes_apply_patch_set_args_and_result() -> None:
     ) == {"replacement_count": 3, "paths": ["src/a.py", "src/b.py"]}
     assert summarize_tool_result(
         "apply_patch_set",
-        {"paths": ["src/a.py", "src/b.py"], "replacement_count": 2},
-    ) == {"paths": ["src/a.py", "src/b.py"], "replacement_count": 2}
+        {
+            "paths": ["src/a.py", "src/b.py"],
+            "replacement_count": 2,
+            "changed_files": [
+                {"path": "src/a.py", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+                {"path": "src/b.py", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+            ],
+            "diff_preview": "-a\n+b",
+        },
+    ) == {
+        "paths": ["src/a.py", "src/b.py"],
+        "replacement_count": 2,
+        "changed_files": [
+            {"path": "src/a.py", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+            {"path": "src/b.py", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+        ],
+    }
 
 
 def test_summarizes_code_run_and_shell_output_excerpts() -> None:

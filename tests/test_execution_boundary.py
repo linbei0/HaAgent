@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 from haagent.context.builder import ContextBuilder
+from haagent.runtime.cancellation import CancellationToken
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.path_policy import ExternalRoot, PathPolicy
 from haagent.runtime.plan import build_plan
@@ -51,6 +54,29 @@ def test_shell_defaults_cwd_to_workspace_root_and_supports_dot(tmp_path: Path) -
     assert missing["truncated"] is False
     assert dot["status"] == "success"
     assert dot["stdout_excerpt"].strip() == str(tmp_path.resolve())
+
+
+def test_code_run_terminates_python_process_when_cancelled(tmp_path: Path) -> None:
+    token = CancellationToken()
+
+    def cancel_soon() -> None:
+        time.sleep(0.05)
+        token.cancel()
+
+    thread = threading.Thread(target=cancel_soon)
+    thread.start()
+    result = code_run(
+        {"code": "import time\ntime.sleep(5)", "timeout_seconds": 10},
+        tmp_path,
+        cancellation_token=token,
+    )
+    thread.join(timeout=1)
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "cancelled"
+    assert result["exit_code"] is None
+    assert result["timeout"] is False
+    assert result["truncated"] is False
 
 
 def test_shell_rejects_workspace_escape_before_execution(tmp_path: Path) -> None:

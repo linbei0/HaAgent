@@ -10,11 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from haagent.runtime.command import CWD_GUIDANCE, normalize_timeout, resolve_execution_cwd, run_command
+from haagent.runtime.cancellation import CancellationToken
 from haagent.runtime.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
 from haagent.tools.base import tool_error
 
 
-def shell(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def shell(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> dict[str, Any]:
     """运行 shell 命令，捕获 stdout/stderr/exit_code，并把失败结构化返回。"""
     command = args.get("command")
     if not isinstance(command, str) or not command:
@@ -35,7 +41,7 @@ def shell(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | 
     if isinstance(timeout_result, str):
         return tool_error("tool_argument_invalid", timeout_result)
 
-    command_result = run_command(command, cwd_result, timeout_result)
+    command_result = run_command(command, cwd_result, timeout_result, cancellation_token=cancellation_token)
     result = {
         "status": "success" if command_result.status == "success" else "error",
         "exit_code": command_result.exit_code,
@@ -52,6 +58,11 @@ def shell(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | 
         result["error"] = {
             "type": "timeout",
             "message": f"command timed out after {timeout_result} seconds",
+        }
+    elif command_result.status == "cancelled":
+        result["error"] = {
+            "type": "cancelled",
+            "message": "command cancelled by user",
         }
     elif command_result.status == "failed":
         result["error"] = {

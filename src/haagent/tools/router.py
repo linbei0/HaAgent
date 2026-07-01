@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from haagent.runtime.cancellation import CancellationToken
 from haagent.runtime.episode import EpisodeWriter
 from haagent.runtime.guardrails import GuardrailResult, check_tool_input, guardrail_evidence
 from haagent.runtime.human_interaction import (
@@ -45,6 +46,7 @@ class ToolRouter:
         approval_allowed_tools: list[str] | None = None,
         approved_tools: list[str] | None = None,
         skill_settings: SkillSettings | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -52,6 +54,7 @@ class ToolRouter:
         self._episode_writer = episode_writer
         self._workspace_root = workspace_root.resolve()
         self._skill_settings = skill_settings
+        self._cancellation_token = cancellation_token
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
         self._handlers: dict[str, ToolHandler] = {
             "fake_tool": self._fake_tool,
@@ -66,10 +69,20 @@ class ToolRouter:
             "web_search": web_search,
             "web_fetch": web_fetch,
             "file_write": lambda args: file_write(args, self._workspace_root, self._path_policy),
-            "code_run": lambda args: code_run(args, self._workspace_root, self._path_policy),
+            "code_run": lambda args: code_run(
+                args,
+                self._workspace_root,
+                self._path_policy,
+                cancellation_token=self._cancellation_token,
+            ),
             "apply_patch": lambda args: apply_patch(args, self._workspace_root, self._path_policy),
             "apply_patch_set": lambda args: apply_patch_set(args, self._workspace_root, self._path_policy),
-            "shell": lambda args: shell(args, self._workspace_root, self._path_policy),
+            "shell": lambda args: shell(
+                args,
+                self._workspace_root,
+                self._path_policy,
+                cancellation_token=self._cancellation_token,
+            ),
         }
         try:
             validate_tool_registry()
@@ -115,7 +128,7 @@ class ToolRouter:
                 elif tool_name == "request_user_input":
                     result = self._request_user_input(args, interaction_handler)
                 else:
-                    result = self._handlers[tool_name](args)
+                    result = self._run_handler(tool_name, args, interaction_handler)
         except Exception as error:
             result = tool_error(type(error).__name__, str(error))
 
@@ -221,7 +234,21 @@ class ToolRouter:
                 granted_policy,
                 guardrail_result,
             )
-        return self._handlers[tool_name](args), granted_policy, None
+        return self._run_handler(tool_name, args, interaction_handler), granted_policy, None
+
+    def _run_handler(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        interaction_handler: HumanInteractionHandler | None,
+    ) -> dict[str, Any]:
+        if tool_name == "file_write":
+            return file_write(args, self._workspace_root, self._path_policy, interaction_handler)
+        if tool_name == "apply_patch":
+            return apply_patch(args, self._workspace_root, self._path_policy, interaction_handler)
+        if tool_name == "apply_patch_set":
+            return apply_patch_set(args, self._workspace_root, self._path_policy, interaction_handler)
+        return self._handlers[tool_name](args)
 
     def _assert_registry_alignment(self) -> None:
         """Router 和 Registry 必须同步，否则 allowed_tools 审计会和实际执行脱节。"""

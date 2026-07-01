@@ -1,11 +1,14 @@
 """
 tests/test_command.py - CommandRunner 测试
 
-验证统一命令执行器能表达成功、非零退出和超时结果。
+验证统一命令执行器能表达成功、非零退出、超时和取消结果。
 """
 
+import threading
+import time
 from pathlib import Path
 
+from haagent.runtime.cancellation import CancellationToken
 from haagent.runtime.command import run_command
 
 
@@ -55,3 +58,26 @@ def test_run_command_records_timeout(tmp_path: Path) -> None:
     assert result.stderr == ""
     assert result.duration_seconds >= 0
     assert result.timeout_seconds == 0.01
+
+
+def test_run_command_terminates_process_when_cancelled(tmp_path: Path) -> None:
+    token = CancellationToken()
+
+    def cancel_soon() -> None:
+        time.sleep(0.05)
+        token.cancel()
+
+    thread = threading.Thread(target=cancel_soon)
+    thread.start()
+    result = run_command(
+        "python -c \"import time; time.sleep(5)\"",
+        cwd=tmp_path,
+        timeout_seconds=10,
+        cancellation_token=token,
+    )
+    thread.join(timeout=1)
+
+    assert result.status == "cancelled"
+    assert result.exit_code is None
+    assert result.timeout is False
+    assert result.duration_seconds < 5

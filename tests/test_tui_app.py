@@ -473,7 +473,12 @@ async def _open_memory_panel(app: HaAgentTuiApp, pilot) -> None:
 
 
 def _interaction_requested_event(request: HumanInteractionRequest, turn_index: int) -> ChatEvent:
-    event_type = "approval_requested" if request.interaction_type == "approval" else "user_input_requested"
+    if request.interaction_type == "approval":
+        event_type = "approval_requested"
+    elif request.interaction_type == "edit_diff":
+        event_type = "edit_diff_requested"
+    else:
+        event_type = "user_input_requested"
     return ChatEvent(
         event_type=event_type,
         session_id="session-test",
@@ -497,6 +502,14 @@ def _interaction_response_event(
 ) -> ChatEvent:
     if request.interaction_type == "approval":
         event_type = "approval_granted" if response.approved else "approval_denied"
+        payload = {
+            "tool_name": request.tool_name,
+            "question": request.question,
+            "approved": response.approved,
+            "args_summary": request.args_summary,
+        }
+    elif request.interaction_type == "edit_diff":
+        event_type = "edit_diff_granted" if response.approved else "edit_diff_denied"
         payload = {
             "tool_name": request.tool_name,
             "question": request.question,
@@ -984,6 +997,23 @@ def test_tui_skill_command_without_name_opens_skill_picker(tmp_path: Path) -> No
                 "disable_model_invocation": False,
             },
         ],
+    )
+
+
+def _edit_diff_request() -> HumanInteractionRequest:
+    return HumanInteractionRequest(
+        interaction_type="edit_diff",
+        tool_name="file_write",
+        question="Approve file edit?",
+        reason="file_write will modify notes.txt",
+        risk_level="high",
+        args_summary={
+            "path": "notes.txt",
+            "change_type": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "diff_preview": "--- notes.txt\n+++ notes.txt\n@@\n-old\n+new",
+        },
     )
 
     async def run_test() -> None:
@@ -2315,7 +2345,19 @@ def test_tui_tool_timeline_state_tracks_started_done_failed_and_redacts_secret(t
             payload={
                 "tool_name": "shell",
                 "status": "success",
-                "result_summary": {"exit_code": 0, "stdout_excerpt": f"ok {secret}", "stderr_excerpt": ""},
+                "result_summary": {
+                    "exit_code": 0,
+                    "stdout_excerpt": f"ok {secret}",
+                    "stderr_excerpt": "",
+                    "changed_files": [
+                        {
+                            "path": "notes.txt",
+                            "change_type": "modified",
+                            "additions": 1,
+                            "deletions": 1,
+                        },
+                    ],
+                },
                 "episode_path": str(tmp_path / ".runs" / "episode-ok"),
             },
         ),
@@ -2342,33 +2384,57 @@ def test_tui_tool_timeline_state_tracks_started_done_failed_and_redacts_secret(t
     assert "done" in rendered
     assert "file_read" in rendered
     assert "failed" in rendered
+    assert "notes.txt" in detail
+    assert "additions" in detail
     assert secret not in rendered
     assert secret not in detail
     assert "[REDACTED_TOKEN]" in detail
 
 
-def test_tui_changed_file_summary_extracts_file_write_and_patch_without_git(tmp_path: Path) -> None:
+def test_tui_changed_file_summary_prefers_structured_changed_files(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
     write_summary = changed_files_from_tool_event(
         "file_write",
         args_summary={"path": "notes/today.md", "mode": "create", "content_chars": 20},
-        result_summary={"path": str(workspace / "notes" / "today.md"), "mode": "create", "bytes_written": 20, "created": True},
+        result_summary={
+            "path": str(workspace / "notes" / "today.md"),
+            "mode": "create",
+            "bytes_written": 20,
+            "created": True,
+            "changed_files": [
+                {
+                    "path": str(workspace / "notes" / "today.md"),
+                    "change_type": "added",
+                    "additions": 2,
+                    "deletions": 0,
+                    "bytes_written": 20,
+                },
+            ],
+        },
         workspace_root=workspace,
     )
     patch_summary = changed_files_from_tool_event(
         "apply_patch_set",
         args_summary={"paths": ["docs/a.md", "docs/b.md"], "replacement_count": 2},
-        result_summary={"paths": ["docs/a.md", "docs/b.md"], "replacement_count": 2},
+        result_summary={
+            "paths": ["ignored.md"],
+            "replacement_count": 2,
+            "changed_files": [
+                {"path": "docs/a.md", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+                {"path": "docs/b.md", "change_type": "modified", "additions": 1, "deletions": 1, "replacements": 1},
+            ],
+        },
         workspace_root=workspace,
     )
 
     assert [item.path for item in write_summary] == ["notes/today.md"]
     assert write_summary[0].change_type == "added"
-    assert "20 bytes" in write_summary[0].summary
+    assert "+2 -0" in write_summary[0].summary
     assert [item.path for item in patch_summary] == ["docs/a.md", "docs/b.md"]
     assert all(item.change_type == "modified" for item in patch_summary)
+    assert all("+1 -1" in item.summary for item in patch_summary)
 
 
 def test_tui_workspace_path_containment_is_normalized(tmp_path: Path) -> None:
@@ -2916,6 +2982,42 @@ def test_tui_help_modal_is_contextual_for_approval_modal(tmp_path: Path) -> None
             assert "n" in rendered
 
     asyncio.run(run())
+
+
+def test_tui_edit_diff_modal_returns_allow_and_deny_responses(tmp_path: Path) -> None:
+    async def allow_run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path / "allow", interaction_request=_edit_diff_request())
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Write notes"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            rendered = _all_text(app)
+            assert "文件改动审批" in rendered
+            assert "notes.txt" in rendered
+            assert "-old" in rendered
+            assert "+new" in rendered
+            await pilot.press("y")
+            await pilot.pause(0.2)
+            assert service.interaction_responses[-1].approved is True
+            assert service.interaction_responses[-1].answer == "once"
+
+    async def deny_run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path / "deny", interaction_request=_edit_diff_request())
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Write notes"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            await pilot.press("n")
+            await pilot.pause(0.2)
+            assert service.interaction_responses[-1].approved is False
+            assert service.interaction_responses[-1].answer == "deny"
+
+    asyncio.run(allow_run())
+    asyncio.run(deny_run())
 
 
 def test_tui_text_area_shift_enter_inserts_newline_and_enter_submits_prompt(tmp_path: Path) -> None:
