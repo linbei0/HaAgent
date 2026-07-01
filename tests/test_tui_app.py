@@ -236,8 +236,6 @@ class FakeAssistantService:
 
     def cancel_current_run(self):
         self.cancelled_count += 1
-        self.block_until_released = False
-        self.release.set()
         return SimpleNamespace(status="cancelled", reason="user_cancelled")
 
     def list_sessions(self) -> list[AssistantSessionSummary]:
@@ -3599,6 +3597,10 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
             await pilot.pause(0.2)
 
             assert service.cancelled_count == 1
+            assert "state: cancelling" in _text(app, "#status-bar")
+            assert "任务正在取消" in _text(app, "#conversation")
+            service.release.set()
+            await pilot.pause(0.2)
             assert "state: cancelled" in _text(app, "#status-bar")
             assert "当前阶段" in _text(app, "#side-bar")
             assert "cancelled" in _text(app, "#side-bar")
@@ -4104,6 +4106,42 @@ def test_tui_conversation_wraps_long_messages_for_scroll_height(tmp_path: Path) 
             assert longest_line <= conversation.content_size.width
             assert conversation.virtual_size.height > len(app._conversation_lines)
             assert conversation.scroll_y == conversation.max_scroll_y
+
+    asyncio.run(run())
+
+
+def test_tui_merges_assistant_delta_events_into_single_response_block(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                ChatEvent(
+                    event_type="assistant_delta",
+                    session_id="session-test",
+                    turn_index=1,
+                    message="Ha",
+                    payload={"delta": "Ha"},
+                ),
+                ChatEvent(
+                    event_type="assistant_delta",
+                    session_id="session-test",
+                    turn_index=1,
+                    message="Agent",
+                    payload={"delta": "Agent"},
+                ),
+            ],
+            assistant_content="HaAgent",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "介绍能力"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = _text(app, "#conversation")
+            assert conversation.count("HaAgent\n") == 1
+            assert "HaAgent" in conversation
 
     asyncio.run(run())
 

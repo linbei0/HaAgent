@@ -93,6 +93,8 @@ class HaAgentTuiApp(App[None]):
         self._conversation_rendered_count = 0
         self._conversation_placeholder_rendered = False
         self._tool_lines: list[str] = []
+        self._streaming_assistant_turn: int | None = None
+        self._streaming_assistant_text = ""
         self._timeline = ToolTimelineState()
         self._changed_files: list[ChangedFileSummary] = []
         self._last_failure: FailureView | None = None
@@ -797,8 +799,11 @@ class HaAgentTuiApp(App[None]):
     def _handle_chat_event(self, event: ChatEvent) -> None:
         event_type = event.event_type
         payload = event.payload
-        if event_type == "assistant_message":
-            self._append_block("Assistant", payload_text(payload, "content", event.message))
+        if event_type == "assistant_delta":
+            delta = payload_text(payload, "delta", event.message)
+            self._merge_assistant_delta(event.turn_index, delta)
+        elif event_type == "assistant_message":
+            self._finalize_assistant_message(event.turn_index, payload_text(payload, "content", event.message))
         elif event_type == "tool_started":
             self._record_tool_event(event)
         elif event_type == "tool_finished":
@@ -961,6 +966,37 @@ class HaAgentTuiApp(App[None]):
     def _restore_prompt_input(self) -> None:
         self.query_one("#prompt-input", PromptInput).placeholder = self._default_prompt_placeholder
 
+    def _merge_assistant_delta(self, turn_index: int, delta: str) -> None:
+        if not delta:
+            return
+        if self._streaming_assistant_turn != turn_index:
+            self._streaming_assistant_turn = turn_index
+            self._streaming_assistant_text = delta
+            self._append_block("Assistant", self._streaming_assistant_text)
+            return
+        self._streaming_assistant_text += delta
+        self._replace_last_assistant_block(self._streaming_assistant_text)
+
+    def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
+        if self._streaming_assistant_turn == turn_index:
+            final_content = content or self._streaming_assistant_text
+            self._replace_last_assistant_block(final_content)
+        else:
+            self._append_block("Assistant", content)
+        self._streaming_assistant_turn = None
+        self._streaming_assistant_text = ""
+
+    def _replace_last_assistant_block(self, body: str) -> None:
+        assistant_title = BLOCK_TITLES.get("Assistant", "Assistant")
+        replacement = f"{assistant_title}\n  {body}"
+        for index in range(len(self._conversation_lines) - 1, -1, -1):
+            if self._conversation_lines[index].startswith(f"{assistant_title}\n"):
+                self._conversation_lines[index] = replacement
+                self._conversation_placeholder_rendered = True
+                self._conversation_rendered_count = 0
+                return
+        self._conversation_lines.append(replacement)
+
     def _prompt_value(self, prompt_input: PromptInput) -> str:
         return prompt_input.text
 
@@ -969,13 +1005,13 @@ class HaAgentTuiApp(App[None]):
         prompt_input.move_cursor(_end_location(value))
 
     def _finish_prompt(self, status: str) -> None:
-        if self._state == "cancelled":
-            self._refresh()
-            return
+        self._streaming_assistant_turn = None
+        self._streaming_assistant_text = ""
         if status == "completed" and self._state not in {"waiting approval", "waiting input", "cancelled"}:
             self._state = "idle"
         elif status == "cancelled":
             self._state = "cancelled"
+            self._append_block("Cancel", "任务已取消。你可以调整请求后再次提交。")
         elif status != "completed":
             self._state = "failed"
             if self._last_failure is None:
@@ -1072,8 +1108,8 @@ class HaAgentTuiApp(App[None]):
             self._pending_interaction = None
         self._pending_decision = None
         self._restore_prompt_input()
-        self._state = "cancelled"
-        self._append_block("Cancel", "任务已取消。你可以调整请求后再次提交。")
+        self._state = "cancelling"
+        self._append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
         self._refresh()
 
     def _refresh_conversation(self) -> None:

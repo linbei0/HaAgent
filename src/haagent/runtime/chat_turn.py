@@ -186,6 +186,8 @@ def runtime_event_message(event_type: str, payload: dict[str, object]) -> str:
         return summary_value(str(payload.get("question", "")))
     if event_type == "user_input_received":
         return "user input received"
+    if event_type == "assistant_delta":
+        return summary_value(str(payload.get("delta", "")))
     if event_type == "assistant_message":
         return summary_value(str(payload.get("content", "")))
     if event_type == "guardrail_triggered":
@@ -265,6 +267,11 @@ def runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[s
             "question": summary_value(str(payload.get("question", "")), 240),
             "answer_chars": payload.get("answer_chars"),
             "approved": payload.get("approved"),
+        }
+    if event_type == "assistant_delta":
+        return {
+            "model_turn": payload.get("turn"),
+            "delta": str(payload.get("delta", "")),
         }
     if event_type == "assistant_message":
         return {

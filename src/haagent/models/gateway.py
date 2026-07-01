@@ -37,13 +37,17 @@ class ModelGateway(Protocol):
         self,
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
+        event_sink: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Generate a model response given a conversation messages list."""
 
 
 Transport = Callable[[dict[str, object], str], dict[str, object]]
+StreamTransport = Callable[[dict[str, object], str, Callable[[str], None]], dict[str, object]]
 AnthropicTransport = Callable[[dict[str, object], str, str], dict[str, object]]
+AnthropicStreamTransport = Callable[[dict[str, object], str, str, Callable[[str], None]], dict[str, object]]
 GoogleGeminiTransport = Callable[[dict[str, object], str, str], dict[str, object]]
+GoogleGeminiStreamTransport = Callable[[dict[str, object], str, str, Callable[[str], None]], dict[str, object]]
 DEFAULT_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
 DEFAULT_CHAT_COMPLETIONS_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT = "https://api.anthropic.com/v1/messages"
@@ -59,6 +63,7 @@ class OpenAIResponsesGateway:
         model: str = "gpt-4.1-mini",
         base_url: str | None = None,
         transport: Transport | None = None,
+        stream_transport: StreamTransport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._model = model
@@ -75,6 +80,14 @@ class OpenAIResponsesGateway:
                 self._responses_endpoint,
             )
         )
+        self._stream_transport = stream_transport or (
+            lambda payload, api_key, on_delta: _responses_stream_transport(
+                payload,
+                api_key,
+                self._responses_endpoint,
+                on_delta,
+            )
+        )
 
     @property
     def responses_endpoint(self) -> str:
@@ -85,6 +98,7 @@ class OpenAIResponsesGateway:
         self,
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
+        event_sink: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
         if not self._api_key:
@@ -97,8 +111,14 @@ class OpenAIResponsesGateway:
         }
         if tool_schemas:
             payload["tools"] = tool_schemas
+        if event_sink is not None:
+            payload["stream"] = True
         try:
-            response = self._transport(payload, self._api_key)
+            response = (
+                self._stream_transport(payload, self._api_key, event_sink)
+                if event_sink is not None
+                else self._transport(payload, self._api_key)
+            )
         except Exception as error:
             raise ModelCallError(str(error)) from error
 
@@ -117,6 +137,7 @@ class OpenAIChatCompletionsGateway:
         model: str = "gpt-4.1-mini",
         base_url: str | None = None,
         transport: Transport | None = None,
+        stream_transport: StreamTransport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._model = model
@@ -126,6 +147,14 @@ class OpenAIChatCompletionsGateway:
                 payload,
                 api_key,
                 self._chat_completions_endpoint,
+            )
+        )
+        self._stream_transport = stream_transport or (
+            lambda payload, api_key, on_delta: _chat_completions_stream_transport(
+                payload,
+                api_key,
+                self._chat_completions_endpoint,
+                on_delta,
             )
         )
 
@@ -138,6 +167,7 @@ class OpenAIChatCompletionsGateway:
         self,
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
+        event_sink: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """调用 OpenAI Chat Completions 兼容 API，并归一化为 ModelResponse。"""
         if not self._api_key:
@@ -151,8 +181,14 @@ class OpenAIChatCompletionsGateway:
         }
         if tool_schemas:
             payload["tools"] = _chat_tool_schemas(tool_schemas)
+        if event_sink is not None:
+            payload["stream"] = True
         try:
-            response = self._transport(payload, self._api_key)
+            response = (
+                self._stream_transport(payload, self._api_key, event_sink)
+                if event_sink is not None
+                else self._transport(payload, self._api_key)
+            )
         except Exception as error:
             raise ModelCallError(str(error)) from error
         return _parse_chat_completion_response(response)
@@ -167,11 +203,13 @@ class AnthropicMessagesGateway:
         model: str = "claude-sonnet-4-5",
         base_url: str | None = None,
         transport: AnthropicTransport | None = None,
+        stream_transport: AnthropicStreamTransport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._model = model
         self._messages_endpoint = _normalize_anthropic_messages_endpoint(base_url)
         self._transport = transport or _anthropic_transport
+        self._stream_transport = stream_transport or _anthropic_stream_transport
 
     @property
     def messages_endpoint(self) -> str:
@@ -182,6 +220,7 @@ class AnthropicMessagesGateway:
         self,
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
+        event_sink: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """调用 Anthropic Messages API，并归一化为统一 ModelResponse。"""
         if not self._api_key:
@@ -197,8 +236,14 @@ class AnthropicMessagesGateway:
             payload["system"] = system
         if tool_schemas:
             payload["tools"] = _anthropic_tool_schemas(tool_schemas)
+        if event_sink is not None:
+            payload["stream"] = True
         try:
-            response = self._transport(payload, self._api_key, self._messages_endpoint)
+            response = (
+                self._stream_transport(payload, self._api_key, self._messages_endpoint, event_sink)
+                if event_sink is not None
+                else self._transport(payload, self._api_key, self._messages_endpoint)
+            )
         except Exception as error:
             raise ModelCallError(str(error)) from error
         return _parse_anthropic_response(response)
@@ -213,11 +258,13 @@ class GoogleGeminiGateway:
         model: str = "gemini-2.5-pro",
         base_url: str | None = None,
         transport: GoogleGeminiTransport | None = None,
+        stream_transport: GoogleGeminiStreamTransport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         self._model = model
         self._endpoint = _normalize_gemini_generate_content_endpoint(base_url, model)
         self._transport = transport or _google_gemini_transport
+        self._stream_transport = stream_transport or _google_gemini_stream_transport
 
     @property
     def generate_content_endpoint(self) -> str:
@@ -228,6 +275,7 @@ class GoogleGeminiGateway:
         self,
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
+        event_sink: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """调用 Gemini generateContent API，并归一化为统一 ModelResponse。"""
         if not self._api_key:
@@ -241,8 +289,14 @@ class GoogleGeminiGateway:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         if tool_schemas:
             payload["tools"] = _gemini_tool_schemas(tool_schemas)
+        if event_sink is not None:
+            payload["stream"] = True
         try:
-            response = self._transport(payload, self._api_key, self._endpoint)
+            response = (
+                self._stream_transport(payload, self._api_key, self._endpoint, event_sink)
+                if event_sink is not None
+                else self._transport(payload, self._api_key, self._endpoint)
+            )
         except Exception as error:
             raise ModelCallError(str(error)) from error
         return _parse_gemini_response(response)
@@ -801,3 +855,267 @@ def _google_gemini_transport(
             f"Gemini request failed with HTTP {error.code}: {detail}",
         ) from error
     return json.loads(body)
+
+
+def _responses_stream_transport(
+    payload: dict[str, object],
+    api_key: str,
+    endpoint: str,
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return _parse_openai_responses_stream(response, on_delta)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ModelCallError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
+
+
+def _chat_completions_stream_transport(
+    payload: dict[str, object],
+    api_key: str,
+    endpoint: str,
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return _parse_openai_chat_stream(response, on_delta)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ModelCallError(
+            f"OpenAI chat request failed with HTTP {error.code}: {detail}",
+        ) from error
+
+
+def _anthropic_stream_transport(
+    payload: dict[str, object],
+    api_key: str,
+    endpoint: str,
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return _parse_anthropic_stream(response, on_delta)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ModelCallError(
+            f"Anthropic request failed with HTTP {error.code}: {detail}",
+        ) from error
+
+
+def _google_gemini_stream_transport(
+    payload: dict[str, object],
+    api_key: str,
+    endpoint: str,
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
+    stream_endpoint = endpoint.replace(":generateContent", ":streamGenerateContent")
+    separator = "&" if "?" in stream_endpoint else "?"
+    request = urllib.request.Request(
+        f"{stream_endpoint}{separator}alt=sse&key={api_key}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return _parse_gemini_stream(response, on_delta)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ModelCallError(
+            f"Gemini request failed with HTTP {error.code}: {detail}",
+        ) from error
+
+
+def _iter_sse_events(response) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    event_lines: list[str] = []
+    for raw_line in response:
+        line = raw_line.decode("utf-8").strip()
+        if not line:
+            if event_lines:
+                data_chunks = [part[5:].strip() for part in event_lines if part.startswith("data:")]
+                if data_chunks:
+                    data = "\n".join(data_chunks)
+                    if data != "[DONE]":
+                        events.append(json.loads(data))
+                event_lines = []
+            continue
+        event_lines.append(line)
+    if event_lines:
+        data_chunks = [part[5:].strip() for part in event_lines if part.startswith("data:")]
+        if data_chunks:
+            data = "\n".join(data_chunks)
+            if data != "[DONE]":
+                events.append(json.loads(data))
+    return events
+
+
+def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict[str, object]] = {}
+    for event in _iter_sse_events(response):
+        choices = event.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                content_parts.append(content)
+                on_delta(content)
+            raw_tool_calls = delta.get("tool_calls")
+            if not isinstance(raw_tool_calls, list):
+                continue
+            for item in raw_tool_calls:
+                if not isinstance(item, dict):
+                    continue
+                index = int(item.get("index", 0))
+                aggregated = tool_calls.setdefault(
+                    index,
+                    {"id": str(item.get("id") or ""), "type": "function", "function": {"name": "", "arguments": ""}},
+                )
+                if item.get("id"):
+                    aggregated["id"] = str(item["id"])
+                function = item.get("function")
+                if not isinstance(function, dict):
+                    continue
+                aggregated_function = aggregated["function"]
+                if isinstance(function.get("name"), str):
+                    aggregated_function["name"] = function["name"]
+                if isinstance(function.get("arguments"), str):
+                    aggregated_function["arguments"] += function["arguments"]
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": "".join(content_parts),
+                    "tool_calls": [tool_calls[index] for index in sorted(tool_calls)],
+                },
+            },
+        ],
+    }
+
+
+def _parse_openai_responses_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    output_text_parts: list[str] = []
+    final_response: dict[str, object] | None = None
+    for event in _iter_sse_events(response):
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                output_text_parts.append(delta)
+                on_delta(delta)
+        elif event_type == "response.completed":
+            response_payload = event.get("response")
+            if isinstance(response_payload, dict):
+                final_response = response_payload
+    if final_response is None:
+        final_response = {"output_text": "".join(output_text_parts), "output": []}
+    elif not isinstance(final_response.get("output_text"), str):
+        final_response["output_text"] = "".join(output_text_parts)
+    return final_response
+
+
+def _parse_anthropic_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    text_parts: list[str] = []
+    content_blocks: list[dict[str, object]] = []
+    current_tool_block: dict[str, object] | None = None
+    for event in _iter_sse_events(response):
+        event_type = event.get("type")
+        if event_type == "content_block_start":
+            block = event.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                current_tool_block = {
+                    "type": "tool_use",
+                    "id": str(block.get("id") or ""),
+                    "name": str(block.get("name") or ""),
+                    "input": {},
+                }
+        elif event_type == "content_block_delta":
+            delta = event.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            if delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+                    on_delta(text)
+            elif delta.get("type") == "input_json_delta" and current_tool_block is not None:
+                partial_json = delta.get("partial_json")
+                if isinstance(partial_json, str) and partial_json.strip():
+                    current_tool_block["_partial_json"] = str(current_tool_block.get("_partial_json", "")) + partial_json
+        elif event_type == "content_block_stop" and current_tool_block is not None:
+            partial_json = current_tool_block.pop("_partial_json", "")
+            if isinstance(partial_json, str) and partial_json.strip():
+                current_tool_block["input"] = _parse_tool_arguments(partial_json)
+            content_blocks.append(current_tool_block)
+            current_tool_block = None
+        elif event_type == "message_stop":
+            break
+    if text_parts:
+        content_blocks.insert(0, {"type": "text", "text": "".join(text_parts)})
+    return {"content": content_blocks}
+
+
+def _parse_gemini_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    parts: list[dict[str, object]] = []
+    text_parts: list[str] = []
+    function_calls: list[dict[str, object]] = []
+    for event in _iter_sse_events(response):
+        candidates = event.get("candidates")
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            candidate_parts = content.get("parts")
+            if not isinstance(candidate_parts, list):
+                continue
+            for part in candidate_parts:
+                if not isinstance(part, dict):
+                    continue
+                if isinstance(part.get("text"), str) and part["text"]:
+                    text_parts.append(part["text"])
+                    on_delta(part["text"])
+                elif isinstance(part.get("functionCall"), dict):
+                    function_calls.append(part["functionCall"])
+    parts.extend({"text": item} for item in text_parts)
+    parts.extend({"functionCall": item} for item in function_calls)
+    return {"candidates": [{"content": {"parts": parts}}]}

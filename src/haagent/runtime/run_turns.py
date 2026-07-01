@@ -6,6 +6,7 @@ haagent/runtime/run_turns.py - Run 单轮执行流程
 
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -95,10 +96,27 @@ def run_turn_loop(
                 "goal": deps.task_goal,
             },
         )
-        model_response = deps.model_gateway.generate(
-            messages=state.messages,
-            tool_schemas=tool_schemas,
-        )
+        def emit_assistant_delta(delta: str) -> None:
+            deps.raise_if_cancelled()
+            deps.emit_event(
+                {
+                    "event_type": "assistant_delta",
+                    "turn": turn,
+                    "delta": delta,
+                },
+            )
+
+        if _supports_event_sink(deps.model_gateway):
+            model_response = deps.model_gateway.generate(
+                messages=state.messages,
+                tool_schemas=tool_schemas,
+                event_sink=emit_assistant_delta,
+            )
+        else:
+            model_response = deps.model_gateway.generate(
+                messages=state.messages,
+                tool_schemas=tool_schemas,
+            )
         deps.raise_if_cancelled()
         output_guardrail = (
             check_assistant_output(model_response.content)
@@ -430,3 +448,11 @@ def _ensure_tool_call_ids(tool_calls: list[ToolCall]) -> list[ToolCall]:
         else:
             tool_calls_with_ids.append(ToolCall(name=tc.name, args=tc.args, id=generate_tool_call_id()))
     return tool_calls_with_ids
+
+
+def _supports_event_sink(model_gateway: ModelGateway) -> bool:
+    try:
+        signature = inspect.signature(model_gateway.generate)
+    except (TypeError, ValueError):
+        return False
+    return "event_sink" in signature.parameters

@@ -5,6 +5,7 @@ tests/test_model_gateway.py - ModelGateway 接口与 provider 行为测试
 """
 
 import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -1096,6 +1097,50 @@ def test_openai_chat_gateway_text_only_response_uses_messages_payload() -> None:
         "model": "chat-test",
         "messages": [{"role": "user", "content": "standardized context"}],
     }
+
+
+def test_openai_chat_gateway_streams_text_deltas_and_returns_complete_response() -> None:
+    deltas: list[str] = []
+
+    def stream_transport(payload: dict[str, object], api_key: str, on_delta):
+        assert payload["stream"] is True
+        on_delta("chat ")
+        on_delta("text")
+        return {"choices": [{"message": {"content": "chat text"}}]}
+
+    gateway = OpenAIChatCompletionsGateway(
+        api_key="test-key",
+        model="chat-test",
+        transport=lambda payload, api_key: {"choices": [{"message": {"content": "unused"}}]},
+        stream_transport=stream_transport,
+    )
+
+    response = gateway.generate(
+        [{"role": "user", "content": "standardized context"}],
+        [],
+        event_sink=deltas.append,
+    )
+
+    assert deltas == ["chat ", "text"]
+    assert response == ModelResponse(content="chat text", tool_calls=[])
+
+
+def test_openai_chat_gateway_stream_timeout_remains_model_call_error() -> None:
+    def stream_transport(payload: dict[str, object], api_key: str, on_delta):
+        raise socket.timeout("read timed out")
+
+    gateway = OpenAIChatCompletionsGateway(
+        api_key="test-key",
+        transport=lambda payload, api_key: {"choices": [{"message": {"content": "unused"}}]},
+        stream_transport=stream_transport,
+    )
+
+    with pytest.raises(ModelCallError, match="read timed out"):
+        gateway.generate(
+            [{"role": "user", "content": "slow"}],
+            [],
+            event_sink=lambda _delta: None,
+        )
 
 
 def test_openai_chat_gateway_normalizes_tool_calls_and_tools_payload() -> None:
