@@ -220,12 +220,7 @@ class ConversationTimeline(VerticalScroll):
 
     def add_tool_activity(self, activity: ToolActivity) -> None:
         item = self._assistant_item(activity.turn_index)
-        existing_activity = _matching_open_tool_activity(item.tools, activity)
-        if existing_activity is None:
-            item.tools.append(activity)
-        else:
-            existing_activity.status = activity.status
-            existing_activity.summary = activity.summary
+        merge_tool_activity(item.tools, activity)
         self._sync_block(item)
         self._sync_plain_text()
 
@@ -514,6 +509,15 @@ def _render_tool_summary(tools: list[ToolActivity], *, show_details: bool) -> li
             compact_names = _unique_tool_names(visible_tools, limit=3)
             lines.append(f"  当前：{'、'.join(compact_names)}")
     return lines
+
+
+def merge_tool_activity(tools: list[ToolActivity], activity: ToolActivity) -> None:
+    existing_activity = _matching_open_tool_activity(tools, activity)
+    if existing_activity is None:
+        tools.append(activity)
+        return
+    existing_activity.status = activity.status
+    existing_activity.summary = activity.summary
 
 
 def _matching_open_tool_activity(tools: list[ToolActivity], activity: ToolActivity) -> ToolActivity | None:

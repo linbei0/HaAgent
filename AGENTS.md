@@ -50,9 +50,12 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 ## Setup Commands
 
 - Install dependencies: `uv sync`
-- Run a focused test file during development: `uv run pytest tests/test_tool_router.py -q`
-- Run the fast local suite (excludes slow TUI/agent tests, ~34s): `uv run pytest -m "not slow" -q`
-- Run all tests when needed for final regression (~2min): `uv run pytest -q`
+- Run a focused test file during development: `uv run pytest tests/integration/tools/test_tool_router.py -q`
+- Run the default fast suite (parallel, skips `tests/tui`, `tests/e2e`, and `tests/extended` unless explicitly selected): `uv run pytest -q`
+- Run serial diagnostics for the default suite: `uv run pytest -q -n 0`
+- Run full TUI wiring tests explicitly: `uv run pytest tests/tui -q`
+- Run extended harness/eval regressions explicitly: `uv run pytest tests/extended -q`
+- Run long/real-flow tests explicitly: `uv run pytest tests/e2e -q --run-e2e`
 - Run the fast local quality gate: `uv run haagent check`
 
 ## Development Workflow
@@ -91,7 +94,7 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
 - For bug fixes and new behavior, write the failing test first, then implement the smallest code that passes.
 - During the TDD inner loop, run the smallest relevant pytest target first: a single test, a single test file, or the directly affected test group.
 - Do not automatically run full `uv run pytest` after every small edit.
-- For a broad-but-fast check, run `uv run pytest -m "not slow" -q` (~34s; excludes `test_tui_app.py`, `test_real_task_smoke.py`, `test_dogfood.py`). Slow tests are tagged in `tests/conftest.py` by measured runtime — adjust that list with timings, not guesses.
+- For a broad-but-fast check, run the default `uv run pytest -q`; `tests/conftest.py` keeps TUI, e2e, and extended harness/eval tests out of default collection unless those paths or their flags are explicitly selected.
 - Before claiming completion, run the tests directly relevant to the changed behavior.
 - Run full `uv run pytest -q` when a change crosses multiple core modules, changes shared runtime contracts, touches `ToolRouter`, `ModelGateway`, context, episode, CLI entry points, workspace boundaries, or secret handling, or when preparing a commit, merge, release, or user-facing handoff.
 - Run `uv run haagent check` before user-facing handoff when the change affects harness, eval, smoke behavior, CLI quality gates, or runtime task execution.

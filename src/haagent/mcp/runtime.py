@@ -17,6 +17,7 @@ from haagent.mcp.types import McpConnectionStatus, McpResourceInfo, McpSettings,
 
 class SyncMcpRuntime:
     def __init__(self, settings: McpSettings) -> None:
+        self._settings = settings
         self._manager = McpClientManager(settings)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: Thread | None = None
@@ -24,6 +25,9 @@ class SyncMcpRuntime:
 
     def start(self) -> None:
         if self._started:
+            return
+        if not self._settings.servers:
+            self._started = True
             return
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=self._run_loop, name="haagent-mcp-runtime", daemon=True)
@@ -33,6 +37,7 @@ class SyncMcpRuntime:
 
     def close(self) -> None:
         if self._loop is None or self._thread is None:
+            self._started = False
             return
         try:
             if self._started:

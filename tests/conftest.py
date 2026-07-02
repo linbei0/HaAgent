@@ -1,12 +1,9 @@
 """
-tests/conftest.py - pytest 测试分层标记
+tests/conftest.py - pytest 测试分层入口
 
-基于实测耗时为慢测试自动打 slow 标，让日常本地开发可用
-`pytest -m "not slow"` 在数十秒内拿到反馈，完整套件仍跑全部用例。
-
-SLOW_FILES 的依据是实测：这几个文件要启动 Textual app 或跑真实
-agent 流程，单独占去完整套件大部分时间。排除它们后约 545 个用例
-~35s 跑完，而完整套件约 134s。修改时请用实测耗时增删，而非凭直觉。
+默认 pytest 只收集日常高信号快测；完整 Textual 接线、真实长流程和
+inspect/eval/export 高级 harness 回归保留显式入口，避免每次本地回归都
+支付低价值长尾成本。
 """
 
 from __future__ import annotations
@@ -16,15 +13,10 @@ from pathlib import Path
 import pytest
 
 
-# 实测耗时显著、应在快速本地运行中可被 -m "not slow" 排除的文件。
-# 当前实测(完整套件 134s)：
-#   test_tui_app.py          ~79s  每个用例启动 Textual app
-#   test_real_task_smoke.py  ~13s  跑真实 agent 工作流
-#   test_dogfood.py          ~6s   含一个 ~5.8s 的运行时用例
-SLOW_FILES = {
-    "test_tui_app.py",
-    "test_real_task_smoke.py",
-    "test_dogfood.py",
+DEFAULT_EXCLUDED_DIRS = {
+    "e2e",
+    "extended",
+    "tui",
 }
 
 # 单个慢用例(其所在文件整体不慢，只标到具体用例)。
@@ -36,6 +28,24 @@ SLOW_NODE_KEYWORDS = {
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
+        "--run-e2e",
+        action="store_true",
+        default=False,
+        help="run tests/e2e long-flow tests when no explicit e2e path is selected",
+    )
+    parser.addoption(
+        "--run-extended",
+        action="store_true",
+        default=False,
+        help="run tests/extended inspect/eval/export regressions by default",
+    )
+    parser.addoption(
+        "--run-tui",
+        action="store_true",
+        default=False,
+        help="run tests/tui Textual wiring tests when no explicit tui path is selected",
+    )
+    parser.addoption(
         "--real-llm",
         action="store_true",
         default=False,
@@ -43,11 +53,35 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:
+    """默认跳过重型分层目录；显式路径或开关可恢复收集。"""
+    path = Path(collection_path)
+    if not path.is_dir() or path.parent.name != "tests":
+        return False
+
+    dirname = path.name
+    if dirname not in DEFAULT_EXCLUDED_DIRS:
+        return False
+
+    if dirname == "e2e" and config.getoption("--run-e2e"):
+        return False
+    if dirname == "extended" and config.getoption("--run-extended"):
+        return False
+    if dirname == "tui" and config.getoption("--run-tui"):
+        return False
+
+    root_path = Path(str(config.rootpath))
+    explicit_targets = [
+        (target if target.is_absolute() else root_path / target).resolve()
+        for target in (Path(arg) for arg in config.args)
+    ]
+    if any(target == path or path in target.parents for target in explicit_targets):
+        return False
+    return True
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """为慢测试打 slow 标，供 `-m "not slow"` 快速本地运行排除。"""
+    """为少量留在默认树里的慢用例打 slow 标，便于串行诊断时过滤。"""
     for item in items:
-        filename = Path(str(item.fspath)).name
-        if filename in SLOW_FILES or any(
-            keyword in item.nodeid for keyword in SLOW_NODE_KEYWORDS
-        ):
+        if any(keyword in item.nodeid for keyword in SLOW_NODE_KEYWORDS):
             item.add_marker(pytest.mark.slow)

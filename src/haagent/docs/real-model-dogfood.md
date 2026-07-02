@@ -22,13 +22,13 @@ uv run haagent dogfood --provider openai --model gpt-4.1-mini
 pytest：
 
 ```powershell
-uv run pytest tests/test_real_model_dogfood.py -q --real-llm
+uv run pytest tests/e2e/test_real_model_dogfood.py -q --real-llm
 ```
 
 ## 跳过规则
 
 - 默认 `uv run pytest -q` 不调用真实模型。
-- `tests/test_real_model_dogfood.py` 未传 `--real-llm` 时显式 `skip`。
+- `tests/e2e/test_real_model_dogfood.py` 未传 `--real-llm` 时显式 `skip`。
 - 未配置 `OPENAI_API_KEY` 或可用 `HAAGENT_DOGFOOD_PROFILE` 时显式 `skip`，不会回退到 fake model。
 - `uv run haagent dogfood` 未提供 `--profile` 或 `--provider` 时输出 `status=skipped`。
 

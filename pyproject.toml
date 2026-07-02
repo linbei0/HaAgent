@@ -19,6 +19,7 @@ haagent = "haagent.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "pytest-xdist>=3.6.0",
 ]
 
 [build-system]
@@ -29,7 +30,7 @@ build-backend = "hatchling.build"
 packages = ["src/haagent"]
 
 [tool.pytest.ini_options]
-addopts = ["--strict-markers"]
+addopts = ["--strict-markers", "-n", "auto", "--dist=loadfile", "-q"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
