@@ -3476,7 +3476,9 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
             assert "工具 file_write" in conversation
-            assert "运行中" in conversation
+            assert "工具 2 项" in conversation
+            assert "1 成功" in conversation
+            assert "1 失败" in conversation
             assert "工具 file_write ok 成功" in conversation
             assert "审批已拒绝：shell" in conversation
             assert "查看工具详情" not in conversation
@@ -4170,6 +4172,100 @@ def test_tui_streaming_turn_keeps_existing_widget_instances_stable(tmp_path: Pat
     asyncio.run(run())
 
 
+def test_tui_streaming_assistant_shows_rotating_cursor_and_cleans_up(tmp_path: Path) -> None:
+    class BlockingAssistantService(FakeAssistantService):
+        def __init__(self, *args, release_event: threading.Event, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.release_event = release_event
+            self.stream_ready = threading.Event()
+
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+            self.prompts.append(prompt)
+            self.started.set()
+            if event_sink is not None:
+                event_sink(_assistant_event("assistant_delta", len(self.prompts), "正在整理"))
+            self.stream_ready.set()
+            self.release_event.wait(timeout=2)
+            if event_sink is not None:
+                event_sink(_assistant_event("assistant_message", len(self.prompts), "最终回答"))
+            return SimpleNamespace(status="completed")
+
+    async def run() -> None:
+        release_event = threading.Event()
+        service = BlockingAssistantService(workspace_root=tmp_path, release_event=release_event)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "查看资料"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.stream_ready.wait, 2)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            active = conversation.query_one(".timeline-assistant .timeline-active")
+            first_frame = str(active.content)
+            assistant_body = conversation.query_one(".timeline-assistant .timeline-body", Markdown)
+            assert first_frame in {"|", "/", "-", "\\"}
+            assert assistant_body.source == "正在整理"
+            assert "生成中" in conversation.plain_text
+
+            await pilot.pause(0.3)
+            second_frame = str(active.content)
+            assert second_frame in {"|", "/", "-", "\\"}
+            assert second_frame != first_frame
+            assert assistant_body.source == "正在整理"
+            assert len(list(conversation.query(".timeline-assistant"))) == 1
+
+            release_event.set()
+            await pilot.pause(0.2)
+            assert str(active.content) == ""
+            assert active.display is False
+            assert assistant_body.source == "最终回答"
+
+    asyncio.run(run())
+
+
+def test_tui_streaming_cursor_keeps_text_semantics_in_no_color_mode(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    class BlockingAssistantService(FakeAssistantService):
+        def __init__(self, *args, release_event: threading.Event, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.release_event = release_event
+            self.stream_ready = threading.Event()
+
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+            self.prompts.append(prompt)
+            self.started.set()
+            if event_sink is not None:
+                event_sink(_assistant_event("assistant_delta", len(self.prompts), "处理中"))
+            self.stream_ready.set()
+            self.release_event.wait(timeout=2)
+            return SimpleNamespace(status="cancelled")
+
+    async def run() -> None:
+        release_event = threading.Event()
+        service = BlockingAssistantService(workspace_root=tmp_path, release_event=release_event)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "查看资料"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.stream_ready.wait, 2)
+            await pilot.pause(0.2)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            active = conversation.query_one(".timeline-assistant .timeline-active")
+            assert "生成中" in str(active.content)
+            assert "生成中" in conversation.plain_text
+
+            release_event.set()
+            await pilot.pause(0.2)
+            assert str(active.content) == ""
+            assert active.display is False
+
+    asyncio.run(run())
+
+
 def test_tui_compact_tool_summary_keeps_active_tool_visible_when_details_off(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
@@ -4191,9 +4287,10 @@ def test_tui_compact_tool_summary_keeps_active_tool_visible_when_details_off(tmp
             await pilot.pause(0.2)
 
             compact = _text(app, "#conversation")
-            assert "工具 5 项" in compact
+            assert "工具 3 项" in compact
+            assert "2 成功" in compact
+            assert "1 运行中" in compact
             assert "web_fetch" in compact
-            assert "运行中" in compact
 
     asyncio.run(run())
 
@@ -4256,11 +4353,91 @@ def test_tui_tool_events_attach_to_turn_summary_and_keep_answer_readable(tmp_pat
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "工具 4 项" in conversation
+            assert "工具 2 项" in conversation
+            assert "1 成功" in conversation
+            assert "1 失败" in conversation
+            assert "运行中" not in conversation
             assert "file_read" in conversation
             assert "web_search" in conversation
             assert "我已经整理好结论。" in conversation
-            assert conversation.index("工具 4 项") > conversation.index("我已经整理好结论。")
+            assert conversation.index("工具 2 项") > conversation.index("我已经整理好结论。")
+
+    asyncio.run(run())
+
+
+def test_tui_tool_summary_counts_calls_not_events_for_repeated_tools(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                _tool_event("tool_started", 1, "web_search"),
+                _tool_event("tool_finished", 1, "web_search"),
+                _tool_event("tool_started", 1, "mcp__exa__web_search_exa"),
+                _tool_event("tool_finished", 1, "mcp__exa__web_search_exa"),
+                _tool_event("tool_started", 1, "web_search"),
+                _tool_event("tool_finished", 1, "web_search"),
+                _tool_event("tool_started", 1, "web_fetch"),
+                _tool_event("tool_failed", 1, "web_fetch", message="timed out"),
+                _tool_event("tool_started", 1, "web_fetch"),
+            ],
+            assistant_content="资料已经核对。",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "联网查证"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = _text(app, "#conversation")
+            assert "工具 5 项" in conversation
+            assert "3 成功" in conversation
+            assert "1 运行中" in conversation
+            assert "1 失败" in conversation
+            assert "工具 9 项" not in conversation
+            assert "5 运行中" not in conversation
+
+    asyncio.run(run())
+
+
+def test_tui_tool_summary_updates_pending_confirmation_on_response_events(tmp_path: Path) -> None:
+    def interaction_event(event_type: str, turn_index: int, tool_name: str) -> ChatEvent:
+        return ChatEvent(
+            event_type=event_type,
+            session_id="session-test",
+            turn_index=turn_index,
+            message=event_type,
+            payload={"tool_name": tool_name, "question": "Approve?", "approved": None},
+        )
+
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                _tool_event("tool_started", 1, "code_run"),
+                interaction_event("approval_requested", 1, "code_run"),
+                interaction_event("approval_denied", 1, "code_run"),
+                _tool_event("tool_started", 1, "shell"),
+                interaction_event("approval_requested", 1, "shell"),
+                interaction_event("approval_granted", 1, "shell"),
+                _tool_event("tool_started", 1, "file_write"),
+                interaction_event("edit_diff_requested", 1, "file_write"),
+                interaction_event("edit_diff_denied", 1, "file_write"),
+            ],
+            assistant_content="审批状态已处理。",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "需要审批的操作"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = _text(app, "#conversation")
+            assert "工具 3 项" in conversation
+            assert "1 运行中" in conversation
+            assert "2 失败" in conversation
+            assert "待确认" not in conversation
 
     asyncio.run(run())
 
@@ -4313,7 +4490,7 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause(0.2)
             compact = _text(app, "#conversation")
-            assert "工具 5 项" in compact
+            assert "工具 3 项" in compact
             assert "web_fetch" in compact
 
             input_widget.value = "/details"

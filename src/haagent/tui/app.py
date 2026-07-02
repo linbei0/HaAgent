@@ -876,16 +876,20 @@ class HaAgentTuiApp(App[None]):
         elif event_type == "approval_granted":
             tool_name = payload_text(payload, "tool_name", "unknown")
             self._state = "running"
+            self._record_tool_activity(event.turn_index, tool_name, "running", "审批已允许")
             self._append_line(f"审批已允许：{tool_name}")
         elif event_type == "approval_denied":
             tool_name = payload_text(payload, "tool_name", "unknown")
+            self._record_tool_activity(event.turn_index, tool_name, "failed", "审批已拒绝")
             self._append_line(f"审批已拒绝：{tool_name}")
         elif event_type == "edit_diff_granted":
             tool_name = payload_text(payload, "tool_name", "unknown")
             self._state = "running"
+            self._record_tool_activity(event.turn_index, tool_name, "running", "文件改动已允许")
             self._append_line(f"文件改动已允许：{tool_name}")
         elif event_type == "edit_diff_denied":
             tool_name = payload_text(payload, "tool_name", "unknown")
+            self._record_tool_activity(event.turn_index, tool_name, "failed", "文件改动已拒绝")
             self._append_line(f"文件改动已拒绝：{tool_name}")
         elif event_type == "user_input_received":
             self._handle_user_input_received(event)
@@ -945,6 +949,7 @@ class HaAgentTuiApp(App[None]):
         self._state = "failed"
         self._last_failure = failure_from_payload(event.payload, event.message)
         self._append_block("Failure", self._last_failure.block_text())
+        self._finalize_streaming_assistant_if_needed()
 
     def _handle_interaction(self, request: HumanInteractionRequest) -> HumanInteractionResponse:
         pending = PendingInteraction(request)
@@ -1013,6 +1018,14 @@ class HaAgentTuiApp(App[None]):
         self._streaming_assistant_turn = None
         self._streaming_assistant_text = ""
 
+    def _finalize_streaming_assistant_if_needed(self) -> None:
+        if self._streaming_assistant_turn is None:
+            return
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        conversation.finalize_assistant(self._streaming_assistant_turn, self._streaming_assistant_text)
+        self._streaming_assistant_turn = None
+        self._streaming_assistant_text = ""
+
     def _replace_last_assistant_block(self, body: str) -> None:
         assistant_title = BLOCK_TITLES.get("Assistant", "Assistant")
         replacement = f"{assistant_title}\n  {body}"
@@ -1032,8 +1045,7 @@ class HaAgentTuiApp(App[None]):
         prompt_input.move_cursor(_end_location(value))
 
     def _finish_prompt(self, status: str) -> None:
-        self._streaming_assistant_turn = None
-        self._streaming_assistant_text = ""
+        self._finalize_streaming_assistant_if_needed()
         if status == "completed" and self._state not in {"waiting approval", "waiting input", "cancelled"}:
             self._state = "idle"
         elif status == "cancelled":
@@ -1054,6 +1066,7 @@ class HaAgentTuiApp(App[None]):
     def _handle_prompt_error(self, error: Exception) -> None:
         self._state = "failed"
         self._append_block("Failure", str(error))
+        self._finalize_streaming_assistant_if_needed()
         self._refresh()
 
     def _show_initial_configuration_state(self) -> None:

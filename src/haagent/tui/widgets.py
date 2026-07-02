@@ -16,6 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
+from textual.timer import Timer
 from textual.widgets import Markdown, Static, TextArea
 
 
@@ -219,7 +220,12 @@ class ConversationTimeline(VerticalScroll):
 
     def add_tool_activity(self, activity: ToolActivity) -> None:
         item = self._assistant_item(activity.turn_index)
-        item.tools.append(activity)
+        existing_activity = _matching_open_tool_activity(item.tools, activity)
+        if existing_activity is None:
+            item.tools.append(activity)
+        else:
+            existing_activity.status = activity.status
+            existing_activity.summary = activity.summary
         self._sync_block(item)
         self._sync_plain_text()
 
@@ -315,6 +321,8 @@ def _render_timeline_item(item: TimelineItem, *, show_tool_details: bool) -> str
 
 
 class TimelineBlock(Vertical):
+    _STREAMING_INDICATOR_FRAMES = ("|", "/", "-", "\\")
+
     def __init__(self, item: TimelineItem, *, show_tool_details: bool) -> None:
         self._item = item
         self._show_tool_details = show_tool_details
@@ -324,6 +332,8 @@ class TimelineBlock(Vertical):
         self._tools_widget: Static | None = None
         self._markdown_stream: Any | None = None
         self._markdown_stream_content = ""
+        self._streaming_indicator_timer: Timer | None = None
+        self._streaming_indicator_index = 0
         super().__init__(classes=_timeline_item_classes(item))
 
     def compose(self) -> ComposeResult:
@@ -342,6 +352,9 @@ class TimelineBlock(Vertical):
     def on_mount(self) -> None:
         self.update_item(self._item, show_tool_details=self._show_tool_details)
 
+    def on_unmount(self) -> None:
+        self._stop_streaming_indicator()
+
     def update_item(self, item: TimelineItem, *, show_tool_details: bool) -> None:
         self._item = item
         self._show_tool_details = show_tool_details
@@ -359,7 +372,12 @@ class TimelineBlock(Vertical):
         else:
             body.update(item.content or "")
         body.display = bool(item.content)
-        active_text = "生成中 · HaAgent" if item.role == "assistant" and item.status == "streaming" else ""
+        if item.role == "assistant" and item.status == "streaming":
+            self._start_streaming_indicator()
+            active_text = self._streaming_indicator_text()
+        else:
+            self._stop_streaming_indicator()
+            active_text = ""
         active.update(active_text)
         active.display = bool(active_text)
         tool_text = "\n".join(_render_tool_summary(item.tools, show_details=self._show_tool_details))
@@ -417,6 +435,40 @@ class TimelineBlock(Vertical):
         self._markdown_stream_content = ""
         self.run_worker(stream.stop(), group="markdown-stream", exit_on_error=False)
 
+    def _start_streaming_indicator(self) -> None:
+        if self._streaming_indicator_timer is not None:
+            return
+        self._streaming_indicator_index = 0
+        self._streaming_indicator_timer = self.set_interval(
+            0.12,
+            self._advance_streaming_indicator,
+            name="streaming-indicator",
+        )
+
+    def _stop_streaming_indicator(self) -> None:
+        if self._streaming_indicator_timer is None:
+            return
+        self._streaming_indicator_timer.stop()
+        self._streaming_indicator_timer = None
+
+    def _advance_streaming_indicator(self) -> None:
+        if self._item.role != "assistant" or self._item.status != "streaming":
+            self._stop_streaming_indicator()
+            return
+        active = self._active_widget
+        if active is None:
+            return
+        self._streaming_indicator_index = (self._streaming_indicator_index + 1) % len(
+            self._STREAMING_INDICATOR_FRAMES
+        )
+        active.update(self._streaming_indicator_text())
+
+    def _streaming_indicator_text(self) -> str:
+        frame = self._STREAMING_INDICATOR_FRAMES[self._streaming_indicator_index]
+        if self.screen.has_class("theme-monochrome"):
+            return f"{frame} 生成中"
+        return frame
+
     def _scroll_timeline_to_end(self) -> None:
         parent = self.parent
         if isinstance(parent, ConversationTimeline):
@@ -462,6 +514,19 @@ def _render_tool_summary(tools: list[ToolActivity], *, show_details: bool) -> li
             compact_names = _unique_tool_names(visible_tools, limit=3)
             lines.append(f"  当前：{'、'.join(compact_names)}")
     return lines
+
+
+def _matching_open_tool_activity(tools: list[ToolActivity], activity: ToolActivity) -> ToolActivity | None:
+    if activity.status == "running":
+        candidate_statuses: set[ToolStatus] = {"approval"}
+    else:
+        candidate_statuses = {"running", "approval"}
+        if activity.status == "failed":
+            candidate_statuses.add("failed")
+    for item in reversed(tools):
+        if item.tool_name == activity.tool_name and item.status in candidate_statuses:
+            return item
+    return None
 
 
 def _role_label(role: TimelineRole) -> str:
