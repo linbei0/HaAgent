@@ -134,6 +134,16 @@ class AssistantSessionTurn:
 
 
 @dataclass(frozen=True)
+class AssistantSessionCompactResult:
+    applied: bool
+    reason: str
+    original_turn_count: int
+    compacted_turn_count: int
+    preserved_recent_count: int
+    saved_chars: int
+
+
+@dataclass(frozen=True)
 class AssistantCancelResult:
     status: str
     reason: str
@@ -243,6 +253,7 @@ class AssistantService:
         self.initial_continue = initial_continue
         self.error_cls = AssistantServiceError
         self.cancel_result_cls = AssistantCancelResult
+        self.session_compact_result_cls = AssistantSessionCompactResult
         self.session_status_cls = AssistantSessionStatus
         self.model_profile_cls = AssistantModelProfile
         self.model_test_result_cls = AssistantModelTestResult
@@ -382,6 +393,9 @@ class AssistantService:
 
     def current_session_history(self) -> list[AssistantSessionTurn]:
         return session_usecases.current_session_history(self)
+
+    def compact_current_session(self) -> AssistantSessionCompactResult:
+        return session_usecases.compact_current_session(self)
 
     def list_model_profiles(self) -> list[AssistantModelProfile]:
         return model_profile_usecases.list_model_profiles(self)

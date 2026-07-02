@@ -90,6 +90,20 @@ class RecordingSession:
         self.model_name = model
         self.model_base_url = base_url
 
+    def compact_current_session(self):
+        return type(
+            "SessionCompactResult",
+            (),
+            {
+                "applied": True,
+                "reason": "applied",
+                "original_turn_count": 8,
+                "compacted_turn_count": 2,
+                "preserved_recent_count": 6,
+                "saved_chars": 900,
+            },
+        )()
+
 
 def _set_home(monkeypatch, home: Path) -> None:
     monkeypatch.setattr(Path, "home", lambda: home)
@@ -315,6 +329,30 @@ def test_service_sets_default_model_profile_without_switching_current_session(
 
     assert service.current_session() is None
     assert provider_profile.load_active_profile_name(settings_path=config_dir / "settings.json") == "router"
+
+
+def test_service_compacts_current_session_through_session_boundary(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _write_user_profile(home)
+    service = AssistantService(
+        workspace_root=tmp_path / "workspace",
+        runs_root=tmp_path / ".runs",
+        environ={"DEEPSEEK_API_KEY": "sk-test"},
+        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        session_cls=RecordingSession,
+    )
+    service.workspace_root.mkdir()
+    service.create_session()
+
+    result = service.compact_current_session()
+
+    assert result.applied is True
+    assert result.reason == "applied"
+    assert result.original_turn_count == 8
+    assert result.compacted_turn_count == 2
+    assert result.preserved_recent_count == 6
+    assert result.saved_chars == 900
 
 
 def test_service_configures_model_profile_with_keyring_without_writing_secret(

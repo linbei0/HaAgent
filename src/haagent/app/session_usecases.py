@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from haagent.app.assistant_service import (
         AssistantCancelResult,
         AssistantService,
+        AssistantSessionCompactResult,
         AssistantServiceError,
         AssistantSessionStatus,
         AssistantSessionSummary,
@@ -90,6 +91,22 @@ def current_session_history(service: "AssistantService") -> list["AssistantSessi
         return [service._session_turn(turn) for turn in service._session.turn_summaries()]
     except ChatSessionError as error:
         _raise_service_error(service, error)
+
+
+def compact_current_session(service: "AssistantService") -> "AssistantSessionCompactResult":
+    session = _ensure_session(service)
+    try:
+        result = session.compact_current_session()
+    except ChatSessionError as error:
+        _raise_service_error(service, error)
+    return service.session_compact_result_cls(
+        applied=result.applied,
+        reason=result.reason,
+        original_turn_count=result.original_turn_count,
+        compacted_turn_count=result.compacted_turn_count,
+        preserved_recent_count=result.preserved_recent_count,
+        saved_chars=result.saved_chars,
+    )
 
 
 def run_prompt_events(

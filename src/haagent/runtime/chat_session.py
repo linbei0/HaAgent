@@ -29,6 +29,8 @@ from haagent.runtime.episode_validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
 )
+from haagent.runtime.full_compact import maybe_full_compact_messages
+from haagent.runtime.full_compact_contract import FullCompactEligibility
 from haagent.runtime.human_interaction import HumanInteractionHandler
 from haagent.runtime.orchestrator import RunOrchestrator
 from haagent.runtime.path_policy import (
@@ -139,6 +141,16 @@ class SessionTurnSummary:
     verification_status: str
 
 
+@dataclass(frozen=True)
+class SessionCompactResult:
+    applied: bool
+    reason: str
+    original_turn_count: int
+    compacted_turn_count: int
+    preserved_recent_count: int
+    saved_chars: int
+
+
 class AgentSession:
     def __init__(
         self,
@@ -167,6 +179,8 @@ class AgentSession:
         self.session_id = session_id or _new_session_id()
         self.turn_count = 0
         self._summaries: list[str] = []
+        self._manual_compaction_summary: str | None = None
+        self._manual_compaction_turn_count = 0
         self._next_turn_target_paths: list[str] = []
         self._tool_result_microcompact_count = 0
         self._working_state = empty_working_state()
@@ -222,6 +236,9 @@ class AgentSession:
         instance.session_id = str(metadata["session_id"])
         instance.turn_count = int(metadata["turn_count"])
         instance._summaries = [str(turn["summary"]) for turn in turns]
+        compaction_summary, compacted_turn_count = _read_manual_compaction_state(session_path)
+        instance._manual_compaction_summary = compaction_summary
+        instance._manual_compaction_turn_count = compacted_turn_count
         instance._next_turn_target_paths = []
         instance._tool_result_microcompact_count = 0
         try:
@@ -563,6 +580,8 @@ class AgentSession:
         self.session_id = _new_session_id()
         self.turn_count = 0
         self._summaries = []
+        self._manual_compaction_summary = None
+        self._manual_compaction_turn_count = 0
         self._working_state = empty_working_state()
         self.path_policy = default_path_policy(self.workspace_root)
         self.session_path = self.runs_root / "sessions" / self.session_id
@@ -580,12 +599,80 @@ class AgentSession:
         """读取当前 session 已记录轮次，供 UI 展示可恢复上下文。"""
         return [_session_turn_summary(turn) for turn in _read_session_turns(self.session_path)]
 
+    def compact_current_session(self) -> SessionCompactResult:
+        if self.model_gateway is None:
+            raise ChatSessionError("当前会话没有可用模型，无法执行智能压缩")
+        if len(self._summaries) <= DEFAULT_PRESERVED_RECENT_TURNS:
+            return SessionCompactResult(
+                applied=False,
+                reason="insufficient_session_history",
+                original_turn_count=len(self._summaries),
+                compacted_turn_count=0,
+                preserved_recent_count=len(self._summaries),
+                saved_chars=0,
+            )
+        messages = [{"role": "user", "content": summary} for summary in self._summaries]
+        original_chars = len("\n".join(self._summaries))
+        compact_result = maybe_full_compact_messages(
+            messages=messages,
+            eligibility=FullCompactEligibility(
+                eligible=True,
+                reason="manual_session_compact",
+                trigger_kind="manual_session",
+                required_preserve_recent=DEFAULT_PRESERVED_RECENT_TURNS,
+            ),
+            gateway=self.model_gateway,
+            preserve_recent=DEFAULT_PRESERVED_RECENT_TURNS,
+        )
+        if not compact_result.applied:
+            return SessionCompactResult(
+                applied=False,
+                reason=compact_result.reason,
+                original_turn_count=len(self._summaries),
+                compacted_turn_count=0,
+                preserved_recent_count=compact_result.preserved_recent_count,
+                saved_chars=0,
+            )
+        summary_text = _manual_compaction_summary_text(compact_result.messages)
+        if summary_text is None:
+            return SessionCompactResult(
+                applied=False,
+                reason="summary_message_missing",
+                original_turn_count=len(self._summaries),
+                compacted_turn_count=0,
+                preserved_recent_count=compact_result.preserved_recent_count,
+                saved_chars=0,
+            )
+        self._manual_compaction_summary = summary_text
+        self._manual_compaction_turn_count = max(0, len(self._summaries) - compact_result.preserved_recent_count)
+        self._write_manual_compaction_state()
+        self._write_session_metadata()
+        final_chars = len("\n".join(self._effective_session_summaries()))
+        return SessionCompactResult(
+            applied=True,
+            reason=compact_result.reason,
+            original_turn_count=len(self._summaries),
+            compacted_turn_count=self._manual_compaction_turn_count,
+            preserved_recent_count=compact_result.preserved_recent_count,
+            saved_chars=max(0, original_chars - final_chars),
+        )
+
     def _session_memory(self):
+        summaries = self._effective_session_summaries()
+        keep_recent = DEFAULT_PRESERVED_RECENT_TURNS
+        if self._manual_compaction_summary is not None:
+            keep_recent += 1
         return compact_session_memory(
-            self._summaries,
-            keep_recent=DEFAULT_PRESERVED_RECENT_TURNS,
+            summaries,
+            keep_recent=keep_recent,
             memory_char_limit=SESSION_MEMORY_CHAR_LIMIT,
         )
+
+    def _effective_session_summaries(self) -> list[str]:
+        if self._manual_compaction_summary is None:
+            return list(self._summaries)
+        compacted_count = min(max(self._manual_compaction_turn_count, 0), len(self._summaries))
+        return [self._manual_compaction_summary, *self._summaries[compacted_count:]]
 
     def session_started_event(self) -> ChatEvent:
         return ChatEvent(
@@ -722,6 +809,23 @@ class AgentSession:
             encoding="utf-8",
         )
 
+    def _write_manual_compaction_state(self) -> None:
+        state_path = self.session_path / "session_memory.json"
+        if self._manual_compaction_summary is None:
+            if state_path.exists():
+                state_path.unlink()
+            return
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        state = {
+            "summary": self._manual_compaction_summary,
+            "compacted_turn_count": self._manual_compaction_turn_count,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
 
 def _turn_summary(prompt: str, result: ChatTurnResult) -> str:
     return "\n".join(
@@ -853,6 +957,33 @@ def _read_session_turns(session_path: Path) -> list[dict[str, object]]:
                 raise ChatSessionError(f"invalid turns.jsonl line {index}: {field_name} must be a string")
         turns.append(record)
     return turns
+
+
+def _read_manual_compaction_state(session_path: Path) -> tuple[str | None, int]:
+    state_path = session_path / "session_memory.json"
+    if not state_path.exists():
+        return None, 0
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ChatSessionError("invalid session_memory.json") from error
+    if not isinstance(state, dict):
+        raise ChatSessionError("invalid session_memory.json: must contain an object")
+    summary = state.get("summary")
+    compacted_turn_count = state.get("compacted_turn_count")
+    if not isinstance(summary, str):
+        raise ChatSessionError("invalid session_memory.json: summary must be a string")
+    if not isinstance(compacted_turn_count, int) or isinstance(compacted_turn_count, bool):
+        raise ChatSessionError("invalid session_memory.json: compacted_turn_count must be an integer")
+    return summary, max(0, compacted_turn_count)
+
+
+def _manual_compaction_summary_text(messages: list[dict[str, Any]]) -> str | None:
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str) and content.startswith("Full Compact Summary:"):
+            return content
+    return None
 
 
 def _session_turn_summary(record: dict[str, object]) -> SessionTurnSummary:

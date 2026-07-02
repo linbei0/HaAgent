@@ -34,6 +34,30 @@ class ConciseRecordingGateway(RecordingGateway):
         return ModelResponse("done", [])
 
 
+class SmartCompactGateway(RecordingGateway):
+    def generate(self, messages, tool_schemas):
+        model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
+        self.model_inputs.append(model_input)
+        if "HaAgent full compact summarizer" in model_input:
+            return ModelResponse(
+                json.dumps(
+                    {
+                        "task_focus": "继续当前用户会话",
+                        "completed_work": ["保留用户已确认的实现方向"],
+                        "open_issues": [],
+                        "important_files": ["src/haagent/runtime/chat_session.py"],
+                        "tool_results": ["旧轮次已压缩为智能摘要"],
+                        "constraints": ["后续对话继续使用压缩后的会话记忆"],
+                        "verification": ["压缩后继续运行下一轮"],
+                        "risks": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                [],
+            )
+        return ModelResponse("done", [])
+
+
 class FakeProfileGateway:
     provider_name = "openai-chat"
 
@@ -248,6 +272,31 @@ def test_chat_session_auto_compacts_old_turn_summaries_without_model_summary(tmp
     assert context_manifest["session_compaction"]["decision"] == "compacted"
     assert context_manifest["session_compaction"]["compacted_turn_count"] == 1
     assert any(event.get("event") == "session_memory_compaction" for event in transcript)
+
+
+def test_chat_session_manual_compact_uses_smart_summary_for_next_turn(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gateway = SmartCompactGateway()
+    session = AgentSession(
+        workspace_root=workspace,
+        runs_root=workspace / ".runs",
+        model_gateway=gateway,
+    )
+    for index in range(1, 9):
+        session.run_prompt(f"turn {index}")
+
+    compact_result = session.compact_current_session()
+    session.run_prompt("continue after compact")
+
+    assert compact_result.applied is True
+    assert compact_result.reason == "applied"
+    assert any("HaAgent full compact summarizer" in item for item in gateway.model_inputs)
+    assert "Full Compact Summary:" in gateway.model_inputs[-1]
+    assert "保留用户已确认的实现方向" in gateway.model_inputs[-1]
+    assert "- user_request: turn 1" not in gateway.model_inputs[-1].splitlines()
+    for index in range(3, 9):
+        assert f"- user_request: turn {index}" in gateway.model_inputs[-1].splitlines()
 
 
 def test_sessions_lists_only_current_workspace_sessions(tmp_path: Path, monkeypatch, capsys) -> None:

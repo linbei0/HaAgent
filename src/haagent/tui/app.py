@@ -445,6 +445,8 @@ class HaAgentTuiApp(App[None]):
             self.action_help()
         elif command.action == "sessions":
             self.action_open_sessions()
+        elif command.action == "compact_session":
+            self.action_compact_session()
         elif command.action == "open_models":
             self.action_open_models()
         elif command.action == "mcp":
@@ -473,6 +475,26 @@ class HaAgentTuiApp(App[None]):
             self.action_new_session()
         elif command.action == "resume_latest":
             self.action_resume_latest()
+
+    def action_compact_session(self) -> None:
+        try:
+            result = self.service.compact_current_session()
+        except Exception as error:
+            self._append_block("Command", f"压缩当前会话失败：{error}")
+        else:
+            if result.applied:
+                self._append_block(
+                    "Command",
+                    (
+                        "已压缩当前会话："
+                        f"压缩 {result.compacted_turn_count} 轮，"
+                        f"保留最近 {result.preserved_recent_count} 轮，"
+                        f"节省约 {result.saved_chars} 字符。"
+                    ),
+                )
+            else:
+                self._append_block("Command", f"当前会话无需压缩：{result.reason}")
+        self._refresh()
 
     def _handle_web_command(self, argument: str) -> None:
         value = argument.strip().lower()

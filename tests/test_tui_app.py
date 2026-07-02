@@ -116,6 +116,7 @@ class FakeAssistantService:
         self.read_skill_names: list[str] = []
         self.searched_marketplace_queries: list[tuple[str, tuple[str, ...] | None, int]] = []
         self.installed_marketplace_ids: list[str] = []
+        self.compacted_count = 0
         self.next_turn_target_paths: list[str] = []
         self.started = threading.Event()
         self.release = threading.Event()
@@ -244,6 +245,17 @@ class FakeAssistantService:
         if self.sessions:
             self.current_session_id = self.sessions[0].session_id
         return self._session_status(self.current_session_id)
+
+    def compact_current_session(self):
+        self.compacted_count += 1
+        return SimpleNamespace(
+            applied=True,
+            reason="applied",
+            original_turn_count=8,
+            compacted_turn_count=2,
+            preserved_recent_count=6,
+            saved_chars=1200,
+        )
 
     def cancel_current_run(self):
         self.cancelled_count += 1
@@ -813,6 +825,7 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
     assert {command.name for command in registry.commands()} >= {
         "help",
         "sessions",
+        "compact",
         "memory",
         "skills",
         "skill",
@@ -830,6 +843,24 @@ def test_tui_slash_command_registry_includes_mcp() -> None:
 
     assert registry.get("mcp") is not None
     assert "models" not in {command.name for command in registry.commands()}
+
+
+def test_tui_compact_command_compacts_session_without_running_prompt(tmp_path: Path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path)
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "/compact"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert service.compacted_count == 1
+            assert service.prompts == []
+            assert "已压缩当前会话" in _text(app, "#conversation")
+
+    asyncio.run(run())
 
 
 def test_tui_skills_command_lists_skills_and_trusts_project_roots(tmp_path: Path) -> None:

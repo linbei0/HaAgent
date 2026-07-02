@@ -60,6 +60,7 @@ def command_registry() -> CommandRegistry:
             SlashCommand("new", "新建 session", "new_session"),
             SlashCommand("resume", "继续最新 session", "resume_latest"),
             SlashCommand("details", "显示或隐藏工具详情", "toggle_details"),
+            SlashCommand("compact", "智能压缩当前会话", "compact_session"),
         ],
     )
 
