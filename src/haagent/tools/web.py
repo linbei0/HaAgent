@@ -12,8 +12,10 @@ import re
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from haagent.tools.base import tool_error
 from haagent.tools.network_guard import NetworkGuardError, Resolver, fetch_public_http_response
@@ -32,6 +34,24 @@ BRAVE_FRESHNESS = {
     "month": "pm",
     "year": "py",
 }
+HTML_REMOVE_TAGS = {
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "svg",
+    "canvas",
+    "nav",
+    "footer",
+    "aside",
+    "header",
+    "form",
+    "input",
+    "button",
+    "select",
+    "textarea",
+}
+HTML_BODY_CANDIDATES = ("main", "article", '[role="main"]', "body")
 
 
 def web_search(
@@ -105,15 +125,19 @@ def web_fetch(
         return tool_error("web_fetch_failed", str(error))
 
     content_type = response.headers.get("content-type", "")
-    body = response.text
-    if "html" in content_type.lower():
-        body = _html_to_text(body)
-    body = body.strip()
+    body = response.text.strip()
     content = f"{EXTERNAL_CONTENT_BANNER}\n\n{body}"
     truncated = False
     if len(content) > max_chars:
         content = content[:max_chars].rstrip() + "\n...[truncated]"
         truncated = True
+    model_visible, visible_truncated = _web_fetch_model_visible(
+        body,
+        final_url=str(response.url),
+        status_code=response.status_code,
+        content_type=content_type or "(unknown)",
+        max_chars=max_chars,
+    )
     return {
         "status": "success",
         "final_url": str(response.url),
@@ -121,6 +145,11 @@ def web_fetch(
         "content_type": content_type or "(unknown)",
         "content": content,
         "truncated": truncated,
+        "model_visible": {
+            **model_visible,
+            "raw_content_truncated": truncated,
+            "truncated": visible_truncated or truncated,
+        },
     }
 
 
@@ -262,6 +291,90 @@ def _text(value: object) -> str:
 
 def _redact_secret(message: str, secret: str) -> str:
     return message.replace(secret, "[redacted]") if secret else message
+
+
+def _web_fetch_model_visible(
+    body: str,
+    *,
+    final_url: str,
+    status_code: int,
+    content_type: str,
+    max_chars: int,
+) -> tuple[dict[str, Any], bool]:
+    if "html" in content_type.lower():
+        content = _simplified_html(body, base_url=final_url)
+        content_format = "simplified_html"
+    else:
+        content = f"{EXTERNAL_CONTENT_BANNER}\n\n{body}".strip()
+        content_format = "text"
+    content, truncated = _bounded_visible_text(content, max_chars)
+    return (
+        {
+            "final_url": final_url,
+            "status_code": status_code,
+            "content_type": content_type,
+            "content_format": content_format,
+            "content": content,
+        },
+        truncated,
+    )
+
+
+def _simplified_html(raw_html: str, *, base_url: str) -> str:
+    soup = BeautifulSoup(raw_html, "html.parser")
+    for tag in soup.find_all(HTML_REMOVE_TAGS):
+        tag.decompose()
+    root = _select_main_html_root(soup)
+    _clean_html_tree(root, base_url=base_url)
+    html_text = str(root)
+    html_text = re.sub(r"\n{3,}", "\n\n", html_text)
+    return html_text.strip()
+
+
+def _select_main_html_root(soup: BeautifulSoup) -> Tag | BeautifulSoup:
+    for selector in HTML_BODY_CANDIDATES:
+        found = soup.select_one(selector)
+        if isinstance(found, Tag):
+            return found
+    return soup
+
+
+def _clean_html_tree(root: Tag | BeautifulSoup, *, base_url: str) -> None:
+    for tag in root.find_all(True):
+        allowed_attrs: dict[str, str] = {}
+        if tag.name == "a":
+            href = tag.get("href")
+            if isinstance(href, str) and href.strip():
+                allowed_attrs["href"] = urljoin(base_url, href.strip())
+        if tag.name == "img":
+            alt = tag.get("alt")
+            if isinstance(alt, str) and alt.strip():
+                allowed_attrs["alt"] = _collapse_spaces(alt)
+        tag.attrs = allowed_attrs
+    for text_node in root.find_all(string=True):
+        if not isinstance(text_node, NavigableString):
+            continue
+        collapsed = _collapse_spaces(str(text_node))
+        if collapsed:
+            text_node.replace_with(collapsed)
+        else:
+            text_node.extract()
+
+
+def _collapse_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _bounded_visible_text(text: str, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n...[model-visible content truncated]...\n"
+    keep = max_chars - len(marker)
+    if keep <= 0:
+        return text[:max_chars], True
+    head = keep // 2
+    tail = keep - head
+    return f"{text[:head].rstrip()}{marker}{text[-tail:].lstrip()}", True
 
 
 def _html_to_text(raw_html: str) -> str:

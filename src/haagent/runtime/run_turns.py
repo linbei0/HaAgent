@@ -279,6 +279,7 @@ def _run_tool_calls(
 ) -> RunResult | None:
     turn_broke_early = False
     pending_suggestion_messages: list[str] = []
+    visible_result_fingerprints: set[str] = set()
     for tool_index, tool_call in enumerate(tool_calls_with_ids):
         deps.raise_if_cancelled()
         deps.emit_event(
@@ -321,7 +322,21 @@ def _run_tool_calls(
                 **observation,
             },
         )
-        state.messages.append(build_tool_result_message(tool_call.id, tool_call.name, tool_result))
+        message_result = tool_result
+        if tool_result.get("status") != "error":
+            fingerprint = _tool_visible_result_fingerprint(tool_call.name, tool_call.args, tool_result)
+            if fingerprint in visible_result_fingerprints:
+                message_result = {
+                    "status": "success",
+                    "model_visible": {
+                        "same_as_previous": True,
+                        "tool_name": tool_call.name,
+                        "reason": "duplicate_tool_result_in_same_turn",
+                    },
+                }
+            else:
+                visible_result_fingerprints.add(fingerprint)
+        state.messages.append(build_tool_result_message(tool_call.id, tool_call.name, message_result))
 
         violation = deps.safety_guard.check(tool_call.name, tool_call.args, tool_result)
         if violation is not None and violation.should_abort:
@@ -452,6 +467,22 @@ def _ensure_tool_call_ids(tool_calls: list[ToolCall]) -> list[ToolCall]:
         else:
             tool_calls_with_ids.append(ToolCall(name=tc.name, args=tc.args, id=generate_tool_call_id()))
     return tool_calls_with_ids
+
+
+def _tool_visible_result_fingerprint(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str:
+    visible_result = result.get("model_visible")
+    if visible_result is None:
+        visible_result = {k: v for k, v in result.items() if k != "status"}
+    return json.dumps(
+        {
+            "tool_name": tool_name,
+            "args": args,
+            "visible_result": visible_result,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
 
 
 def _supports_event_sink(model_gateway: ModelGateway) -> bool:

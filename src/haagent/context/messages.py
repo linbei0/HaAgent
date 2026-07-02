@@ -166,8 +166,10 @@ def _format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         message = error.get("message", "")
         return f"error ({error_type}): {message}"
 
-    # Remove status key from display, keep everything else
-    display = {k: v for k, v in result.items() if k != "status"}
+    display = result.get("model_visible")
+    if display is None:
+        # Remove status key from display, keep everything else.
+        display = {k: v for k, v in result.items() if k != "status"}
     if not display:
         return "success"
     try:

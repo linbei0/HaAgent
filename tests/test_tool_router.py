@@ -522,6 +522,46 @@ def test_file_read_keyword_reads_near_first_match(tmp_path: Path) -> None:
     assert result["content"] == "one\nneedle here\nthree\n"
 
 
+def test_file_read_model_visible_includes_range_and_truncation_diagnostics(tmp_path: Path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("zero\none\ntwo\nthree\nfour\n", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("file_read", {"path": "notes.txt", "offset": 1, "limit": 2})
+
+    visible = result["model_visible"]
+    assert visible == {
+        "path": "notes.txt",
+        "offset": 1,
+        "limit": 2,
+        "keyword": None,
+        "start_line": 2,
+        "end_line": 3,
+        "line_count": 5,
+        "content": "one\ntwo\n",
+        "truncated": True,
+        "truncation_reason": "requested_range_excludes_file_lines",
+    }
+
+
+def test_file_read_raw_content_is_not_serialized_to_tool_message_when_model_visible_exists(tmp_path: Path) -> None:
+    from haagent.context.messages import build_tool_result_message
+
+    target = tmp_path / "notes.txt"
+    target.write_text("raw-only-line\nvisible-line\n", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
+
+    result = router.dispatch("file_read", {"path": "notes.txt", "offset": 0, "limit": 1})
+    result["model_visible"]["content"] = "visible excerpt"
+
+    message = build_tool_result_message("call_1", "file_read", result)
+
+    assert "visible excerpt" in message["content"]
+    assert "raw-only-line" not in message["content"]
+
+
 def test_file_read_keyword_miss_returns_structured_error(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     writer = make_writer(tmp_path)

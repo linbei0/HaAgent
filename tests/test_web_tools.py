@@ -80,9 +80,12 @@ def test_web_fetch_cleans_html_and_marks_external_content() -> None:
     assert result["status"] == "success"
     assert result["final_url"] == "https://example.com/page"
     assert result["content"].startswith(EXTERNAL_CONTENT_BANNER)
-    assert "Readable text" in result["content"]
-    assert "bad()" not in result["content"]
-    assert ".x{color:red}" not in result["content"]
+    assert "bad()" in result["content"]
+    visible_content = result["model_visible"]["content"]
+    assert result["model_visible"]["content_format"] == "simplified_html"
+    assert "Readable text" in visible_content
+    assert "bad()" not in visible_content
+    assert ".x{color:red}" not in visible_content
     assert result["truncated"] is False
 
 
@@ -99,6 +102,64 @@ def test_web_fetch_truncates_content_after_external_banner() -> None:
     assert result["status"] == "success"
     assert result["truncated"] is True
     assert result["content"].endswith("\n...[truncated]")
+
+
+def test_web_fetch_returns_simplified_html_in_model_visible_and_preserves_raw_trace_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text=(
+                "<html><head><title>Readable Page</title><script>track()</script></head>"
+                "<body><nav>Top nav</nav><main><h1>Readable Page</h1>"
+                "<p>Important body</p><a href=\"/next\">Next link</a></main>"
+                "<footer>Footer links</footer></body></html>"
+            ),
+            request=request,
+        )
+
+    result = web_fetch(
+        {"url": "https://example.com/page", "max_chars": 1200},
+        transport=httpx.MockTransport(handler),
+        resolver=_public_resolver,
+    )
+
+    assert result["status"] == "success"
+    assert "track()" in result["content"]
+    visible = result["model_visible"]
+    assert visible["final_url"] == "https://example.com/page"
+    assert visible["content_format"] == "simplified_html"
+    assert "<main>" in visible["content"]
+    assert "Important body" in visible["content"]
+    assert "href=\"https://example.com/next\"" in visible["content"]
+    assert "track()" not in visible["content"]
+    assert "Top nav" not in visible["content"]
+    assert "Footer links" not in visible["content"]
+
+
+def test_web_fetch_simplified_html_removes_low_value_page_chrome() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=(
+                "<article><header>Article header</header><h1>Title</h1>"
+                "<aside>Related posts</aside><p>Useful paragraph</p>"
+                "<form><input value='noise'></form></article>"
+            ),
+            request=request,
+        )
+
+    result = web_fetch(
+        {"url": "https://example.com/article", "max_chars": 1200},
+        transport=httpx.MockTransport(handler),
+        resolver=_public_resolver,
+    )
+
+    visible_content = result["model_visible"]["content"]
+    assert "Useful paragraph" in visible_content
+    assert "Related posts" not in visible_content
+    assert "value=" not in visible_content
 
 
 def test_tavily_web_search_maps_results_without_leaking_api_key() -> None:
