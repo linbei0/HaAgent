@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import count
-from typing import Literal
+from typing import Any, Literal
 
 from rich.text import Text
 from textual import events
@@ -16,7 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Static, TextArea
+from textual.widgets import Markdown, Static, TextArea
 
 
 class PromptInput(TextArea):
@@ -319,14 +319,19 @@ class TimelineBlock(Vertical):
         self._item = item
         self._show_tool_details = show_tool_details
         self._header_widget: Static | None = None
-        self._body_widget: Static | None = None
+        self._body_widget: Markdown | Static | None = None
         self._active_widget: Static | None = None
         self._tools_widget: Static | None = None
+        self._markdown_stream: Any | None = None
+        self._markdown_stream_content = ""
         super().__init__(classes=_timeline_item_classes(item))
 
     def compose(self) -> ComposeResult:
         self._header_widget = Static("", classes="timeline-header")
-        self._body_widget = Static("", classes="timeline-body")
+        if self._item.role == "assistant":
+            self._body_widget = Markdown("", classes="timeline-body timeline-answer", open_links=False)
+        else:
+            self._body_widget = Static("", classes="timeline-body")
         self._active_widget = Static("", classes="timeline-active")
         self._tools_widget = Static("", classes="timeline-tools")
         yield self._header_widget
@@ -349,8 +354,10 @@ class TimelineBlock(Vertical):
         label = item.title or _role_label(item.role)
         header.update(f"[{label}]")
         header.display = True
-        body.update(item.content or "")
-        body.set_class(item.role == "assistant", "timeline-answer")
+        if isinstance(body, Markdown):
+            self._update_markdown_body(body, item)
+        else:
+            body.update(item.content or "")
         body.display = bool(item.content)
         active_text = "生成中 · HaAgent" if item.role == "assistant" and item.status == "streaming" else ""
         active.update(active_text)
@@ -364,6 +371,56 @@ class TimelineBlock(Vertical):
         self.set_class(item.role == "assistant", "timeline-assistant")
         self.set_class(item.role == "system", "timeline-system")
         self.set_class(item.role == "failure" or item.status == "failed", "timeline-failed")
+
+    def _update_markdown_body(self, body: Markdown, item: TimelineItem) -> None:
+        content = item.content or ""
+        if item.status == "streaming":
+            if self._markdown_stream is None or not content.startswith(self._markdown_stream_content):
+                self._stop_markdown_stream()
+                self.run_worker(
+                    self._update_markdown_content(body, ""),
+                    group="markdown-update",
+                    exit_on_error=False,
+                    exclusive=True,
+                )
+                self._markdown_stream = Markdown.get_stream(body)
+                self._markdown_stream_content = ""
+            delta = content[len(self._markdown_stream_content) :]
+            if delta:
+                self.run_worker(
+                    self._markdown_stream.write(delta),
+                    group="markdown-stream",
+                    exit_on_error=False,
+                )
+                self._markdown_stream_content = content
+                self.call_after_refresh(self._scroll_timeline_to_end)
+            return
+        self._stop_markdown_stream()
+        if body.source != content:
+            self.run_worker(
+                self._update_markdown_content(body, content),
+                group="markdown-update",
+                exit_on_error=False,
+                exclusive=True,
+            )
+
+    async def _update_markdown_content(self, body: Markdown, content: str) -> None:
+        await body.update(content)
+        self._scroll_timeline_to_end()
+        self.call_after_refresh(self._scroll_timeline_to_end)
+
+    def _stop_markdown_stream(self) -> None:
+        if self._markdown_stream is None:
+            return
+        stream = self._markdown_stream
+        self._markdown_stream = None
+        self._markdown_stream_content = ""
+        self.run_worker(stream.stop(), group="markdown-stream", exit_on_error=False)
+
+    def _scroll_timeline_to_end(self) -> None:
+        parent = self.parent
+        if isinstance(parent, ConversationTimeline):
+            parent.scroll_end(animate=False)
 
 
 def _timeline_item_classes(item: TimelineItem) -> str:

@@ -36,7 +36,7 @@ from haagent.tui.theme import (
     status_semantic,
 )
 from haagent.tui.widgets import ConversationTimeline, PromptInput
-from textual.widgets import RichLog, TextArea
+from textual.widgets import Markdown, RichLog, TextArea
 from textual.screen import Screen
 
 
@@ -3968,6 +3968,66 @@ def test_tui_conversation_wraps_long_messages_for_scroll_height(tmp_path: Path) 
             assert answer.region.width <= conversation.content_size.width
             assert conversation.virtual_size.height > len(app._conversation_lines)
             assert conversation.scroll_y == conversation.max_scroll_y
+
+    asyncio.run(run())
+
+
+def test_tui_assistant_body_renders_markdown_without_opening_links(tmp_path: Path) -> None:
+    async def run() -> None:
+        markdown_reply = (
+            "# 结果\n\n"
+            "- **重点**\n"
+            "- `inline code`\n\n"
+            "| 文件 | 状态 |\n"
+            "| --- | --- |\n"
+            "| README.md | 已读 |\n\n"
+            "```python\nprint('ok')\n```\n\n"
+            "[资料](https://example.com)"
+        )
+        service = FakeAssistantService(workspace_root=tmp_path, assistant_content=markdown_reply)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "总结资料"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            assistant_body = conversation.query_one(".timeline-assistant .timeline-body")
+            assert isinstance(assistant_body, Markdown)
+            assert getattr(assistant_body, "_open_links") is False
+            assert markdown_reply in conversation.plain_text
+
+    asyncio.run(run())
+
+
+def test_tui_assistant_final_message_replaces_streamed_markdown(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                ChatEvent(
+                    event_type="assistant_delta",
+                    session_id="session-test",
+                    turn_index=1,
+                    message="# 草稿",
+                    payload={"delta": "# 草稿"},
+                ),
+            ],
+            assistant_content="# 最终\n\n- 完成",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "生成清单"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            assistant_body = conversation.query_one(".timeline-assistant .timeline-body", Markdown)
+            assert assistant_body.source == "# 最终\n\n- 完成"
+            assert "# 草稿" not in conversation.plain_text
+            assert "# 最终\n\n- 完成" in conversation.plain_text
 
     asyncio.run(run())
 

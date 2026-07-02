@@ -116,6 +116,11 @@ ConversationTimeline {
     margin-bottom: 1;
 }
 
+.timeline-assistant Markdown.timeline-body {
+    width: 1fr;
+    height: auto;
+}
+
 .timeline-answer {
     margin-top: 1;
 }
