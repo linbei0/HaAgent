@@ -4,12 +4,39 @@ tests/integration/mcp/test_mcp_runtime.py - MCP 运行期连接测试
 验证同步 HaAgent runtime 可以通过后台事件循环连接和调用异步 MCP server。
 """
 
+import asyncio
 from pathlib import Path
 import sys
+import threading
+import time
+from types import SimpleNamespace
 
+from haagent.mcp.client import McpClientManager, McpToolExecutionError
 from haagent.mcp.settings import redact_mcp_secret_text
-from haagent.mcp.runtime import SyncMcpRuntime
+from haagent.mcp.runtime import McpRuntimeTimeoutError, SyncMcpRuntime
 from haagent.mcp.types import McpHttpServerConfig, McpSettings, McpStdioServerConfig
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+import pytest
+
+
+class ErrorResultSession:
+    async def call_tool(self, tool_name: str, arguments: dict[str, object]) -> object:
+        del tool_name, arguments
+        return SimpleNamespace(
+            content=[SimpleNamespace(text="quota exceeded")],
+            structuredContent=None,
+            isError=True,
+        )
+
+
+def test_mcp_client_raises_structured_error_for_mcp_error_result():
+    manager = McpClientManager(McpSettings())
+    manager._sessions["exa"] = ErrorResultSession()  # type: ignore[assignment]
+
+    with pytest.raises(McpToolExecutionError) as exc_info:
+        asyncio.run(manager.call_tool("exa", "web_fetch_exa", {"url": "https://example.com"}))
+
+    assert str(exc_info.value) == "quota exceeded"
 
 
 def test_sync_mcp_runtime_discovers_and_calls_stdio_tool():
@@ -58,6 +85,61 @@ def test_sync_mcp_runtime_records_failed_server_without_raising():
         assert statuses[0].name == "missing"
         assert statuses[0].state == "failed"
         assert statuses[0].detail
+    finally:
+        runtime.close()
+
+
+def test_sync_mcp_runtime_cancels_waiting_call_promptly():
+    server_path = Path(__file__).parents[2] / "fixtures" / "fake_mcp_server.py"
+    runtime = SyncMcpRuntime(
+        McpSettings(
+            servers={
+                "fixture": McpStdioServerConfig(
+                    name="fixture",
+                    command=sys.executable,
+                    args=[str(server_path)],
+                ),
+            },
+        ),
+    )
+    token = CancellationToken()
+
+    try:
+        runtime.start()
+        threading.Timer(0.05, token.cancel).start()
+        started = time.perf_counter()
+
+        with pytest.raises(RunCancelled):
+            runtime._run(asyncio.sleep(5), cancellation_token=token)
+
+        assert time.perf_counter() - started < 1
+    finally:
+        runtime.close()
+
+
+def test_sync_mcp_runtime_times_out_waiting_call_promptly():
+    server_path = Path(__file__).parents[2] / "fixtures" / "fake_mcp_server.py"
+    runtime = SyncMcpRuntime(
+        McpSettings(
+            servers={
+                "fixture": McpStdioServerConfig(
+                    name="fixture",
+                    command=sys.executable,
+                    args=[str(server_path)],
+                ),
+            },
+        ),
+    )
+
+    try:
+        runtime.start()
+        started = time.perf_counter()
+
+        with pytest.raises(McpRuntimeTimeoutError) as exc_info:
+            runtime._run(asyncio.sleep(5), timeout_seconds=0.05)
+
+        assert "timed out after 0.05 seconds" in str(exc_info.value)
+        assert time.perf_counter() - started < 1
     finally:
         runtime.close()
 

@@ -202,6 +202,12 @@ class ConversationTimeline(VerticalScroll):
         self._items.append(TimelineItem(item_id=next(self._ids), role="assistant", turn_index=turn_index, content=content, status="done", title="HaAgent"))
         self._render_timeline()
 
+    def start_assistant_response(self, *, turn_index: int) -> None:
+        item = self._assistant_item(turn_index)
+        item.status = "streaming"
+        self._sync_block(item)
+        self._sync_plain_text()
+
     def update_assistant_delta(self, turn_index: int, delta: str) -> None:
         if not delta:
             return

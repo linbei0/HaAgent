@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.guardrails import GuardrailResult, check_tool_input, guardrail_evidence
 from haagent.runtime.execution.human_interaction import (
@@ -153,9 +153,18 @@ class ToolRouter:
                 elif tool_name == "request_user_input":
                     result = self._request_user_input(args, interaction_handler)
                 elif tool_name.startswith("mcp__"):
-                    result = run_mcp_tool(tool_name, args, self._mcp_runtime)
+                    result = run_mcp_tool(
+                        tool_name,
+                        args,
+                        self._mcp_runtime,
+                        cancellation_token=self._cancellation_token,
+                    )
                 else:
                     result = self._run_handler(tool_name, args, interaction_handler)
+        except RunCancelled as error:
+            result = tool_error(type(error).__name__, str(error))
+            self._write_trace(tool_name, args, result, started, policy_decision, guardrail_result)
+            raise
         except Exception as error:
             result = tool_error(type(error).__name__, str(error))
 
@@ -318,7 +327,16 @@ class ToolRouter:
                 guardrail_result,
             )
         if tool_name.startswith("mcp__"):
-            return run_mcp_tool(tool_name, args, self._mcp_runtime), granted_policy, None
+            return (
+                run_mcp_tool(
+                    tool_name,
+                    args,
+                    self._mcp_runtime,
+                    cancellation_token=self._cancellation_token,
+                ),
+                granted_policy,
+                None,
+            )
         return self._run_handler(tool_name, args, interaction_handler), granted_policy, None
 
     def _run_handler(

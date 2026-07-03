@@ -71,9 +71,25 @@ def failure_next_steps(
 
 
 def failure_from_payload(payload: dict[str, object], fallback_message: str = "") -> FailureView:
+    status = _payload_text(payload.get("status"))
+    fallback = _payload_text(fallback_message)
+    failed_stage = _payload_text(payload.get("failed_stage"))
+    failure_category = _payload_text(payload.get("failure_category"))
+    reason = _payload_text(payload.get("reason"))
+    if status == "cancelled":
+        failed_stage = failed_stage or "cancelled"
+        failure_category = failure_category or "Runtime Failure"
+        reason = reason or fallback or "user cancelled current run"
     return FailureView(
-        failed_stage=str(payload.get("failed_stage", "unknown")),
-        failure_category=str(payload.get("failure_category", "unknown")),
-        reason=str(payload.get("reason", fallback_message or "unknown")),
+        failed_stage=failed_stage or "unknown",
+        failure_category=failure_category or "unknown",
+        reason=reason or fallback or "unknown",
         episode_path=str(payload.get("episode_path", "unknown")),
     )
+
+
+def _payload_text(value: object) -> str:
+    text = str(value or "").strip()
+    if text in {"none", "unknown"}:
+        return ""
+    return text

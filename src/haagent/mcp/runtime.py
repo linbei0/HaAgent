@@ -7,12 +7,21 @@ src/haagent/mcp/runtime.py - 同步 MCP runtime 包装
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError
 from threading import Thread
+import time
 from typing import Any, Coroutine
 
 from haagent.mcp.client import McpClientManager
 from haagent.mcp.types import McpConnectionStatus, McpResourceInfo, McpSettings, McpToolInfo
+from haagent.runtime.execution.cancellation import CancellationToken
+
+
+DEFAULT_MCP_TOOL_TIMEOUT_SECONDS = 60.0
+
+
+class McpRuntimeTimeoutError(TimeoutError):
+    """MCP 调用超过业务超时时抛出。"""
 
 
 class SyncMcpRuntime:
@@ -59,8 +68,21 @@ class SyncMcpRuntime:
     def list_resources(self) -> list[McpResourceInfo]:
         return self._manager.list_resources()
 
-    def call_tool(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
-        return self._run(self._manager.call_tool(server_name, tool_name, arguments))
+    def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        cancellation_token: CancellationToken | None = None,
+        timeout_seconds: float = DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
+    ) -> str:
+        return self._run(
+            self._manager.call_tool(server_name, tool_name, arguments),
+            cancellation_token=cancellation_token,
+            timeout_seconds=timeout_seconds,
+            timeout_label=f"MCP tool {server_name}.{tool_name}",
+        )
 
     def read_resource(self, server_name: str, uri: str) -> str:
         return self._run(self._manager.read_resource(server_name, uri))
@@ -70,8 +92,26 @@ class SyncMcpRuntime:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _run(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+    def _run(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        cancellation_token: CancellationToken | None = None,
+        timeout_seconds: float | None = None,
+        timeout_label: str = "MCP operation",
+    ) -> Any:
         if self._loop is None:
             raise RuntimeError("MCP runtime has not been started")
         future: Future[Any] = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
-        return future.result()
+        started = time.perf_counter()
+        while True:
+            if cancellation_token is not None and cancellation_token.is_cancelled:
+                future.cancel()
+                cancellation_token.raise_if_cancelled()
+            if timeout_seconds is not None and time.perf_counter() - started >= timeout_seconds:
+                future.cancel()
+                raise McpRuntimeTimeoutError(f"{timeout_label} timed out after {timeout_seconds:g} seconds")
+            try:
+                return future.result(timeout=0.1)
+            except TimeoutError:
+                continue

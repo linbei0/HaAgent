@@ -9,7 +9,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from haagent.mcp.runtime import SyncMcpRuntime
+from haagent.mcp.client import McpServerNotConnectedError, McpToolExecutionError
+from haagent.mcp.runtime import McpRuntimeTimeoutError, SyncMcpRuntime
+from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.tools.base import tool_error
 
 
@@ -39,13 +41,33 @@ def read_mcp_resource(args: dict[str, Any], runtime: SyncMcpRuntime | None) -> d
     return {"status": "success", "output": runtime.read_resource(args["server"], args["uri"])}
 
 
-def run_mcp_tool(tool_name: str, args: dict[str, Any], runtime: SyncMcpRuntime | None) -> dict[str, Any]:
+def run_mcp_tool(
+    tool_name: str,
+    args: dict[str, Any],
+    runtime: SyncMcpRuntime | None,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> dict[str, Any]:
     if runtime is None:
         return tool_error("mcp_unavailable", "MCP runtime is not available")
     match = _MCP_TOOL_RE.match(tool_name)
     if match is None:
         return tool_error("invalid_mcp_tool_name", f"invalid MCP tool name: {tool_name}")
-    return {
-        "status": "success",
-        "output": runtime.call_tool(match.group("server"), match.group("tool"), args),
-    }
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    server_name = match.group("server")
+    mcp_tool_name = match.group("tool")
+    try:
+        output = runtime.call_tool(
+            server_name,
+            mcp_tool_name,
+            args,
+            cancellation_token=cancellation_token,
+        )
+    except McpRuntimeTimeoutError as error:
+        return tool_error("mcp_timeout", str(error))
+    except McpToolExecutionError as error:
+        return tool_error("mcp_tool_error", str(error))
+    except McpServerNotConnectedError as error:
+        return tool_error("mcp_unavailable", str(error))
+    return {"status": "success", "output": output}

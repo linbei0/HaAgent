@@ -2878,6 +2878,25 @@ def test_tui_ctrl_q_exits_even_when_prompt_input_is_focused(tmp_path: Path) -> N
     asyncio.run(run())
 
 
+def test_tui_ctrl_q_cancels_running_task_before_exit(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, block_until_released=True)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Long task"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.started.wait, 2)
+
+            await pilot.press("ctrl+q")
+            await pilot.pause(0.1)
+
+            assert service.cancelled_count == 1
+            service.release.set()
+
+    asyncio.run(run())
+
+
 def test_tui_q_does_not_exit_while_prompt_input_is_focused(tmp_path: Path) -> None:
     async def run_empty_input() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
@@ -4776,5 +4795,57 @@ def test_tui_running_state_does_not_block_ui(tmp_path: Path) -> None:
             service.release.set()
             await pilot.pause(0.2)
             assert "state: idle" in _text(app, "#status-bar")
+
+    asyncio.run(run())
+
+
+def test_tui_cancelled_failure_event_does_not_show_none_placeholders(tmp_path: Path) -> None:
+    async def run() -> None:
+        episode_path = tmp_path / ".runs" / "episode-cancelled"
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            failure_event=FailureNoticeEvent(
+                session_id="session-test",
+                turn_index=1,
+                status="cancelled",
+                failed_stage="none",
+                failure_category="none",
+                reason="none",
+                episode_path=str(episode_path),
+            ),
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "停止当前任务"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            conversation = _text(app, "#conversation")
+            assert "阶段：cancelled" in conversation
+            assert "来源：Runtime Failure" in conversation
+            assert "错误：user cancelled current run" in conversation
+            assert "阶段：none" not in conversation
+            assert "来源：none" not in conversation
+            assert "错误：none" not in conversation
+
+    asyncio.run(run())
+
+
+def test_tui_shows_assistant_placeholder_immediately_after_submit(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, block_until_released=True)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Search slowly"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.started.wait, 2)
+
+            conversation = _text(app, "#conversation")
+            assert "[你]" in conversation
+            assert "[HaAgent]" in conversation
+
+            service.release.set()
+            await pilot.pause(0.2)
 
     asyncio.run(run())

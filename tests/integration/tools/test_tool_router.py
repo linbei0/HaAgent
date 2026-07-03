@@ -7,7 +7,11 @@ tests/integration/tools/test_tool_router.py - ToolRouter 本地工具行为测�
 import json
 from pathlib import Path
 
+import pytest
+
+from haagent.mcp.runtime import McpRuntimeTimeoutError
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
 from haagent.skills import SkillSettings
@@ -429,7 +433,14 @@ class FakeMcpRuntime:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, dict[str, object]]] = []
 
-    def call_tool(self, server_name: str, tool_name: str, arguments: dict[str, object]) -> str:
+    def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        **kwargs: object,
+    ) -> str:
+        del kwargs
         self.calls.append((server_name, tool_name, arguments))
         return "echo:hi"
 
@@ -438,6 +449,17 @@ class FakeMcpRuntime:
 
     def read_resource(self, server_name: str, uri: str) -> str:
         return "resource text"
+
+
+class TimeoutMcpRuntime(FakeMcpRuntime):
+    def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        **kwargs: object,
+    ) -> str:
+        raise McpRuntimeTimeoutError("MCP tool fixture.echo timed out after 0.05 seconds")
 
 
 def test_tool_router_dispatches_dynamic_mcp_tool_through_trace(tmp_path: Path) -> None:
@@ -471,6 +493,64 @@ def test_tool_router_dispatches_dynamic_mcp_tool_through_trace(tmp_path: Path) -
     assert record["tool_name"] == "mcp__fixture__echo"
     assert record["status"] == "success"
     assert record["policy"]["risk_level"] == "high"
+
+
+def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    dynamic = ToolDefinition(
+        name="mcp__fixture__echo",
+        description="Echo text",
+        risk_level="high",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    router = ToolRouter(
+        allowed_tools=["mcp__fixture__echo"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approved_tools=["mcp__fixture__echo"],
+        tool_registry=default_tool_runtime_registry({"mcp__fixture__echo": dynamic}),
+        mcp_runtime=TimeoutMcpRuntime(),
+    )
+
+    result = router.dispatch("mcp__fixture__echo", {})
+
+    assert result == {
+        "status": "error",
+        "error": {
+            "type": "mcp_timeout",
+            "message": "MCP tool fixture.echo timed out after 0.05 seconds",
+        },
+    }
+    record = _read_single_tool_call(writer)
+    assert record["status"] == "error"
+    assert record["error"]["type"] == "mcp_timeout"
+
+
+def test_tool_router_does_not_swallow_run_cancelled_for_mcp_tool(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    token = CancellationToken()
+    token.cancel()
+    dynamic = ToolDefinition(
+        name="mcp__fixture__echo",
+        description="Echo text",
+        risk_level="high",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    router = ToolRouter(
+        allowed_tools=["mcp__fixture__echo"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approved_tools=["mcp__fixture__echo"],
+        cancellation_token=token,
+        tool_registry=default_tool_runtime_registry({"mcp__fixture__echo": dynamic}),
+        mcp_runtime=FakeMcpRuntime(),
+    )
+
+    with pytest.raises(RunCancelled):
+        router.dispatch("mcp__fixture__echo", {})
+    record = _read_single_tool_call(writer)
+    assert record["status"] == "error"
+    assert record["error"]["type"] == "RunCancelled"
 
 
 def test_dynamic_mcp_tool_defaults_to_high_risk_approval(tmp_path: Path) -> None:

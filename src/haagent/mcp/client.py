@@ -6,6 +6,7 @@ src/haagent/mcp/client.py - 异步 MCP client manager
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from contextlib import AsyncExitStack
 from typing import Any
@@ -31,6 +32,10 @@ class McpServerNotConnectedError(Exception):
     """MCP server 未连接或连接已丢失时抛出。"""
 
 
+class McpToolExecutionError(Exception):
+    """MCP server 返回工具执行错误或调用失败时抛出。"""
+
+
 class McpClientManager:
     def __init__(self, settings: McpSettings) -> None:
         self._settings = settings
@@ -50,6 +55,15 @@ class McpClientManager:
                     await self._connect_stdio(name, config)
                 elif isinstance(config, McpHttpServerConfig):
                     await self._connect_http(name, config)
+            except asyncio.CancelledError as error:
+                self._statuses[name] = McpConnectionStatus(
+                    name=name,
+                    state="failed",
+                    detail=redact_mcp_secret_text(
+                        f"MCP server cancelled during startup: {error or type(error).__name__}",
+                        self._settings,
+                    ),
+                )
             except Exception as error:
                 self._statuses[name] = McpConnectionStatus(
                     name=name,
@@ -60,7 +74,7 @@ class McpClientManager:
     async def close(self) -> None:
         while self._stacks:
             stack = self._stacks.pop()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception, asyncio.CancelledError):
                 await stack.aclose()
         self._sessions.clear()
 
@@ -75,8 +89,16 @@ class McpClientManager:
 
     async def call_tool(self, server_name: str, tool_name: str, arguments: dict[str, Any]) -> str:
         session = self._session(server_name)
-        result = await session.call_tool(tool_name, arguments)
-        return _stringify_tool_result(result)
+        try:
+            result = await session.call_tool(tool_name, arguments)
+        except Exception as error:
+            message = redact_mcp_secret_text(str(error) or type(error).__name__, self._settings)
+            raise McpToolExecutionError(message) from error
+        output = _stringify_tool_result(result)
+        if bool(getattr(result, "isError", False) or getattr(result, "is_error", False)):
+            message = output or "MCP tool returned an error result"
+            raise McpToolExecutionError(redact_mcp_secret_text(message, self._settings))
+        return output
 
     async def read_resource(self, server_name: str, uri: str) -> str:
         session = self._session(server_name)

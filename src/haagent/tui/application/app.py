@@ -7,6 +7,7 @@ haagent/tui/app.py - HaAgent TUI 应用编排
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from textual import events, work
 from textual.app import App, ComposeResult
@@ -233,6 +234,9 @@ class HaAgentTuiApp(App[None]):
     def _start_prompt(self, prompt: str) -> None:
         self._active_turn_index = self._next_turn_index()
         self._append_block("You", prompt)
+        self.query_one("#conversation", ConversationTimeline).start_assistant_response(
+            turn_index=self._active_turn_index,
+        )
         self._state = "running"
         self._refresh()
         self._run_prompt(prompt)
@@ -321,6 +325,7 @@ class HaAgentTuiApp(App[None]):
             self._close_file_ref_overlay()
 
     def action_quit(self) -> None:
+        self._request_current_task_cancel()
         self.exit(None)
 
     def action_toggle_theme(self) -> None:
@@ -1089,27 +1094,33 @@ class HaAgentTuiApp(App[None]):
         return "chat"
 
     def action_cancel_current_task(self) -> None:
-        if self._state not in {"running", "waiting approval", "waiting input"}:
+        result = self._request_current_task_cancel()
+        if result is None:
             return
-        cancel = getattr(self.service, "cancel_current_run", None)
-        if cancel is None:
-            self._append_block("Cancel", "当前 service 未提供可取消协议；本轮不能安全取消。")
-            self._refresh()
-            return
-        result = cancel()
-        if self._pending_interaction is not None:
-            self._pending_interaction.response = HumanInteractionResponse(approved=False, answer="")
-            self._pending_interaction.done.set()
-            self._pending_interaction = None
-        self._restore_prompt_input()
         status = str(getattr(result, "status", "cancelled"))
-        if status == "idle":
+        if status == "unavailable":
+            self._append_block("Cancel", "当前 service 未提供可取消协议；本轮不能安全取消。")
+        elif status == "idle":
             self._state = "idle"
             self._append_block("Cancel", "当前没有仍在运行的任务。")
         else:
             self._state = "cancelling"
             self._append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
         self._refresh()
+
+    def _request_current_task_cancel(self):
+        if self._state not in {"running", "waiting approval", "waiting input", "cancelling"}:
+            return None
+        cancel = getattr(self.service, "cancel_current_run", None)
+        if cancel is None:
+            return SimpleNamespace(status="unavailable")
+        result = cancel()
+        if self._pending_interaction is not None:
+            self._pending_interaction.response = HumanInteractionResponse(approved=False, answer="")
+            self._pending_interaction.done.set()
+            self._pending_interaction = None
+        self._restore_prompt_input()
+        return result
 
     def _refresh_conversation(self) -> None:
         conversation = self.query_one("#conversation", ConversationTimeline)
