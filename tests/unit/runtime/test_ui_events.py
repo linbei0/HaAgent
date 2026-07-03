@@ -147,6 +147,8 @@ def test_runtime_ui_event_mapper_groups_tool_result_microcompact_as_warning() ->
         turn_index=1,
         title="Tool result compacted",
         message="web_fetch result compacted from 20000 to 2400 chars",
+        notice_kind="tool_result_microcompact",
+        surface="tool_detail",
         details={
             "turn": 2,
             "message_index": 4,
@@ -177,6 +179,8 @@ def test_runtime_ui_event_mapper_groups_loop_suggestion_as_warning() -> None:
         turn_index=1,
         title="Loop guidance",
         message="请改用相对路径重试。",
+        notice_kind="loop_guidance",
+        surface="hidden",
         details={
             "turn": 2,
             "trigger": "tool_argument_invalid",
@@ -203,6 +207,8 @@ def test_runtime_ui_event_mapper_groups_safety_abort_as_warning() -> None:
         turn_index=1,
         title="Safety abort",
         message="blocked outside workspace",
+        notice_kind="safety_abort",
+        surface="timeline",
         details={
             "turn": 3,
             "violation_type": "workspace_boundary",
@@ -255,5 +261,7 @@ def test_runtime_ui_event_mapper_turns_unknown_events_into_warning() -> None:
 
     assert isinstance(event, WarningNoticeEvent)
     assert event.title == "Runtime warning"
+    assert event.notice_kind == "runtime_warning"
+    assert event.surface == "timeline"
     assert "new_runtime_event" in event.message
     assert event.details == {"value": "kept"}

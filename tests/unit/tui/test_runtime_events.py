@@ -35,6 +35,7 @@ class FakeRuntimeEventApp:
         self.assistant_deltas: list[tuple[int, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
         self.tool_activities: list[tuple[int, str, str, str]] = []
+        self.tool_diagnostics: list[tuple[int, str, str]] = []
         self.blocks: list[tuple[str, str]] = []
         self.lines: list[str] = []
         self.answer_questions: list[str] = []
@@ -50,6 +51,9 @@ class FakeRuntimeEventApp:
 
     def _record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
         self.tool_activities.append((turn_index, tool_name, status, summary))
+
+    def _record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
+        self.tool_diagnostics.append((turn_index, tool_name, message))
 
     def _append_block(self, title: str, body: str) -> None:
         self.blocks.append((title, body))
@@ -112,8 +116,61 @@ def test_runtime_ui_event_handler_tracks_approval_state() -> None:
 
     assert app.tool_activities[0] == (1, "shell", "approval", "等待审批")
     assert app.tool_activities[1] == (1, "shell", "running", "审批已允许")
-    assert app.lines == ["审批已允许：shell"]
+    assert app.lines == []
     assert app._state == "running"
+
+
+def test_runtime_ui_event_handler_keeps_approval_denials_visible() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        ApprovalStateEvent("session-1", 1, 2, "shell", "denied", "", False),
+    )
+
+    assert app.tool_activities == [(1, "shell", "failed", "审批已拒绝")]
+    assert app.lines == ["审批已拒绝：shell"]
+
+
+def test_runtime_ui_event_handler_routes_tool_result_compaction_to_tool_detail() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        WarningNoticeEvent(
+            session_id="session-1",
+            turn_index=1,
+            title="Tool result compacted",
+            message="web_search result compacted from 1854 to 929 chars",
+            notice_kind="tool_result_microcompact",
+            surface="tool_detail",
+            details={"tool_name": "web_search", "original_chars": 1854, "final_chars": 929},
+        ),
+    )
+
+    assert app.blocks == []
+    assert app.tool_diagnostics == [(1, "web_search", "结果已压缩 1854 -> 929 字符")]
+
+
+def test_runtime_ui_event_handler_hides_loop_guidance() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        WarningNoticeEvent(
+            session_id="session-1",
+            turn_index=1,
+            title="Loop guidance",
+            message="File change succeeded. Consider reading back notes.md.",
+            notice_kind="loop_guidance",
+            surface="hidden",
+            details={"tool_name": "file_write"},
+        ),
+    )
+
+    assert app.blocks == []
+    assert app.lines == []
+    assert app.tool_diagnostics == []
 
 
 def test_runtime_ui_event_handler_tracks_user_input_state() -> None:

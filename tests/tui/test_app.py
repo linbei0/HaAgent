@@ -3540,6 +3540,34 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_tui_running_task_rejects_plain_submit_and_keeps_input(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, block_until_released=True)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "Long task"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.started.wait, 2)
+
+            input_widget.value = "Second task"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            try:
+                assert service.prompts == ["Long task"]
+                assert input_widget.value == "Second task"
+                conversation = _text(app, "#conversation")
+                assert "当前任务仍在运行，请等待或使用 /cancel" not in conversation
+                assert "[命令]" not in conversation
+                assert "Second task" not in conversation
+            finally:
+                service.release.set()
+                await pilot.pause(0.2)
+
+    asyncio.run(run())
+
+
 def test_tui_layout_sizes_do_not_render_side_bar(tmp_path: Path) -> None:
     async def run_80() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
@@ -3580,7 +3608,7 @@ def test_tui_approval_allow_returns_approved_true_to_same_prompt(tmp_path: Path)
             await pilot.pause(0.2)
             assert service.prompts == ["Run checks"]
             assert service.interaction_responses == [HumanInteractionResponse(approved=True, answer="")]
-            assert "审批已允许：shell" in _text(app, "#conversation")
+            assert "审批已允许：shell" not in _text(app, "#conversation")
             assert "assistant: Run checks" in _text(app, "#conversation")
 
     asyncio.run(run())
@@ -4421,13 +4449,14 @@ def test_tui_tool_summary_updates_pending_confirmation_on_response_events(tmp_pa
             input_widget = app.query_one("#prompt-input")
             input_widget.value = "需要审批的操作"
             await pilot.press("enter")
-            await pilot.pause(0.2)
+            await pilot.pause(0.4)
 
             conversation = _text(app, "#conversation")
             assert "工具 3 项" in conversation
             assert "1 运行中" in conversation
             assert "2 失败" in conversation
             assert "待确认" not in conversation
+            assert "审批已允许：shell" not in conversation
 
     asyncio.run(run())
 
@@ -4469,6 +4498,21 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
                 _tool_event("tool_finished", 1, "file_read"),
                 _tool_event("tool_started", 1, "web_search"),
                 _tool_event("tool_finished", 1, "web_search"),
+                _runtime_event(
+                    "tool_result_microcompact",
+                    1,
+                    tool_name="web_search",
+                    original_chars=1854,
+                    final_chars=929,
+                    decision="collapsed",
+                    reason="old_tool_result_over_budget",
+                ),
+                _runtime_event(
+                    "loop_suggestion_added",
+                    1,
+                    tool_name="file_write",
+                    message="File change succeeded. Consider reading back notes.md.",
+                ),
                 _tool_event("tool_started", 1, "web_fetch"),
             ],
             assistant_content="资料已经核对。",
@@ -4482,6 +4526,9 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             compact = _text(app, "#conversation")
             assert "工具 3 项" in compact
             assert "web_fetch" in compact
+            assert "result compacted" not in compact
+            assert "File change succeeded" not in compact
+            assert "结果已压缩" not in compact
 
             input_widget.value = "/details"
             await pilot.press("enter")
@@ -4489,6 +4536,8 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             detailed = _text(app, "#conversation")
             assert "工具详情已开启" in detailed
             assert "web_fetch" in detailed
+            assert "结果已压缩 1854 -> 929 字符" in detailed
+            assert "File change succeeded" not in detailed
 
     asyncio.run(run())
 

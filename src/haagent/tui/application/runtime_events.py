@@ -64,7 +64,6 @@ def _handle_approval_state(app, event: ApprovalStateEvent) -> None:
     if event.state == "granted":
         app._state = "running"
         app._record_tool_activity(event.turn_index, event.tool_name, "running", f"{label}已允许")
-        app._append_line(f"{label}已允许：{event.tool_name}")
         return
     app._record_tool_activity(event.turn_index, event.tool_name, "failed", f"{label}已拒绝")
     app._append_line(f"{label}已拒绝：{event.tool_name}")
@@ -109,6 +108,11 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
 
 
 def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
+    if event.surface == "hidden":
+        return
+    if event.surface == "tool_detail":
+        app._record_tool_diagnostic(event.turn_index, _warning_tool_name(event), _warning_detail_message(event))
+        return
     app._append_block(event.title, event.message)
 
 
@@ -120,6 +124,22 @@ def _as_event(event: RuntimeUiEvent, event_type):
     if not isinstance(event, event_type):
         raise TypeError(f"expected {event_type.__name__}, got {type(event).__name__}")
     return event
+
+
+def _warning_tool_name(event: WarningNoticeEvent) -> str:
+    value = event.details.get("tool_name")
+    if isinstance(value, str) and value:
+        return value
+    return "unknown_tool"
+
+
+def _warning_detail_message(event: WarningNoticeEvent) -> str:
+    if event.notice_kind == "tool_result_microcompact":
+        original_chars = event.details.get("original_chars")
+        final_chars = event.details.get("final_chars")
+        if isinstance(original_chars, int) and isinstance(final_chars, int):
+            return f"结果已压缩 {original_chars} -> {final_chars} 字符"
+    return event.message
 
 
 RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {

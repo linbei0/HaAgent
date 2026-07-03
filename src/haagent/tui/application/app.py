@@ -219,10 +219,13 @@ class HaAgentTuiApp(App[None]):
             self._set_prompt_value(prompt_input, "")
             self._handle_slash_command(command)
             return
-        self._set_prompt_value(prompt_input, "")
         if self._pending_interaction is not None and self._pending_interaction.request.interaction_type == "user_input":
+            self._set_prompt_value(prompt_input, "")
             self._complete_interaction(HumanInteractionResponse(approved=True, answer=prompt))
             return
+        if self._state in {"running", "cancelling", "waiting approval"}:
+            return
+        self._set_prompt_value(prompt_input, "")
         if path_authorization.handle_prompt_path_authorization(self, prompt):
             return
         self._start_prompt(prompt)
@@ -859,6 +862,10 @@ class HaAgentTuiApp(App[None]):
                 turn_index=turn_index,
             ),
         )
+
+    def _record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
+        conversation = self.query_one("#conversation", ConversationTimeline)
+        conversation.add_tool_diagnostic(turn_index, tool_name, safe_summary(message, 120))
 
     def _handle_interaction(self, request: HumanInteractionRequest) -> HumanInteractionResponse:
         pending = PendingInteraction(request)

@@ -79,6 +79,8 @@ def unknown_runtime_ui_event(
         turn_index=turn_index,
         title="Runtime warning",
         message=f"Unknown runtime event: {event_type}",
+        notice_kind="runtime_warning",
+        surface="timeline",
         details=without_event_type(event),
     )
 
@@ -214,6 +216,8 @@ def _guardrail_event(event: dict[str, object], context: RawRuntimeUiEventContext
         turn_index=context.turn_index,
         title="Guardrail",
         message=summary_value(str(event.get("message", "guardrail triggered"))),
+        notice_kind="guardrail",
+        surface="timeline",
         details=without_event_type(event),
     )
 
@@ -230,6 +234,8 @@ def _tool_result_microcompact_event(
         turn_index=context.turn_index,
         title="Tool result compacted",
         message=f"{name} result compacted from {original_chars} to {final_chars} chars",
+        notice_kind="tool_result_microcompact",
+        surface="tool_detail",
         details=without_event_type(event),
     )
 
@@ -240,6 +246,8 @@ def _loop_suggestion_event(event: dict[str, object], context: RawRuntimeUiEventC
         turn_index=context.turn_index,
         title="Loop guidance",
         message=summary_value(str(event.get("message", ""))),
+        notice_kind="loop_guidance",
+        surface="hidden",
         details=without_event_type(event),
     )
 
@@ -250,6 +258,8 @@ def _safety_abort_event(event: dict[str, object], context: RawRuntimeUiEventCont
         turn_index=context.turn_index,
         title="Safety abort",
         message=summary_value(str(event.get("message", ""))),
+        notice_kind="safety_abort",
+        surface="timeline",
         details=without_event_type(event),
     )
 

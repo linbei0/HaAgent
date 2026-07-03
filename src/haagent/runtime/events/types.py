@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+NoticeSurface: TypeAlias = Literal["timeline", "tool_detail", "hidden"]
+
 
 @dataclass(frozen=True)
 class AssistantDeltaEvent:
@@ -83,6 +85,8 @@ class WarningNoticeEvent:
     turn_index: int
     title: str
     message: str
+    notice_kind: str = "warning"
+    surface: NoticeSurface = "timeline"
     details: dict[str, object] = field(default_factory=dict)
 
 

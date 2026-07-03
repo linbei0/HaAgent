@@ -128,6 +128,7 @@ class ToolActivity:
     status: ToolStatus
     summary: str
     turn_index: int
+    diagnostics: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -221,6 +222,17 @@ class ConversationTimeline(VerticalScroll):
     def add_tool_activity(self, activity: ToolActivity) -> None:
         item = self._assistant_item(activity.turn_index)
         merge_tool_activity(item.tools, activity)
+        self._sync_block(item)
+        self._sync_plain_text()
+
+    def add_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
+        item = self._assistant_item(turn_index)
+        activity = _matching_latest_tool_activity(item.tools, tool_name)
+        if activity is None:
+            activity = ToolActivity(tool_name=tool_name, status="done", summary="诊断", turn_index=turn_index)
+            item.tools.append(activity)
+        if message not in activity.diagnostics:
+            activity.diagnostics.append(message)
         self._sync_block(item)
         self._sync_plain_text()
 
@@ -503,6 +515,8 @@ def _render_tool_summary(tools: list[ToolActivity], *, show_details: bool) -> li
         visible_tools = tools
         for item in visible_tools:
             lines.append(f"    - 工具 {item.tool_name} {_tool_legacy_status(item.status)} · {item.summary}")
+            if show_details:
+                lines.extend(f"      诊断：{diagnostic}" for diagnostic in item.diagnostics)
     else:
         visible_tools = [item for item in tools if item.status in {"running", "approval", "failed"}]
         if visible_tools:
@@ -518,6 +532,9 @@ def merge_tool_activity(tools: list[ToolActivity], activity: ToolActivity) -> No
         return
     existing_activity.status = activity.status
     existing_activity.summary = activity.summary
+    for diagnostic in activity.diagnostics:
+        if diagnostic not in existing_activity.diagnostics:
+            existing_activity.diagnostics.append(diagnostic)
 
 
 def _matching_open_tool_activity(tools: list[ToolActivity], activity: ToolActivity) -> ToolActivity | None:
@@ -529,6 +546,13 @@ def _matching_open_tool_activity(tools: list[ToolActivity], activity: ToolActivi
             candidate_statuses.add("failed")
     for item in reversed(tools):
         if item.tool_name == activity.tool_name and item.status in candidate_statuses:
+            return item
+    return None
+
+
+def _matching_latest_tool_activity(tools: list[ToolActivity], tool_name: str) -> ToolActivity | None:
+    for item in reversed(tools):
+        if item.tool_name == tool_name:
             return item
     return None
 
