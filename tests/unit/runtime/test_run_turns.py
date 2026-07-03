@@ -6,6 +6,7 @@ tests/unit/runtime/test_run_turns.py - 单轮工具执行循环测试
 
 from types import SimpleNamespace
 from typing import Any
+from pathlib import Path
 
 from haagent.models.gateway import ToolCall
 from haagent.models.gateway import ModelResponse
@@ -47,7 +48,8 @@ class _FakeRouter:
 
 
 class _FakeWriter:
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or Path.cwd()
         self.transcript: list[dict[str, Any]] = []
         self.failure_records: list[dict[str, Any] | None] = []
 
@@ -252,6 +254,38 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
     ]
     assert "task_get" not in tool_call_names
     assert any(record["event"] == "worker_notifications_collected" for record in writer.transcript)
+
+
+def test_turn_loop_allows_unlimited_max_turns(tmp_path: Path) -> None:
+    finish_statuses: list[object] = []
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas):
+            del messages, tool_schemas
+            return ModelResponse(content="done", tool_calls=[])
+
+    deps = _deps(
+        router=_FakeRouter({}),
+        writer=_FakeWriter(tmp_path / "episode"),
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.PLANNING],
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "max_turns", None)
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+
+    result = run_turn_loop(
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=deps,
+    )
+
+    assert result is not None
+    assert finish_statuses == [RunStatus.COMPLETED]
 
 
 def _deps(

@@ -163,6 +163,7 @@ def switch_current_session_model(service: "AssistantService", profile_name: str)
                 runs_root=service.runs_root,
                 session_path=service.runs_root,
                 turn_count=0,
+                max_turns=service.max_turns,
                 provider=profile.provider,
                 model_profile_name=profile.name,
                 model=profile.model,

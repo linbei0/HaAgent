@@ -20,9 +20,9 @@ from haagent.multi_agent.team_store import MailboxMessage, TeamStore, WorkerReco
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathPolicy
+from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
 
-DEFAULT_WORKER_MAX_TURNS = 20
 RESTART_STATUS_NOTE = "Task restarted; prior interactive context was not preserved."
 
 
@@ -36,6 +36,17 @@ class _WorkerTask:
     done: threading.Event = field(default_factory=threading.Event)
     notification: dict[str, Any] | None = None
     restart_count: int = 0
+
+
+class _EmptyMcpRuntime:
+    def list_tools(self) -> list[Any]:
+        return []
+
+    def list_statuses(self) -> list[Any]:
+        return []
+
+    def close(self) -> None:
+        return None
 
 
 class MultiAgentRuntime:
@@ -60,7 +71,7 @@ class MultiAgentRuntime:
         tool_registry: Any,
         mcp_runtime: Any,
         team_root: Path | None = None,
-        worker_max_turns: int = DEFAULT_WORKER_MAX_TURNS,
+        worker_max_turns: int | None = DEFAULT_INTERACTIVE_MAX_TURNS,
     ) -> None:
         self.runs_root = runs_root
         self.workspace_root = workspace_root
@@ -436,6 +447,7 @@ class MultiAgentRuntime:
             allowed_tools_override=policy.allowed_tools,
             approval_allowed_tools_override=policy.approval_allowed_tools,
             approved_tools_override=policy.approved_tools,
+            mcp_runtime=self.mcp_runtime or _EmptyMcpRuntime(),
         )
 
     def _emit_worker_event(

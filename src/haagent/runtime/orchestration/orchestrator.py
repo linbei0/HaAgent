@@ -58,6 +58,7 @@ from haagent.runtime.orchestration.preparation import prepare_initial_messages, 
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.turns import TurnLoopDependencies, TurnLoopState, run_turn_loop
+from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS
 from haagent.runtime.contracts.task import TaskLoadError
 from haagent.tools.base import ToolRoutingError, tool_error
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
@@ -70,7 +71,7 @@ class RunOrchestrator:
         self,
         runs_root: Path,
         model_gateway: ModelGateway | None = None,
-        max_turns: int = 3,
+        max_turns: int | None = DEFAULT_RUN_MAX_TURNS,
         session_summary: str | None = None,
         session_compaction: dict[str, object] | None = None,
         tool_result_microcompact_count: int = 0,

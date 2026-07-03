@@ -14,6 +14,7 @@ from typing import Any, Sequence
 
 from haagent.models.gateway import ModelGateway
 from haagent.runtime.evaluation.runner import run_eval_path
+from haagent.runtime.settings import DEFAULT_CHECK_EVAL_MAX_TURNS
 
 
 OUTPUT_EXCERPT_LIMIT = 4000
@@ -55,7 +56,7 @@ def run_quality_checks(
         eval_path,
         runs_root=runs_root,
         model_gateway=model_gateway,
-        max_turns=5,
+        max_turns=DEFAULT_CHECK_EVAL_MAX_TURNS,
     )
     checks = [_eval_check_summary(eval_report)]
     pytest_result = None

@@ -43,7 +43,6 @@ from haagent.models.provider_profile import (
     user_config_dir,
 )
 from haagent.runtime.session.agent import (
-    CHAT_MAX_TURNS,
     AgentSession,
     ChatSessionError,
     ChatTurnResult,
@@ -55,6 +54,12 @@ from haagent.runtime.session.agent import (
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathAccess, PermissionMode
+from haagent.runtime.settings import (
+    DEFAULT_INTERACTIVE_MAX_TURNS,
+    RuntimeSettingsError,
+    load_runtime_settings,
+    set_interactive_max_turns,
+)
 from haagent.skills import trust_project_root, untrust_project_root
 from haagent.skills.marketplace import MarketplaceError, MarketplaceSkillCard, install_marketplace_skill_card, search_marketplace
 from haagent.tools.skills import skill_list, skill_read
@@ -98,12 +103,19 @@ class AssistantWorkspaceStatus:
 
 
 @dataclass(frozen=True)
+class AssistantTurnLimitStatus:
+    current_max_turns: int | None
+    configured_interactive_max_turns: int
+
+
+@dataclass(frozen=True)
 class AssistantSessionStatus:
     session_id: str
     workspace_root: Path
     runs_root: Path
     session_path: Path
     turn_count: int
+    max_turns: int | None
     provider: str
     model_profile_name: str | None = None
     model: str | None = None
@@ -235,7 +247,7 @@ class AssistantService:
         environ: Mapping[str, str] | None = None,
         gateway_factory: GatewayFactory | None = None,
         session_cls: type[AgentSession] = AgentSession,
-        max_turns: int = CHAT_MAX_TURNS,
+        max_turns: int | None = DEFAULT_INTERACTIVE_MAX_TURNS,
         enable_web: bool = False,
         initial_resume: str | Path | None = None,
         initial_continue: bool = False,
@@ -399,6 +411,30 @@ class AssistantService:
         if self._session is not None:
             self._session.enable_web = enabled
         return self.get_workspace_status()
+
+    def get_turn_limit_status(self) -> AssistantTurnLimitStatus:
+        configured = load_runtime_settings().interactive_max_turns
+        current = self._session.max_turns if self._session is not None else self.max_turns
+        return AssistantTurnLimitStatus(
+            current_max_turns=current,
+            configured_interactive_max_turns=configured,
+        )
+
+    def set_interactive_max_turns(self, max_turns: int) -> AssistantTurnLimitStatus:
+        try:
+            settings = set_interactive_max_turns(max_turns)
+        except RuntimeSettingsError as error:
+            raise AssistantServiceError(str(error)) from error
+        self.max_turns = settings.interactive_max_turns
+        if self._session is not None:
+            self._session.set_max_turns(settings.interactive_max_turns)
+        return self.get_turn_limit_status()
+
+    def set_current_turns_unlimited(self) -> AssistantTurnLimitStatus:
+        if self._session is None:
+            raise AssistantServiceError("当前没有 session；先发送一条消息再使用 /turns unlimited。")
+        self._session.set_max_turns(None)
+        return self.get_turn_limit_status()
 
     def create_session(self) -> AssistantSessionStatus:
         return session_usecases.create_session(self)
@@ -576,6 +612,7 @@ def _session_status(session: AgentSession) -> AssistantSessionStatus:
         runs_root=session.runs_root,
         session_path=session.session_path.resolve(),
         turn_count=session.turn_count,
+        max_turns=getattr(session, "max_turns", None),
         provider=session.provider_name,
         model_profile_name=getattr(session, "model_profile_name", None),
         model=getattr(session, "model_name", None),

@@ -63,7 +63,7 @@ class RecordingSession:
         model_profile_name: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
-        max_turns: int,
+        max_turns: int | None,
         enable_web: bool = False,
     ) -> None:
         self.session_id = "session-from-default-registry"
@@ -104,6 +104,9 @@ class RecordingSession:
                 "saved_chars": 900,
             },
         )()
+
+    def set_max_turns(self, max_turns: int | None) -> None:
+        self.max_turns = max_turns
 
 
 def _set_home(monkeypatch, home: Path) -> None:
@@ -765,6 +768,49 @@ def test_service_can_toggle_web_for_current_and_future_sessions(tmp_path: Path, 
     assert service.get_workspace_status().web_enabled is False
     assert service.current_session().web_enabled is False
     assert service._session.enable_web is False
+
+
+def test_service_saves_interactive_turn_limit_and_updates_current_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _write_user_profile(home)
+    service = _service(tmp_path, gateway_factory=lambda profile: RecordingGateway(profile.name))
+    service.session_cls = RecordingSession
+    service.create_session()
+
+    status = service.set_interactive_max_turns(80)
+
+    assert status.current_max_turns == 80
+    assert status.configured_interactive_max_turns == 80
+    assert service.current_session().max_turns == 80
+    assert service._session.max_turns == 80
+    saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
+    assert saved["active_profile"] == "local"
+    assert saved["interactive_max_turns"] == 80
+
+
+def test_service_sets_current_session_unlimited_without_persisting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _write_user_profile(home)
+    service = _service(tmp_path, gateway_factory=lambda profile: RecordingGateway(profile.name))
+    service.session_cls = RecordingSession
+    service.create_session()
+
+    status = service.set_current_turns_unlimited()
+
+    assert status.current_max_turns is None
+    assert status.configured_interactive_max_turns == 200
+    assert service.current_session().max_turns is None
+    assert service._session.max_turns is None
+    saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
+    assert saved == {"active_profile": "local"}
 
 
 def test_service_switches_current_session_model_without_changing_default(

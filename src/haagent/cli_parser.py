@@ -21,6 +21,11 @@ from haagent.cli_commands import (
     handle_tui_migration,
 )
 from haagent.cli_runtime import CliRuntime
+from haagent.runtime.settings import (
+    DEFAULT_DOGFOOD_MAX_TURNS,
+    DEFAULT_RUN_MAX_TURNS,
+    DEFAULT_SMOKE_MAX_TURNS,
+)
 
 
 class _RootHelpParser(argparse.ArgumentParser):
@@ -118,8 +123,8 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     _add_model_provider(run_parser)
     _add_max_turns(
         run_parser,
-        default=3,
-        help_text="maximum model/tool turns before failing the run (default: 3)",
+        default=DEFAULT_RUN_MAX_TURNS,
+        help_text=f"maximum model/tool turns before failing the run (default: {DEFAULT_RUN_MAX_TURNS})",
     )
     run_parser.set_defaults(handler=lambda args: handle_run(args, runtime))
 
@@ -151,8 +156,8 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     smoke_parser.add_argument("--profile", help="real provider profile name from .haagent/providers.json")
     _add_max_turns(
         smoke_parser,
-        default=12,
-        help_text="maximum model/tool turns per smoke task (default: 12)",
+        default=DEFAULT_SMOKE_MAX_TURNS,
+        help_text=f"maximum model/tool turns per smoke task (default: {DEFAULT_SMOKE_MAX_TURNS})",
     )
     smoke_parser.set_defaults(handler=lambda args: handle_smoke(args, runtime))
 
@@ -177,8 +182,8 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     )
     _add_max_turns(
         dogfood_parser,
-        default=16,
-        help_text="maximum model/tool turns per dogfood task (default: 16)",
+        default=DEFAULT_DOGFOOD_MAX_TURNS,
+        help_text=f"maximum model/tool turns per dogfood task (default: {DEFAULT_DOGFOOD_MAX_TURNS})",
     )
     dogfood_parser.add_argument(
         "--no-auto-approve",

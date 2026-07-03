@@ -33,6 +33,7 @@ from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfoo
 from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package
 from haagent.runtime.evaluation.export import export_eval_case
 from haagent.runtime.evaluation.runner import EvalRunnerError, run_eval_path
+from haagent.runtime.settings import load_runtime_settings
 from haagent.tui.application.app import run_tui
 
 
@@ -88,6 +89,7 @@ def handle_tui_entry(args) -> int:
     service = AssistantService(
         workspace_root=workspace_root,
         runs_root=args.runs_root,
+        max_turns=load_runtime_settings().interactive_max_turns,
         enable_web=bool(getattr(args, "enable_web", False)),
         initial_resume=getattr(args, "resume", None),
         initial_continue=bool(getattr(args, "continue_session", False)),

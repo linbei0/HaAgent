@@ -33,4 +33,5 @@ def test_runtime_top_level_packages_are_named_by_responsibility() -> None:
         "execution",
         "orchestration",
         "session",
+        "settings",
     ]

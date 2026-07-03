@@ -310,7 +310,12 @@ def delete_provider_profile(name: str, *, config_dir: Path | None = None) -> Pat
             replacement = _required_string(next_records[0], "name")
             save_active_profile(replacement, config_dir=directory)
         elif settings_path.exists():
-            settings_path.unlink()
+            settings = _load_settings_record(settings_path)
+            settings.pop("active_profile", None)
+            if settings:
+                _write_json(settings_path, settings)
+            else:
+                settings_path.unlink()
     return path
 
 
@@ -320,7 +325,9 @@ def save_active_profile(name: str, *, config_dir: Path | None = None) -> Path:
     directory = config_dir or user_config_dir()
     path = directory / USER_SETTINGS_FILE
     directory.mkdir(parents=True, exist_ok=True)
-    _write_json(path, {"active_profile": name})
+    settings = _load_settings_record(path) if path.exists() else {}
+    settings["active_profile"] = name
+    _write_json(path, settings)
     return path
 
 
@@ -396,6 +403,16 @@ def _required_string(record: dict[str, object], field_name: str) -> str:
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_settings_record(path: Path) -> dict[str, object]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ProviderProfileError(f"settings config is invalid JSON: {path}") from error
+    if not isinstance(raw, dict):
+        raise ProviderProfileError("settings config must be a JSON object")
+    return raw
 
 
 def _setup_required_message() -> str:

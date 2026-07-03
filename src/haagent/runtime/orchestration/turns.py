@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import dataclass, field
+from itertools import count
 from typing import Any, Callable
 
 from haagent.context.messages import (
@@ -60,7 +61,7 @@ class TurnLoopDependencies:
     tool_registry: ToolRuntimeRegistry
     verification_commands: list[str]
     workspace_root: object
-    max_turns: int
+    max_turns: int | None
     raise_if_cancelled: Callable[[], None]
     emit_event: Callable[[dict[str, object]], None]
     microcompact_old_tool_messages: Callable[[list[dict[str, Any]], EpisodeWriter, int, Callable[[dict[str, object]]]], None]
@@ -84,7 +85,8 @@ def run_turn_loop(
     state: TurnLoopState,
     deps: TurnLoopDependencies,
 ) -> RunResult | None:
-    for turn in range(1, deps.max_turns + 1):
+    turn_numbers = count(1) if deps.max_turns is None else range(1, deps.max_turns + 1)
+    for turn in turn_numbers:
         deps.raise_if_cancelled()
         if state.pending_worker_task_ids:
             notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
@@ -276,7 +278,7 @@ def _handle_no_tool_response(
     )
     state.messages.append(ver_msg)
     state.final_response_requested = False
-    if turn == deps.max_turns:
+    if deps.max_turns is not None and turn == deps.max_turns:
         deps.recorder.transition(RunStatus.FAILED)
         deps.writer.write_failure_attribution(
             {

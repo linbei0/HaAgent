@@ -13,7 +13,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import TextArea
 
-from haagent.app.assistant_service import AssistantService
+from haagent.app.assistant_service import AssistantService, AssistantServiceError
 from haagent.models.gateway_registry import catalog_provider_capability
 from haagent.memory import MemoryCandidate
 from haagent.runtime.events import RuntimeUiEvent
@@ -469,6 +469,8 @@ class HaAgentTuiApp(App[None]):
             self._handle_skill_command(result.argument)
         elif command.action == "web":
             self._handle_web_command(result.argument)
+        elif command.action == "turns":
+            self._handle_turns_command(result.argument)
         elif command.action == "permissions":
             self._show_permissions()
         elif command.action == "cancel_task":
@@ -477,6 +479,50 @@ class HaAgentTuiApp(App[None]):
             self.action_new_session()
         elif command.action == "resume_latest":
             self.action_resume_latest()
+
+    def _handle_turns_command(self, argument: str) -> None:
+        usage = "用法：/turns [show|unlimited|COUNT]"
+        parts = argument.strip().split()
+        if not parts or parts == ["show"]:
+            status = self.service.get_turn_limit_status()
+            current = (
+                "unlimited"
+                if status.current_max_turns is None
+                else str(status.current_max_turns)
+            )
+            self._append_block(
+                "Command",
+                (
+                    f"当前 session turn 限制：{current}\n"
+                    f"已保存交互默认值：{status.configured_interactive_max_turns}\n"
+                    f"{usage}"
+                ),
+            )
+            self._refresh()
+            return
+        if parts == ["unlimited"]:
+            try:
+                self.service.set_current_turns_unlimited()
+            except AssistantServiceError as error:
+                self._append_block("Command", str(error))
+            else:
+                self._append_block(
+                    "Command",
+                    "当前 session turn 限制已设为 unlimited；不会写入全局配置。",
+                )
+            self._refresh()
+            return
+        count_text = parts[0] if len(parts) == 1 else parts[1] if parts[0] == "set" and len(parts) == 2 else ""
+        if not count_text.isdigit() or int(count_text) <= 0:
+            self._append_block("Command", usage)
+            self._refresh()
+            return
+        self.service.set_interactive_max_turns(int(count_text))
+        self._append_block(
+            "Command",
+            f"已保存交互默认 turn 限制：{int(count_text)}；当前 session 已同步。",
+        )
+        self._refresh()
 
     def action_compact_session(self) -> None:
         try:

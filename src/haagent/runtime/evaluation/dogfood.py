@@ -15,6 +15,7 @@ from typing import Any, Callable
 from haagent.models.gateway import ModelGateway
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.settings import DEFAULT_DOGFOOD_MAX_TURNS
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ def run_dogfood_tasks(
     model_gateway: ModelGateway,
     *,
     runs_root: Path | None = None,
-    max_turns: int = 16,
+    max_turns: int = DEFAULT_DOGFOOD_MAX_TURNS,
     auto_approve: bool = True,
 ) -> DogfoodReport:
     root = runs_root if runs_root is not None else Path(tempfile.mkdtemp(prefix="haagent-dogfood-runs-"))

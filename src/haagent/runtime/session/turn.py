@@ -52,7 +52,7 @@ class OrchestratorFactory(Protocol):
         *,
         runs_root: Path,
         model_gateway: ModelGateway,
-        max_turns: int,
+        max_turns: int | None,
         session_summary: str | None,
         session_compaction: dict[str, object] | None,
         tool_result_microcompact_count: int,
@@ -73,7 +73,7 @@ class ChatTurnRequest:
     workspace_root: Path
     runs_root: Path
     model_gateway: ModelGateway
-    max_turns: int
+    max_turns: int | None
     session_summary: str | None
     session_compaction: dict[str, object] | None
     tool_result_microcompact_count: int

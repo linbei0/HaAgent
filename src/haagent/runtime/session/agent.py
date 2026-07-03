@@ -64,8 +64,10 @@ from haagent.runtime.session.working_state import (
     update_working_state,
     write_working_state,
 )
+from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 from haagent.tools.registry import default_tool_runtime_registry
-CHAT_MAX_TURNS = 20
+
+CHAT_MAX_TURNS = DEFAULT_INTERACTIVE_MAX_TURNS
 
 
 class ChatSessionError(RuntimeError):
@@ -153,13 +155,14 @@ class AgentSession:
         model_profile_name: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
-        max_turns: int = CHAT_MAX_TURNS,
+        max_turns: int | None = CHAT_MAX_TURNS,
         session_id: str | None = None,
         memory_extraction_enabled: bool = True,
         enable_web: bool = False,
         allowed_tools_override: list[str] | None = None,
         approval_allowed_tools_override: list[str] | None = None,
         approved_tools_override: list[str] | None = None,
+        mcp_runtime: Any | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.path_policy = default_path_policy(self.workspace_root)
@@ -188,8 +191,13 @@ class AgentSession:
         self._working_state = empty_working_state()
         self._current_cancellation_token: CancellationToken | None = None
         self._mcp_settings = load_mcp_settings()
-        self._mcp_runtime = SyncMcpRuntime(self._mcp_settings)
-        self._mcp_runtime.start()
+        if mcp_runtime is None:
+            self._mcp_runtime = SyncMcpRuntime(self._mcp_settings)
+            self._mcp_runtime.start()
+            self._owns_mcp_runtime = True
+        else:
+            self._mcp_runtime = mcp_runtime
+            self._owns_mcp_runtime = False
         self._mcp_tool_names = [
             mcp_tool_alias(tool.server_name, tool.name)
             for tool in self._mcp_runtime.list_tools()
@@ -212,7 +220,7 @@ class AgentSession:
         model_profile_name: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
-        max_turns: int = CHAT_MAX_TURNS,
+        max_turns: int | None = CHAT_MAX_TURNS,
         enable_web: bool = False,
     ) -> "AgentSession":
         session_path = _resolve_session_path(session, runs_root or Path(".runs"))
@@ -250,6 +258,7 @@ class AgentSession:
         instance._mcp_settings = load_mcp_settings()
         instance._mcp_runtime = SyncMcpRuntime(instance._mcp_settings)
         instance._mcp_runtime.start()
+        instance._owns_mcp_runtime = True
         instance._mcp_tool_names = [
             mcp_tool_alias(tool.server_name, tool.name)
             for tool in instance._mcp_runtime.list_tools()
@@ -264,6 +273,9 @@ class AgentSession:
         instance._approved_tools_override = None
         instance._created_at = str(metadata["created_at"])
         return instance
+
+    def set_max_turns(self, max_turns: int | None) -> None:
+        self.max_turns = max_turns
 
     @property
     def provider_name(self) -> str:
@@ -611,7 +623,8 @@ class AgentSession:
             for team in store.list_teams_for_leader(self.session_id):
                 store.mark_inactive(team.team_id)
         finally:
-            self._mcp_runtime.close()
+            if self._owns_mcp_runtime:
+                self._mcp_runtime.close()
 
     def summary_text(self) -> str | None:
         return self._session_memory().summary_text

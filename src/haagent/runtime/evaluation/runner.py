@@ -19,6 +19,7 @@ from haagent.models.gateway import ModelGateway, ModelResponse, ToolCall
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.episodes.validator import load_inspect_episode_package
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS
 
 
 EVAL_REPORT_VERSION = "1.0"
@@ -37,7 +38,7 @@ def run_eval_path(
     *,
     runs_root: Path,
     model_gateway: ModelGateway | None = None,
-    max_turns: int = 3,
+    max_turns: int = DEFAULT_RUN_MAX_TURNS,
 ) -> dict[str, Any]:
     case_paths = _resolve_case_paths(eval_path)
     results = [

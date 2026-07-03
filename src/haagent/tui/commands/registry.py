@@ -56,6 +56,7 @@ def command_registry() -> CommandRegistry:
             SlashCommand("skills", "查看、信任、搜索和安装 skills", "skills"),
             SlashCommand("skill", "显式使用一个 skill", "skill"),
             SlashCommand("web", "切换联网工具", "web"),
+            SlashCommand("turns", "查看或设置当前会话 turn 限制", "turns"),
             SlashCommand("permissions", "管理外部目录权限", "permissions"),
             SlashCommand("cancel", "取消当前任务", "cancel_task"),
             SlashCommand("new", "新建 session", "new_session"),
