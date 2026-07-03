@@ -20,8 +20,9 @@ from haagent.memory.extraction import (
 )
 from haagent.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.chat_session import AgentSession
-from haagent.runtime.human_interaction import HumanInteractionResponse
+from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.events import MemoryNoticeEvent, ToolActivityEvent
+from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 
 
 class RecordingGateway:
@@ -243,7 +244,7 @@ def test_agent_session_does_not_extract_without_start_memory_update(tmp_path: Pa
     assert result.memory_extraction_status == "skipped"
     assert len(gateway.calls) == 1
     assert not CandidateQueue(session.session_path).path.exists()
-    assert not any(event.event_type == "memory_candidates_created" for event in events)
+    assert not any(isinstance(event, MemoryNoticeEvent) for event in events)
 
 
 def test_agent_session_extracts_only_after_start_memory_update(tmp_path: Path) -> None:
@@ -741,7 +742,7 @@ def test_agent_session_emits_candidate_notice(tmp_path: Path) -> None:
     assert result.status == "completed"
     assert result.memory_candidates_created == 1
     assert "memory_candidates=1" in result.output_lines()
-    assert any(event.event_type == "memory_candidates_created" for event in events)
+    assert any(isinstance(event, MemoryNoticeEvent) for event in events)
 
 
 def test_memory_request_keeps_regular_tools_available_and_extracts_candidate(tmp_path: Path) -> None:
@@ -902,7 +903,11 @@ def test_agent_session_allows_profile_file_write_then_extracts_pending_candidate
     store = MemoryStore(workspace_root=workspace)
     records = store.list_records(scope="user", category="user_preferences")
     assert all(record.source_candidate_id != pending[0].candidate_id for record in records)
-    assert not [event for event in events if event.event_type == "tool_failed"]
+    assert not [
+        event
+        for event in events
+        if isinstance(event, ToolActivityEvent) and event.status == "failed"
+    ]
 
 
 def test_memory_cli_lists_confirms_and_rejects_candidates(tmp_path: Path, monkeypatch, capsys) -> None:

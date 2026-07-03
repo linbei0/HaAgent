@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from haagent.runtime.episode_validator import (
+from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
 )

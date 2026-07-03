@@ -19,8 +19,8 @@ from haagent.models.provider_profile import (
     load_active_provider_profile,
     load_provider_profile,
 )
-from haagent.runtime.chat_session import AgentSession
-from haagent.runtime.orchestrator import RunOrchestrator
+from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
 
 @dataclass(frozen=True)

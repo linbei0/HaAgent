@@ -1,40 +1,28 @@
 from __future__ import annotations
 
-from haagent.runtime.chat_turn import ChatEventMapper
+from haagent.runtime.session.turn import runtime_event_message, runtime_event_payload
 
 
-def test_chat_event_mapper_converts_tool_finished_without_tui_or_session() -> None:
-    event = ChatEventMapper.to_chat_event(
-        {
-            "event_type": "tool_finished",
-            "turn": 2,
-            "tool_name": "file_read",
-            "result": {"status": "success", "path": "README.md", "content": "hello"},
-        },
-        turn_index=1,
-    )
+def test_runtime_event_helpers_compact_tool_finished_without_tui_or_session() -> None:
+    payload = {
+        "turn": 2,
+        "tool_name": "file_read",
+        "result": {"status": "success", "path": "README.md", "content": "hello"},
+    }
 
-    assert event.event_type == "tool_finished"
-    assert event.message == "finished tool file_read"
-    assert event.payload["model_turn"] == 2
-    assert event.payload["tool_name"] == "file_read"
-    assert event.payload["status"] == "success"
-    assert event.payload["result_summary"]["path"] == "README.md"
+    assert runtime_event_message("tool_finished", payload) == "finished tool file_read"
+    compact_payload = runtime_event_payload("tool_finished", payload)
+    assert compact_payload["model_turn"] == 2
+    assert compact_payload["tool_name"] == "file_read"
+    assert compact_payload["status"] == "success"
+    assert compact_payload["result_summary"]["path"] == "README.md"
 
 
-def test_chat_event_mapper_converts_assistant_delta_without_transcript_bloat() -> None:
-    event = ChatEventMapper.to_chat_event(
-        {
-            "event_type": "assistant_delta",
-            "turn": 1,
-            "delta": "半句实时输出",
-        },
-        turn_index=1,
-    )
+def test_runtime_event_helpers_compact_assistant_delta_without_transcript_bloat() -> None:
+    payload = {"turn": 1, "delta": "半句实时输出"}
 
-    assert event.event_type == "assistant_delta"
-    assert event.message == "半句实时输出"
-    assert event.payload == {
+    assert runtime_event_message("assistant_delta", payload) == "半句实时输出"
+    assert runtime_event_payload("assistant_delta", payload) == {
         "model_turn": 1,
         "delta": "半句实时输出",
     }

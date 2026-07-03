@@ -4,8 +4,8 @@ tests/unit/runtime/test_human_interaction_resolver.py - 人机交互解析器测
 验证审批和用户补充信息能按通用签名复用，并生成中性状态摘要。
 """
 
-from haagent.runtime.human_interaction import HumanInteractionRequest, HumanInteractionResponse
-from haagent.runtime.human_interaction_resolver import HumanInteractionResolver
+from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
 
 
 def _user_input_request(question: str = "Which file?", path: str = "README.md") -> HumanInteractionRequest:

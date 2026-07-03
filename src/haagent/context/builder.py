@@ -44,10 +44,10 @@ from haagent.memory.retrieval import (
     MemoryRetrievalRequest,
     MemoryRetriever,
 )
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.full_compact_contract import assess_full_compact_eligibility
-from haagent.runtime.task_contract import TaskSpec
-from haagent.runtime.working_state import (
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.compaction.contract import assess_full_compact_eligibility
+from haagent.runtime.contracts.task import TaskSpec
+from haagent.runtime.session.working_state import (
     WorkingStateError,
     format_working_state_for_model,
     raw_working_state_text,

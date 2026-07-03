@@ -14,11 +14,11 @@ import time
 from pathlib import Path
 
 from haagent.context.builder import ContextBuilder
-from haagent.runtime.cancellation import CancellationToken
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.path_policy import ExternalRoot, PathPolicy
-from haagent.runtime.plan import build_plan
-from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
+from haagent.runtime.contracts.plan import build_plan
+from haagent.runtime.contracts.task import TaskSpec
 from haagent.tools.code_run import code_run
 from haagent.tools.router import ToolRouter
 from haagent.tools.shell import shell

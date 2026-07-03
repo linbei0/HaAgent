@@ -14,20 +14,30 @@ from types import SimpleNamespace
 from haagent import cli
 from haagent.app.assistant_service import AssistantSessionStatus, AssistantSessionSummary, AssistantWorkspaceStatus
 from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
-from haagent.runtime.chat_session import ChatEvent
-from haagent.runtime.human_interaction import HumanInteractionRequest, HumanInteractionResponse
-from haagent.tui.app import HaAgentTuiApp, find_untrusted_absolute_paths
+from haagent.runtime.events import (
+    ApprovalStateEvent,
+    AssistantDeltaEvent,
+    AssistantMessageEvent,
+    FailureNoticeEvent,
+    MemoryNoticeEvent,
+    RuntimeUiEvent,
+    RuntimeUiEventMapper,
+    ToolActivityEvent,
+    UserInputStateEvent,
+)
+from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.tui.application.app import HaAgentTuiApp, find_untrusted_absolute_paths
 from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
-from haagent.tui.failures import failure_next_steps
-from haagent.tui.file_refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
-from haagent.tui.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
-from haagent.tui.models import ModelCatalogLoadingOverlay
-from haagent.tui.copy import MODAL_TITLES, PANEL_TITLES
-from haagent.tui.renderers import memory_panel_text, status_line
-from haagent.tui.search import ConversationSearchState
-from haagent.tui.sessions import SessionOverlayState
+from haagent.tui.design.failures import failure_next_steps
+from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
+from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
+from haagent.tui.overlays.models import ModelCatalogLoadingOverlay
+from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
+from haagent.tui.design.renderers import memory_panel_text, status_line
+from haagent.tui.state.search import ConversationSearchState
+from haagent.tui.overlays.sessions import SessionOverlayState
 from haagent.tui.state import ResponsiveLayout, layout_for_size
-from haagent.tui.theme import (
+from haagent.tui.design.theme import (
     SemanticToken,
     TuiThemeMode,
     no_color_enabled,
@@ -57,9 +67,9 @@ class FakeAssistantService:
         profile_error: str | None = None,
         block_until_released: bool = False,
         assistant_content: str | None = None,
-        failure_event: ChatEvent | None = None,
+        failure_event: RuntimeUiEvent | None = None,
         interaction_request: HumanInteractionRequest | None = None,
-        extra_events: list[ChatEvent] | None = None,
+        extra_events: list[RuntimeUiEvent] | None = None,
         memory_candidates: list[MemoryCandidate] | None = None,
         memory_error: Exception | None = None,
         current_session_id: str = "session-test",
@@ -199,30 +209,28 @@ class FakeAssistantService:
                 event_sink(_interaction_response_event(request, response, len(self.prompts)))
                 if not response.approved:
                     event_sink(
-                        ChatEvent(
-                            event_type="tool_failed",
+                        ToolActivityEvent(
                             session_id="session-test",
                             turn_index=len(self.prompts),
-                            message="tool failed",
-                            payload={
-                                "tool_name": request.tool_name,
-                                "error_type": (
-                                    "approval_denied"
-                                    if request.interaction_type == "approval"
-                                    else "user_input_unavailable"
-                                ),
-                                "message": "interaction declined",
-                            },
+                            model_turn=None,
+                            tool_name=request.tool_name,
+                            status="failed",
+                            summary="interaction declined",
+                            error_type=(
+                                "approval_denied"
+                                if request.interaction_type == "approval"
+                                else "user_input_unavailable"
+                            ),
+                            error_message="interaction declined",
                         ),
                     )
                     return SimpleNamespace(status="failed")
             event_sink(
-                ChatEvent(
-                    event_type="assistant_message",
+                AssistantMessageEvent(
                     session_id="session-test",
                     turn_index=len(self.prompts),
-                    message="assistant message",
-                    payload={"content": self.assistant_content or f"assistant: {prompt}"},
+                    model_turn=None,
+                    content=self.assistant_content or f"assistant: {prompt}",
                 ),
             )
         return SimpleNamespace(status="completed")
@@ -499,88 +507,109 @@ async def _open_memory_panel(app: HaAgentTuiApp, pilot) -> None:
     await pilot.pause(0.1)
 
 
-def _interaction_requested_event(request: HumanInteractionRequest, turn_index: int) -> ChatEvent:
+def _runtime_event(event_type: str, turn_index: int, **payload: object) -> RuntimeUiEvent:
+    return RuntimeUiEventMapper.to_ui_event(
+        {"event_type": event_type, **payload},
+        session_id="session-test",
+        turn_index=turn_index,
+    )
+
+
+def _interaction_requested_event(request: HumanInteractionRequest, turn_index: int) -> RuntimeUiEvent:
     if request.interaction_type == "approval":
-        event_type = "approval_requested"
-    elif request.interaction_type == "edit_diff":
-        event_type = "edit_diff_requested"
+        return ApprovalStateEvent(
+            session_id="session-test",
+            turn_index=turn_index,
+            model_turn=None,
+            tool_name=request.tool_name,
+            state="requested",
+            question=request.question,
+            approved=None,
+            args_summary=request.args_summary,
+        )
+    if request.interaction_type == "edit_diff":
+        return ApprovalStateEvent(
+            session_id="session-test",
+            turn_index=turn_index,
+            model_turn=None,
+            tool_name=request.tool_name,
+            state="requested",
+            question=request.question,
+            approved=None,
+            args_summary=request.args_summary,
+            approval_kind="edit_diff",
+        )
+    return UserInputStateEvent(
+        session_id="session-test",
+        turn_index=turn_index,
+        model_turn=None,
+        tool_name=request.tool_name,
+        state="requested",
+        question=request.question,
+        reason=request.reason,
+    )
+
+
+def _tool_event(event_type: str, turn_index: int, tool_name: str, *, message: str | None = None) -> ToolActivityEvent:
+    if event_type == "tool_finished":
+        status = "finished"
+    elif event_type == "tool_failed":
+        status = "failed"
     else:
-        event_type = "user_input_requested"
-    return ChatEvent(
-        event_type=event_type,
+        status = "started"
+    return ToolActivityEvent(
         session_id="session-test",
         turn_index=turn_index,
-        message="interaction requested",
-        payload={
-            "tool_name": request.tool_name,
-            "question": request.question,
-            "reason": request.reason,
-            "risk_level": request.risk_level,
-            "args_summary": request.args_summary,
-            "approved": None,
-        },
+        model_turn=None,
+        tool_name=tool_name,
+        status=status,
+        summary=message or tool_name,
     )
 
 
-def _tool_event(event_type: str, turn_index: int, tool_name: str, *, message: str | None = None) -> ChatEvent:
-    payload: dict[str, object] = {"tool_name": tool_name}
-    if message is not None:
-        payload["message"] = message
-    return ChatEvent(
-        event_type=event_type,
-        session_id="session-test",
-        turn_index=turn_index,
-        message=message or tool_name,
-        payload=payload,
-    )
-
-
-def _assistant_event(event_type: str, turn_index: int, text: str) -> ChatEvent:
-    payload_key = "delta" if event_type == "assistant_delta" else "content"
-    return ChatEvent(
-        event_type=event_type,
-        session_id="session-test",
-        turn_index=turn_index,
-        message=text,
-        payload={payload_key: text},
-    )
+def _assistant_event(event_type: str, turn_index: int, text: str) -> RuntimeUiEvent:
+    if event_type == "assistant_delta":
+        return AssistantDeltaEvent("session-test", turn_index, None, text)
+    return AssistantMessageEvent("session-test", turn_index, None, text)
 
 
 def _interaction_response_event(
     request: HumanInteractionRequest,
     response: HumanInteractionResponse,
     turn_index: int,
-) -> ChatEvent:
+) -> RuntimeUiEvent:
     if request.interaction_type == "approval":
-        event_type = "approval_granted" if response.approved else "approval_denied"
-        payload = {
-            "tool_name": request.tool_name,
-            "question": request.question,
-            "approved": response.approved,
-            "args_summary": request.args_summary,
-        }
-    elif request.interaction_type == "edit_diff":
-        event_type = "edit_diff_granted" if response.approved else "edit_diff_denied"
-        payload = {
-            "tool_name": request.tool_name,
-            "question": request.question,
-            "approved": response.approved,
-            "args_summary": request.args_summary,
-        }
-    else:
-        event_type = "user_input_received"
-        payload = {
-            "tool_name": request.tool_name,
-            "question": request.question,
-            "answer_chars": len(response.answer),
-            "approved": response.approved,
-        }
-    return ChatEvent(
-        event_type=event_type,
+        return ApprovalStateEvent(
+            session_id="session-test",
+            turn_index=turn_index,
+            model_turn=None,
+            tool_name=request.tool_name,
+            state="granted" if response.approved else "denied",
+            question=request.question,
+            approved=response.approved,
+            args_summary=request.args_summary,
+        )
+    if request.interaction_type == "edit_diff":
+        return ApprovalStateEvent(
+            session_id="session-test",
+            turn_index=turn_index,
+            model_turn=None,
+            tool_name=request.tool_name,
+            state="granted" if response.approved else "denied",
+            question=request.question,
+            approved=response.approved,
+            args_summary=request.args_summary,
+            approval_kind="edit_diff",
+        )
+    return UserInputStateEvent(
         session_id="session-test",
         turn_index=turn_index,
-        message="interaction response",
-        payload=payload,
+        model_turn=None,
+        tool_name=request.tool_name,
+        state="received",
+        question=request.question,
+        answer_chars=len(response.answer),
+        approved=response.approved,
     )
 
 
@@ -2307,7 +2336,7 @@ def test_tui_file_reference_index_uses_fast_file_walker(tmp_path: Path, monkeypa
         FileReferenceMatch(path=src / "main.py", display_path="src/main.py"),
     ]
 
-    monkeypatch.setattr("haagent.tui.file_refs._iter_file_reference_candidates", lambda root: iter(candidates))
+    monkeypatch.setattr("haagent.tui.files.refs._iter_file_reference_candidates", lambda root: iter(candidates))
 
     index = build_file_reference_index(tmp_path)
     assert [item.display_path for item in index.matches("plan")] == ["docs/Project Plan.md"]
@@ -2315,7 +2344,7 @@ def test_tui_file_reference_index_uses_fast_file_walker(tmp_path: Path, monkeypa
 
 
 def test_tui_file_reference_overlay_scrolls_selected_match_into_view(tmp_path: Path) -> None:
-    from haagent.tui.file_ref_modal import FileReferenceOverlay
+    from haagent.tui.files.overlay import FileReferenceOverlay
 
     overlay = FileReferenceOverlay(tmp_path, "")
     overlay.index = FileReferenceIndex(
@@ -2338,7 +2367,7 @@ def test_tui_file_reference_overlay_scrolls_selected_match_into_view(tmp_path: P
 
 
 def test_tui_file_reference_overlay_uses_preloaded_index_without_loading(tmp_path: Path) -> None:
-    from haagent.tui.file_ref_modal import FileReferenceOverlay
+    from haagent.tui.files.overlay import FileReferenceOverlay
 
     index = FileReferenceIndex(
         root=tmp_path.resolve(),
@@ -2353,7 +2382,7 @@ def test_tui_file_reference_overlay_uses_preloaded_index_without_loading(tmp_pat
 
 
 def test_tui_file_reference_overlay_filters_loaded_index_without_rescanning(tmp_path: Path, monkeypatch) -> None:
-    from haagent.tui.file_ref_modal import FileReferenceOverlay
+    from haagent.tui.files.overlay import FileReferenceOverlay
 
     def fail_rglob(self, pattern):
         raise AssertionError("query updates should not rescan workspace")
@@ -2375,7 +2404,7 @@ def test_tui_file_reference_overlay_filters_loaded_index_without_rescanning(tmp_
 
 
 def test_tui_file_reference_overlay_ignores_index_after_unmount(tmp_path: Path, monkeypatch) -> None:
-    from haagent.tui.file_ref_modal import FileReferenceOverlay
+    from haagent.tui.files.overlay import FileReferenceOverlay
 
     overlay = FileReferenceOverlay(tmp_path, "")
     index = build_file_reference_index(tmp_path)
@@ -3353,7 +3382,7 @@ def test_tui_slash_command_suggestions_filter_execute_and_do_not_pollute_convers
 
 
 def test_tui_slash_command_suggestions_scroll_visible_window() -> None:
-    from haagent.tui.command_suggestions import CommandSuggestionState
+    from haagent.tui.commands.suggestions import CommandSuggestionState
 
     state = CommandSuggestionState(commands=command_registry().commands())
     for _ in range(8):
@@ -3444,24 +3473,17 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             workspace_root=tmp_path,
             interaction_request=_approval_request({"command": "uv run pytest -q", "cwd": ".", "timeout_seconds": 30}),
             extra_events=[
-                ChatEvent(
-                    event_type="tool_started",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="starting tool file_write",
-                    payload={"tool_name": "file_write", "args_summary": {"path": "notes.md", "mode": "create"}},
+                _runtime_event(
+                    "tool_started",
+                    1,
+                    tool_name="file_write",
+                    args={"path": "notes.md", "mode": "create"},
                 ),
-                ChatEvent(
-                    event_type="tool_finished",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="finished tool file_write",
-                    payload={
-                        "tool_name": "file_write",
-                        "status": "success",
-                        "result_summary": {"path": str(tmp_path / "notes.md"), "mode": "create", "bytes_written": 12, "created": True},
-                        "episode_path": str(tmp_path / ".runs" / "episode-ok"),
-                    },
+                _runtime_event(
+                    "tool_finished",
+                    1,
+                    tool_name="file_write",
+                    result={"status": "success", "path": str(tmp_path / "notes.md"), "mode": "create", "bytes_written": 12, "created": True},
                 ),
             ],
         )
@@ -3660,16 +3682,12 @@ def test_tui_interaction_reused_event_does_not_enter_pending_interaction(tmp_pat
         service = FakeAssistantService(
             workspace_root=tmp_path,
             extra_events=[
-                ChatEvent(
-                    event_type="interaction_reused",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="interaction reused",
-                    payload={
-                        "interaction_type": "user_input",
-                        "tool_name": "request_user_input",
-                        "status": "answered",
-                    },
+                _runtime_event(
+                    "interaction_reused",
+                    1,
+                    interaction_type="user_input",
+                    tool_name="request_user_input",
+                    status="answered",
                 ),
             ],
         )
@@ -3693,15 +3711,11 @@ def test_tui_memory_candidate_event_shows_notice(tmp_path: Path) -> None:
             workspace_root=tmp_path,
             memory_candidates=[_memory_candidate()],
             extra_events=[
-                ChatEvent(
-                    event_type="memory_candidates_created",
+                MemoryNoticeEvent(
                     session_id="session-test",
                     turn_index=1,
-                    message="memory candidates created",
-                    payload={
-                        "count": 1,
-                        "message": "发现 1 条可记忆候选，已放入候选队列，等待你确认。",
-                    },
+                    count=1,
+                    message="发现 1 条可记忆候选，已放入候选队列，等待你确认。",
                 ),
             ],
         )
@@ -4039,13 +4053,7 @@ def test_tui_assistant_final_message_replaces_streamed_markdown(tmp_path: Path) 
         service = FakeAssistantService(
             workspace_root=tmp_path,
             extra_events=[
-                ChatEvent(
-                    event_type="assistant_delta",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="# 草稿",
-                    payload={"delta": "# 草稿"},
-                ),
+                _assistant_event("assistant_delta", 1, "# 草稿"),
             ],
             assistant_content="# 最终\n\n- 完成",
         )
@@ -4070,20 +4078,8 @@ def test_tui_merges_assistant_delta_events_into_single_response_block(tmp_path: 
         service = FakeAssistantService(
             workspace_root=tmp_path,
             extra_events=[
-                ChatEvent(
-                    event_type="assistant_delta",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="Ha",
-                    payload={"delta": "Ha"},
-                ),
-                ChatEvent(
-                    event_type="assistant_delta",
-                    session_id="session-test",
-                    turn_index=1,
-                    message="Agent",
-                    payload={"delta": "Agent"},
-                ),
+                _assistant_event("assistant_delta", 1, "Ha"),
+                _assistant_event("assistant_delta", 1, "Agent"),
             ],
             assistant_content="HaAgent",
         )
@@ -4401,14 +4397,8 @@ def test_tui_tool_summary_counts_calls_not_events_for_repeated_tools(tmp_path: P
 
 
 def test_tui_tool_summary_updates_pending_confirmation_on_response_events(tmp_path: Path) -> None:
-    def interaction_event(event_type: str, turn_index: int, tool_name: str) -> ChatEvent:
-        return ChatEvent(
-            event_type=event_type,
-            session_id="session-test",
-            turn_index=turn_index,
-            message=event_type,
-            payload={"tool_name": tool_name, "question": "Approve?", "approved": None},
-        )
+    def interaction_event(event_type: str, turn_index: int, tool_name: str) -> RuntimeUiEvent:
+        return _runtime_event(event_type, turn_index, tool_name=tool_name, question="Approve?", approved=None)
 
     async def run() -> None:
         service = FakeAssistantService(
@@ -4563,18 +4553,14 @@ def test_tui_failure_event_shows_reason_episode_in_conversation(tmp_path: Path) 
         episode_path = tmp_path / ".runs" / "episode-failed"
         service = FakeAssistantService(
             workspace_root=tmp_path,
-            failure_event=ChatEvent(
-                event_type="failure",
+            failure_event=FailureNoticeEvent(
                 session_id="session-test",
                 turn_index=1,
-                message="chat turn failed",
-                payload={
-                    "status": "failed",
-                    "failed_stage": "executing",
-                    "failure_category": "Loop Limit Failure",
-                    "reason": "exceeded max_turns=20",
-                    "episode_path": str(episode_path),
-                },
+                status="failed",
+                failed_stage="executing",
+                failure_category="Loop Limit Failure",
+                reason="exceeded max_turns=20",
+                episode_path=str(episode_path),
             ),
         )
         app = HaAgentTuiApp(service)

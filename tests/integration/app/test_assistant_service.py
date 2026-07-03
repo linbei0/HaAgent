@@ -20,6 +20,7 @@ from haagent.models.gateway import ModelResponse, OpenAIChatCompletionsGateway
 from haagent.models import provider_profile
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.provider_profile import ProviderProfileRecord, save_active_profile, save_provider_profile
+from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent
 from haagent.skills.marketplace import MarketplaceProvider, MarketplaceSearchResult, MarketplaceSkillCard
 
 
@@ -1080,13 +1081,17 @@ def test_run_prompt_events_forwards_chat_events(tmp_path: Path, monkeypatch) -> 
     result = service.run_prompt_events("send events", event_sink=events.append)
 
     assert result.status == "completed"
-    assert [event.event_type for event in events] == [
+    assert [
+        event.state if isinstance(event, SessionLifecycleEvent) else type(event).__name__
+        for event in events
+    ] == [
         "session_started",
         "turn_started",
-        "assistant_message",
+        "AssistantMessageEvent",
         "turn_finished",
         "session_finished",
     ]
+    assert any(isinstance(event, AssistantMessageEvent) for event in events)
 
 
 def test_session_creation_requires_usable_active_profile(tmp_path: Path, monkeypatch) -> None:

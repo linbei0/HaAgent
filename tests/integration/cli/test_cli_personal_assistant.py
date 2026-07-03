@@ -11,8 +11,8 @@ from pathlib import Path
 
 from haagent import cli
 from haagent.models.gateway import ModelResponse
-from haagent.runtime.chat_session import AgentSession
-from haagent.runtime.task_contract import load_task
+from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.contracts.task import load_task
 
 
 class RecordingGateway:

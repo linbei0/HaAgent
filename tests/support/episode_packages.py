@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from haagent.runtime.orchestrator import RunOrchestrator
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
 
 def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, object]:

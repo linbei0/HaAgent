@@ -7,7 +7,7 @@ tests/integration/runtime/test_verification_engine.py - VerificationEngine éªŒè¯
 import json
 from pathlib import Path
 
-from haagent.runtime.episode import EpisodeWriter
+from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.verification.engine import EXCERPT_LIMIT, VerificationEngine
 
 

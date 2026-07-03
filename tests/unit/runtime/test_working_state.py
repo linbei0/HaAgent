@@ -10,8 +10,8 @@ import json
 
 import pytest
 
-from haagent.runtime.chat_session import ChatTurnResult
-from haagent.runtime.working_state import (
+from haagent.runtime.session.agent import ChatTurnResult
+from haagent.runtime.session.working_state import (
     WORKING_STATE_MODEL_CHAR_LIMIT,
     WorkingStateError,
     empty_working_state,

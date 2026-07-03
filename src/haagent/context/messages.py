@@ -11,7 +11,7 @@ import os
 from typing import Any
 
 from haagent.context.instructions import AGENT_INSTRUCTIONS
-from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.contracts.task import TaskSpec
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 
 

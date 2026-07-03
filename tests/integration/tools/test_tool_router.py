@@ -7,9 +7,9 @@ tests/integration/tools/test_tool_router.py - ToolRouter 本地工具行为测�
 import json
 from pathlib import Path
 
-from haagent.runtime.human_interaction import HumanInteractionResponse
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.path_policy import ExternalRoot, PathPolicy
+from haagent.runtime.execution.human_interaction import HumanInteractionResponse
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
 from haagent.skills import SkillSettings
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry

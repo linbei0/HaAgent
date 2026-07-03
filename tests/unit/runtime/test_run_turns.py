@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from haagent.models.gateway import ToolCall
-from haagent.runtime.run_turns import TurnLoopDependencies, TurnLoopState, _run_tool_calls
+from haagent.runtime.orchestration.turns import TurnLoopDependencies, TurnLoopState, _run_tool_calls
 
 
 class _FakeRouter:

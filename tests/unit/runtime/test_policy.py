@@ -4,7 +4,7 @@ tests/unit/runtime/test_policy.py - Policy Engine 行为测试
 验证工具风险等级会映射为稳定的 allow/deny 决策。
 """
 
-from haagent.runtime.policy import evaluate_tool_call
+from haagent.runtime.execution.policy import evaluate_tool_call
 from haagent.tools.registry import ToolDefinition
 
 

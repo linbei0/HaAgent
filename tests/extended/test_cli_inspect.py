@@ -12,10 +12,10 @@ import pytest
 
 from haagent import cli, cli_inspect
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.episode_validator import EpisodePackageView
-from haagent.runtime.human_interaction import HumanInteractionResponse
-from haagent.runtime.orchestrator import RunOrchestrator
-from haagent.runtime.state import RunStatus
+from haagent.runtime.episodes.validator import EpisodePackageView
+from haagent.runtime.execution.human_interaction import HumanInteractionResponse
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.orchestration.state import RunStatus
 
 
 class FakeResult:

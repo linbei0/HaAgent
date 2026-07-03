@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.orchestrator import RunOrchestrator
-from haagent.runtime.state import RunStatus
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.orchestration.state import RunStatus
 
 
 class BadFileReadGateway:

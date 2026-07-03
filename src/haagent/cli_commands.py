@@ -28,12 +28,12 @@ from haagent.models.provider_profile import (
     ProviderProfileError,
     load_provider_profile,
 )
-from haagent.runtime.checks import run_quality_checks
-from haagent.runtime.dogfood import render_dogfood_report, run_dogfood_tasks, skipped_dogfood_report
-from haagent.runtime.episode_validator import EpisodeValidationError, load_inspect_episode_package
-from haagent.runtime.eval_export import export_eval_case
-from haagent.runtime.eval_runner import EvalRunnerError, run_eval_path
-from haagent.tui.app import run_tui
+from haagent.runtime.evaluation.checks import run_quality_checks
+from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks, skipped_dogfood_report
+from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package
+from haagent.runtime.evaluation.export import export_eval_case
+from haagent.runtime.evaluation.runner import EvalRunnerError, run_eval_path
+from haagent.tui.application.app import run_tui
 
 
 AUTHORING_ALLOWED_TOOLS = ["file_list", "file_read", "file_search", "apply_patch", "shell"]

@@ -8,8 +8,8 @@ import json
 from pathlib import Path
 
 from haagent import cli
-from haagent.runtime.eval_export import export_eval_case
-from haagent.runtime.orchestrator import RunOrchestrator
+from haagent.runtime.evaluation.export import export_eval_case
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
 
 def write_task(path: Path) -> None:

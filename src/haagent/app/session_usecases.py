@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from haagent.runtime.chat_session import ChatSessionError, find_latest_session, list_sessions
+from haagent.runtime.session.agent import ChatSessionError, find_latest_session, list_sessions
 
 if TYPE_CHECKING:
     from haagent.app.assistant_service import (
@@ -22,8 +22,8 @@ if TYPE_CHECKING:
         AssistantSessionTurn,
         EventSink,
     )
-    from haagent.runtime.human_interaction import HumanInteractionHandler
-    from haagent.runtime.path_policy import PathAccess, PermissionMode
+    from haagent.runtime.execution.human_interaction import HumanInteractionHandler
+    from haagent.runtime.execution.path_policy import PathAccess, PermissionMode
 
 
 def create_session(service: "AssistantService") -> "AssistantSessionStatus":

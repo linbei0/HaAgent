@@ -13,7 +13,7 @@ import pytest
 
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
 from haagent.models.provider_profile import ProviderProfileError, load_provider_profile
-from haagent.runtime.dogfood import render_dogfood_report, run_dogfood_tasks
+from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks
 
 
 pytestmark = pytest.mark.real_llm

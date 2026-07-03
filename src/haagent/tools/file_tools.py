@@ -18,8 +18,8 @@ from haagent.memory.path_policy import (
     MEMORY_STORE_PATH_MESSAGE,
     is_workspace_memory_store_path,
 )
-from haagent.runtime.path_policy import PathPolicy, default_path_policy, resolve_path_for_access
-from haagent.runtime.human_interaction import HumanInteractionHandler, HumanInteractionRequest
+from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_path_for_access
+from haagent.runtime.execution.human_interaction import HumanInteractionHandler, HumanInteractionRequest
 from haagent.tools.base import tool_error
 
 

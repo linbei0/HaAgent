@@ -16,8 +16,8 @@ from haagent.memory.retrieval import (
     MemoryRetrievalRequest,
     MemoryRetriever,
 )
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.contracts.task import TaskSpec
 
 
 def _evidence() -> CandidateEvidence:

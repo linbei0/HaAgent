@@ -12,7 +12,7 @@ from typing import Any
 
 from haagent import cli
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.dogfood import render_dogfood_report, run_dogfood_tasks
+from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks
 
 
 class ScriptedGateway:

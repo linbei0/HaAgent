@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from haagent.runtime.episode_validator import EpisodeValidationError, load_inspect_episode_package
+from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package
 
 
 def print_run_summary(result) -> None:

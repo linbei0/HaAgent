@@ -8,8 +8,8 @@ import threading
 import time
 from pathlib import Path
 
-from haagent.runtime.cancellation import CancellationToken
-from haagent.runtime.command import run_command
+from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.command import run_command
 
 
 def test_run_command_records_success(tmp_path: Path) -> None:

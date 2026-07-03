@@ -11,14 +11,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from haagent.runtime.cancellation import CancellationToken
-from haagent.runtime.command import (
+from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.command import (
     CWD_GUIDANCE,
     normalize_timeout,
     resolve_execution_cwd,
     run_process,
 )
-from haagent.runtime.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
+from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
 from haagent.tools.base import tool_error
 
 

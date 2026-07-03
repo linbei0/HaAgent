@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from haagent import cli
-from haagent.runtime import checks
+from haagent.runtime.evaluation import checks
 
 
 def test_cli_check_runs_builtin_eval_suite_successfully(tmp_path: Path, capsys) -> None:

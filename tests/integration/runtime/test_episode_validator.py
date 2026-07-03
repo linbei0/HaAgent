@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.episode_validator import (
+from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     EpisodePackageView,
     load_validated_episode_package,
@@ -18,8 +18,8 @@ from haagent.runtime.episode_validator import (
     read_failure_record,
     validate_episode_package,
 )
-from haagent.runtime.orchestrator import RunOrchestrator
-from haagent.runtime.state import RunStatus
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.orchestration.state import RunStatus
 from tests.support.episode_packages import (
     read_json,
     valid_episode_json,

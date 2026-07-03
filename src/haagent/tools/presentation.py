@@ -6,7 +6,7 @@ haagent/tools/presentation.py - 工具展示摘要
 
 from __future__ import annotations
 
-from haagent.runtime.human_interaction import interaction_args_summary
+from haagent.runtime.execution.human_interaction import interaction_args_summary
 
 
 def summarize_tool_args(tool_name: str, args: dict[str, object]) -> dict[str, object]:

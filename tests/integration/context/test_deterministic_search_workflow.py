@@ -13,9 +13,9 @@ import pytest
 import yaml
 
 from haagent.context.builder import ContextBuilder
-from haagent.runtime.chat_turn import write_chat_task_yaml
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.session.turn import write_chat_task_yaml
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.contracts.task import TaskSpec
 from haagent.tools.registry import TOOL_REGISTRY, export_tool_schemas
 from haagent.tools.router import ToolRouter
 

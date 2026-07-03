@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from haagent.runtime.path_policy import (
+from haagent.runtime.execution.path_policy import (
     ExternalRoot,
     PathPolicy,
     load_path_policy,

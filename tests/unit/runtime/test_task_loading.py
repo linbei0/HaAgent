@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from haagent.runtime.task_contract import (
+from haagent.runtime.contracts.task import (
     TaskLoadError,
     TaskSpec,
     load_task,

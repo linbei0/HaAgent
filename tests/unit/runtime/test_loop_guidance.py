@@ -6,7 +6,7 @@ tests/unit/runtime/test_loop_guidance.py - Agent loop 工具建议测试
 
 from __future__ import annotations
 
-from haagent.runtime.loop_guidance import suggestion_for_observation
+from haagent.runtime.orchestration.loop_guidance import suggestion_for_observation
 
 
 def _obs(tool_name: str, args: dict, result: dict) -> dict:

@@ -10,8 +10,8 @@ import copy
 import json
 
 from haagent.models.gateway import ModelCallError, ModelResponse, ToolCall
-from haagent.runtime.full_compact import maybe_full_compact_messages
-from haagent.runtime.full_compact_contract import FullCompactEligibility
+from haagent.runtime.compaction.full import maybe_full_compact_messages
+from haagent.runtime.compaction.contract import FullCompactEligibility
 
 
 class RecordingGateway:

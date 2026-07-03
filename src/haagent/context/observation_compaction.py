@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 from typing import Literal
 
-from haagent.runtime.command import redact_secret_like_text
+from haagent.runtime.execution.command import redact_secret_like_text
 
 
 OBSERVATION_EXCERPT_CHAR_LIMIT = 240

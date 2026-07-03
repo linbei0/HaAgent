@@ -41,10 +41,9 @@ from haagent.models.provider_profile import (
     save_provider_profile_with_key,
     user_config_dir,
 )
-from haagent.runtime.chat_session import (
+from haagent.runtime.session.agent import (
     CHAT_MAX_TURNS,
     AgentSession,
-    ChatEvent,
     ChatSessionError,
     ChatTurnResult,
     SessionSummary,
@@ -52,8 +51,9 @@ from haagent.runtime.chat_session import (
     find_latest_session,
     list_sessions,
 )
-from haagent.runtime.human_interaction import HumanInteractionHandler
-from haagent.runtime.path_policy import PathAccess, PermissionMode
+from haagent.runtime.events import RuntimeUiEvent
+from haagent.runtime.execution.human_interaction import HumanInteractionHandler
+from haagent.runtime.execution.path_policy import PathAccess, PermissionMode
 from haagent.skills import trust_project_root, untrust_project_root
 from haagent.skills.marketplace import MarketplaceError, MarketplaceSkillCard, install_marketplace_skill_card, search_marketplace
 from haagent.tools.skills import skill_list, skill_read
@@ -67,7 +67,7 @@ from haagent.app import memory_usecases, model_profile_usecases, session_usecase
 
 
 GatewayFactory = Callable[[ProviderProfile], ModelGateway]
-EventSink = Callable[[ChatEvent], None]
+EventSink = Callable[[RuntimeUiEvent], None]
 
 
 class AssistantServiceError(RuntimeError):

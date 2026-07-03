@@ -12,8 +12,8 @@ from typing import Any
 
 from haagent.cli_inspect import render_episode_summary
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.chat_session import AgentSession
-from haagent.runtime.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 
 
 class ScriptedGateway:

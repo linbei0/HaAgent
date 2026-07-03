@@ -7,9 +7,9 @@ tests/extended/test_eval_runner.py - 本地 eval runner 测试
 import json
 from pathlib import Path
 
-from haagent.runtime.eval_export import export_eval_case
-from haagent.runtime.eval_runner import run_eval_path
-from haagent.runtime.orchestrator import RunOrchestrator
+from haagent.runtime.evaluation.export import export_eval_case
+from haagent.runtime.evaluation.runner import run_eval_path
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
 
 def write_task(path: Path) -> None:

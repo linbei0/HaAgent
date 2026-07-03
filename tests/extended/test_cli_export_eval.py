@@ -12,9 +12,9 @@ import pytest
 
 from haagent import cli
 from haagent.models.gateway import ModelResponse, ToolCall
-from haagent.runtime.episode_validator import EpisodePackageView
-from haagent.runtime.orchestrator import RunOrchestrator
-from haagent.runtime.state import RunStatus
+from haagent.runtime.episodes.validator import EpisodePackageView
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.orchestration.state import RunStatus
 
 
 class FakeResult:

@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from haagent.models.gateway import ModelResponse
-from haagent.runtime.cancellation import CancellationToken
-from haagent.runtime.chat_turn import ChatTurnRequest, ChatTurnRunner
-from haagent.runtime.path_policy import default_path_policy
-from haagent.runtime.run_recorder import RunResult
-from haagent.runtime.state import RunStatus
-from haagent.runtime.task_contract import load_task
+from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.session.turn import ChatTurnRequest, ChatTurnRunner
+from haagent.runtime.execution.path_policy import default_path_policy
+from haagent.runtime.orchestration.recorder import RunResult
+from haagent.runtime.orchestration.state import RunStatus
+from haagent.runtime.contracts.task import load_task
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 
 

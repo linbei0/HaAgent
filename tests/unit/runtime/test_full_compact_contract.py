@@ -6,7 +6,7 @@ tests/unit/runtime/test_full_compact_contract.py - full compact 契约测试
 
 from __future__ import annotations
 
-from haagent.runtime.full_compact_contract import (
+from haagent.runtime.compaction.contract import (
     REQUIRED_FULL_COMPACT_SUMMARY_FIELDS,
     assess_full_compact_eligibility,
     plan_full_compact_window,

@@ -11,8 +11,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from haagent.runtime.command import run_command
-from haagent.runtime.episode import EpisodeWriter
+from haagent.runtime.execution.command import run_command
+from haagent.runtime.episodes.writer import EpisodeWriter
 
 
 EXCERPT_LIMIT = 2000

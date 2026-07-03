@@ -7,7 +7,7 @@ tests/unit/tui/test_memory_presenter.py - TUI 记忆面板渲染单元测试
 from __future__ import annotations
 
 from haagent.memory import CandidateEvidence, MemoryCandidate
-from haagent.tui.memory_presenter import MemoryPanelPresenter
+from haagent.tui.memory.presenter import MemoryPanelPresenter
 
 
 def _memory_candidate(candidate_id: str = "cand_abc123", title: str = "用户身份与爱好") -> MemoryCandidate:

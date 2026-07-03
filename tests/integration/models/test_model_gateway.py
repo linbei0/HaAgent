@@ -39,8 +39,8 @@ from haagent.models.provider_profile import (
     provider_profile_credential_status,
     save_provider_profile,
 )
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.contracts.task import TaskSpec
 
 
 def make_task() -> TaskSpec:
@@ -1419,7 +1419,7 @@ def test_openai_gateway_failure_is_explicit() -> None:
 
 
 def test_model_call_is_written_to_transcript_by_orchestrator(tmp_path: Path) -> None:
-    from haagent.runtime.orchestrator import RunOrchestrator
+    from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -1449,7 +1449,7 @@ verification_commands: []
 
 
 def test_full_compact_contract_is_written_to_transcript_by_orchestrator(tmp_path: Path) -> None:
-    from haagent.runtime.orchestrator import RunOrchestrator
+    from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -1484,8 +1484,8 @@ def test_full_compact_success_is_written_to_transcript_by_orchestrator(tmp_path:
     from haagent.context.builder import BuiltContext
     from haagent.context.manifest import ContextManifest
     from haagent.models.gateway import ModelResponse
-    from haagent.runtime.full_compact_contract import FullCompactEligibility
-    from haagent.runtime.orchestrator import RunOrchestrator
+    from haagent.runtime.compaction.contract import FullCompactEligibility
+    from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -1515,7 +1515,7 @@ verification_commands: []
         tool_calls=[],
     )
     gateway = FakeModelGateway(response=compact_response)
-    original_build = __import__("haagent.runtime.orchestrator", fromlist=["ContextBuilder"]).ContextBuilder.build
+    original_build = __import__("haagent.runtime.orchestration.orchestrator", fromlist=["ContextBuilder"]).ContextBuilder.build
 
     def fake_build(self):
         context = original_build(self)
@@ -1542,7 +1542,7 @@ verification_commands: []
             diagnostics=context.diagnostics,
         )
 
-    monkeypatch.setattr("haagent.runtime.orchestrator.ContextBuilder.build", fake_build)
+    monkeypatch.setattr("haagent.runtime.orchestration.orchestrator.ContextBuilder.build", fake_build)
 
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
@@ -1574,8 +1574,8 @@ def test_full_compact_failure_is_written_to_transcript_and_original_messages_con
     from haagent.context.builder import BuiltContext
     from haagent.context.manifest import ContextManifest
     from haagent.models.gateway import ModelResponse
-    from haagent.runtime.full_compact_contract import FullCompactEligibility
-    from haagent.runtime.orchestrator import RunOrchestrator
+    from haagent.runtime.compaction.contract import FullCompactEligibility
+    from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     class TwoStepGateway:
         provider_name = "two-step"
@@ -1601,7 +1601,7 @@ verification_commands: []
 """.strip(),
         encoding="utf-8",
     )
-    original_build = __import__("haagent.runtime.orchestrator", fromlist=["ContextBuilder"]).ContextBuilder.build
+    original_build = __import__("haagent.runtime.orchestration.orchestrator", fromlist=["ContextBuilder"]).ContextBuilder.build
 
     def fake_build(self):
         context = original_build(self)
@@ -1623,7 +1623,7 @@ verification_commands: []
             diagnostics=context.diagnostics,
         )
 
-    monkeypatch.setattr("haagent.runtime.orchestrator.ContextBuilder.build", fake_build)
+    monkeypatch.setattr("haagent.runtime.orchestration.orchestrator.ContextBuilder.build", fake_build)
     gateway = TwoStepGateway()
 
     result = RunOrchestrator(
@@ -1644,7 +1644,7 @@ verification_commands: []
 
 
 def test_orchestrator_microcompacts_old_tool_result_messages(tmp_path: Path) -> None:
-    from haagent.runtime.orchestrator import RunOrchestrator
+    from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     class LargeToolResultGateway:
         provider_name = "large-tool-result"
@@ -1678,11 +1678,13 @@ verification_commands: []
         encoding="utf-8",
     )
     gateway = LargeToolResultGateway()
+    runtime_events: list[dict[str, object]] = []
 
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
         model_gateway=gateway,
         max_turns=2,
+        event_sink=runtime_events.append,
     ).run(task_path)
 
     second_input = gateway.model_inputs[1]
@@ -1695,3 +1697,8 @@ verification_commands: []
         for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert any(record.get("event") == "tool_result_microcompact" for record in transcript)
+    microcompact_events = [
+        event for event in runtime_events if event.get("event_type") == "tool_result_microcompact"
+    ]
+    assert len(microcompact_events) == 1
+    assert "event" not in microcompact_events[0]

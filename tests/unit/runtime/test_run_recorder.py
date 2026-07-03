@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.run_recorder import RunRecorder
-from haagent.runtime.state import RunStatus
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.orchestration.recorder import RunRecorder
+from haagent.runtime.orchestration.state import RunStatus
 
 
 def test_run_recorder_records_state_transitions_and_finish(tmp_path: Path) -> None:

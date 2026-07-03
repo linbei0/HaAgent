@@ -13,9 +13,9 @@ from haagent.context.compaction import (
     assess_auto_compact_trigger,
     compact_context_sections,
 )
-from haagent.runtime.session_memory_compaction import compact_session_memory
-from haagent.runtime.episode import EpisodeWriter
-from haagent.runtime.task_contract import TaskSpec
+from haagent.runtime.session.memory_compaction import compact_session_memory
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.contracts.task import TaskSpec
 
 
 def test_collapse_oversized_section_keeps_head_and_tail() -> None:

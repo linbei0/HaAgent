@@ -6,7 +6,7 @@ tests/unit/runtime/test_safety_guard.py - 安全防护层测试
 
 from __future__ import annotations
 
-from haagent.runtime.safety_guard import SafetyGuard
+from haagent.runtime.execution.safety_guard import SafetyGuard
 
 
 def _success(tool_name: str, args: dict) -> dict:
