@@ -24,6 +24,7 @@ from haagent.models.credentials import CredentialError
 from haagent.models.gateway import ModelGateway
 from haagent.models.gateway import ModelCallError
 from haagent.models.gateway_registry import GatewayCapability, gateway_capability_for_profile, gateway_from_profile
+from haagent.multi_agent.team_store import TeamStore
 from haagent.models.provider_profile import (
     ProviderProfile,
     ProviderProfileError,
@@ -372,6 +373,26 @@ class AssistantService:
             "failed_count": 0,
             "servers": [],
         }
+
+    def list_agents(self) -> list[dict[str, object]]:
+        if self._session is None:
+            return []
+        store = TeamStore(user_config_dir() / "teams")
+        agents: list[dict[str, object]] = []
+        for team in store.list_teams_for_leader(self._session.session_id):
+            for worker in team.agents:
+                agents.append(
+                    {
+                        "team_id": team.team_id,
+                        "agent_id": worker.agent_id,
+                        "task_id": worker.task_id,
+                        "subagent_type": worker.subagent_type,
+                        "description": worker.description,
+                        "status": worker.status,
+                        "episode_path": worker.episode_path,
+                    },
+                )
+        return agents
 
     def set_web_enabled(self, enabled: bool) -> AssistantWorkspaceStatus:
         self.enable_web = enabled

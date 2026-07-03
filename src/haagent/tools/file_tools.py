@@ -666,7 +666,12 @@ def _collect_file_tree(
     entries: list[str],
     skipped_dirs: set[str],
 ) -> bool:
-    for child in sorted(current.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower())):
+    try:
+        children = sorted(current.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))
+    except OSError:
+        skipped_dirs.add(_relative_tree_path(current, root).rstrip("/"))
+        return False
+    for child in children:
         if child.is_dir() and child.name in NOISE_DIRECTORIES:
             skipped_dirs.add(_relative_tree_path(child, root).rstrip("/"))
             continue

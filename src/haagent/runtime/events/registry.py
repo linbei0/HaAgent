@@ -150,6 +150,38 @@ def _tool_failed_event(event: dict[str, object], context: RawRuntimeUiEventConte
     )
 
 
+def _worker_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> ToolActivityEvent:
+    event_type = str(event.get("event_type", "worker_started"))
+    agent_id = summary_value(str(event.get("agent_id", "unknown")), 80)
+    status = summary_value(str(event.get("status", "")), 80)
+    description = summary_value(str(event.get("description", "")), 160)
+    if event_type == "worker_started":
+        activity_status: Literal["started", "finished", "failed"] = "started"
+        label = "started"
+    elif event_type == "worker_failed":
+        activity_status = "failed"
+        label = "failed"
+    else:
+        activity_status = "finished"
+        label = "stopped" if event_type == "worker_stopped" else "completed"
+    summary = f"worker {label}: {description}" if description and description != "none" else f"worker {label}"
+    return ToolActivityEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        model_turn=context.model_turn,
+        tool_name=f"agent:{agent_id}",
+        status=activity_status,
+        summary=summary,
+        args_summary={
+            "agent_id": agent_id,
+            "task_id": summary_value(str(event.get("task_id", "")), 80),
+            "team_id": summary_value(str(event.get("team_id", "")), 80),
+            "subagent_type": summary_value(str(event.get("subagent_type", "")), 80),
+        },
+        result_status=status,
+    )
+
+
 def _tool_approval_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> ApprovalStateEvent:
     return _approval_event(event, context, approval_kind="tool")
 
@@ -317,6 +349,10 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("safety_abort", WarningNoticeEvent, _safety_abort_event),
     _spec("interaction_reused", WarningNoticeEvent, _interaction_reused_event),
     _spec("failure", FailureNoticeEvent, _failure_event),
+    _spec("worker_started", ToolActivityEvent, _worker_event),
+    _spec("worker_completed", ToolActivityEvent, _worker_event),
+    _spec("worker_failed", ToolActivityEvent, _worker_event),
+    _spec("worker_stopped", ToolActivityEvent, _worker_event),
 )
 
 RAW_RUNTIME_UI_EVENT_REGISTRY: dict[str, RawRuntimeUiEventSpec] = {

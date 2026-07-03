@@ -46,6 +46,7 @@ class TurnLoopState:
     has_shell_verification: bool = False
     passed_verification_commands: set[str] = field(default_factory=set)
     verification_engine: VerificationEngine | None = None
+    pending_worker_task_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,16 @@ def run_turn_loop(
 ) -> RunResult | None:
     for turn in range(1, deps.max_turns + 1):
         deps.raise_if_cancelled()
+        if state.pending_worker_task_ids:
+            notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
+            deps.writer.append_transcript(
+                {
+                    "event": "worker_notifications_collected",
+                    "turn": turn,
+                    "notifications": notifications,
+                },
+            )
+            state.messages.append(_build_worker_notifications_message(notifications))
         tool_schemas = [] if state.final_response_requested else export_tool_schemas(
             deps.allowed_tools,
             registry=deps.tool_registry,
@@ -222,6 +233,17 @@ def _handle_no_tool_response(
             },
         )
         return deps.recorder.finish(RunStatus.FAILED)
+    if state.pending_worker_task_ids:
+        notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
+        deps.writer.append_transcript(
+            {
+                "event": "worker_notifications_collected",
+                "turn": turn,
+                "notifications": notifications,
+            },
+        )
+        state.messages.append(_build_worker_notifications_message(notifications))
+        return None
     deps.writer.append_transcript(
         {
             "event": "no_tool_reviewed",
@@ -337,6 +359,10 @@ def _run_tool_calls(
             else:
                 visible_result_fingerprints.add(fingerprint)
         state.messages.append(build_tool_result_message(tool_call.id, tool_call.name, message_result))
+        if tool_call.name == "agent" and tool_result.get("status") == "running":
+            task_id = str(tool_result.get("task_id") or "").strip()
+            if task_id:
+                state.pending_worker_task_ids.append(task_id)
 
         violation = deps.safety_guard.check(tool_call.name, tool_call.args, tool_result)
         if violation is not None and violation.should_abort:
@@ -457,6 +483,44 @@ def _run_tool_calls(
         state.final_response_requested = True
         state.messages.append(build_final_response_request_message())
     return None
+
+
+def _wait_for_pending_worker_tasks(
+    *,
+    state: TurnLoopState,
+    deps: TurnLoopDependencies,
+) -> list[dict[str, Any]]:
+    task_ids = list(state.pending_worker_task_ids)
+    notifications: list[dict[str, Any]] = []
+    for task_id in task_ids:
+        while True:
+            deps.raise_if_cancelled()
+            notification = deps.router.wait_for_agent_task(task_id, timeout=0.2)
+            deps.raise_if_cancelled()
+            if notification:
+                notifications.append(notification)
+                break
+    state.pending_worker_task_ids.clear()
+    return notifications
+
+
+def _build_worker_notifications_message(notifications: list[dict[str, Any]]) -> dict[str, Any]:
+    lines = ["Worker notifications:"]
+    for notification in notifications:
+        status = str(notification.get("status") or "unknown")
+        task_id = str(notification.get("task_id") or "unknown-task")
+        agent_id = str(notification.get("agent_id") or "unknown-agent")
+        summary = str(
+            notification.get("summary")
+            or notification.get("result_excerpt")
+            or notification.get("error")
+            or ""
+        )
+        if summary:
+            lines.append(f"- {agent_id} ({task_id}) {status}: {summary[:500]}")
+        else:
+            lines.append(f"- {agent_id} ({task_id}) {status}")
+    return {"role": "user", "content": "\n".join(lines)}
 
 
 def _ensure_tool_call_ids(tool_calls: list[ToolCall]) -> list[ToolCall]:

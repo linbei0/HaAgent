@@ -83,6 +83,7 @@ class FakeAssistantService:
         marketplace_results: list[SimpleNamespace] | None = None,
         marketplace_warnings: list[str] | None = None,
         mcp_status: dict[str, object] | None = None,
+        agents: list[dict[str, object]] | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.profile_name = profile_name
@@ -112,6 +113,7 @@ class FakeAssistantService:
         self.blocked_project_skill_roots = list(blocked_project_skill_roots or [])
         self.marketplace_results = list(marketplace_results or [])
         self.marketplace_warnings = list(marketplace_warnings or [])
+        self.agents = list(agents or [])
         self.mcp_status = dict(
             mcp_status
             or {
@@ -182,6 +184,9 @@ class FakeAssistantService:
 
     def get_mcp_status(self) -> dict[str, object]:
         return dict(self.mcp_status)
+
+    def list_agents(self) -> list[dict[str, object]]:
+        return list(self.agents)
 
     def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
         self.prompts.append(prompt)
@@ -862,9 +867,96 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "resume",
         "model",
         "mcp",
+        "agents",
         "web",
         "permissions",
     }
+
+
+def test_tui_agents_command_lists_current_workers(tmp_path: Path) -> None:
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        agents=[
+            {
+                "agent_id": "explorer-1",
+                "task_id": "task-1",
+                "team_id": "team-session-test",
+                "subagent_type": "explorer",
+                "description": "Inspect project",
+                "status": "running",
+            },
+            {
+                "agent_id": "verification-1",
+                "task_id": "task-2",
+                "team_id": "team-session-test",
+                "subagent_type": "verification",
+                "description": "Run tests",
+                "status": "completed",
+            },
+        ],
+    )
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "/agents"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            conversation = _text(app, "#conversation")
+            assert "Workers" in conversation
+            assert "explorer-1" in conversation
+            assert "running" in conversation
+            assert "Inspect project" in conversation
+            assert "verification-1" in conversation
+            assert "completed" in conversation
+            assert service.prompts == []
+
+    asyncio.run(run())
+
+
+def test_tui_timeline_shows_worker_lifecycle_events(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                _runtime_event(
+                    "worker_started",
+                    1,
+                    agent_id="explorer-1",
+                    task_id="task-1",
+                    team_id="team-session-test",
+                    subagent_type="explorer",
+                    description="Inspect project",
+                    status="running",
+                ),
+                _runtime_event(
+                    "worker_completed",
+                    1,
+                    agent_id="explorer-1",
+                    task_id="task-1",
+                    team_id="team-session-test",
+                    subagent_type="explorer",
+                    description="Inspect project",
+                    status="completed",
+                ),
+            ],
+            assistant_content="已综合 worker 结果。",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "分派检查"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = _text(app, "#conversation")
+            assert "agent:explorer-1" in conversation
+            assert "worker completed: Inspect project" in conversation
+            assert "已综合 worker 结果。" in conversation
+
+    asyncio.run(run())
 
 
 def test_tui_slash_command_registry_includes_mcp() -> None:
@@ -3540,6 +3632,27 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_tui_cancel_returns_idle_when_no_active_run_remains(tmp_path: Path) -> None:
+    class IdleCancelService(FakeAssistantService):
+        def cancel_current_run(self):
+            self.cancelled_count += 1
+            return SimpleNamespace(status="idle", reason="no_active_run")
+
+    async def run() -> None:
+        service = IdleCancelService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)):
+            app._state = "running"
+            app.action_cancel_current_task()
+            await asyncio.sleep(0)
+
+            assert service.cancelled_count == 1
+            assert "state: idle" in _text(app, "#status-bar")
+            assert "当前没有仍在运行的任务" in _text(app, "#conversation")
+
+    asyncio.run(run())
+
+
 def test_tui_running_task_rejects_plain_submit_and_keeps_input(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, block_until_released=True)
@@ -4148,6 +4261,25 @@ def test_tui_assistant_delta_updates_current_turn_without_overwriting_previous_t
     asyncio.run(run())
 
 
+def test_tui_final_message_on_new_turn_closes_previous_streaming_turn(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)):
+            app._handle_chat_event(_assistant_event("assistant_delta", 2, "worker 已启动，请稍候"))
+            app._handle_chat_event(_assistant_event("assistant_message", 3, "worker 已完成，结论如下"))
+            await asyncio.sleep(0)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            assistant_items = [item for item in conversation._items if item.role == "assistant"]
+            assert [(item.turn_index, item.status) for item in assistant_items] == [
+                (2, "done"),
+                (3, "done"),
+            ]
+
+    asyncio.run(run())
+
+
 def test_tui_streaming_turn_keeps_existing_widget_instances_stable(tmp_path: Path) -> None:
     class BlockingAssistantService(FakeAssistantService):
         def __init__(self, *args, release_event: threading.Event, **kwargs) -> None:
@@ -4624,6 +4756,7 @@ def test_tui_failure_event_shows_reason_episode_in_conversation(tmp_path: Path) 
             assert "category=Loop Limit Failure" in conversation
             assert "reason=exceeded max_turns=20" in conversation
             assert str(episode_path) in conversation.replace("\n", "")
+            assert "state: failed" in _text(app, "#status-bar")
             assert list(app.query("#side-bar")) == []
 
     asyncio.run(run())

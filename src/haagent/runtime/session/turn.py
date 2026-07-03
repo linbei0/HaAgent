@@ -34,6 +34,12 @@ CHAT_ALLOWED_TOOLS = [
     "apply_patch",
     "apply_patch_set",
     "shell",
+    "agent",
+    "send_message",
+    "task_stop",
+    "task_get",
+    "task_list",
+    "task_output",
 ]
 CHAT_WEB_TOOLS = ["web_search", "web_fetch", "skill_market_search"]
 CHAT_SKILL_TOOLS = ["skill_list", "skill_read"]
@@ -56,6 +62,7 @@ class OrchestratorFactory(Protocol):
         cancellation_token: CancellationToken,
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: object | None = None,
+        leader_session_id: str | None = None,
     ):
         ...
 
@@ -78,9 +85,13 @@ class ChatTurnRequest:
     interaction_handler: HumanInteractionHandler | None
     cancellation_token: CancellationToken
     orchestrator_factory: OrchestratorFactory
+    leader_session_id: str | None = None
     tool_registry: ToolRuntimeRegistry | None = None
     mcp_runtime: object | None = None
     mcp_tool_names: list[str] = field(default_factory=list)
+    allowed_tools_override: list[str] | None = None
+    approval_allowed_tools_override: list[str] | None = None
+    approved_tools_override: list[str] | None = None
 
 
 class ChatTurnRunner:
@@ -98,6 +109,9 @@ class ChatTurnRunner:
                 enable_web=request.enable_web,
                 target_paths=request.target_paths,
                 mcp_tool_names=request.mcp_tool_names,
+                allowed_tools_override=request.allowed_tools_override,
+                approval_allowed_tools_override=request.approval_allowed_tools_override,
+                approved_tools_override=request.approved_tools_override,
             )
             orchestrator = request.orchestrator_factory(
                 runs_root=request.runs_root,
@@ -112,6 +126,7 @@ class ChatTurnRunner:
                 cancellation_token=request.cancellation_token,
                 tool_registry=request.tool_registry,
                 mcp_runtime=request.mcp_runtime,
+                leader_session_id=request.leader_session_id,
             )
             return orchestrator.run(task_path)
 
@@ -125,20 +140,32 @@ def write_chat_task_yaml(
     enable_web: bool = False,
     target_paths: list[str] | None = None,
     mcp_tool_names: list[str] | None = None,
+    allowed_tools_override: list[str] | None = None,
+    approval_allowed_tools_override: list[str] | None = None,
+    approved_tools_override: list[str] | None = None,
 ) -> None:
-    allowed_tools = list(CHAT_ALLOWED_TOOLS)
     mcp_tools = list(mcp_tool_names or [])
-    if enable_web:
-        allowed_tools.extend(CHAT_WEB_TOOLS)
-    if load_skill_registry(workspace_root=workspace_root).list_skills():
-        allowed_tools.extend(CHAT_SKILL_TOOLS)
-    if mcp_tools:
-        allowed_tools.extend(mcp_tools)
-        allowed_tools.extend(["list_mcp_resources", "read_mcp_resource"])
+    if allowed_tools_override is None:
+        allowed_tools = list(CHAT_ALLOWED_TOOLS)
+        if enable_web:
+            allowed_tools.extend(CHAT_WEB_TOOLS)
+        if load_skill_registry(workspace_root=workspace_root).list_skills():
+            allowed_tools.extend(CHAT_SKILL_TOOLS)
+        if mcp_tools:
+            allowed_tools.extend(mcp_tools)
+            allowed_tools.extend(["list_mcp_resources", "read_mcp_resource"])
+    else:
+        allowed_tools = list(allowed_tools_override)
     policy = path_policy or default_path_policy(workspace_root)
-    approval_allowed_tools = [*CHAT_APPROVED_TOOLS, *mcp_tools]
+    approval_allowed_tools = (
+        list(approval_allowed_tools_override)
+        if approval_allowed_tools_override is not None
+        else [*CHAT_APPROVED_TOOLS, *mcp_tools]
+    )
     approved_tools = (
-        approval_allowed_tools
+        list(approved_tools_override)
+        if approved_tools_override is not None
+        else approval_allowed_tools
         if policy.permission_mode in {"auto_approve", "full_access"}
         else []
     )

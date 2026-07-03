@@ -129,7 +129,8 @@ def run_prompt_events(
 def cancel_current_run(service: "AssistantService") -> "AssistantCancelResult":
     if service._session is None:
         return service.cancel_result_cls(status="idle", reason="no_active_session")
-    service._session.cancel_current_run()
+    if not service._session.cancel_current_run():
+        return service.cancel_result_cls(status="idle", reason="no_active_run")
     return service.cancel_result_cls(status="cancelled", reason="user_cancelled")
 
 

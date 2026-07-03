@@ -55,6 +55,7 @@ class ToolRouter:
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: Any | None = None,
+        agent_runtime: Any | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -65,9 +66,16 @@ class ToolRouter:
         self._cancellation_token = cancellation_token
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
+        self._agent_runtime = agent_runtime
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
         self._handlers: dict[str, ToolHandler] = {
             "fake_tool": self._fake_tool,
+            "agent": self._agent,
+            "send_message": self._send_message,
+            "task_stop": self._task_stop,
+            "task_get": self._task_get,
+            "task_list": self._task_list,
+            "task_output": self._task_output,
             "file_list": lambda args: file_list(args, self._workspace_root, self._path_policy),
             "file_search": lambda args: file_search(args, self._workspace_root, self._path_policy),
             "file_read": lambda args: file_read(args, self._workspace_root, self._path_policy),
@@ -101,6 +109,10 @@ class ToolRouter:
         except ValueError as error:
             raise ToolRoutingError(str(error), error_type="tool_registry_invalid") from error
         self._assert_registry_alignment()
+
+    @property
+    def episode_writer(self) -> EpisodeWriter:
+        return self._episode_writer
 
     def dispatch(
         self,
@@ -158,6 +170,11 @@ class ToolRouter:
                 error_type=str(error.get("type", "")),
             )
 
+    def wait_for_agent_task(self, task_id: str, timeout: float | None = None) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return {}
+        return self._agent_runtime.wait_for_task(task_id, timeout=timeout)
+
     def _fake_tool(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "success", "args": args}
 
@@ -170,6 +187,57 @@ class ToolRouter:
             "memory_update_requested": True,
             "reason": str(args.get("reason", "")),
         }
+
+    def _agent(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        return _agent_runtime_result(
+            self._agent_runtime.spawn_worker(
+                description=str(args["description"]),
+                prompt=str(args["prompt"]),
+                subagent_type=args["subagent_type"],
+                team_id=args.get("team"),
+                model_profile=args.get("model_profile"),
+            ),
+        )
+
+    def _send_message(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        return _agent_runtime_result(self._agent_runtime.send_message(str(args["to"]), str(args["message"])))
+
+    def _task_stop(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        return _agent_runtime_result(
+            self._agent_runtime.stop_task(
+                str(args["task_id"]),
+                force=bool(args.get("force", False)),
+            ),
+        )
+
+    def _task_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        return _agent_runtime_result(self._agent_runtime.task_get(str(args["task_id"])))
+
+    def _task_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        status = args.get("status")
+        return _agent_runtime_result(
+            self._agent_runtime.task_list(status=str(status) if status else None),
+        )
+
+    def _task_output(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        return _agent_runtime_result(
+            self._agent_runtime.task_output(
+                str(args["task_id"]),
+                max_chars=int(args.get("max_chars", 12000)),
+            ),
+        )
 
     def _request_user_input(
         self,
@@ -350,3 +418,9 @@ def _matches_json_type(value: Any, expected_type: str) -> bool:
     if expected_type == "array":
         return isinstance(value, list)
     return True
+
+
+def _agent_runtime_result(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("is_error") is True:
+        return tool_error("agent_runtime_error", str(result.get("error", "agent runtime failed")))
+    return result

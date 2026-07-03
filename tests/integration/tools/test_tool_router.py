@@ -15,6 +15,7 @@ from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
 from haagent.tools import router as router_module
+from haagent.tools import file_tools
 from haagent.tools.shell import shell
 
 
@@ -68,6 +69,29 @@ def test_tool_router_handlers_match_tool_registry(tmp_path: Path) -> None:
     )
 
     assert set(router._handlers) == set(TOOL_REGISTRY)
+
+
+def test_file_list_skips_inaccessible_subdirectories(tmp_path: Path, monkeypatch) -> None:
+    blocked = tmp_path / ".tmp" / "pytest"
+    blocked.mkdir(parents=True)
+    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def fake_iterdir(path: Path):
+        if path == blocked:
+            raise PermissionError("access denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+
+    result = file_tools.file_list(
+        {"path": ".", "max_depth": 3, "max_entries": 20},
+        tmp_path,
+    )
+
+    assert result["status"] == "success"
+    assert ".tmp/pytest" in result["skipped_dirs"]
+    assert "README.md" in result["tree"]
 
 
 def test_start_memory_update_sets_runtime_flag_and_writes_trace(tmp_path: Path) -> None:

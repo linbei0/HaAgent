@@ -323,7 +323,7 @@ def _validate_tool_calls(records: list[dict[str, Any]]) -> None:
         if not isinstance(record["tool_name"], str):
             raise EpisodeValidationError(f"tool-calls.jsonl line {index} tool_name must be a string")
         status = record["status"]
-        if status not in {"success", "error"}:
+        if status not in {"success", "error", "running"}:
             raise EpisodeValidationError(f"tool-calls.jsonl line {index} status is invalid: {status}")
         if "policy" not in record:
             raise EpisodeValidationError(

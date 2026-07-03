@@ -451,6 +451,8 @@ class HaAgentTuiApp(App[None]):
             self.action_open_models()
         elif command.action == "mcp":
             self._handle_mcp_command()
+        elif command.action == "agents":
+            self._handle_agents_command()
         elif command.action == "memory":
             if not self._memory_mode:
                 self.action_toggle_memory()
@@ -532,6 +534,28 @@ class HaAgentTuiApp(App[None]):
             else:
                 lines.append(f"- {name}: {state}")
         self._append_block("Command", "\n".join(lines))
+        self._refresh()
+
+    def _handle_agents_command(self) -> None:
+        try:
+            agents = self.service.list_agents()
+        except Exception as error:
+            self._append_block("Agents", f"读取 worker 状态失败：{error}")
+            self._refresh()
+            return
+        if not agents:
+            self._append_block("Agents", "当前 session 没有 worker。")
+            self._refresh()
+            return
+        lines = ["Workers:"]
+        for item in agents:
+            agent_id = str(item.get("agent_id", "unknown"))
+            status = str(item.get("status", "unknown"))
+            subagent_type = str(item.get("subagent_type", "worker"))
+            description = str(item.get("description", "")).strip()
+            suffix = f" - {description}" if description else ""
+            lines.append(f"- {agent_id} [{subagent_type}] {status}{suffix}")
+        self._append_block("Agents", "\n".join(lines))
         self._refresh()
 
     def _handle_skills_command(self, argument: str) -> None:
@@ -930,6 +954,8 @@ class HaAgentTuiApp(App[None]):
             final_content = content or self._streaming_assistant_text
             conversation.finalize_assistant(turn_index, final_content)
         else:
+            if self._streaming_assistant_turn is not None:
+                conversation.finalize_assistant(self._streaming_assistant_turn, self._streaming_assistant_text)
             conversation.finalize_assistant(turn_index, content)
         self._streaming_assistant_turn = None
         self._streaming_assistant_text = ""
@@ -1024,14 +1050,19 @@ class HaAgentTuiApp(App[None]):
             self._append_block("Cancel", "当前 service 未提供可取消协议；本轮不能安全取消。")
             self._refresh()
             return
-        cancel()
+        result = cancel()
         if self._pending_interaction is not None:
             self._pending_interaction.response = HumanInteractionResponse(approved=False, answer="")
             self._pending_interaction.done.set()
             self._pending_interaction = None
         self._restore_prompt_input()
-        self._state = "cancelling"
-        self._append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
+        status = str(getattr(result, "status", "cancelled"))
+        if status == "idle":
+            self._state = "idle"
+            self._append_block("Cancel", "当前没有仍在运行的任务。")
+        else:
+            self._state = "cancelling"
+            self._append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
         self._refresh()
 
     def _refresh_conversation(self) -> None:

@@ -36,6 +36,10 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "safety_abort",
         "interaction_reused",
         "failure",
+        "worker_started",
+        "worker_completed",
+        "worker_failed",
+        "worker_stopped",
     }
 
 
@@ -73,6 +77,38 @@ def test_runtime_ui_event_mapper_groups_tool_events_as_activity() -> None:
     assert event.tool_name == "file_read"
     assert event.status == "finished"
     assert event.summary
+
+
+def test_runtime_ui_event_mapper_groups_worker_events_as_activity() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "worker_completed",
+            "agent_id": "explorer-1",
+            "task_id": "task-1",
+            "team_id": "team-1",
+            "subagent_type": "explorer",
+            "description": "Inspect project",
+            "status": "completed",
+        },
+        session_id="session-1",
+        turn_index=1,
+    )
+
+    assert event == ToolActivityEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        tool_name="agent:explorer-1",
+        status="finished",
+        summary="worker completed: Inspect project",
+        args_summary={
+            "agent_id": "explorer-1",
+            "task_id": "task-1",
+            "team_id": "team-1",
+            "subagent_type": "explorer",
+        },
+        result_status="completed",
+    )
 
 
 def test_runtime_ui_event_mapper_groups_approval_events() -> None:

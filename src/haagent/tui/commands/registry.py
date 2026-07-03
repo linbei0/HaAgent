@@ -51,6 +51,7 @@ def command_registry() -> CommandRegistry:
             SlashCommand("sessions", "打开会话列表", "sessions"),
             SlashCommand("model", "打开模型中心", "open_models"),
             SlashCommand("mcp", "查看 MCP 连接状态", "mcp"),
+            SlashCommand("agents", "查看当前 worker 状态", "agents"),
             SlashCommand("memory", "打开记忆候选审查", "memory"),
             SlashCommand("skills", "查看、信任、搜索和安装 skills", "skills"),
             SlashCommand("skill", "显式使用一个 skill", "skill"),

@@ -17,7 +17,9 @@ from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.settings import load_mcp_settings
 from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.gateway import ModelGateway
+from haagent.models.provider_profile import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
+from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.session.turn import ChatTurnRequest, ChatTurnRunner, summary_value as _summary_value
 from haagent.runtime.events import RuntimeUiEvent
@@ -155,6 +157,9 @@ class AgentSession:
         session_id: str | None = None,
         memory_extraction_enabled: bool = True,
         enable_web: bool = False,
+        allowed_tools_override: list[str] | None = None,
+        approval_allowed_tools_override: list[str] | None = None,
+        approved_tools_override: list[str] | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.path_policy = default_path_policy(self.workspace_root)
@@ -166,6 +171,13 @@ class AgentSession:
         self.max_turns = max_turns
         self.memory_extraction_enabled = memory_extraction_enabled
         self.enable_web = enable_web
+        self._allowed_tools_override = list(allowed_tools_override) if allowed_tools_override is not None else None
+        self._approval_allowed_tools_override = (
+            list(approval_allowed_tools_override)
+            if approval_allowed_tools_override is not None
+            else None
+        )
+        self._approved_tools_override = list(approved_tools_override) if approved_tools_override is not None else None
         self.session_id = session_id or _new_session_id()
         self.turn_count = 0
         self._summaries: list[str] = []
@@ -247,6 +259,9 @@ class AgentSession:
         )
         instance.session_path = session_path
         instance._current_cancellation_token = None
+        instance._allowed_tools_override = None
+        instance._approval_allowed_tools_override = None
+        instance._approved_tools_override = None
         instance._created_at = str(metadata["created_at"])
         return instance
 
@@ -302,29 +317,37 @@ class AgentSession:
         target_paths = list(self._next_turn_target_paths)
         self._next_turn_target_paths = []
         session_memory = self._session_memory()
-        result = ChatTurnRunner().run(
-            ChatTurnRequest(
-                prompt=clean_prompt,
-                workspace_root=self.workspace_root,
-                runs_root=self.runs_root,
-                model_gateway=self.model_gateway,
-                max_turns=self.max_turns,
-                session_summary=session_memory.summary_text,
-                session_compaction=session_memory.diagnostics,
-                tool_result_microcompact_count=self._tool_result_microcompact_count,
-                working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
-                path_policy=self.path_policy,
-                enable_web=self.enable_web,
-                target_paths=target_paths,
-                event_sink=on_runtime_event,
-                interaction_handler=interaction_handler,
-                cancellation_token=self._current_cancellation_token,
-                orchestrator_factory=RunOrchestrator,
-                tool_registry=self._tool_registry,
-                mcp_runtime=self._mcp_runtime,
-                mcp_tool_names=self._mcp_tool_names,
-            ),
-        )
+        try:
+            result = ChatTurnRunner().run(
+                ChatTurnRequest(
+                    prompt=clean_prompt,
+                    workspace_root=self.workspace_root,
+                    runs_root=self.runs_root,
+                    model_gateway=self.model_gateway,
+                    max_turns=self.max_turns,
+                    session_summary=session_memory.summary_text,
+                    session_compaction=session_memory.diagnostics,
+                    tool_result_microcompact_count=self._tool_result_microcompact_count,
+                    working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
+                    path_policy=self.path_policy,
+                    enable_web=self.enable_web,
+                    target_paths=target_paths,
+                    event_sink=on_runtime_event,
+                    interaction_handler=interaction_handler,
+                    cancellation_token=self._current_cancellation_token,
+                    orchestrator_factory=RunOrchestrator,
+                    leader_session_id=self.session_id,
+                    tool_registry=self._tool_registry,
+                    mcp_runtime=self._mcp_runtime,
+                    mcp_tool_names=self._mcp_tool_names,
+                    allowed_tools_override=self._allowed_tools_override,
+                    approval_allowed_tools_override=self._approval_allowed_tools_override,
+                    approved_tools_override=self._approved_tools_override,
+                ),
+            )
+        except Exception:
+            self._current_cancellation_token = None
+            raise
 
         turn_result = self._build_turn_result(clean_prompt, result)
         self.turn_count += 1
@@ -411,9 +434,11 @@ class AgentSession:
         self._current_cancellation_token = None
         return turn_result
 
-    def cancel_current_run(self) -> None:
+    def cancel_current_run(self) -> bool:
         if self._current_cancellation_token is not None:
             self._current_cancellation_token.cancel()
+            return True
+        return False
 
     def switch_model_gateway(
         self,
@@ -581,7 +606,12 @@ class AgentSession:
         self._write_working_state()
 
     def close(self) -> None:
-        self._mcp_runtime.close()
+        try:
+            store = TeamStore(user_config_dir() / "teams")
+            for team in store.list_teams_for_leader(self.session_id):
+                store.mark_inactive(team.team_id)
+        finally:
+            self._mcp_runtime.close()
 
     def summary_text(self) -> str | None:
         return self._session_memory().summary_text

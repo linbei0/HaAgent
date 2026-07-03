@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from haagent.runtime.execution.cancellation import CancellationToken
 
@@ -62,14 +63,68 @@ def run_command(
     cancellation_token: CancellationToken | None = None,
 ) -> CommandResult:
     """运行 shell 命令，并用统一结构表达执行结果。"""
+    popen_args, use_shell = resolve_shell_command(command)
     return run_process(
         command=command,
-        popen_args=command,
-        shell=True,
+        popen_args=popen_args,
+        shell=use_shell,
         cwd=cwd,
         timeout_seconds=timeout_seconds,
         cancellation_token=cancellation_token,
     )
+
+
+def resolve_shell_command(
+    command: str,
+    *,
+    os_name: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    bash_is_usable: Callable[[str], bool] | None = None,
+) -> tuple[str | list[str], bool]:
+    """选择平台合适的 shell argv，避免 Windows 默认 cmd 误跑 Unix 风格命令。"""
+    resolved_os = os_name or os.name
+    usable_bash = bash_is_usable or _bash_is_usable
+    if resolved_os == "nt":
+        bash = which("bash")
+        if bash and not _is_wsl_bash_path(bash) and usable_bash(bash):
+            return [bash, "-lc", command], False
+        powershell = which("pwsh") or which("powershell")
+        if powershell:
+            return [powershell, "-NoLogo", "-NoProfile", "-Command", _powershell_command(command)], False
+        return [which("cmd.exe") or "cmd.exe", "/d", "/s", "/c", command], False
+
+    shell = which("bash") or which("sh") or os.environ.get("SHELL") or "/bin/sh"
+    return [shell, "-lc", command], False
+
+
+def _bash_is_usable(bash_path: str) -> bool:
+    try:
+        result = subprocess.run(
+            [bash_path, "-lc", "exit 0"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _powershell_command(command: str) -> str:
+    return (
+        "& { "
+        "$ErrorActionPreference = 'Stop'; "
+        "try { "
+        f"{command}; "
+        "if ($null -ne $global:LASTEXITCODE) { exit $global:LASTEXITCODE } "
+        "} catch { Write-Error $_; exit 1 } "
+        "}"
+    )
+
+
+def _is_wsl_bash_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    return normalized.endswith("/windows/system32/bash.exe") or "/microsoft/windowsapps/bash.exe" in normalized
 
 
 def run_process(

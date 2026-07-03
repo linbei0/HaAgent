@@ -37,6 +37,12 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "apply_patch",
         "apply_patch_set",
         "shell",
+        "agent",
+        "send_message",
+        "task_stop",
+        "task_get",
+        "task_list",
+        "task_output",
     }
     assert all(isinstance(definition, ToolDefinition) for definition in TOOL_REGISTRY.values())
 
@@ -112,6 +118,20 @@ def test_file_search_schema_stays_deterministic() -> None:
     assert schema["parameters"]["required"] == ["query"]
     assert set(schema["parameters"]["properties"]) == {"query", "root"}
     assert TOOL_REGISTRY["file_search"].risk_level == "low"
+
+
+def test_task_tools_are_low_risk_worker_inspection_tools() -> None:
+    get_schema, list_schema, output_schema = export_tool_schemas(["task_get", "task_list", "task_output"])
+
+    assert get_schema["parameters"]["required"] == ["task_id"]
+    assert set(get_schema["parameters"]["properties"]) == {"task_id"}
+    assert list_schema["parameters"]["required"] == []
+    assert set(list_schema["parameters"]["properties"]) == {"status"}
+    assert output_schema["parameters"]["required"] == ["task_id"]
+    assert set(output_schema["parameters"]["properties"]) == {"task_id", "max_chars"}
+    assert TOOL_REGISTRY["task_get"].risk_level == "low"
+    assert TOOL_REGISTRY["task_list"].risk_level == "low"
+    assert TOOL_REGISTRY["task_output"].risk_level == "low"
 
 
 def test_request_user_input_schema_requires_question() -> None:

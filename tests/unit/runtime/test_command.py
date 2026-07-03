@@ -9,7 +9,70 @@ import time
 from pathlib import Path
 
 from haagent.runtime.execution.cancellation import CancellationToken
-from haagent.runtime.execution.command import run_command
+from haagent.runtime.execution.command import _powershell_command, resolve_shell_command, run_command
+
+
+def test_resolve_shell_command_prefers_usable_bash_on_windows() -> None:
+    def fake_which(name: str) -> str | None:
+        return {"bash": "C:/Program Files/Git/bin/bash.exe"}.get(name)
+
+    argv, use_shell = resolve_shell_command(
+        "pwd && ls -la",
+        os_name="nt",
+        which=fake_which,
+        bash_is_usable=lambda path: path.endswith("bash.exe"),
+    )
+
+    assert argv == ["C:/Program Files/Git/bin/bash.exe", "-lc", "pwd && ls -la"]
+    assert use_shell is False
+
+
+def test_resolve_shell_command_falls_back_to_powershell_on_windows() -> None:
+    def fake_which(name: str) -> str | None:
+        return {"pwsh": "C:/Program Files/PowerShell/7/pwsh.exe"}.get(name)
+
+    argv, use_shell = resolve_shell_command(
+        "Get-ChildItem",
+        os_name="nt",
+        which=fake_which,
+        bash_is_usable=lambda path: False,
+    )
+
+    assert argv[:4] == [
+        "C:/Program Files/PowerShell/7/pwsh.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+    ]
+    assert "Get-ChildItem" in argv[4]
+    assert "$global:LASTEXITCODE" in argv[4]
+    assert use_shell is False
+
+
+def test_resolve_shell_command_skips_wsl_bash_on_windows() -> None:
+    def fake_which(name: str) -> str | None:
+        return {
+            "bash": "C:/Windows/System32/bash.exe",
+            "pwsh": "C:/Program Files/PowerShell/7/pwsh.exe",
+        }.get(name)
+
+    argv, use_shell = resolve_shell_command(
+        "python -c \"print('ok')\"",
+        os_name="nt",
+        which=fake_which,
+        bash_is_usable=lambda path: True,
+    )
+
+    assert argv[0] == "C:/Program Files/PowerShell/7/pwsh.exe"
+    assert use_shell is False
+
+
+def test_powershell_command_converts_cmdlet_errors_to_failed_exit() -> None:
+    wrapped = _powershell_command("ls -la")
+
+    assert "$ErrorActionPreference = 'Stop'" in wrapped
+    assert "catch" in wrapped
+    assert "exit 1" in wrapped
 
 
 def test_run_command_records_success(tmp_path: Path) -> None:

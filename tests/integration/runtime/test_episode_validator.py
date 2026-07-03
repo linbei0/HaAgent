@@ -403,6 +403,15 @@ def test_package_validator_accepts_tool_status_error(tmp_path: Path) -> None:
     validate_episode_package(result.episode_path)
 
 
+def test_package_validator_accepts_tool_status_running(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    write_tool_call(result.episode_path, tool_name="agent", status="running")
+
+    validate_episode_package(result.episode_path)
+
+
 def test_package_validator_rejects_tool_call_missing_policy(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)

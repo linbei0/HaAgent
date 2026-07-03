@@ -26,6 +26,9 @@ from haagent.context.observation_compaction import (
 )
 from haagent.models.fake import FakeModelGateway
 from haagent.models.gateway import ModelCallError, ModelGateway, ToolCall
+from haagent.models.provider_profile import user_config_dir
+from haagent.multi_agent.runtime import MultiAgentRuntime
+from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.failure import FailureCategory
@@ -77,6 +80,7 @@ class RunOrchestrator:
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: Any | None = None,
+        leader_session_id: str | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -90,6 +94,7 @@ class RunOrchestrator:
         self._cancellation_token = cancellation_token
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
+        self._leader_session_id = leader_session_id or "leader"
 
     def _emit_event(self, event: dict[str, object]) -> None:
         if self._event_sink is not None:
@@ -142,6 +147,25 @@ class RunOrchestrator:
                 cancellation_token=self._cancellation_token,
                 tool_registry=self._tool_registry,
                 mcp_runtime=self._mcp_runtime,
+                agent_runtime=MultiAgentRuntime(
+                    runs_root=self._runs_root,
+                    workspace_root=workspace_root,
+                    leader_session_id=self._leader_session_id,
+                    model_gateway=self._model_gateway,
+                    path_policy=path_policy,
+                    inherited_allowed_tools=task.allowed_tools,
+                    inherited_approval_allowed_tools=task.policy["approval_allowed_tools"],
+                    inherited_approved_tools=task.policy["approved_tools"],
+                    event_sink=self._emit_event,
+                    interaction_handler=self._interaction_handler,
+                    enable_web=bool({"web_search", "web_fetch"} & set(task.allowed_tools)),
+                    mcp_tool_names=[
+                        tool for tool in task.allowed_tools if tool.startswith("mcp__")
+                    ],
+                    tool_registry=self._tool_registry,
+                    mcp_runtime=self._mcp_runtime,
+                    worker_max_turns=self._max_turns,
+                ),
             )
             verification_engine: VerificationEngine | None = None
             passed_verification_commands: set[str] = set()
@@ -164,6 +188,11 @@ class RunOrchestrator:
                 interaction_resolver=interaction_resolver,
                 tool_registry=self._tool_registry,
             )
+            worker_notifications = _worker_notification_context(self._leader_session_id)
+            if worker_notifications:
+                prepared_messages.messages.append(
+                    {"role": "user", "content": worker_notifications},
+                )
             context_id = prepared_messages.context_id
             messages = prepared_messages.messages
             turn_result = run_turn_loop(
@@ -624,3 +653,19 @@ def _workspace_root_candidate(raw_root: str | None, task_path: Path) -> Path:
     if raw_root is not None and not candidate.is_absolute():
         candidate = task_path.parent / candidate
     return candidate.resolve(strict=False)
+
+
+def _worker_notification_context(leader_session_id: str) -> str | None:
+    store = TeamStore(user_config_dir() / "teams")
+    lines: list[str] = []
+    for team in store.list_teams_for_leader(leader_session_id):
+        for item in store.read_notifications(team.team_id, limit=5):
+            lines.append(
+                "- "
+                f"{item.get('agent_id', '')} "
+                f"{item.get('status', '')}: "
+                f"{item.get('summary', '')}"
+            )
+    if not lines:
+        return None
+    return "Worker Notifications:\n" + "\n".join(lines[-10:])
