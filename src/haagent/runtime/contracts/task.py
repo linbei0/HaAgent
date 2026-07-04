@@ -29,6 +29,7 @@ class TaskSpec:
     policy: dict[str, list[str]] = field(
         default_factory=lambda: {"approval_allowed_tools": [], "approved_tools": []},
     )
+    worker_context: dict[str, Any] | None = None
 
 
 def load_task(path: Path) -> TaskSpec:
@@ -48,6 +49,7 @@ def load_task(path: Path) -> TaskSpec:
         path_policy=_optional_path_policy(raw),
         target_paths=_optional_str_list(raw, "target_paths"),
         policy=_optional_policy(raw, allowed_tools),
+        worker_context=_optional_mapping(raw, "worker_context"),
     )
 
 
@@ -150,3 +152,12 @@ def _optional_path_policy(raw: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise TaskLoadError("path_policy must be a mapping")
     return value
+
+
+def _optional_mapping(raw: dict[str, Any], field: str) -> dict[str, Any] | None:
+    value = raw.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TaskLoadError(f"{field} must be a mapping")
+    return dict(value)

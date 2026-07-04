@@ -15,8 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from haagent.multi_agent.messages import WorkerMessage, WorkerPermissionRequest
 
-WorkerStatus = Literal["queued", "running", "idle", "completed", "failed", "stopped"]
+
+WorkerStatus = Literal["queued", "running", "idle", "awaiting_approval", "completed", "failed", "stopped"]
 MessageType = Literal["user_message", "shutdown_request"]
 
 
@@ -31,6 +33,8 @@ class WorkerRecord:
     episode_path: str = ""
     restart_count: int = 0
     status_note: str = ""
+    profile: str = ""
+    model_profile: str = ""
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
@@ -110,6 +114,8 @@ class TeamStore:
                     episode_path=item.get("episode_path", ""),
                     restart_count=int(item.get("restart_count", 0)),
                     status_note=item.get("status_note", ""),
+                    profile=item.get("profile", ""),
+                    model_profile=item.get("model_profile", ""),
                     updated_at=item.get("updated_at", ""),
                 )
                 for item in raw.get("agents", [])
@@ -163,6 +169,8 @@ class TeamStore:
                     episode_path=next_episode_path,
                     restart_count=worker.restart_count if restart_count is None else restart_count,
                     status_note=worker.status_note if status_note is None else status_note,
+                    profile=worker.profile,
+                    model_profile=worker.model_profile,
                 ),
             )
         self._write_team(
@@ -196,6 +204,97 @@ class TeamStore:
         inbox.mkdir(parents=True, exist_ok=True)
         filename = f"{message.timestamp:.6f}_{message.id}.json"
         return _atomic_write_json(inbox / filename, asdict(message))
+
+    def write_worker_message(self, team_id: str, agent_id: str, message: WorkerMessage) -> Path:
+        payload = message.to_dict()
+        inbox = self._team_dir(team_id) / "agents" / _safe_id(agent_id) / "messages"
+        inbox.mkdir(parents=True, exist_ok=True)
+        path = inbox / f"{payload['created_at']}-{payload['message_id']}.json"
+        return _atomic_write_json(path, payload)
+
+    def read_worker_messages(self, team_id: str, agent_id: str) -> list[WorkerMessage]:
+        inbox = self._team_dir(team_id) / "agents" / _safe_id(agent_id) / "messages"
+        if not inbox.exists():
+            return []
+        messages = []
+        for path in sorted(inbox.glob("*.json")):
+            messages.append(WorkerMessage.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+        return messages
+
+    def consume_worker_messages(self, team_id: str, agent_id: str) -> list[WorkerMessage]:
+        inbox = self._team_dir(team_id) / "agents" / _safe_id(agent_id) / "messages"
+        if not inbox.exists():
+            return []
+        messages: list[WorkerMessage] = []
+        for path in sorted(inbox.glob("*.json")):
+            messages.append(WorkerMessage.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+            path.unlink(missing_ok=True)
+        return messages
+
+    def write_permission_request(self, request: WorkerPermissionRequest) -> Path:
+        directory = self._team_dir(request.team_id) / "permissions" / request.status
+        directory.mkdir(parents=True, exist_ok=True)
+        return _atomic_write_json(directory / f"{_safe_id(request.request_id)}.json", request.to_dict())
+
+    def read_permission_requests(
+        self,
+        team_id: str,
+        *,
+        status: str = "pending",
+    ) -> list[WorkerPermissionRequest]:
+        directory = self._team_dir(team_id) / "permissions" / _safe_id(status)
+        if not directory.exists():
+            return []
+        requests = []
+        for path in sorted(directory.glob("*.json")):
+            requests.append(WorkerPermissionRequest.from_dict(json.loads(path.read_text(encoding="utf-8"))))
+        return requests
+
+    def resolve_permission_request(
+        self,
+        request_id: str,
+        *,
+        approved: bool,
+        response_message: str = "",
+    ) -> WorkerPermissionRequest:
+        found = self._find_permission_request(request_id, statuses=("pending",))
+        if found is None:
+            raise ValueError(f"pending permission request not found: {request_id}")
+        path, request = found
+        resolved = WorkerPermissionRequest(
+            request_id=request.request_id,
+            team_id=request.team_id,
+            agent_id=request.agent_id,
+            task_id=request.task_id,
+            tool_name=request.tool_name,
+            tool_args_summary=request.tool_args_summary,
+            reason=request.reason,
+            status="approved" if approved else "rejected",
+            response_message=response_message,
+        )
+        path.unlink(missing_ok=True)
+        self.write_permission_request(resolved)
+        return resolved
+
+    def consume_permission_request(self, request_id: str) -> WorkerPermissionRequest:
+        found = self._find_permission_request(request_id, statuses=("approved", "rejected"))
+        if found is None:
+            raise ValueError(f"resolved permission request not found: {request_id}")
+        path, request = found
+        consumed = WorkerPermissionRequest(
+            request_id=request.request_id,
+            team_id=request.team_id,
+            agent_id=request.agent_id,
+            task_id=request.task_id,
+            tool_name=request.tool_name,
+            tool_args_summary=request.tool_args_summary,
+            reason=request.reason,
+            status="consumed",
+            response_message=request.response_message,
+        )
+        path.unlink(missing_ok=True)
+        self.write_permission_request(consumed)
+        return consumed
 
     def append_notification(self, team_id: str, notification: dict[str, Any]) -> None:
         path = self._team_dir(team_id) / "notifications.jsonl"
@@ -238,6 +337,22 @@ class TeamStore:
     def _write_team(self, team: TeamRecord) -> None:
         payload = asdict(team)
         _atomic_write_json(self._team_file(team.team_id), payload)
+
+    def _find_permission_request(
+        self,
+        request_id: str,
+        *,
+        statuses: tuple[str, ...],
+    ) -> tuple[Path, WorkerPermissionRequest] | None:
+        safe_request_id = _safe_id(request_id)
+        if not self.root.exists():
+            return None
+        for team_dir in sorted(path for path in self.root.iterdir() if path.is_dir()):
+            for status in statuses:
+                path = team_dir / "permissions" / _safe_id(status) / f"{safe_request_id}.json"
+                if path.exists():
+                    return path, WorkerPermissionRequest.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        return None
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> Path:

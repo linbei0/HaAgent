@@ -88,6 +88,10 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
                 },
                 "team": {"type": "string"},
                 "model_profile": {"type": "string"},
+                "profile": {
+                    "type": "string",
+                    "description": "agent profile name; defaults to subagent_type when omitted",
+                },
             },
             "required": ["description", "prompt", "subagent_type"],
             "additionalProperties": False,

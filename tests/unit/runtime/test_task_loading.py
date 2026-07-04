@@ -70,6 +70,37 @@ verification_commands: []
     assert task.workspace_root == ".."
 
 
+def test_load_task_reads_worker_context(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(
+        task_path,
+        """
+goal: Inspect files
+workspace_root: .
+constraints: []
+allowed_tools: [file_read]
+acceptance_criteria: [Complete the requested chat task.]
+verification_commands: []
+worker_context:
+  agent_id: worker-1
+  agent_profile: explorer
+  system_prompt: 你是只读探索助手。
+  leader_session_id: leader-1
+  team_id: team-1
+  inbox_enabled: true
+policy:
+  approval_allowed_tools: []
+  approved_tools: []
+""".strip(),
+    )
+
+    task = load_task(task_path)
+
+    assert task.worker_context is not None
+    assert task.worker_context["agent_profile"] == "explorer"
+    assert task.worker_context["system_prompt"] == "你是只读探索助手。"
+
+
 def test_load_task_defaults_policy_approval_allowed_tools_to_empty(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(

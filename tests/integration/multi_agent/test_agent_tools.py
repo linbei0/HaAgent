@@ -113,7 +113,7 @@ def test_agent_tool_starts_worker_and_records_trace(tmp_path: Path) -> None:
     assert json.loads(trace_lines[0])["tool_name"] == "agent"
 
 
-def test_send_message_rejects_running_worker(tmp_path: Path) -> None:
+def test_send_message_queues_running_worker_message(tmp_path: Path) -> None:
     runtime = MultiAgentRuntime(
         runs_root=tmp_path / ".runs",
         workspace_root=tmp_path,
@@ -140,8 +140,10 @@ def test_send_message_rejects_running_worker(tmp_path: Path) -> None:
 
     result = runtime.send_message(first["agent_id"], "continue")
 
-    assert result["is_error"] is True
-    assert "still running" in result["error"]
+    assert result["status"] == "queued"
+    assert result["task_id"] == first["task_id"]
+    messages = runtime.store.read_worker_messages("team-test", first["agent_id"])
+    assert [message.content for message in messages] == ["continue"]
 
 
 def test_send_message_can_continue_worker_from_new_runtime_for_same_leader(tmp_path: Path) -> None:

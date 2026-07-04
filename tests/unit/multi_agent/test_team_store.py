@@ -87,3 +87,27 @@ def test_team_store_marks_team_inactive_without_deleting_audit_data(tmp_path: Pa
     assert saved_team is not None
     assert saved_team.active is False
     assert (tmp_path / ".haagent" / "teams" / "team-demo" / "team.json").exists()
+
+
+def test_worker_record_persists_profile_fields(tmp_path: Path) -> None:
+    store = TeamStore(tmp_path / "teams")
+    store.ensure_team(team_id="team-1", workspace_root=tmp_path, leader_session_id="leader")
+    store.upsert_worker(
+        "team-1",
+        WorkerRecord(
+            agent_id="explorer-1",
+            task_id="task-1",
+            subagent_type="explorer",
+            description="Inspect",
+            status="completed",
+            session_id="session-1",
+            profile="explorer",
+            model_profile="fast",
+        ),
+    )
+
+    team = store.load_team("team-1")
+
+    assert team is not None
+    assert team.agents[0].profile == "explorer"
+    assert team.agents[0].model_profile == "fast"

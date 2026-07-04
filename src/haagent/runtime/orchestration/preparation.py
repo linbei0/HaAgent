@@ -123,7 +123,10 @@ def prepare_initial_messages(
         writer.append_transcript(
             {"event": "full_compact_contract", **context.manifest.full_compact_contract},
         )
-    messages: list[dict[str, Any]] = list(context.messages)
+    messages: list[dict[str, Any]] = _with_worker_context_messages(
+        list(context.messages),
+        task.worker_context,
+    )
     if context.manifest.full_compact_contract is not None:
         if context.manifest.full_compact_contract.get("eligible") is True:
             writer.append_transcript(
@@ -161,6 +164,27 @@ def full_compact_eligibility_from_manifest(contract: dict[str, Any]) -> FullComp
         trigger_kind=contract.get("trigger_kind") if isinstance(contract.get("trigger_kind"), str) else None,
         required_preserve_recent=full_compact_preserve_recent(contract),
     )
+
+
+def _with_worker_context_messages(
+    messages: list[dict[str, Any]],
+    worker_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not worker_context:
+        return messages
+    system_prompt = worker_context.get("system_prompt")
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        return messages
+    lines = [
+        "Worker profile context:",
+        f"- agent_id: {worker_context.get('agent_id', '')}",
+        f"- agent_profile: {worker_context.get('agent_profile', '')}",
+        f"- leader_session_id: {worker_context.get('leader_session_id', '')}",
+        f"- team_id: {worker_context.get('team_id', '')}",
+        f"- inbox_enabled: {bool(worker_context.get('inbox_enabled'))}",
+        f"- system_prompt: {system_prompt}",
+    ]
+    return [{"role": "system", "content": "\n".join(lines)}, *messages]
 
 
 def full_compact_preserve_recent(contract: dict[str, Any]) -> int:

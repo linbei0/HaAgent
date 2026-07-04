@@ -9,7 +9,7 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 import yaml
 
@@ -63,6 +63,7 @@ class OrchestratorFactory(Protocol):
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: object | None = None,
         leader_session_id: str | None = None,
+        worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
     ):
         ...
 
@@ -92,6 +93,8 @@ class ChatTurnRequest:
     allowed_tools_override: list[str] | None = None
     approval_allowed_tools_override: list[str] | None = None
     approved_tools_override: list[str] | None = None
+    worker_context: dict[str, object] | None = None
+    worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None
 
 
 class ChatTurnRunner:
@@ -112,6 +115,7 @@ class ChatTurnRunner:
                 allowed_tools_override=request.allowed_tools_override,
                 approval_allowed_tools_override=request.approval_allowed_tools_override,
                 approved_tools_override=request.approved_tools_override,
+                worker_context=request.worker_context,
             )
             orchestrator = request.orchestrator_factory(
                 runs_root=request.runs_root,
@@ -127,6 +131,7 @@ class ChatTurnRunner:
                 tool_registry=request.tool_registry,
                 mcp_runtime=request.mcp_runtime,
                 leader_session_id=request.leader_session_id,
+                worker_permission_requester=request.worker_permission_requester,
             )
             return orchestrator.run(task_path)
 
@@ -143,6 +148,7 @@ def write_chat_task_yaml(
     allowed_tools_override: list[str] | None = None,
     approval_allowed_tools_override: list[str] | None = None,
     approved_tools_override: list[str] | None = None,
+    worker_context: dict[str, object] | None = None,
 ) -> None:
     mcp_tools = list(mcp_tool_names or [])
     if allowed_tools_override is None:
@@ -183,6 +189,8 @@ def write_chat_task_yaml(
             "approved_tools": approved_tools,
         },
     }
+    if worker_context is not None:
+        task["worker_context"] = dict(worker_context)
     path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 

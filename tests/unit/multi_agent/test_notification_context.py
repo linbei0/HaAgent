@@ -35,5 +35,5 @@ def test_worker_notification_context_uses_summary_without_full_result_excerpt(tm
 
     context = orchestrator_module._worker_notification_context("leader-session")
 
-    assert context == "Worker Notifications:\n- explorer-1 completed: README summarized"
+    assert context == "Worker Notifications:\n- explorer-1 completed: README summarized (task=task-1)"
     assert "FULL WORKER TRANSCRIPT" not in context

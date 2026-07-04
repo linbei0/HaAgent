@@ -82,6 +82,7 @@ class RunOrchestrator:
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: Any | None = None,
         leader_session_id: str | None = None,
+        worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -96,6 +97,7 @@ class RunOrchestrator:
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
         self._leader_session_id = leader_session_id or "leader"
+        self._worker_permission_requester = worker_permission_requester
 
     def _emit_event(self, event: dict[str, object]) -> None:
         if self._event_sink is not None:
@@ -167,6 +169,7 @@ class RunOrchestrator:
                     mcp_runtime=self._mcp_runtime,
                     worker_max_turns=self._max_turns,
                 ),
+                worker_permission_requester=self._worker_permission_requester,
             )
             verification_engine: VerificationEngine | None = None
             passed_verification_commands: set[str] = set()
@@ -475,7 +478,7 @@ def _record_guardrail(
 def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:
     error = tool_result.get("error") if isinstance(tool_result.get("error"), dict) else {}
     error_type = str(error.get("type", ""))
-    if error_type in {"approval_denied", "policy_denied", "guardrail_denied", "tool_not_allowed", "unknown_tool"}:
+    if error_type in {"approval_denied", "approval_pending", "policy_denied", "guardrail_denied", "tool_not_allowed", "unknown_tool"}:
         return True
     if error_type in {"patch_text_not_found", "patch_text_not_unique", "code_run_failed", "timeout"}:
         return False
@@ -661,11 +664,22 @@ def _worker_notification_context(leader_session_id: str) -> str | None:
     lines: list[str] = []
     for team in store.list_teams_for_leader(leader_session_id):
         for item in store.read_notifications(team.team_id, limit=5):
+            details: list[str] = []
+            task_id = str(item.get("task_id", "")).strip()
+            if task_id:
+                details.append(f"task={task_id}")
+            request_id = str(item.get("request_id", "")).strip()
+            if request_id:
+                details.append(f"request={request_id}")
+            if item.get("needs_attention") is True:
+                details.append("attention=yes")
+            suffix = f" ({', '.join(details)})" if details else ""
             lines.append(
                 "- "
                 f"{item.get('agent_id', '')} "
                 f"{item.get('status', '')}: "
                 f"{item.get('summary', '')}"
+                f"{suffix}"
             )
     if not lines:
         return None

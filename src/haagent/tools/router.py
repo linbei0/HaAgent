@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
@@ -56,6 +56,7 @@ class ToolRouter:
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: Any | None = None,
         agent_runtime: Any | None = None,
+        worker_permission_requester: Callable[[str, dict[str, Any], PolicyDecision], Any] | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -67,6 +68,7 @@ class ToolRouter:
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
         self._agent_runtime = agent_runtime
+        self._worker_permission_requester = worker_permission_requester
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
         self._handlers: dict[str, ToolHandler] = {
             "fake_tool": self._fake_tool,
@@ -207,6 +209,7 @@ class ToolRouter:
                 subagent_type=args["subagent_type"],
                 team_id=args.get("team"),
                 model_profile=args.get("model_profile"),
+                profile=args.get("profile"),
             ),
         )
 
@@ -286,6 +289,23 @@ class ToolRouter:
         policy_decision: PolicyDecision,
         interaction_handler: HumanInteractionHandler | None,
     ) -> tuple[dict[str, Any], PolicyDecision, GuardrailResult | None]:
+        if (
+            tool_name in self._approval_allowed_tools
+            and interaction_handler is None
+            and self._worker_permission_requester is not None
+        ):
+            validation_error = _validate_args(tool_name, args, self._tool_registry)
+            if validation_error:
+                return validation_error, policy_decision, None
+            request = self._worker_permission_requester(tool_name, args, policy_decision)
+            return (
+                tool_error(
+                    "approval_pending",
+                    f"worker approval pending: {request.request_id}",
+                ),
+                policy_decision,
+                None,
+            )
         if tool_name not in self._approval_allowed_tools or interaction_handler is None:
             return (
                 tool_error(
@@ -295,9 +315,6 @@ class ToolRouter:
                 policy_decision,
                 None,
             )
-        validation_error = _validate_args(tool_name, args, self._tool_registry)
-        if validation_error:
-            return validation_error, policy_decision, None
         response = interaction_handler(
             HumanInteractionRequest(
                 interaction_type="approval",

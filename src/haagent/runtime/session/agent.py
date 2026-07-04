@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.settings import load_mcp_settings
@@ -163,6 +163,8 @@ class AgentSession:
         approval_allowed_tools_override: list[str] | None = None,
         approved_tools_override: list[str] | None = None,
         mcp_runtime: Any | None = None,
+        worker_context: dict[str, object] | None = None,
+        worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve()
         self.path_policy = default_path_policy(self.workspace_root)
@@ -181,6 +183,8 @@ class AgentSession:
             else None
         )
         self._approved_tools_override = list(approved_tools_override) if approved_tools_override is not None else None
+        self._worker_context = dict(worker_context) if worker_context is not None else None
+        self._worker_permission_requester = worker_permission_requester
         self.session_id = session_id or _new_session_id()
         self.turn_count = 0
         self._summaries: list[str] = []
@@ -271,6 +275,8 @@ class AgentSession:
         instance._allowed_tools_override = None
         instance._approval_allowed_tools_override = None
         instance._approved_tools_override = None
+        instance._worker_context = None
+        instance._worker_permission_requester = None
         instance._created_at = str(metadata["created_at"])
         return instance
 
@@ -355,6 +361,8 @@ class AgentSession:
                     allowed_tools_override=self._allowed_tools_override,
                     approval_allowed_tools_override=self._approval_allowed_tools_override,
                     approved_tools_override=self._approved_tools_override,
+                    worker_context=self._worker_context,
+                    worker_permission_requester=self._worker_permission_requester,
                 ),
             )
         except Exception:
