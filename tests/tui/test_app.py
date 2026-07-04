@@ -313,6 +313,7 @@ class FakeAssistantService:
             runs_root=self.workspace_root / ".runs",
             session_path=self.workspace_root / ".runs" / "sessions" / self.current_session_id,
             turn_count=len(self.prompts),
+            max_turns=None,
             provider=self.provider or "-",
             model_profile_name=profile_name,
             model=next((item.model for item in self.model_profiles if item.name == profile_name), self.model),
@@ -343,6 +344,7 @@ class FakeAssistantService:
             runs_root=self.workspace_root / ".runs",
             session_path=self.workspace_root / ".runs" / "sessions" / session_id,
             turn_count=len(self.prompts),
+            max_turns=None,
             provider=self.provider or "-",
             web_enabled=self.enable_web,
             external_roots=list(self.external_roots),
@@ -712,6 +714,9 @@ def test_tui_keymap_help_and_footer_share_context_definitions() -> None:
             assert key in footer
     assert "Ctrl+T" in footer_text("chat")
     assert "切换主题" in help_body("chat")
+    assert "End" not in footer_text("chat")
+    assert "End" in help_body("chat")
+    assert "回到底部" in help_body("chat")
 
 
 def test_tui_chat_memory_entry_is_only_slash_command() -> None:
@@ -953,7 +958,6 @@ def test_tui_timeline_shows_worker_lifecycle_events(tmp_path: Path) -> None:
 
             conversation = _text(app, "#conversation")
             assert "agent:explorer-1" in conversation
-            assert "worker completed: Inspect project" in conversation
             assert "已综合 worker 结果。" in conversation
 
     asyncio.run(run())
@@ -3501,10 +3505,10 @@ def test_tui_slash_command_suggestions_scroll_visible_window() -> None:
 
     rendered = state.render()
 
-    assert "/permissions" in rendered
+    assert "/web" in rendered
     assert "/help" not in rendered
     assert "/skill" in rendered
-    assert "> /permissions" in rendered
+    assert "> /web" in rendered
 
 
 def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> None:
@@ -3575,7 +3579,9 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             assert deny_has_focus
             assert "state: waiting approval" in status
             assert list(app.query("#side-bar")) == []
-            assert "工具 shell ? 待审批" in conversation or "工具 shell" in conversation
+            assert "工具 1 项" in conversation
+            assert "1 待确认" in conversation
+            assert "shell" in conversation
 
     asyncio.run(run())
 def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path) -> None:
@@ -3608,11 +3614,11 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
-            assert "工具 file_write" in conversation
             assert "工具 2 项" in conversation
             assert "1 成功" in conversation
             assert "1 失败" in conversation
-            assert "工具 file_write ok 成功" in conversation
+            assert "file_write" in conversation
+            assert "shell" in conversation
             assert "审批已拒绝：shell" in conversation
             assert "查看工具详情" not in conversation
             assert "任务工作台" not in conversation
@@ -3830,7 +3836,8 @@ def test_tui_user_input_cancel_returns_explicit_denial(tmp_path: Path) -> None:
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
             conversation = _text(app, "#conversation")
             assert "回答已取消：request_user_input" in conversation
-            assert "工具 request_user_input" in conversation
+            assert "工具 1 项" in conversation
+            assert "request_user_input" in conversation
             assert "失败" in conversation
             assert "state: failed" in _text(app, "#status-bar")
 
@@ -4154,6 +4161,75 @@ def test_tui_conversation_auto_scrolls_to_latest_content(tmp_path: Path) -> None
             assert conversation.max_scroll_y > 0
             assert conversation.scroll_y == conversation.max_scroll_y
             assert "line 29" in _text(app, "#conversation")
+
+    asyncio.run(run())
+
+
+def test_tui_conversation_does_not_auto_scroll_when_user_reads_history(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            conversation = app.query_one("#conversation")
+            for index in range(30):
+                app._append_block("Assistant", f"line {index}")
+            app._refresh_conversation()
+            await pilot.pause()
+            assert conversation.max_scroll_y > 0
+
+            conversation.scroll_to(y=0, animate=False, force=True)
+            await pilot.pause()
+            app._append_block("Assistant", "new line while reading")
+            app._refresh_conversation()
+            await pilot.pause()
+
+            assert conversation.scroll_y == 0
+
+    asyncio.run(run())
+
+
+def test_tui_end_key_scrolls_conversation_to_bottom_when_prompt_is_empty(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            conversation = app.query_one("#conversation")
+            for index in range(30):
+                app._append_block("Assistant", f"line {index}")
+            app._refresh_conversation()
+            await pilot.pause()
+            conversation.scroll_to(y=0, animate=False, force=True)
+            await pilot.pause()
+
+            await pilot.press("end")
+            await pilot.pause()
+
+            assert conversation.scroll_y == conversation.max_scroll_y
+
+    asyncio.run(run())
+
+
+def test_tui_end_key_keeps_prompt_cursor_behavior_when_prompt_has_text(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            conversation = app.query_one("#conversation")
+            for index in range(30):
+                app._append_block("Assistant", f"line {index}")
+            app._refresh_conversation()
+            await pilot.pause()
+            conversation.scroll_to(y=0, animate=False, force=True)
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "abc"
+            input_widget.cursor_location = (0, 0)
+            await pilot.pause()
+
+            await pilot.press("end")
+            await pilot.pause()
+
+            assert conversation.scroll_y == 0
+            assert input_widget.cursor_location == (0, 3)
 
     asyncio.run(run())
 
@@ -4535,7 +4611,36 @@ def test_tui_tool_events_attach_to_turn_summary_and_keep_answer_readable(tmp_pat
             assert "file_read" in conversation
             assert "web_search" in conversation
             assert "我已经整理好结论。" in conversation
-            assert conversation.index("工具 2 项") > conversation.index("我已经整理好结论。")
+            assert conversation.index("工具 2 项") < conversation.index("我已经整理好结论。")
+
+    asyncio.run(run())
+
+
+def test_tui_tool_summary_defaults_to_single_line_even_for_few_tools(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                _tool_event("tool_started", 1, "file_read", message="reading very long local file"),
+                _tool_event("tool_finished", 1, "file_read", message="file_read finished with a long summary"),
+                _tool_event("tool_started", 1, "web_search", message="searching the web with a long query"),
+                _tool_event("tool_failed", 1, "web_search", message="web_search failed with timeout"),
+            ],
+            assistant_content="我已经整理好结论。",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "整理资料"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = _text(app, "#conversation")
+            assert "工具 2 项" in conversation
+            assert "1 成功" in conversation
+            assert "1 失败" in conversation
+            assert "reading very long local file" not in conversation
+            assert "web_search failed with timeout" not in conversation
 
     asyncio.run(run())
 
@@ -4687,6 +4792,8 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             detailed = _text(app, "#conversation")
             assert "工具详情已开启" in detailed
             assert "web_fetch" in detailed
+            assert "工具 file_read ok" in detailed
+            assert "工具 web_search ok" in detailed
             assert "结果已压缩 1854 -> 929 字符" in detailed
             assert "File change succeeded" not in detailed
 

@@ -155,6 +155,19 @@ class ConversationTimeline(VerticalScroll):
         self._blocks: dict[int, TimelineBlock] = {}
         self._placeholder_widget: Static | None = None
         self._memory_widget: Static | None = None
+        self._stick_to_bottom = True
+
+    def set_stick_to_bottom(self, enabled: bool) -> None:
+        self._stick_to_bottom = enabled
+
+    def scroll_end_if_sticky(self) -> None:
+        if self._stick_to_bottom:
+            self.scroll_end(animate=False)
+
+    def scroll_to(self, x: float | None = None, y: float | None = None, **kwargs: Any) -> None:
+        if y is not None:
+            self._stick_to_bottom = y >= self.max_scroll_y - 1
+        super().scroll_to(x=x, y=y, **kwargs)
 
     def show_placeholder(self) -> None:
         self._items.clear()
@@ -261,7 +274,8 @@ class ConversationTimeline(VerticalScroll):
             return
         block.update_item(item, show_tool_details=self._tool_details_enabled)
         self.set_class(bool(self._items), "timeline-ready")
-        self.call_after_refresh(self.scroll_end, animate=False)
+        if self._stick_to_bottom:
+            self.call_after_refresh(self.scroll_end_if_sticky)
 
     def _sync_blocks(self) -> None:
         self._remove_singletons()
@@ -290,7 +304,8 @@ class ConversationTimeline(VerticalScroll):
                 block = self._blocks.pop(turn_index)
                 block.remove()
         self.set_class(bool(self._items), "timeline-ready")
-        self.call_after_refresh(self.scroll_end, animate=False)
+        if self._stick_to_bottom:
+            self.call_after_refresh(self.scroll_end_if_sticky)
 
     def _sync_plain_text(self) -> None:
         self._plain_text = "\n\n".join(_render_timeline_item(item, show_tool_details=self._tool_details_enabled) for item in self._items)
@@ -307,7 +322,7 @@ class ConversationTimeline(VerticalScroll):
         else:
             self._memory_widget = existing
         self.set_class(False, "timeline-ready")
-        self.call_after_refresh(self.scroll_end, animate=False)
+        self.call_after_refresh(self.scroll_end_if_sticky)
 
     def _remove_singletons(self) -> None:
         for widget in (self._placeholder_widget, self._memory_widget):
@@ -315,6 +330,10 @@ class ConversationTimeline(VerticalScroll):
                 widget.remove()
         self._placeholder_widget = None
         self._memory_widget = None
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        self._stick_to_bottom = new_value >= self.max_scroll_y - 1
 
 
 ConversationView = ConversationTimeline
@@ -324,12 +343,12 @@ def _render_timeline_item(item: TimelineItem, *, show_tool_details: bool) -> str
     label = item.title or _role_label(item.role)
     marker = _role_marker(item.role, item.status)
     lines = [f"{marker} [{label}]"]
+    if item.tools:
+        lines.extend(_render_tool_summary(item.tools, show_details=show_tool_details))
     if item.content:
         lines.extend(item.content.splitlines())
     if item.role == "assistant" and item.status == "streaming":
         lines.append("  生成中 · HaAgent")
-    if item.tools:
-        lines.extend(_render_tool_summary(item.tools, show_details=show_tool_details))
     return "\n".join(lines)
 
 
@@ -358,9 +377,9 @@ class TimelineBlock(Vertical):
         self._active_widget = Static("", classes="timeline-active")
         self._tools_widget = Static("", classes="timeline-tools")
         yield self._header_widget
+        yield self._tools_widget
         yield self._body_widget
         yield self._active_widget
-        yield self._tools_widget
 
     def on_mount(self) -> None:
         self.update_item(self._item, show_tool_details=self._show_tool_details)
@@ -485,7 +504,7 @@ class TimelineBlock(Vertical):
     def _scroll_timeline_to_end(self) -> None:
         parent = self.parent
         if isinstance(parent, ConversationTimeline):
-            parent.scroll_end(animate=False)
+            parent.scroll_end_if_sticky()
 
 
 def _timeline_item_classes(item: TimelineItem) -> str:
@@ -516,18 +535,15 @@ def _render_tool_summary(tools: list[ToolActivity], *, show_details: bool) -> li
         summary_parts.append(f"{counts['approval']} 待确认")
     if counts["failed"]:
         summary_parts.append(f"{counts['failed']} 失败")
+    compact_names = _unique_tool_names(tools, limit=3)
+    if compact_names:
+        summary_parts.append(f"当前：{'、'.join(compact_names)}")
     lines = [f"  [工具] {' · '.join(summary_parts)}"]
-    if show_details or len(tools) <= 4:
+    if show_details:
         visible_tools = tools
         for item in visible_tools:
             lines.append(f"    - 工具 {item.tool_name} {_tool_legacy_status(item.status)} · {item.summary}")
-            if show_details:
-                lines.extend(f"      诊断：{diagnostic}" for diagnostic in item.diagnostics)
-    else:
-        visible_tools = [item for item in tools if item.status in {"running", "approval", "failed"}]
-        if visible_tools:
-            compact_names = _unique_tool_names(visible_tools, limit=3)
-            lines.append(f"  当前：{'、'.join(compact_names)}")
+            lines.extend(f"      诊断：{diagnostic}" for diagnostic in item.diagnostics)
     return lines
 
 

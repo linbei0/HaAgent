@@ -96,6 +96,7 @@ class HaAgentTuiApp(App[None]):
         self._conversation_lines: list[str] = []
         self._conversation_rendered_count = 0
         self._conversation_placeholder_rendered = False
+        self._conversation_stick_to_bottom = True
         self._streaming_assistant_turn: int | None = None
         self._streaming_assistant_text = ""
         self._active_turn_index: int | None = None
@@ -178,6 +179,11 @@ class HaAgentTuiApp(App[None]):
         prompt_input = self.query_one("#prompt-input", PromptInput)
         if self._prompt_value(prompt_input):
             return
+        if event.key == "end":
+            event.stop()
+            event.prevent_default()
+            self.action_conversation_end()
+            return
         if event.key in {"/", "slash"} or event.character == "/":
             event.stop()
             self.action_open_command_suggestions()
@@ -233,6 +239,8 @@ class HaAgentTuiApp(App[None]):
 
     def _start_prompt(self, prompt: str) -> None:
         self._active_turn_index = self._next_turn_index()
+        self._conversation_stick_to_bottom = True
+        self.query_one("#conversation", ConversationTimeline).set_stick_to_bottom(True)
         self._append_block("You", prompt)
         self.query_one("#conversation", ConversationTimeline).start_assistant_response(
             turn_index=self._active_turn_index,
@@ -338,10 +346,20 @@ class HaAgentTuiApp(App[None]):
         self._refresh()
 
     def action_conversation_page_up(self) -> None:
-        self.query_one("#conversation", ConversationView).scroll_page_up(animate=False, force=True)
+        self._conversation_stick_to_bottom = False
+        conversation = self.query_one("#conversation", ConversationView)
+        conversation.set_stick_to_bottom(False)
+        conversation.scroll_page_up(animate=False, force=True)
 
     def action_conversation_page_down(self) -> None:
-        self.query_one("#conversation", ConversationView).scroll_page_down(animate=False, force=True)
+        conversation = self.query_one("#conversation", ConversationView)
+        conversation.scroll_page_down(animate=False, force=True)
+        self.call_after_refresh(self._sync_conversation_stickiness)
+
+    def action_conversation_end(self) -> None:
+        self._conversation_stick_to_bottom = True
+        self.query_one("#conversation", ConversationTimeline).set_stick_to_bottom(True)
+        self._scroll_conversation_to_end()
 
     def action_cancel_interaction(self) -> None:
         if self._memory_mode:
@@ -1135,11 +1153,33 @@ class HaAgentTuiApp(App[None]):
                 self._conversation_placeholder_rendered = True
             return
         self._conversation_rendered_count = len(self._conversation_lines)
-        self.call_after_refresh(self._scroll_conversation_to_end)
+        if self._conversation_should_stick_to_bottom(conversation):
+            self._conversation_stick_to_bottom = True
+            conversation.set_stick_to_bottom(True)
+            self.call_after_refresh(self._scroll_conversation_to_end_if_sticky)
+        else:
+            self._conversation_stick_to_bottom = False
+            conversation.set_stick_to_bottom(False)
 
     def _scroll_conversation_to_end(self) -> None:
         conversation = self.query_one("#conversation", ConversationView)
+        conversation.set_stick_to_bottom(True)
         conversation.scroll_to(y=conversation.max_scroll_y, animate=False, immediate=True, force=True)
+
+    def _scroll_conversation_to_end_if_sticky(self) -> None:
+        conversation = self.query_one("#conversation", ConversationView)
+        if self._conversation_should_stick_to_bottom(conversation):
+            self._scroll_conversation_to_end()
+
+    def _conversation_should_stick_to_bottom(self, conversation: ConversationView) -> bool:
+        if not self._conversation_stick_to_bottom:
+            return False
+        return conversation.scroll_y >= conversation.max_scroll_y - 1
+
+    def _sync_conversation_stickiness(self) -> None:
+        conversation = self.query_one("#conversation", ConversationView)
+        self._conversation_stick_to_bottom = conversation.scroll_y >= conversation.max_scroll_y - 1
+        conversation.set_stick_to_bottom(self._conversation_stick_to_bottom)
 
     def _load_memory_candidates(self, *, silent: bool = False) -> None:
         try:

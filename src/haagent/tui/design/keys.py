@@ -22,6 +22,7 @@ APP_BINDINGS = [
     ("ctrl+x", "cancel_current_task", "取消任务"),
     ("pageup", "conversation_page_up", "上翻"),
     ("pagedown", "conversation_page_down", "下翻"),
+    ("end", "conversation_end", "回到底部"),
 ]
 
 APPROVAL_BINDINGS = [
@@ -46,6 +47,7 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("Enter", "发送当前输入"),
         ("Shift+Enter", "插入换行"),
         ("PgUp/PgDn", "滚动对话"),
+        ("End", "回到底部"),
         ("/", "打开快捷命令"),
         ("/cancel", "取消当前任务"),
         ("Ctrl+F", "搜索当前对话"),
