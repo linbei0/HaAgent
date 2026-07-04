@@ -19,6 +19,7 @@ from haagent.runtime.execution.command import (
     run_process,
 )
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
+from haagent.runtime.sandbox.base import SandboxBackend, SandboxCommand
 from haagent.tools.base import tool_error
 
 
@@ -27,6 +28,7 @@ def code_run(
     workspace_root: Path,
     path_policy: PathPolicy | None = None,
     cancellation_token: CancellationToken | None = None,
+    sandbox_backend: SandboxBackend | None = None,
 ) -> dict[str, Any]:
     code = args.get("code")
     if not isinstance(code, str) or not code:
@@ -53,14 +55,25 @@ def code_run(
     script_path = tmp_dir / f"code-run-{uuid.uuid4().hex[:12]}.py"
     script_path.write_text(code, encoding="utf-8")
 
-    command_result = run_process(
-        command=f"{sys.executable} {script_path}",
-        popen_args=[sys.executable, str(script_path)],
-        shell=False,
-        cwd=cwd_result,
-        timeout_seconds=timeout_result,
-        cancellation_token=cancellation_token,
-    )
+    if sandbox_backend is None:
+        command_result = run_process(
+            command=f"{sys.executable} {script_path}",
+            popen_args=[sys.executable, str(script_path)],
+            shell=False,
+            cwd=cwd_result,
+            timeout_seconds=timeout_result,
+            cancellation_token=cancellation_token,
+        )
+    else:
+        command_result = sandbox_backend.run_python(
+            script_path,
+            SandboxCommand(
+                command=f"python {script_path}",
+                cwd=cwd_result,
+                timeout_seconds=timeout_result,
+                cancellation_token=cancellation_token,
+            ),
+        )
     result = {
         "status": "success" if command_result.status == "success" else "error",
         "exit_code": command_result.exit_code,

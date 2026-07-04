@@ -85,16 +85,7 @@ verification_commands: []
             encoding="utf-8",
         )
         (episode_path / "sandbox.json").write_text(
-            json.dumps(
-                {
-                    "workspace_root": episode_json.get("workspace_root"),
-                    "filesystem_boundary": "workspace_root",
-                    "network_policy": "unrestricted",
-                    "process_policy": "local_subprocess",
-                    "credential_policy": "inherit_environment",
-                    "resource_limits": {"command_timeout_seconds": 60},
-                },
-            ),
+            json.dumps(expanded_sandbox_json(str(episode_json.get("workspace_root")))),
             encoding="utf-8",
         )
         (episode_path / "plan.json").write_text(
@@ -135,6 +126,32 @@ def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, o
     }
 
 
+def expanded_sandbox_json(workspace_root: str, **updates: object) -> dict[str, object]:
+    sandbox: dict[str, object] = {
+        "workspace_root": workspace_root,
+        "filesystem_boundary": "workspace_root",
+        "backend": "local_subprocess",
+        "network_policy": "unrestricted",
+        "process_policy": "local_subprocess",
+        "credential_policy": "inherit_environment",
+        "resource_limits": {"command_timeout_seconds": 60},
+        "isolation": {
+            "no_new_privileges": False,
+            "cap_drop": [],
+            "read_only_rootfs": False,
+            "user": "host",
+            "privileged": False,
+        },
+        "availability": {
+            "available": False,
+            "degraded": True,
+            "reason": "docker sandbox disabled",
+        },
+    }
+    sandbox.update(updates)
+    return sandbox
+
+
 def valid_policy(tool_name: str = "fake_tool") -> dict[str, object]:
     return {
         "tool_name": tool_name,
@@ -165,6 +182,54 @@ def valid_verification_command(**updates: object) -> dict[str, object]:
     }
     record.update(updates)
     return record
+
+
+def test_cli_inspect_outputs_expanded_sandbox_metadata(tmp_path: Path) -> None:
+    episode_path = tmp_path / "episode-1"
+    sandbox = expanded_sandbox_json(
+        str(tmp_path),
+        backend="docker",
+        network_policy="none",
+        process_policy="docker_exec_non_root",
+        credential_policy="minimal_env",
+        resource_limits={
+            "command_timeout_seconds": 60,
+            "cpu_limit": 1.0,
+            "memory_limit": "1g",
+            "pids_limit": 128,
+            "tmpfs": ["/tmp:rw,noexec,nosuid,size=256m"],
+        },
+        isolation={
+            "no_new_privileges": True,
+            "cap_drop": ["ALL"],
+            "read_only_rootfs": True,
+            "user": "haagent",
+            "privileged": False,
+        },
+        availability={
+            "available": True,
+            "degraded": False,
+            "reason": "",
+        },
+    )
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    (episode_path / "sandbox.json").write_text(json.dumps(sandbox), encoding="utf-8")
+
+    output = cli_inspect.render_episode_summary(episode_path)
+
+    assert "backend: docker" in output
+    assert "network_policy: none" in output
+    assert "process_policy: docker_exec_non_root" in output
+    assert "credential_policy: minimal_env" in output
+    assert "cpu_limit: 1.0" in output
+    assert "memory_limit: 1g" in output
+    assert "pids_limit: 128" in output
+    assert "degraded: False" in output
+
 
 def test_cli_inspect_completed_episode_outputs_summary(tmp_path: Path, capsys) -> None:
     episode_path = tmp_path / "episode-1"
@@ -302,16 +367,7 @@ verification_commands: []
         encoding="utf-8",
     )
     (episode_path / "sandbox.json").write_text(
-        json.dumps(
-            {
-                "workspace_root": str(tmp_path),
-                "filesystem_boundary": "workspace_root",
-                "network_policy": "unrestricted",
-                "process_policy": "local_subprocess",
-                "credential_policy": "inherit_environment",
-                "resource_limits": {"command_timeout_seconds": 60},
-            },
-        ),
+        json.dumps(expanded_sandbox_json(str(tmp_path))),
         encoding="utf-8",
     )
     (episode_path / "plan.json").write_text(
@@ -475,16 +531,7 @@ verification_commands: []
         encoding="utf-8",
     )
     (episode_path / "sandbox.json").write_text(
-        json.dumps(
-            {
-                "workspace_root": str(tmp_path),
-                "filesystem_boundary": "workspace_root",
-                "network_policy": "unrestricted",
-                "process_policy": "local_subprocess",
-                "credential_policy": "inherit_environment",
-                "resource_limits": {"command_timeout_seconds": 60},
-            },
-        ),
+        json.dumps(expanded_sandbox_json(str(tmp_path))),
         encoding="utf-8",
     )
     (episode_path / "plan.json").write_text(
@@ -1305,14 +1352,7 @@ def test_cli_inspect_new_episode_uses_package_view(tmp_path: Path, monkeypatch, 
         ],
         tool_calls=[{"tool_name": "fake_tool", "status": "success", "policy": valid_policy()}],
         verification_commands=[],
-        sandbox={
-            "workspace_root": str(tmp_path),
-            "filesystem_boundary": "workspace_root",
-            "network_policy": "unrestricted",
-            "process_policy": "local_subprocess",
-            "credential_policy": "inherit_environment",
-            "resource_limits": {"command_timeout_seconds": 60},
-        },
+        sandbox=expanded_sandbox_json(str(tmp_path)),
     )
 
     monkeypatch.setattr(cli_inspect, "load_inspect_episode_package", lambda path: package_view)

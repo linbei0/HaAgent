@@ -58,12 +58,13 @@ from haagent.runtime.orchestration.preparation import prepare_initial_messages, 
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.turns import TurnLoopDependencies, TurnLoopState, run_turn_loop
-from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS
+from haagent.runtime.sandbox import SandboxBackend, create_sandbox_backend
+from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS, load_runtime_settings
 from haagent.runtime.contracts.task import TaskLoadError
 from haagent.tools.base import ToolRoutingError, tool_error
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
-from haagent.verification.engine import VerificationEngine
+from haagent.verification.engine import DEFAULT_COMMAND_TIMEOUT_SECONDS, VerificationEngine
 
 
 class RunOrchestrator:
@@ -114,6 +115,7 @@ class RunOrchestrator:
         transition = recorder.transition
 
         transition(RunStatus.CREATED)
+        sandbox_backend: SandboxBackend | None = None
 
         try:
             setup = prepare_run_setup(
@@ -127,6 +129,14 @@ class RunOrchestrator:
             task = setup.task
             workspace_root = setup.workspace_root
             path_policy = setup.path_policy
+            runtime_settings = load_runtime_settings()
+            sandbox_backend = create_sandbox_backend(
+                settings=runtime_settings.sandbox,
+                workspace_root=workspace_root,
+                session_id=writer.path.name,
+                command_timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            )
+            writer.write_sandbox_metadata(sandbox_backend.metadata())
             input_guardrail = check_user_input(task.goal)
             if input_guardrail is not None:
                 _record_guardrail(writer, self._emit_event, input_guardrail)
@@ -170,6 +180,7 @@ class RunOrchestrator:
                     worker_max_turns=self._max_turns,
                 ),
                 worker_permission_requester=self._worker_permission_requester,
+                sandbox_backend=sandbox_backend,
             )
             verification_engine: VerificationEngine | None = None
             passed_verification_commands: set[str] = set()
@@ -316,6 +327,9 @@ class RunOrchestrator:
                 },
             )
             return recorder.finish(RunStatus.FAILED)
+        finally:
+            if sandbox_backend is not None:
+                sandbox_backend.close()
 
 
 def _verification_evidence(verification_result) -> str:

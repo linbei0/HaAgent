@@ -7,10 +7,15 @@ haagent/runtime/settings/__init__.py - runtime 级用户设置
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from haagent.models.provider_profile import user_settings_path
+from haagent.runtime.sandbox.settings import (
+    SandboxSettings,
+    SandboxSettingsError,
+    load_sandbox_settings,
+)
 
 DEFAULT_INTERACTIVE_MAX_TURNS = 200
 DEFAULT_RUN_MAX_TURNS = 3
@@ -26,6 +31,7 @@ class RuntimeSettingsError(ValueError):
 @dataclass(frozen=True)
 class RuntimeSettings:
     interactive_max_turns: int = DEFAULT_INTERACTIVE_MAX_TURNS
+    sandbox: SandboxSettings = field(default_factory=SandboxSettings)
 
 
 def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings:
@@ -34,7 +40,14 @@ def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings
         return RuntimeSettings()
     raw = _read_settings_json(path)
     value = raw.get("interactive_max_turns", DEFAULT_INTERACTIVE_MAX_TURNS)
-    return RuntimeSettings(interactive_max_turns=_positive_int(value, "interactive_max_turns"))
+    try:
+        sandbox = load_sandbox_settings(raw.get("sandbox"))
+    except SandboxSettingsError as error:
+        raise RuntimeSettingsError(str(error)) from error
+    return RuntimeSettings(
+        interactive_max_turns=_positive_int(value, "interactive_max_turns"),
+        sandbox=sandbox,
+    )
 
 
 def save_runtime_settings(

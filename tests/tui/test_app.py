@@ -12,7 +12,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import AssistantSessionStatus, AssistantSessionSummary, AssistantWorkspaceStatus
+from haagent.app.assistant_service import (
+    AssistantSandboxStatus,
+    AssistantSessionStatus,
+    AssistantSessionSummary,
+    AssistantWorkspaceStatus,
+    SandboxDoctorReport,
+)
 from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
 from haagent.runtime.events import (
     ApprovalStateEvent,
@@ -84,6 +90,8 @@ class FakeAssistantService:
         marketplace_warnings: list[str] | None = None,
         mcp_status: dict[str, object] | None = None,
         agents: list[dict[str, object]] | None = None,
+        sandbox_status: AssistantSandboxStatus | None = None,
+        sandbox_doctor_report: SandboxDoctorReport | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.profile_name = profile_name
@@ -114,6 +122,21 @@ class FakeAssistantService:
         self.marketplace_results = list(marketplace_results or [])
         self.marketplace_warnings = list(marketplace_warnings or [])
         self.agents = list(agents or [])
+        self.sandbox_status = sandbox_status or AssistantSandboxStatus(
+            backend="local_subprocess",
+            degraded=True,
+            reason="docker sandbox disabled",
+        )
+        self.sandbox_doctor_report = sandbox_doctor_report or SandboxDoctorReport(
+            backend="local_subprocess",
+            ready=False,
+            docker_cli="not_checked",
+            docker_daemon="not_checked",
+            image="not_checked",
+            auto_build_image=True,
+            reason="docker sandbox disabled",
+            next_action="Run `haagent sandbox enable docker` to enable Docker isolation.",
+        )
         self.mcp_status = dict(
             mcp_status
             or {
@@ -140,6 +163,8 @@ class FakeAssistantService:
         self.resumed_sessions: list[str] = []
         self.continued_latest_count = 0
         self.cancelled_count = 0
+        self.sandbox_enabled_count = 0
+        self.sandbox_disabled_count = 0
         self.model_profiles: list[SimpleNamespace] = []
         self.switched_model_profile: str | None = None
         self.default_model_profile: str | None = None
@@ -180,6 +205,7 @@ class FakeAssistantService:
             web_enabled=self.enable_web,
             external_roots=list(self.external_roots),
             permission_mode=self.permission_mode,
+            sandbox_status=self.sandbox_status,
         )
 
     def get_mcp_status(self) -> dict[str, object]:
@@ -187,6 +213,30 @@ class FakeAssistantService:
 
     def list_agents(self) -> list[dict[str, object]]:
         return list(self.agents)
+
+    def get_sandbox_status(self) -> AssistantSandboxStatus:
+        return self.sandbox_status
+
+    def get_sandbox_doctor_report(self) -> SandboxDoctorReport:
+        return self.sandbox_doctor_report
+
+    def enable_docker_sandbox(self, *, fail_if_unavailable: bool = True) -> AssistantSandboxStatus:
+        self.sandbox_enabled_count += 1
+        self.sandbox_status = AssistantSandboxStatus(
+            backend="docker",
+            degraded=False,
+            reason="" if fail_if_unavailable else "fallback allowed",
+        )
+        return self.sandbox_status
+
+    def disable_sandbox(self) -> AssistantSandboxStatus:
+        self.sandbox_disabled_count += 1
+        self.sandbox_status = AssistantSandboxStatus(
+            backend="local_subprocess",
+            degraded=True,
+            reason="docker sandbox disabled",
+        )
+        return self.sandbox_status
 
     def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
         self.prompts.append(prompt)
@@ -704,6 +754,14 @@ def test_tui_status_renderers_show_explicit_web_state(tmp_path: Path) -> None:
     assert "web:on" in status_line(online, ui_state="idle", width=120)
 
 
+def test_tui_status_renderer_shows_sandbox_state(tmp_path: Path) -> None:
+    status = FakeAssistantService(workspace_root=tmp_path / "sandbox").get_workspace_status()
+
+    line = status_line(status, ui_state="idle", width=140)
+
+    assert "sandbox:degraded" in line
+
+
 def test_tui_keymap_help_and_footer_share_context_definitions() -> None:
     for context in ("chat", "memory_list", "memory_detail", "pending_input", "approval", "too_small"):
         footer = footer_text(context)
@@ -868,6 +926,7 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "memory",
         "skills",
         "skill",
+        "sandbox",
         "new",
         "resume",
         "model",
@@ -876,6 +935,47 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "web",
         "permissions",
     }
+
+
+def test_tui_sandbox_command_shows_status_doctor_and_updates_settings(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+
+            input_widget.value = "/sandbox"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
+            assert "当前沙箱：local_subprocess" in conversation
+            assert "haagent sandbox enable docker" in conversation
+
+            input_widget.value = "/sandbox doctor"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
+            assert "Docker CLI: not_checked" in conversation
+            assert "docker sandbox disabled" in conversation
+
+            input_widget.value = "/sandbox enable docker"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
+            assert service.sandbox_enabled_count == 1
+            assert "Docker 沙箱已启用" in conversation
+            assert "新 session 生效" in conversation
+            assert "sandbox:docker" in _text(app, "#status-bar")
+
+            input_widget.value = "/sandbox disable"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
+            assert service.sandbox_disabled_count == 1
+            assert "已恢复 local_subprocess" in conversation
+            assert "sandbox:degraded" in _text(app, "#status-bar")
+
+    asyncio.run(run())
 
 
 def test_tui_agents_command_lists_current_workers(tmp_path: Path) -> None:

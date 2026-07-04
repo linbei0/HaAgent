@@ -579,6 +579,65 @@ def test_active_profile_status_reports_api_key_available(tmp_path: Path, monkeyp
     assert "sk-secret" not in repr(status)
 
 
+def test_workspace_status_reports_default_sandbox_status(tmp_path: Path, monkeypatch) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_profile(Path.home())
+    service = _service(tmp_path)
+
+    status = service.get_workspace_status()
+
+    assert status.sandbox_status.backend == "local_subprocess"
+    assert status.sandbox_status.degraded is True
+    assert status.sandbox_status.reason == "docker sandbox disabled"
+
+
+def test_service_enables_docker_sandbox_and_preserves_settings(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _write_user_profile(home)
+    service = _service(tmp_path)
+
+    status = service.enable_docker_sandbox()
+    saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
+
+    assert status.backend == "docker"
+    assert status.degraded is False
+    assert saved["active_profile"] == "local"
+    assert saved["sandbox"]["enabled"] is True
+    assert saved["sandbox"]["backend"] == "docker"
+    assert saved["sandbox"]["fail_if_unavailable"] is True
+
+
+def test_service_disables_sandbox(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _write_user_profile(home)
+    service = _service(tmp_path)
+    service.enable_docker_sandbox()
+
+    status = service.disable_sandbox()
+    saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
+
+    assert status.backend == "local_subprocess"
+    assert status.degraded is True
+    assert saved["active_profile"] == "local"
+    assert saved["sandbox"]["enabled"] is False
+
+
+def test_service_reports_sandbox_doctor(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    _write_user_profile(home)
+    service = _service(tmp_path)
+    monkeypatch.setattr("haagent.runtime.sandbox.status.shutil.which", lambda name: None)
+
+    report = service.get_sandbox_doctor_report()
+
+    assert report.ready is False
+    assert report.docker_cli == "missing"
+    assert "Install Docker Desktop" in report.next_action
+
+
 def test_active_profile_status_reports_missing_api_key_env(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_profile(Path.home())

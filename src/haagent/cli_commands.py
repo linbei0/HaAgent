@@ -34,6 +34,12 @@ from haagent.runtime.episodes.validator import EpisodeValidationError, load_insp
 from haagent.runtime.evaluation.export import export_eval_case
 from haagent.runtime.evaluation.runner import EvalRunnerError, run_eval_path
 from haagent.runtime.settings import load_runtime_settings
+from haagent.runtime.sandbox.status import (
+    disable_sandbox,
+    enable_docker_sandbox,
+    sandbox_doctor_report,
+    sandbox_user_status,
+)
 from haagent.tui.application.app import run_tui
 
 
@@ -100,6 +106,32 @@ def handle_tui_entry(args) -> int:
 def handle_tui_migration(args) -> int:
     print("此交互入口已迁移到 TUI；请运行 haagent 打开 TUI 后完成该操作。")
     return 1
+
+
+def handle_sandbox(args) -> int:
+    action = getattr(args, "sandbox_action", "status")
+    if action == "status":
+        print(render_sandbox_status(sandbox_user_status()))
+        return 0
+    if action == "doctor":
+        print(render_sandbox_doctor(sandbox_doctor_report(check_disabled=True)))
+        return 0
+    if action == "enable":
+        backend = getattr(args, "backend", "")
+        if backend != "docker":
+            print("error: only docker sandbox can be enabled")
+            return 2
+        status = enable_docker_sandbox(
+            fail_if_unavailable=bool(getattr(args, "fail_if_unavailable", True)),
+        )
+        print(render_sandbox_status(status))
+        print("note=existing sessions keep their current backend; start a new session for this setting.")
+        return 0
+    if action == "disable":
+        print(render_sandbox_status(disable_sandbox()))
+        return 0
+    print("error: unknown sandbox action")
+    return 2
 
 
 def handle_smoke(args, runtime: CliRuntime) -> int:
@@ -199,6 +231,36 @@ def handle_check(args, runtime: CliRuntime) -> int:
         print(f"check_report={args.output}")
     print_check_summary(report)
     return 0 if report["status"] == "passed" else 1
+
+
+def render_sandbox_status(status) -> str:
+    return "\n".join(
+        [
+            f"backend={status.backend}",
+            f"isolation_level={status.isolation_level}",
+            f"network_policy={status.network_policy}",
+            f"credential_policy={status.credential_policy}",
+            f"degraded={str(status.degraded).lower()}",
+            f"reason={status.reason}",
+            f"config_path={status.config_path}",
+            f"next_action={status.recommendation}",
+        ],
+    )
+
+
+def render_sandbox_doctor(report) -> str:
+    return "\n".join(
+        [
+            f"backend={report.backend}",
+            f"ready={str(report.ready).lower()}",
+            f"docker_cli={report.docker_cli}",
+            f"docker_daemon={report.docker_daemon}",
+            f"image={report.image}",
+            f"auto_build_image={str(report.auto_build_image).lower()}",
+            f"reason={report.reason}",
+            f"next_action={report.next_action}",
+        ],
+    )
 
 
 def handle_export_eval(args) -> int:

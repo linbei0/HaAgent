@@ -110,6 +110,7 @@ class HaAgentTuiApp(App[None]):
         self._memory_selected = 0
         self._memory_error: str | None = None
         self._memory_notice: str | None = None
+        self._sandbox_status: dict[str, object] | None = None
         self._pending_external_prompt: str | None = None
         self._pending_external_path: Path | None = None
         self._pending_full_trust_prompt: str | None = None
@@ -490,6 +491,8 @@ class HaAgentTuiApp(App[None]):
             self._handle_skills_command(result.argument)
         elif command.action == "skill":
             self._handle_skill_command(result.argument)
+        elif command.action == "sandbox":
+            self._handle_sandbox_command(result.argument)
         elif command.action == "web":
             self._handle_web_command(result.argument)
         elif command.action == "turns":
@@ -545,6 +548,57 @@ class HaAgentTuiApp(App[None]):
             "Command",
             f"已保存交互默认 turn 限制：{int(count_text)}；当前 session 已同步。",
         )
+        self._refresh()
+
+    def _handle_sandbox_command(self, argument: str) -> None:
+        parts = argument.strip().split()
+        usage = "用法：/sandbox [status|doctor|enable docker [--allow-fallback]|disable]"
+        try:
+            if not parts or parts == ["status"]:
+                self._append_block("Command", _sandbox_status_text(self.service.get_sandbox_status()))
+            elif parts == ["doctor"]:
+                self._append_block("Command", _sandbox_doctor_text(self.service.get_sandbox_doctor_report()))
+            elif parts[:2] == ["enable", "docker"]:
+                extra = parts[2:]
+                if any(item not in {"--allow-fallback", "--fail-if-unavailable"} for item in extra):
+                    self._append_block("Command", usage)
+                else:
+                    allow_fallback = "--allow-fallback" in extra
+                    status = self.service.enable_docker_sandbox(fail_if_unavailable=not allow_fallback)
+                    self._sandbox_status = {
+                        "backend": status.backend,
+                        "availability": {
+                            "degraded": status.degraded,
+                            "reason": status.reason,
+                        },
+                    }
+                    self._append_block(
+                        "Command",
+                        (
+                            "Docker 沙箱已启用；新 session 生效。\n"
+                            f"{_sandbox_status_text(status)}"
+                        ),
+                    )
+            elif parts == ["disable"]:
+                status = self.service.disable_sandbox()
+                self._sandbox_status = {
+                    "backend": status.backend,
+                    "availability": {
+                        "degraded": status.degraded,
+                        "reason": status.reason,
+                    },
+                }
+                self._append_block(
+                    "Command",
+                    (
+                        "已恢复 local_subprocess；后续新 session 会使用本机执行。\n"
+                        f"{_sandbox_status_text(status)}"
+                    ),
+                )
+            else:
+                self._append_block("Command", usage)
+        except Exception as error:
+            self._append_block("Command", f"沙箱设置失败：{error}")
         self._refresh()
 
     def action_compact_session(self) -> None:
@@ -1096,7 +1150,14 @@ class HaAgentTuiApp(App[None]):
     def _refresh(self) -> None:
         status = self.service.get_workspace_status()
         status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.update_status(status_line(status, ui_state=self._state, width=self.size.width))
+        status_bar.update_status(
+            status_line(
+                status,
+                ui_state=self._state,
+                width=self.size.width,
+                sandbox_status=self._sandbox_status,
+            ),
+        )
         self._apply_status_classes(status_bar)
         self._refresh_conversation()
         self.query_one("#footer-bar", FooterBar).update_footer(footer_text(self._help_context()))
@@ -1354,6 +1415,41 @@ def _tool_activity_status(status: str) -> ToolStatus:
     if status in {"running", "approval", "done", "failed"}:
         return status
     return "running"
+
+
+def _sandbox_status_text(status: object) -> str:
+    backend = getattr(status, "backend", "unknown")
+    degraded = bool(getattr(status, "degraded", True))
+    reason = str(getattr(status, "reason", "") or "")
+    lines = [
+        f"当前沙箱：{backend}",
+        f"degraded={str(degraded).lower()}",
+    ]
+    if reason:
+        lines.append(f"reason={reason}")
+    if backend != "docker":
+        lines.append("开启 Docker 隔离：haagent sandbox enable docker")
+    else:
+        lines.append("检查 Docker 可用性：haagent sandbox doctor")
+    return "\n".join(lines)
+
+
+def _sandbox_doctor_text(report: object) -> str:
+    lines = [
+        f"当前沙箱：{getattr(report, 'backend', 'unknown')}",
+        f"ready={str(bool(getattr(report, 'ready', False))).lower()}",
+        f"Docker CLI: {getattr(report, 'docker_cli', 'unknown')}",
+        f"Docker daemon: {getattr(report, 'docker_daemon', 'unknown')}",
+        f"image={getattr(report, 'image', 'unknown')}",
+        f"auto_build_image={str(bool(getattr(report, 'auto_build_image', False))).lower()}",
+    ]
+    reason = str(getattr(report, "reason", "") or "")
+    next_action = str(getattr(report, "next_action", "") or "")
+    if reason:
+        lines.append(f"reason={reason}")
+    if next_action:
+        lines.append(f"next_action={next_action}")
+    return "\n".join(lines)
 
 
 def _permission_mode_label(mode: str) -> str:

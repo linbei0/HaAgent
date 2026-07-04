@@ -7,6 +7,7 @@ tests/unit/runtime/test_episode_writer.py - EpisodeWriter 文件产物测试
 from pathlib import Path
 
 from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 
 
 def test_episode_writer_creates_required_files(tmp_path: Path) -> None:
@@ -26,7 +27,12 @@ verification_commands: []
     writer = EpisodeWriter.create(runs_root=tmp_path / ".runs", task_path=task_path)
     writer.write_context_manifest({"allowed_tools": ["fake_tool"]})
     writer.write_environment()
-    writer.write_sandbox_metadata(tmp_path, command_timeout_seconds=60)
+    writer.write_sandbox_metadata(
+        LocalSubprocessSandboxBackend(
+            workspace_root=tmp_path,
+            command_timeout_seconds=60,
+        ).metadata(),
+    )
     writer.write_failure_attribution(None)
 
     assert (writer.path / "task.yaml").exists()

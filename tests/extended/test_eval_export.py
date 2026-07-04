@@ -73,6 +73,57 @@ def valid_policy(tool_name: str = "fake_tool") -> dict[str, object]:
     }
 
 
+def expanded_sandbox_json(workspace_root: str, **updates: object) -> dict[str, object]:
+    sandbox: dict[str, object] = {
+        "workspace_root": workspace_root,
+        "filesystem_boundary": "workspace_root",
+        "backend": "local_subprocess",
+        "network_policy": "unrestricted",
+        "process_policy": "local_subprocess",
+        "credential_policy": "inherit_environment",
+        "resource_limits": {"command_timeout_seconds": 60},
+        "isolation": {
+            "no_new_privileges": False,
+            "cap_drop": [],
+            "read_only_rootfs": False,
+            "user": "host",
+            "privileged": False,
+        },
+        "availability": {
+            "available": False,
+            "degraded": True,
+            "reason": "docker sandbox disabled",
+        },
+    }
+    sandbox.update(updates)
+    return sandbox
+
+
+def expanded_sandbox_summary(sandbox: dict[str, object]) -> dict[str, object]:
+    resource_limits = sandbox["resource_limits"]
+    availability = sandbox["availability"]
+    isolation = sandbox["isolation"]
+    assert isinstance(resource_limits, dict)
+    assert isinstance(availability, dict)
+    assert isinstance(isolation, dict)
+    return {
+        "workspace_root": sandbox["workspace_root"],
+        "filesystem_boundary": sandbox["filesystem_boundary"],
+        "backend": sandbox["backend"],
+        "network_policy": sandbox["network_policy"],
+        "process_policy": sandbox["process_policy"],
+        "credential_policy": sandbox["credential_policy"],
+        "command_timeout_seconds": resource_limits["command_timeout_seconds"],
+        "cpu_limit": resource_limits.get("cpu_limit"),
+        "memory_limit": resource_limits.get("memory_limit"),
+        "pids_limit": resource_limits.get("pids_limit"),
+        "degraded": availability.get("degraded"),
+        "availability_reason": availability.get("reason"),
+        "sandbox_user": isolation.get("user"),
+        "privileged": isolation.get("privileged"),
+    }
+
+
 def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)
@@ -105,14 +156,7 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     assert eval_case["tool_names_used"] == ["fake_tool"]
     assert eval_case["tool_argument_errors"] == []
     sandbox = json.loads((result.episode_path / "sandbox.json").read_text(encoding="utf-8"))
-    assert eval_case["sandbox_summary"] == {
-        "workspace_root": sandbox["workspace_root"],
-        "filesystem_boundary": sandbox["filesystem_boundary"],
-        "network_policy": sandbox["network_policy"],
-        "process_policy": sandbox["process_policy"],
-        "credential_policy": sandbox["credential_policy"],
-        "command_timeout_seconds": sandbox["resource_limits"]["command_timeout_seconds"],
-    }
+    assert eval_case["sandbox_summary"] == expanded_sandbox_summary(sandbox)
     assert eval_case["approval_summary"] == [
         {
             "tool_name": "fake_tool",
@@ -392,14 +436,48 @@ def test_eval_export_reads_sandbox_summary_from_sandbox_json(tmp_path: Path) -> 
 
     eval_case = export_eval_case(result.episode_path)
 
-    assert eval_case["sandbox_summary"] == {
-        "workspace_root": sandbox["workspace_root"],
-        "filesystem_boundary": sandbox["filesystem_boundary"],
-        "network_policy": "test-network-policy",
-        "process_policy": sandbox["process_policy"],
-        "credential_policy": sandbox["credential_policy"],
-        "command_timeout_seconds": 12.5,
-    }
+    expected = expanded_sandbox_summary(sandbox)
+    expected["network_policy"] = "test-network-policy"
+    expected["command_timeout_seconds"] = 12.5
+    assert eval_case["sandbox_summary"] == expected
+
+
+def test_eval_export_includes_expanded_sandbox_summary(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    sandbox = expanded_sandbox_json(
+        str(tmp_path.resolve()),
+        backend="docker",
+        network_policy="none",
+        process_policy="docker_exec_non_root",
+        credential_policy="minimal_env",
+        resource_limits={
+            "command_timeout_seconds": 60,
+            "cpu_limit": 1.0,
+            "memory_limit": "1g",
+            "pids_limit": 128,
+            "tmpfs": ["/tmp:rw,noexec,nosuid,size=256m"],
+        },
+        isolation={
+            "no_new_privileges": True,
+            "cap_drop": ["ALL"],
+            "read_only_rootfs": True,
+            "user": "haagent",
+            "privileged": False,
+        },
+        availability={"available": True, "degraded": False, "reason": ""},
+    )
+    (result.episode_path / "sandbox.json").write_text(json.dumps(sandbox), encoding="utf-8")
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert eval_case["sandbox_summary"]["backend"] == "docker"
+    assert eval_case["sandbox_summary"]["network_policy"] == "none"
+    assert eval_case["sandbox_summary"]["cpu_limit"] == 1.0
+    assert eval_case["sandbox_summary"]["memory_limit"] == "1g"
+    assert eval_case["sandbox_summary"]["pids_limit"] == 128
+    assert eval_case["sandbox_summary"]["degraded"] is False
 
 
 def test_eval_export_rejects_missing_sandbox_through_validator(tmp_path: Path) -> None:
@@ -500,14 +578,7 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
         transcript=[],
         tool_calls=[{"tool_name": "fake_tool", "status": "success", "policy": valid_policy()}],
         verification_commands=[],
-        sandbox={
-            "workspace_root": str(tmp_path),
-            "filesystem_boundary": "workspace_root",
-            "network_policy": "unrestricted",
-            "process_policy": "local_subprocess",
-            "credential_policy": "inherit_environment",
-            "resource_limits": {"command_timeout_seconds": 60},
-        },
+        sandbox=expanded_sandbox_json(str(tmp_path)),
     )
 
     monkeypatch.setattr(eval_export, "load_validated_episode_package", lambda path: package_view)
@@ -518,14 +589,7 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
     assert eval_case["task"]["goal"] == "Export eval case"
     assert eval_case["tool_names_used"] == ["fake_tool"]
     assert eval_case["tool_argument_errors"] == []
-    assert eval_case["sandbox_summary"] == {
-        "workspace_root": str(tmp_path),
-        "filesystem_boundary": "workspace_root",
-        "network_policy": "unrestricted",
-        "process_policy": "local_subprocess",
-        "credential_policy": "inherit_environment",
-        "command_timeout_seconds": 60,
-    }
+    assert eval_case["sandbox_summary"] == expanded_sandbox_summary(expanded_sandbox_json(str(tmp_path)))
     assert eval_case["approval_summary"] == [
         {
             "tool_name": "fake_tool",

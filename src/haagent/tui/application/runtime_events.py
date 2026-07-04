@@ -117,6 +117,19 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
 
 
 def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:
+    sandbox = event.details.get("sandbox")
+    if not isinstance(sandbox, dict):
+        return
+    backend = sandbox.get("backend")
+    availability = sandbox.get("availability", {})
+    if not isinstance(availability, dict):
+        availability = {}
+    if isinstance(backend, str) and backend:
+        app._sandbox_status = {
+            "backend": backend,
+            "degraded": availability.get("degraded") is True,
+            "reason": availability.get("reason") if isinstance(availability.get("reason"), str) else "",
+        }
     return
 
 

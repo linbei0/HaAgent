@@ -297,6 +297,99 @@ def test_package_validator_rejects_sandbox_command_timeout_type_error(tmp_path: 
         validate_episode_package(result.episode_path)
 
 
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"backend": 123}, "sandbox.json backend must be a string"),
+        ({"isolation": "local"}, "sandbox.json isolation must be an object"),
+        ({"availability": "local"}, "sandbox.json availability must be an object"),
+    ],
+)
+def test_package_validator_rejects_expanded_sandbox_field_type_errors(
+    tmp_path: Path,
+    updates: dict[str, object],
+    message: str,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_sandbox(result.episode_path, **updates)
+
+    with pytest.raises(EpisodeValidationError, match=message):
+        validate_episode_package(result.episode_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "bad_value", "message"),
+    [
+        (
+            "isolation",
+            "no_new_privileges",
+            "false",
+            "sandbox.json isolation.no_new_privileges must be a bool",
+        ),
+        (
+            "isolation",
+            "cap_drop",
+            ["ALL", 123],
+            "sandbox.json isolation.cap_drop must be a list of strings",
+        ),
+        (
+            "isolation",
+            "user",
+            123,
+            "sandbox.json isolation.user must be a string",
+        ),
+        (
+            "availability",
+            "available",
+            "false",
+            "sandbox.json availability.available must be a bool",
+        ),
+        (
+            "availability",
+            "degraded",
+            "true",
+            "sandbox.json availability.degraded must be a bool",
+        ),
+        (
+            "availability",
+            "reason",
+            123,
+            "sandbox.json availability.reason must be a string",
+        ),
+    ],
+)
+def test_package_validator_rejects_expanded_sandbox_nested_type_errors(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    bad_value: object,
+    message: str,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    sandbox = read_json(result.episode_path / "sandbox.json")
+    sandbox["isolation"] = {
+        "no_new_privileges": False,
+        "cap_drop": [],
+        "read_only_rootfs": False,
+        "user": "host",
+        "privileged": False,
+    }
+    sandbox["availability"] = {
+        "available": False,
+        "degraded": True,
+        "reason": "docker sandbox disabled",
+    }
+    sandbox[section][field] = bad_value
+    write_json(result.episode_path / "sandbox.json", sandbox)
+
+    with pytest.raises(EpisodeValidationError, match=message):
+        validate_episode_package(result.episode_path)
+
+
 def test_package_validator_rejects_plan_field_type_error(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)

@@ -60,6 +60,13 @@ from haagent.runtime.settings import (
     load_runtime_settings,
     set_interactive_max_turns,
 )
+from haagent.runtime.sandbox.status import (
+    SandboxDoctorReport as RuntimeSandboxDoctorReport,
+    disable_sandbox,
+    enable_docker_sandbox,
+    sandbox_doctor_report,
+    sandbox_user_status,
+)
 from haagent.skills import trust_project_root, untrust_project_root
 from haagent.skills.marketplace import MarketplaceError, MarketplaceSkillCard, install_marketplace_skill_card, search_marketplace
 from haagent.tools.skills import skill_list, skill_read
@@ -78,6 +85,16 @@ EventSink = Callable[[RuntimeUiEvent], None]
 
 class AssistantServiceError(RuntimeError):
     """AssistantService 无法完成显式请求时抛出。"""
+
+
+@dataclass(frozen=True)
+class AssistantSandboxStatus:
+    backend: str
+    degraded: bool
+    reason: str
+
+
+SandboxDoctorReport = RuntimeSandboxDoctorReport
 
 
 @dataclass(frozen=True)
@@ -100,6 +117,11 @@ class AssistantWorkspaceStatus:
     web_enabled: bool = False
     external_roots: list[dict[str, str]] | None = None
     permission_mode: PermissionMode = "request_approval"
+    sandbox_status: AssistantSandboxStatus = AssistantSandboxStatus(
+        backend="local_subprocess",
+        degraded=True,
+        reason="docker sandbox disabled",
+    )
 
 
 @dataclass(frozen=True)
@@ -123,6 +145,11 @@ class AssistantSessionStatus:
     web_enabled: bool = False
     external_roots: list[dict[str, str]] | None = None
     permission_mode: PermissionMode = "request_approval"
+    sandbox_status: AssistantSandboxStatus = AssistantSandboxStatus(
+        backend="local_subprocess",
+        degraded=True,
+        reason="docker sandbox disabled",
+    )
 
 
 @dataclass(frozen=True)
@@ -331,6 +358,7 @@ class AssistantService:
         except ProviderProfileError as error:
             profile_error = str(error)
         session_status = self.current_session()
+        sandbox_status = _sandbox_status()
         return AssistantWorkspaceStatus(
             workspace_root=self.workspace_root,
             runs_root=self.runs_root,
@@ -350,6 +378,7 @@ class AssistantService:
             web_enabled=self.enable_web,
             external_roots=session_status.external_roots if session_status is not None else [],
             permission_mode=session_status.permission_mode if session_status is not None else "request_approval",
+            sandbox_status=session_status.sandbox_status if session_status is not None else sandbox_status,
         )
 
     def current_session(self) -> AssistantSessionStatus | None:
@@ -385,6 +414,20 @@ class AssistantService:
             "failed_count": 0,
             "servers": [],
         }
+
+    def get_sandbox_status(self) -> AssistantSandboxStatus:
+        return _sandbox_status()
+
+    def get_sandbox_doctor_report(self) -> SandboxDoctorReport:
+        return sandbox_doctor_report(check_disabled=True)
+
+    def enable_docker_sandbox(self, *, fail_if_unavailable: bool = True) -> AssistantSandboxStatus:
+        enable_docker_sandbox(fail_if_unavailable=fail_if_unavailable)
+        return _sandbox_status()
+
+    def disable_sandbox(self) -> AssistantSandboxStatus:
+        disable_sandbox()
+        return _sandbox_status()
 
     def list_agents(self) -> list[dict[str, object]]:
         if self._session is None:
@@ -606,6 +649,7 @@ def _marketplace_skill(card: MarketplaceSkillCard) -> AssistantMarketplaceSkill:
 
 
 def _session_status(session: AgentSession) -> AssistantSessionStatus:
+    sandbox_status = _sandbox_status()
     return AssistantSessionStatus(
         session_id=session.session_id,
         workspace_root=session.workspace_root,
@@ -620,6 +664,16 @@ def _session_status(session: AgentSession) -> AssistantSessionStatus:
         web_enabled=getattr(session, "enable_web", False),
         external_roots=_external_root_summaries(session),
         permission_mode=_session_permission_mode(session),
+        sandbox_status=sandbox_status,
+    )
+
+
+def _sandbox_status() -> AssistantSandboxStatus:
+    status = sandbox_user_status()
+    return AssistantSandboxStatus(
+        backend=status.backend,
+        degraded=status.degraded,
+        reason=status.reason,
     )
 
 

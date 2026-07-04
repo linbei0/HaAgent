@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.runtime.orchestration.failure import FailureCategory
+from haagent.runtime.sandbox.base import SandboxMetadata
 
 
 EPISODE_VERSION = "1.0"
@@ -90,24 +91,8 @@ class EpisodeWriter:
             environment["workspace_root"] = str(workspace_root)
         self._write_json("environment.json", environment)
 
-    def write_sandbox_metadata(
-        self,
-        workspace_root: Path,
-        command_timeout_seconds: int | float,
-    ) -> None:
-        self._write_json(
-            "sandbox.json",
-            {
-                "workspace_root": str(workspace_root),
-                "filesystem_boundary": "workspace_root",
-                "network_policy": "unrestricted",
-                "process_policy": "local_subprocess",
-                "credential_policy": "inherit_environment",
-                "resource_limits": {
-                    "command_timeout_seconds": command_timeout_seconds,
-                },
-            },
-        )
+    def write_sandbox_metadata(self, metadata: SandboxMetadata) -> None:
+        self._write_json("sandbox.json", metadata.to_dict())
 
     def write_workspace_preflight(self, preflight: dict[str, Any]) -> None:
         workspace_dir = self.path / "workspace"

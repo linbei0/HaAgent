@@ -438,6 +438,7 @@ def _validate_sandbox(sandbox: dict[str, Any]) -> None:
     for field_name in [
         "workspace_root",
         "filesystem_boundary",
+        "backend",
         "network_policy",
         "process_policy",
         "credential_policy",
@@ -455,6 +456,45 @@ def _validate_sandbox(sandbox: dict[str, Any]) -> None:
         raise EpisodeValidationError(
             "sandbox.json resource_limits.command_timeout_seconds must be a number",
         )
+    cpu_limit = resource_limits.get("cpu_limit")
+    if cpu_limit is not None and (
+        isinstance(cpu_limit, bool) or not isinstance(cpu_limit, int | float)
+    ):
+        raise EpisodeValidationError("sandbox.json resource_limits.cpu_limit must be a number")
+    memory_limit = resource_limits.get("memory_limit")
+    if memory_limit is not None and not isinstance(memory_limit, str):
+        raise EpisodeValidationError("sandbox.json resource_limits.memory_limit must be a string")
+    pids_limit = resource_limits.get("pids_limit")
+    if pids_limit is not None and (
+        isinstance(pids_limit, bool) or not isinstance(pids_limit, int)
+    ):
+        raise EpisodeValidationError("sandbox.json resource_limits.pids_limit must be an int")
+    tmpfs = resource_limits.get("tmpfs")
+    if tmpfs is not None and (
+        not isinstance(tmpfs, list) or any(not isinstance(item, str) for item in tmpfs)
+    ):
+        raise EpisodeValidationError("sandbox.json resource_limits.tmpfs must be a list of strings")
+
+    isolation = sandbox.get("isolation")
+    if not isinstance(isolation, dict):
+        raise EpisodeValidationError("sandbox.json isolation must be an object")
+    for field_name in ["no_new_privileges", "read_only_rootfs", "privileged"]:
+        if not isinstance(isolation.get(field_name), bool):
+            raise EpisodeValidationError(f"sandbox.json isolation.{field_name} must be a bool")
+    cap_drop = isolation.get("cap_drop")
+    if not isinstance(cap_drop, list) or any(not isinstance(item, str) for item in cap_drop):
+        raise EpisodeValidationError("sandbox.json isolation.cap_drop must be a list of strings")
+    if not isinstance(isolation.get("user"), str):
+        raise EpisodeValidationError("sandbox.json isolation.user must be a string")
+
+    availability = sandbox.get("availability")
+    if not isinstance(availability, dict):
+        raise EpisodeValidationError("sandbox.json availability must be an object")
+    for field_name in ["available", "degraded"]:
+        if not isinstance(availability.get(field_name), bool):
+            raise EpisodeValidationError(f"sandbox.json availability.{field_name} must be a bool")
+    if not isinstance(availability.get("reason"), str):
+        raise EpisodeValidationError("sandbox.json availability.reason must be a string")
 
 
 def _validate_workspace_preflight(preflight: dict[str, Any]) -> None:

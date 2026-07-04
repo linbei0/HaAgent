@@ -16,11 +16,17 @@ from haagent.tui.design.theme import status_badge, status_semantic
 from haagent.tui.design.utils import safe_summary, short_session, truncate_end, truncate_status_line, workspace_label
 
 
-def status_line(status: AssistantWorkspaceStatus, *, ui_state: str, width: int) -> str:
+def status_line(
+    status: AssistantWorkspaceStatus,
+    *,
+    ui_state: str,
+    width: int,
+    sandbox_status: object | None = None,
+) -> str:
     width = max(1, width or 120)
     if width <= 80:
         return _compact_status_line(status, ui_state=ui_state, width=width)
-    workspace_limit = 5 if width <= 80 else 4 if width <= 120 else 16
+    workspace_limit = 3 if width <= 120 else 16
     model_limit = 4 if width <= 80 else 14
     session_limit = 4 if width <= 80 else 12
     turn_count = status.current_turn_count if status.current_turn_count is not None else 0
@@ -31,20 +37,26 @@ def status_line(status: AssistantWorkspaceStatus, *, ui_state: str, width: int) 
     )
     web_label = "web:on " if status.web_enabled else "web:off " if width > 80 else ""
     perm_label = f"perm:{permission_mode_short(status)} "
-    prefix = (
-        f"ws:{workspace_label(status.workspace_root, workspace_limit)} "
-        f"profile: {truncate_end(status.profile_name or 'missing', 12)} "
-        f"{provider_model} "
-        f"{web_label}"
-        f"{perm_label}"
-        f"key: {compact_key_state(status)} "
-        f"turn:{turn_count} "
-        f"sid:{short_session(status.current_session_id or '-', session_limit)}"
+    sandbox_label = (
+        f"{sandbox_state(status, sandbox_status=sandbox_status)} "
+        if sandbox_status is not None or width > 120
+        else ""
     )
     running_label = " HaAgent 正在回答" if ui_state == "running" else ""
     state = f" 状态: {status_badge(ui_state)}{running_label} state: {ui_state}"
     prefix_width = max(0, width - len(state))
-    return f"{truncate_status_line(prefix, prefix_width)}{state}"
+    prefix = _wide_status_prefix(
+        status,
+        width=prefix_width,
+        workspace_limit=workspace_limit,
+        provider_model=provider_model,
+        web_label=web_label,
+        perm_label=perm_label,
+        sandbox_label=sandbox_label,
+        session_limit=session_limit,
+        turn_count=turn_count,
+    )
+    return f"{prefix}{state}"
 
 
 def _compact_status_line(status: AssistantWorkspaceStatus, *, ui_state: str, width: int) -> str:
@@ -64,6 +76,58 @@ def _compact_status_line(status: AssistantWorkspaceStatus, *, ui_state: str, wid
         state = f" state: {ui_state}"
     prefix_width = max(0, width - len(state))
     return f"{truncate_status_line(prefix, prefix_width)}{state}"
+
+
+def _wide_status_prefix(
+    status: AssistantWorkspaceStatus,
+    *,
+    width: int,
+    workspace_limit: int,
+    provider_model: str,
+    web_label: str,
+    perm_label: str,
+    sandbox_label: str,
+    session_limit: int,
+    turn_count: int,
+) -> str:
+    fixed_suffix = (
+        f"{web_label}"
+        f"{perm_label}"
+        f"{sandbox_label}"
+        f"key: {compact_key_state(status)} "
+        f"turn:{turn_count} "
+        f"sid:{short_session(status.current_session_id or '-', session_limit)}"
+    )
+    if len(fixed_suffix) >= width:
+        return truncate_status_line(fixed_suffix, width)
+    remaining = width - len(fixed_suffix)
+    head_parts = [
+        f"ws:{workspace_label(status.workspace_root, workspace_limit)} ",
+        f"profile: {truncate_end(status.profile_name or 'missing', 8)} ",
+        f"{provider_model} ",
+    ]
+    head = truncate_status_line("".join(head_parts), remaining)
+    return f"{head}{fixed_suffix}"
+
+
+def sandbox_state(status: AssistantWorkspaceStatus, *, sandbox_status: object | None = None) -> str:
+    value = sandbox_status if sandbox_status is not None else status.sandbox_status
+    if isinstance(value, dict):
+        backend = value.get("backend")
+        degraded = value.get("degraded")
+        availability = value.get("availability")
+        if degraded is None and isinstance(availability, dict):
+            degraded = availability.get("degraded")
+    else:
+        backend = getattr(value, "backend", "unknown")
+        degraded = getattr(value, "degraded", True)
+    if degraded is True:
+        return "sandbox:degraded"
+    if backend == "local_subprocess":
+        return "sandbox:local"
+    if isinstance(backend, str) and backend:
+        return f"sandbox:{backend}"
+    return "sandbox:unknown"
 
 
 def approval_body(request: HumanInteractionRequest) -> str:

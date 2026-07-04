@@ -22,7 +22,6 @@ from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.contracts.task import TaskSpec, load_task, resolve_workspace_root
 from haagent.tools.registry import ToolRuntimeRegistry
 from haagent.runtime.contracts.workspace_preflight import build_workspace_preflight
-from haagent.verification.engine import DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -60,10 +59,6 @@ def prepare_run_setup(
     )
     transition(RunStatus.PLANNING)
     writer.write_environment(workspace_root)
-    writer.write_sandbox_metadata(
-        workspace_root,
-        command_timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
-    )
     raise_if_cancelled()
     plan = build_plan(task)
     writer.write_plan(plan)

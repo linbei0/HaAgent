@@ -264,7 +264,14 @@ def _format_sandbox(sandbox: dict[str, Any]) -> list[str]:
     resource_limits = sandbox.get("resource_limits", {})
     if not isinstance(resource_limits, dict):
         resource_limits = {}
+    isolation = sandbox.get("isolation", {})
+    if not isinstance(isolation, dict):
+        isolation = {}
+    availability = sandbox.get("availability", {})
+    if not isinstance(availability, dict):
+        availability = {}
     return [
+        f"- backend: {sandbox.get('backend', 'unknown')}",
         f"- filesystem_boundary: {sandbox.get('filesystem_boundary', 'unknown')}",
         f"- network_policy: {sandbox.get('network_policy', 'unknown')}",
         f"- process_policy: {sandbox.get('process_policy', 'unknown')}",
@@ -273,6 +280,13 @@ def _format_sandbox(sandbox: dict[str, Any]) -> list[str]:
             "- command_timeout_seconds: "
             f"{resource_limits.get('command_timeout_seconds', 'unknown')}"
         ),
+        f"- cpu_limit: {resource_limits.get('cpu_limit', 'unknown')}",
+        f"- memory_limit: {resource_limits.get('memory_limit', 'unknown')}",
+        f"- pids_limit: {resource_limits.get('pids_limit', 'unknown')}",
+        f"- user: {isolation.get('user', 'unknown')}",
+        f"- privileged: {isolation.get('privileged', 'unknown')}",
+        f"- degraded: {availability.get('degraded', 'unknown')}",
+        f"- availability_reason: {availability.get('reason', '')}",
     ]
 
 

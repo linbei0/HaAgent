@@ -32,6 +32,7 @@ class FakeRuntimeEventApp:
         self._memory_mode = False
         self._memory_detail_mode = True
         self._last_failure = None
+        self._sandbox_status = None
         self.assistant_deltas: list[tuple[int, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
         self.tool_activities: list[tuple[int, str, str, str]] = []
@@ -232,3 +233,29 @@ def test_runtime_ui_event_handler_opens_memory_notice() -> None:
     assert app._memory_mode is True
     assert app._memory_detail_mode is False
     assert app.memory_loads == 1
+
+
+def test_runtime_ui_event_handler_tracks_sandbox_status_from_session_lifecycle() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        SessionLifecycleEvent(
+            session_id="session-1",
+            turn_index=1,
+            state="turn_started",
+            message="started",
+            details={
+                "sandbox": {
+                    "backend": "docker",
+                    "availability": {"degraded": False, "reason": ""},
+                },
+            },
+        ),
+    )
+
+    assert app._sandbox_status == {
+        "backend": "docker",
+        "degraded": False,
+        "reason": "",
+    }

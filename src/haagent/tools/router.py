@@ -25,6 +25,7 @@ from haagent.runtime.execution.policy import (
     evaluate_tool_call,
     grant_tool_approval,
 )
+from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.skills import SkillSettings
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
 from haagent.tools.code_run import code_run
@@ -57,6 +58,7 @@ class ToolRouter:
         mcp_runtime: Any | None = None,
         agent_runtime: Any | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], PolicyDecision], Any] | None = None,
+        sandbox_backend: SandboxBackend | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -69,6 +71,7 @@ class ToolRouter:
         self._mcp_runtime = mcp_runtime
         self._agent_runtime = agent_runtime
         self._worker_permission_requester = worker_permission_requester
+        self._sandbox_backend = sandbox_backend
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
         self._handlers: dict[str, ToolHandler] = {
             "fake_tool": self._fake_tool,
@@ -96,6 +99,7 @@ class ToolRouter:
                 self._workspace_root,
                 self._path_policy,
                 cancellation_token=self._cancellation_token,
+                sandbox_backend=self._sandbox_backend,
             ),
             "apply_patch": lambda args: apply_patch(args, self._workspace_root, self._path_policy),
             "apply_patch_set": lambda args: apply_patch_set(args, self._workspace_root, self._path_policy),
@@ -104,6 +108,7 @@ class ToolRouter:
                 self._workspace_root,
                 self._path_policy,
                 cancellation_token=self._cancellation_token,
+                sandbox_backend=self._sandbox_backend,
             ),
         }
         try:

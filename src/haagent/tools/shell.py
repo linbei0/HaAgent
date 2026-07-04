@@ -12,6 +12,7 @@ from typing import Any
 from haagent.runtime.execution.command import CWD_GUIDANCE, normalize_timeout, resolve_execution_cwd, run_command
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
+from haagent.runtime.sandbox.base import SandboxBackend, SandboxCommand
 from haagent.tools.base import tool_error
 
 
@@ -20,6 +21,7 @@ def shell(
     workspace_root: Path,
     path_policy: PathPolicy | None = None,
     cancellation_token: CancellationToken | None = None,
+    sandbox_backend: SandboxBackend | None = None,
 ) -> dict[str, Any]:
     """运行 shell 命令，捕获 stdout/stderr/exit_code，并把失败结构化返回。"""
     command = args.get("command")
@@ -41,7 +43,17 @@ def shell(
     if isinstance(timeout_result, str):
         return tool_error("tool_argument_invalid", timeout_result)
 
-    command_result = run_command(command, cwd_result, timeout_result, cancellation_token=cancellation_token)
+    if sandbox_backend is None:
+        command_result = run_command(command, cwd_result, timeout_result, cancellation_token=cancellation_token)
+    else:
+        command_result = sandbox_backend.run_shell(
+            SandboxCommand(
+                command=command,
+                cwd=cwd_result,
+                timeout_seconds=timeout_result,
+                cancellation_token=cancellation_token,
+            ),
+        )
     result = {
         "status": "success" if command_result.status == "success" else "error",
         "exit_code": command_result.exit_code,

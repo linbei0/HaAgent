@@ -16,6 +16,7 @@ from haagent.cli_commands import (
     handle_export_eval,
     handle_inspect,
     handle_run,
+    handle_sandbox,
     handle_smoke,
     handle_tui_entry,
     handle_tui_migration,
@@ -109,6 +110,32 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     _add_runs_root(tui_parser, help_text="directory for assistant session packages (default: .runs)")
     _add_web_flag(tui_parser)
     tui_parser.set_defaults(handler=handle_tui_migration)
+
+    sandbox_parser = subparsers.add_parser("sandbox", help=argparse.SUPPRESS)
+    sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_action", required=True)
+    sandbox_status = sandbox_subparsers.add_parser("status", help="show sandbox status")
+    sandbox_status.set_defaults(handler=handle_sandbox)
+    sandbox_doctor = sandbox_subparsers.add_parser("doctor", help="diagnose Docker sandbox readiness")
+    sandbox_doctor.set_defaults(handler=handle_sandbox)
+    sandbox_enable = sandbox_subparsers.add_parser("enable", help="enable a sandbox backend")
+    sandbox_enable.add_argument("backend", choices=["docker"], help="sandbox backend to enable")
+    fallback_group = sandbox_enable.add_mutually_exclusive_group()
+    fallback_group.add_argument(
+        "--fail-if-unavailable",
+        action="store_true",
+        dest="fail_if_unavailable",
+        default=True,
+        help="fail runs when Docker is unavailable (default)",
+    )
+    fallback_group.add_argument(
+        "--allow-fallback",
+        action="store_false",
+        dest="fail_if_unavailable",
+        help="allow fallback to local_subprocess when Docker is unavailable",
+    )
+    sandbox_enable.set_defaults(handler=handle_sandbox)
+    sandbox_disable = sandbox_subparsers.add_parser("disable", help="disable Docker sandbox")
+    sandbox_disable.set_defaults(handler=handle_sandbox)
 
     run_parser = subparsers.add_parser("run", help="run a task.yaml file")
     run_parser.add_argument("task_yaml", nargs="?", type=Path, help="path to task.yaml")

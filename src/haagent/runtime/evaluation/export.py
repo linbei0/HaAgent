@@ -101,13 +101,23 @@ def _verification_summary(records: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _sandbox_summary(sandbox: dict[str, Any]) -> dict[str, Any]:
     resource_limits = sandbox["resource_limits"]
+    availability = sandbox.get("availability", {})
+    isolation = sandbox.get("isolation", {})
     return {
         "workspace_root": sandbox["workspace_root"],
         "filesystem_boundary": sandbox["filesystem_boundary"],
+        "backend": sandbox["backend"],
         "network_policy": sandbox["network_policy"],
         "process_policy": sandbox["process_policy"],
         "credential_policy": sandbox["credential_policy"],
         "command_timeout_seconds": resource_limits["command_timeout_seconds"],
+        "cpu_limit": resource_limits.get("cpu_limit"),
+        "memory_limit": resource_limits.get("memory_limit"),
+        "pids_limit": resource_limits.get("pids_limit"),
+        "degraded": availability.get("degraded"),
+        "availability_reason": availability.get("reason"),
+        "sandbox_user": isolation.get("user"),
+        "privileged": isolation.get("privileged"),
     }
 
 

@@ -39,6 +39,60 @@ verification_commands: []
     return EpisodeWriter.create(runs_root=tmp_path / ".runs", task_path=task_path)
 
 
+class FakeSandboxBackend:
+    def __init__(self) -> None:
+        self.shell_commands = []
+        self.python_scripts = []
+
+    def metadata(self):
+        raise AssertionError("metadata is not needed in this test")
+
+    def run_shell(self, command):
+        from haagent.runtime.execution.command import CommandResult
+
+        self.shell_commands.append(command)
+        return CommandResult(
+            command=command.command,
+            status="success",
+            exit_code=0,
+            stdout="sandbox shell",
+            stderr="",
+            stdout_excerpt="sandbox shell",
+            stderr_excerpt="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            truncated=False,
+            timeout=False,
+            redacted=False,
+            duration_seconds=0.01,
+            timeout_seconds=command.timeout_seconds,
+        )
+
+    def run_python(self, script_path, command):
+        from haagent.runtime.execution.command import CommandResult
+
+        self.python_scripts.append((script_path, command))
+        return CommandResult(
+            command=f"python {script_path}",
+            status="success",
+            exit_code=0,
+            stdout="sandbox python",
+            stderr="",
+            stdout_excerpt="sandbox python",
+            stderr_excerpt="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            truncated=False,
+            timeout=False,
+            redacted=False,
+            duration_seconds=0.01,
+            timeout_seconds=command.timeout_seconds,
+        )
+
+    def close(self):
+        return None
+
+
 def test_tool_router_runs_fake_tool_and_writes_trace(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["fake_tool"], episode_writer=writer, workspace_root=tmp_path)
@@ -524,6 +578,49 @@ def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -
     record = _read_single_tool_call(writer)
     assert record["status"] == "error"
     assert record["error"]["type"] == "mcp_timeout"
+
+
+def test_shell_uses_sandbox_backend_when_provided(tmp_path: Path) -> None:
+    backend = FakeSandboxBackend()
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["shell"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["shell"],
+        approved_tools=["shell"],
+        sandbox_backend=backend,
+    )
+
+    result = router.dispatch("shell", {"command": "echo hi", "timeout_seconds": 5})
+
+    assert result["status"] == "success"
+    assert result["stdout_excerpt"] == "sandbox shell"
+    assert backend.shell_commands[0].command == "echo hi"
+    assert backend.shell_commands[0].cwd == tmp_path.resolve()
+    assert backend.shell_commands[0].timeout_seconds == 5
+
+
+def test_code_run_uses_sandbox_backend_and_workspace_script(tmp_path: Path) -> None:
+    backend = FakeSandboxBackend()
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["code_run"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["code_run"],
+        approved_tools=["code_run"],
+        sandbox_backend=backend,
+    )
+
+    result = router.dispatch("code_run", {"code": "print('hi')", "timeout_seconds": 5})
+
+    assert result["status"] == "success"
+    assert result["stdout_excerpt"] == "sandbox python"
+    script_path, command = backend.python_scripts[0]
+    assert script_path.is_file()
+    assert script_path.is_relative_to(tmp_path.resolve())
+    assert command.cwd == tmp_path.resolve()
 
 
 def test_tool_router_does_not_swallow_run_cancelled_for_mcp_tool(tmp_path: Path) -> None:
