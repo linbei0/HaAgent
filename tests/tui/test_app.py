@@ -52,6 +52,7 @@ from haagent.tui.design.theme import (
     status_semantic,
 )
 from haagent.tui.widgets import ConversationTimeline, PromptInput
+from haagent.tui.typography.wrap import is_textual_line_breaking_installed
 from textual.widgets import Markdown, RichLog, TextArea
 from textual.screen import Screen
 
@@ -1110,6 +1111,30 @@ def test_tui_slash_command_registry_includes_mcp() -> None:
 
     assert registry.get("mcp") is not None
     assert "models" not in {command.name for command in registry.commands()}
+
+
+def test_tui_installs_unicode_line_breaking_for_assistant_markdown(tmp_path: Path) -> None:
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        assistant_content="各地举行建国 250 周年庆祝活动，约 400 架无人机参与。",
+    )
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(42, 24)) as pilot:
+            assert is_textual_line_breaking_installed()
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            input_widget.value = "看看新闻"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            assert "建国 250 周年" in _text(app, "#conversation")
+            rendered = app.query_one(Markdown).render()
+            rendered_text = getattr(rendered, "plain", str(rendered))
+            assert "250\n周年" not in rendered_text
+            assert "400\n架" not in rendered_text
+
+    asyncio.run(run())
 
 
 def test_tui_compact_command_compacts_session_without_running_prompt(tmp_path: Path) -> None:

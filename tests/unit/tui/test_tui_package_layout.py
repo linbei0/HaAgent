@@ -34,5 +34,6 @@ def test_tui_top_level_packages_are_named_by_responsibility() -> None:
         "memory",
         "overlays",
         "state",
+        "typography",
         "widgets",
     ]

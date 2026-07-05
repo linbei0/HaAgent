@@ -53,6 +53,7 @@ from haagent.tui.design.theme import (
 from haagent.tui.overlays.search import SearchOverlay
 from haagent.tui.overlays.sessions import SessionOverlay, SessionOverlayResult
 from haagent.tui.design.utils import safe_summary
+from haagent.tui.typography import install_textual_line_breaking
 from haagent.tui.widgets import (
     ConversationTimeline,
     ConversationView,
@@ -90,6 +91,7 @@ class HaAgentTuiApp(App[None]):
     BINDINGS = APP_BINDINGS
 
     def __init__(self, service: AssistantService) -> None:
+        install_textual_line_breaking()
         super().__init__()
         self.service = service
         self._state = "idle"
