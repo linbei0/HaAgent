@@ -26,6 +26,7 @@ class TaskSpec:
     workspace_root: str | None = None
     path_policy: dict[str, Any] | None = None
     target_paths: list[str] = field(default_factory=list)
+    prompt_pack_ids: list[str] = field(default_factory=list)
     policy: dict[str, list[str]] = field(
         default_factory=lambda: {"approval_allowed_tools": [], "approved_tools": []},
     )
@@ -48,6 +49,7 @@ def load_task(path: Path) -> TaskSpec:
         workspace_root=_optional_str(raw, "workspace_root"),
         path_policy=_optional_path_policy(raw),
         target_paths=_optional_str_list(raw, "target_paths"),
+        prompt_pack_ids=_optional_str_list(raw, "prompt_pack_ids"),
         policy=_optional_policy(raw, allowed_tools),
         worker_context=_optional_mapping(raw, "worker_context"),
     )

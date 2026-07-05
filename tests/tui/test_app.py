@@ -919,6 +919,9 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
     assert unknown.command is None
     assert unknown.error == "未知命令：/wat"
     assert not_command is None
+    assert parse_slash_command("/review 看看改动", registry) is None
+    assert parse_slash_command("/debug", registry) is None
+    assert parse_slash_command("/verify", registry) is None
     assert {command.name for command in registry.commands()} >= {
         "help",
         "sessions",
@@ -934,7 +937,46 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
         "agents",
         "web",
         "permissions",
+        "review",
+        "debug",
+        "verify",
     }
+
+
+def test_tui_prompt_pack_command_suggestion_fills_prompt_input(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("/")
+            await pilot.pause(0.1)
+            app._command_suggestion_overlay.update_query("rev")
+
+            app.action_accept_command_suggestion()
+
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            assert app._prompt_value(input_widget) == "/review "
+            assert service.prompts == []
+            assert "未知命令" not in _text(app, "#conversation")
+
+    asyncio.run(run())
+
+
+def test_tui_prompt_pack_command_is_submitted_to_chat_runtime(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+            app._set_prompt_value(input_widget, "/review 看看改动")
+
+            app._submit_prompt(input_widget)
+            await asyncio.to_thread(service.started.wait, 2)
+
+            assert service.prompts == ["/review 看看改动"]
+            assert "未知命令" not in _text(app, "#conversation")
+
+    asyncio.run(run())
 
 
 def test_tui_sandbox_command_shows_status_doctor_and_updates_settings(tmp_path: Path) -> None:

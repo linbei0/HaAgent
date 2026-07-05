@@ -23,6 +23,7 @@ def build_system_message(
     project_instructions: str | None,
     tool_workflow_hints: list[str],
     session_summary: str | None = None,
+    prompt_packs: str | None = None,
     skills_block: str | None = None,
 ) -> dict[str, Any]:
     parts: list[str] = []
@@ -41,6 +42,11 @@ def build_system_message(
         parts.append("")
         parts.append("Project Instructions:")
         parts.append(project_instructions.strip())
+
+    if prompt_packs and prompt_packs.strip():
+        parts.append("")
+        parts.append("Prompt Packs:")
+        parts.append(prompt_packs.strip())
 
     if session_summary and session_summary.strip():
         parts.append("")

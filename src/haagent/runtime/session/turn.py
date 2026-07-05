@@ -14,6 +14,7 @@ from typing import Any, Callable, Protocol
 import yaml
 
 from haagent.models.gateway import ModelGateway
+from haagent.prompts.commands import parse_prompt_command
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, serialize_path_policy
@@ -90,6 +91,7 @@ class ChatTurnRequest:
     tool_registry: ToolRuntimeRegistry | None = None
     mcp_runtime: object | None = None
     mcp_tool_names: list[str] = field(default_factory=list)
+    prompt_pack_ids: list[str] = field(default_factory=list)
     allowed_tools_override: list[str] | None = None
     approval_allowed_tools_override: list[str] | None = None
     approved_tools_override: list[str] | None = None
@@ -102,16 +104,19 @@ class ChatTurnRunner:
         clean_prompt = request.prompt.strip()
         if not clean_prompt:
             raise ValueError("prompt must be non-empty")
+        parsed_prompt = parse_prompt_command(clean_prompt)
+        prompt_pack_ids = [*request.prompt_pack_ids, *parsed_prompt.prompt_pack_ids]
         with tempfile.TemporaryDirectory(prefix="haagent-chat-") as task_dir:
             task_path = Path(task_dir) / "task.yaml"
             write_chat_task_yaml(
                 task_path,
-                clean_prompt,
+                parsed_prompt.normalized_prompt,
                 request.workspace_root,
                 path_policy=request.path_policy,
                 enable_web=request.enable_web,
                 target_paths=request.target_paths,
                 mcp_tool_names=request.mcp_tool_names,
+                prompt_pack_ids=prompt_pack_ids,
                 allowed_tools_override=request.allowed_tools_override,
                 approval_allowed_tools_override=request.approval_allowed_tools_override,
                 approved_tools_override=request.approved_tools_override,
@@ -145,6 +150,7 @@ def write_chat_task_yaml(
     enable_web: bool = False,
     target_paths: list[str] | None = None,
     mcp_tool_names: list[str] | None = None,
+    prompt_pack_ids: list[str] | None = None,
     allowed_tools_override: list[str] | None = None,
     approval_allowed_tools_override: list[str] | None = None,
     approved_tools_override: list[str] | None = None,
@@ -180,6 +186,7 @@ def write_chat_task_yaml(
         "workspace_root": str(workspace_root.resolve()),
         "path_policy": serialize_path_policy(policy),
         "target_paths": list(target_paths or []),
+        "prompt_pack_ids": list(prompt_pack_ids or []),
         "constraints": [],
         "allowed_tools": allowed_tools,
         "acceptance_criteria": ["Complete the requested chat task."],

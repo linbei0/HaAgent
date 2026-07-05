@@ -9,6 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+PROMPT_MODE_COMMANDS = frozenset({"review", "debug", "verify"})
+
+
 @dataclass(frozen=True)
 class SlashCommand:
     name: str
@@ -64,8 +67,18 @@ def command_registry() -> CommandRegistry:
             SlashCommand("resume", "继续最新 session", "resume_latest"),
             SlashCommand("details", "显示或隐藏工具详情", "toggle_details"),
             SlashCommand("compact", "智能压缩当前会话", "compact_session"),
+            SlashCommand("review", "使用代码审查提示词包", "prompt_mode"),
+            SlashCommand("debug", "使用调试提示词包", "prompt_mode"),
+            SlashCommand("verify", "使用验证提示词包", "prompt_mode"),
         ],
     )
+
+
+def is_prompt_mode_command(text: str) -> bool:
+    if not text.startswith("/"):
+        return False
+    command_text, _, _argument = text[1:].partition(" ")
+    return command_text in PROMPT_MODE_COMMANDS
 
 
 def parse_slash_command(text: str, registry: CommandRegistry) -> SlashCommandResult | None:
@@ -76,6 +89,8 @@ def parse_slash_command(text: str, registry: CommandRegistry) -> SlashCommandRes
         return SlashCommandResult(command=None, error="请输入命令名")
     if command_text == "models":
         command_text = "model"
+    if is_prompt_mode_command(text):
+        return None
     command = registry.get(command_text)
     if command is None:
         return SlashCommandResult(command=None, error=f"未知命令：/{command_text}")

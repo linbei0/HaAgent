@@ -32,6 +32,7 @@ class ContextSection:
     priority: int
     kind: str
     recent_rank: int | None = None
+    hard_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -247,7 +248,7 @@ def _candidate(
     decision: ContextDecision = "selected"
     reason = "within_budget"
 
-    if _should_collapse_old_observation(section, budget):
+    if not section.hard_required and _should_collapse_old_observation(section, budget):
         content, collapsed_chars = collapse_text_head_tail(
             content,
             max_chars=budget.max_tool_observation_chars,
@@ -258,7 +259,7 @@ def _candidate(
             decision = "collapsed"
             reason = "old_observation_over_budget"
 
-    if len(content) > budget.max_section_chars:
+    if not section.hard_required and len(content) > budget.max_section_chars:
         content, collapsed_chars = collapse_text_head_tail(
             content,
             max_chars=budget.max_section_chars,

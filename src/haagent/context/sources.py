@@ -36,6 +36,7 @@ class ContextSection:
     title: str
     content: str
     chars: int
+    hard_required: bool = False
 
 
 @dataclass(frozen=True)

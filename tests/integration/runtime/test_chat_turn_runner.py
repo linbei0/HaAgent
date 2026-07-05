@@ -66,6 +66,35 @@ def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> 
     assert result.status == RunStatus.COMPLETED
 
 
+def test_chat_turn_runner_writes_prompt_pack_ids_from_explicit_command(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    ChatTurnRunner().run(
+        ChatTurnRequest(
+            prompt="/review 看看改动",
+            workspace_root=tmp_path,
+            runs_root=tmp_path / ".runs",
+            model_gateway=_Gateway(),
+            max_turns=3,
+            session_summary=None,
+            session_compaction=None,
+            tool_result_microcompact_count=0,
+            working_state=None,
+            path_policy=default_path_policy(tmp_path),
+            enable_web=False,
+            target_paths=[],
+            event_sink=lambda event: None,
+            interaction_handler=None,
+            cancellation_token=CancellationToken(),
+            orchestrator_factory=lambda **kwargs: _Orchestrator(captured, **kwargs),
+        ),
+    )
+
+    task = captured["task"]
+    assert task.goal == "看看改动"
+    assert task.prompt_pack_ids == ["code-review"]
+
+
 def test_chat_turn_runner_allows_dynamic_mcp_tool_in_task_contract(tmp_path: Path) -> None:
     dynamic = ToolDefinition(
         name="mcp__fixture__echo",

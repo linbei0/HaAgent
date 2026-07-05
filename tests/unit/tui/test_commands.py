@@ -24,6 +24,16 @@ def test_turns_command_is_registered_and_parsed() -> None:
     assert result.argument == "set 80"
 
 
+def test_prompt_pack_commands_are_forwarded_as_chat_prompts() -> None:
+    registry = command_registry()
+
+    names = {command.name for command in registry.commands()}
+    assert {"review", "debug", "verify"} <= names
+    assert parse_slash_command("/review 看看改动", registry) is None
+    assert parse_slash_command("/debug", registry) is None
+    assert parse_slash_command("/verify", registry) is None
+
+
 def test_turns_command_show_reports_current_and_configured_limits() -> None:
     app = _FakeTurnsApp(
         status=SimpleNamespace(current_max_turns=None, configured_interactive_max_turns=200),

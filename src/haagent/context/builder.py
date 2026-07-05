@@ -44,6 +44,7 @@ from haagent.memory.retrieval import (
     MemoryRetrievalRequest,
     MemoryRetriever,
 )
+from haagent.prompts.packs import get_prompt_pack
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.compaction.contract import assess_full_compact_eligibility
 from haagent.runtime.contracts.task import TaskSpec
@@ -146,6 +147,7 @@ class ContextBuilder:
             project_instructions=selected_sections.get("project_instructions") or None,
             tool_workflow_hints=self._tool_workflow_hints(),
             session_summary=selected_sections.get("session_summary") or None,
+            prompt_packs=selected_sections.get("prompt_pack") or None,
             skills_block=selected_sections.get("skills") or None,
         )
         task_msg = build_task_message(
@@ -317,6 +319,23 @@ class ContextBuilder:
         block = self._memory_result().to_model_block()
         return block or None
 
+    def _prompt_packs_block(self) -> tuple[str | None, dict[str, object]]:
+        packs = [get_prompt_pack(pack_id) for pack_id in self._task.prompt_pack_ids]
+        if not packs:
+            return None, {"selected": []}
+
+        lines: list[str] = []
+        for pack in packs:
+            lines.append(f"## {pack.title} ({pack.id})")
+            lines.append(pack.content.strip())
+
+        return "\n\n".join(lines), {
+            "selected": [
+                {"id": pack.id, "title": pack.title, "chars": len(pack.content)}
+                for pack in packs
+            ],
+        }
+
     def _memory_navigation_result(self):
         if not hasattr(self, "_cached_memory_navigation_result"):
             self._cached_memory_navigation_result = build_memory_navigation(
@@ -340,9 +359,12 @@ class ContextBuilder:
         return [f"- {_interaction_state_summary(r)}" for r in self._interaction_state[-8:]]
 
     def _build_context_candidates(self, project_instructions: str | None):
+        prompt_packs_block, prompt_pack_metadata = self._prompt_packs_block()
         return collect_context_candidates(
             ContextCandidateInputs(
                 project_instructions=(project_instructions or "").strip()[:PROJECT_INSTRUCTIONS_CHAR_LIMIT],
+                prompt_packs=prompt_packs_block,
+                prompt_pack_metadata=prompt_pack_metadata,
                 session_summary=(self._session_summary or "").strip()[:SESSION_SUMMARY_CHAR_LIMIT],
                 working_state=self._working_state_content(),
                 memory_index=self._memory_index_block(),

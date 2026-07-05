@@ -20,7 +20,7 @@ from haagent.memory import MemoryCandidate
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.commands.suggestions import CommandSuggestionOverlay
-from haagent.tui.commands import command_registry, parse_slash_command
+from haagent.tui.commands import command_registry, is_prompt_mode_command, parse_slash_command
 from haagent.tui.design.copy import BLOCK_TITLES
 from haagent.tui.design.failures import FailureView
 from haagent.tui.files.overlay import FileReferenceOverlay
@@ -234,6 +234,9 @@ class HaAgentTuiApp(App[None]):
         if self._state in {"running", "cancelling", "waiting approval"}:
             return
         self._set_prompt_value(prompt_input, "")
+        if is_prompt_mode_command(prompt):
+            self._start_prompt(prompt)
+            return
         if path_authorization.handle_prompt_path_authorization(self, prompt):
             return
         self._start_prompt(prompt)
@@ -912,6 +915,9 @@ class HaAgentTuiApp(App[None]):
             return
         self._close_command_suggestions()
         prompt_input = self.query_one("#prompt-input", PromptInput)
+        if is_prompt_mode_command(result.token):
+            self._set_prompt_value(prompt_input, f"{result.token} ")
+            return
         self._set_prompt_value(prompt_input, "")
         self._handle_slash_command(parse_slash_command(result.token, self._commands))
 
@@ -925,6 +931,9 @@ class HaAgentTuiApp(App[None]):
             return
         self._close_command_suggestions()
         prompt_input = self.query_one("#prompt-input", PromptInput)
+        if is_prompt_mode_command(command.token):
+            self._set_prompt_value(prompt_input, f"{command.token} ")
+            return
         self._set_prompt_value(prompt_input, "")
         self._handle_slash_command(parse_slash_command(command.token, self._commands))
 

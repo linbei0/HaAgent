@@ -94,6 +94,7 @@ class ContextSelector:
                 title=candidate.title,
                 content=content,
                 chars=chars,
+                hard_required=candidate.hard_required,
             )
             if placement == "system":
                 system_sections.append(section)
@@ -114,6 +115,8 @@ class ContextSelector:
 @dataclass(frozen=True)
 class ContextCandidateInputs:
     project_instructions: str | None = None
+    prompt_packs: str | None = None
+    prompt_pack_metadata: dict[str, Any] = field(default_factory=dict)
     session_summary: str | None = None
     working_state: str | None = None
     memory_index: str | None = None
@@ -135,6 +138,18 @@ def collect_context_candidates(inputs: ContextCandidateInputs) -> list[ContextCa
         content=inputs.project_instructions,
         reason="workspace_agents_md_found",
         priority=10,
+    )
+    _append_candidate(
+        candidates,
+        source_type="prompt_pack",
+        source_id="prompt_pack",
+        placement="system",
+        title="Prompt Packs",
+        content=inputs.prompt_packs,
+        reason="explicit_prompt_command",
+        priority=15,
+        metadata=inputs.prompt_pack_metadata,
+        hard_required=True,
     )
     _append_candidate(
         candidates,
@@ -221,6 +236,7 @@ def compaction_sections_from_selection(selection: ContextSelectionResult) -> lis
                 source=_compaction_source(selected.source_type),
                 priority=_compaction_priority(selected.source_type),
                 kind=_compaction_kind(selected.source_type),
+                hard_required=selected.hard_required,
             ),
         )
     return sections
@@ -259,6 +275,7 @@ def _append_candidate(
     include_empty: bool = False,
     skip_reason: str | None = None,
     metadata: dict[str, Any] | None = None,
+    hard_required: bool = False,
 ) -> None:
     if include_empty or (content and content.strip()):
         candidates.append(
@@ -270,6 +287,7 @@ def _append_candidate(
                 content=(content or "").strip(),
                 reason=reason,
                 priority=priority,
+                hard_required=hard_required,
                 skip_reason=skip_reason,
                 metadata=dict(metadata or {}),
             ),
@@ -319,6 +337,7 @@ def _compaction_kind(source_type: str) -> str:
 
 def _compaction_priority(source_type: str) -> int:
     return {
+        "prompt_pack": 85,
         "project_instructions": 80,
         "working_state": 75,
         "session_summary": 70,
