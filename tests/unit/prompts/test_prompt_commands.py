@@ -7,7 +7,7 @@ tests/unit/prompts/test_prompt_commands.py - 显式提示词命令测试
 from __future__ import annotations
 
 from haagent.prompts.commands import parse_prompt_command
-from haagent.prompts.packs import get_prompt_pack
+from haagent.prompts.packs import get_prompt_pack, iter_prompt_modes
 
 
 def test_review_command_selects_code_review_pack() -> None:
@@ -35,13 +35,30 @@ def test_prompt_pack_lookup_returns_atomic_builtin_pack() -> None:
 
 
 def test_builtin_prompt_packs_define_workflow_and_output_contracts() -> None:
-    for pack_id in ["code-review", "debugging", "verification"]:
-        content = get_prompt_pack(pack_id).content
+    for mode in iter_prompt_modes():
+        content = mode.pack.content
 
         assert "Workflow:" in content
         assert "Output:" in content
         assert "Evidence" in content
-        assert len(content) <= get_prompt_pack(pack_id).max_chars
+        assert mode.pack.hard_required is True
+        assert len(content) <= mode.pack.max_chars
+
+
+def test_prompt_modes_are_the_single_source_for_command_parsing() -> None:
+    modes = {mode.command: mode for mode in iter_prompt_modes()}
+
+    assert set(modes) == {"review", "debug", "verify"}
+    for command, mode in modes.items():
+        with_body = parse_prompt_command(f"/{command} custom request")
+        empty_body = parse_prompt_command(f"/{command}")
+
+        assert with_body.command == command
+        assert with_body.prompt_pack_ids == [mode.pack.id]
+        assert with_body.normalized_prompt == "custom request"
+        assert empty_body.command == command
+        assert empty_body.prompt_pack_ids == [mode.pack.id]
+        assert empty_body.normalized_prompt == mode.default_goal
 
 
 def test_debug_command_uses_default_goal_when_body_is_empty() -> None:

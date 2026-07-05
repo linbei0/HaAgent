@@ -9,6 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from haagent.app.assistant_service import AssistantServiceError
+from haagent.prompts.packs import iter_prompt_modes
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.commands import command_registry, parse_slash_command
 
@@ -27,11 +28,11 @@ def test_turns_command_is_registered_and_parsed() -> None:
 def test_prompt_pack_commands_are_forwarded_as_chat_prompts() -> None:
     registry = command_registry()
 
+    prompt_mode_commands = {mode.command for mode in iter_prompt_modes()}
     names = {command.name for command in registry.commands()}
-    assert {"review", "debug", "verify"} <= names
-    assert parse_slash_command("/review 看看改动", registry) is None
-    assert parse_slash_command("/debug", registry) is None
-    assert parse_slash_command("/verify", registry) is None
+    assert prompt_mode_commands <= names
+    for command in prompt_mode_commands:
+        assert parse_slash_command(f"/{command} 看看改动", registry) is None
 
 
 def test_turns_command_show_reports_current_and_configured_limits() -> None:
