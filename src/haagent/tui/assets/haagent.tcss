@@ -14,6 +14,11 @@ Screen.theme-monochrome {
     color: $foreground;
 }
 
+Screen > .screen--selection {
+    background: $primary;
+    color: $foreground;
+}
+
 #status-bar {
     height: 1;
     padding: 0 1;
@@ -37,8 +42,16 @@ Screen.theme-monochrome {
 }
 
 ConversationTimeline {
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
+    scrollbar-visibility: hidden;
     scrollbar-background: $background;
+    scrollbar-background-hover: $background;
+    scrollbar-background-active: $background;
     scrollbar-color: $primary;
+    scrollbar-color-hover: $background;
+    scrollbar-color-active: $background;
+    scrollbar-corner-color: $background;
 }
 
 .timeline-placeholder,
@@ -143,9 +156,12 @@ ConversationTimeline {
     margin-top: 1;
     margin-left: 2;
     padding: 1 2;
-    background: $background;
-    color: $text-muted;
+    background: $surface;
+    color: $foreground;
     border-left: solid $warning;
+    overflow: hidden;
+    scrollbar-background: $surface;
+    scrollbar-color: $surface;
 }
 
 

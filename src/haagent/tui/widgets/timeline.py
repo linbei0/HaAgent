@@ -11,13 +11,15 @@ from itertools import count
 from typing import Any, Literal
 
 from rich.text import Text
+from textual.strip import Strip
 from textual import events
 from textual.app import ComposeResult
+from textual.await_complete import AwaitComplete
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
-from textual.widgets import Markdown, Static, TextArea
+from textual.widgets import Log, Markdown, Static, TextArea
 
 
 class PromptInput(TextArea):
@@ -120,6 +122,12 @@ class StatusBar(Static):
 TimelineRole = Literal["user", "assistant", "system", "failure"]
 TimelineStatus = Literal["streaming", "done", "failed"]
 ToolStatus = Literal["running", "approval", "done", "failed"]
+TOOL_DETAIL_VISIBLE_LIMIT = 8
+TOOL_DIAGNOSTIC_VISIBLE_LIMIT = 2
+TOOL_ACTIVITY_FLUSH_INTERVAL_MS = 50
+MARKDOWN_DELTA_FLUSH_INTERVAL_MS = 33
+SELECTION_RESUME_DELAY_MS = 120
+DETAILS_REFRESH_RECENT_TURNS = 3
 
 
 @dataclass
@@ -142,6 +150,15 @@ class TimelineItem:
     tools: list[ToolActivity] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class TimelineRenderMetrics:
+    item_count: int
+    tool_count: int
+    diagnostic_count: int
+    detail_line_count: int
+    rendered_character_count: int
+
+
 class ConversationTimeline(VerticalScroll):
     _ids = count(1)
 
@@ -152,10 +169,18 @@ class ConversationTimeline(VerticalScroll):
         self._items: list[TimelineItem] = []
         self._tool_details_enabled = False
         self._plain_text = ""
+        self._plain_text_dirty = False
         self._blocks: dict[int, TimelineBlock] = {}
         self._placeholder_widget: Static | None = None
         self._memory_widget: Static | None = None
         self._stick_to_bottom = True
+        self._pending_tool_item_ids: set[int] = set()
+        self._tool_activity_flush_scheduled = False
+        self._pending_assistant_delta_item_ids: set[int] = set()
+        self._assistant_delta_flush_scheduled = False
+        self._interactive_updates_paused = False
+        self._mouse_down_location: tuple[float, float] | None = None
+        self._selection_dragging = False
 
     def set_stick_to_bottom(self, enabled: bool) -> None:
         self._stick_to_bottom = enabled
@@ -167,16 +192,20 @@ class ConversationTimeline(VerticalScroll):
     def scroll_to(self, x: float | None = None, y: float | None = None, **kwargs: Any) -> None:
         if y is not None:
             self._stick_to_bottom = y >= self.max_scroll_y - 1
+            if not self._stick_to_bottom:
+                self.pause_interactive_updates()
         super().scroll_to(x=x, y=y, **kwargs)
 
     def show_placeholder(self) -> None:
         self._items.clear()
         self._plain_text = "Ready. 输入消息后按 Enter 发送；Shift+Enter 换行；Ctrl+Q 退出。"
+        self._plain_text_dirty = False
         self._show_singleton("placeholder", "Ready. 输入消息后按 Enter 发送；Shift+Enter 换行；Ctrl+Q 退出。", "timeline-placeholder")
 
     def show_memory(self, text: str) -> None:
         self._items.clear()
         self._plain_text = text
+        self._plain_text_dirty = False
         self._show_singleton("memory", text, "timeline-memory")
 
     def append_lines(self, lines: list[str], *, start: int) -> None:
@@ -185,19 +214,37 @@ class ConversationTimeline(VerticalScroll):
 
     @property
     def plain_text(self) -> str:
+        if self._plain_text_dirty:
+            self._sync_plain_text()
         return self._plain_text
 
     def clear_timeline(self) -> None:
         self._items.clear()
         self._plain_text = ""
+        self._plain_text_dirty = False
+        self._pending_tool_item_ids.clear()
+        self._tool_activity_flush_scheduled = False
+        self._pending_assistant_delta_item_ids.clear()
+        self._assistant_delta_flush_scheduled = False
+        self._interactive_updates_paused = False
+        self._mouse_down_location = None
+        self._selection_dragging = False
         self._remove_singletons()
         for block in list(self._blocks.values()):
             block.remove()
         self._blocks.clear()
 
     def set_tool_details(self, enabled: bool) -> None:
+        if self._tool_details_enabled == enabled:
+            return
         self._tool_details_enabled = enabled
-        self._render_timeline()
+        recent_assistants = [item for item in self._items if item.role == "assistant"][-DETAILS_REFRESH_RECENT_TURNS:]
+        if not recent_assistants:
+            self._render_timeline()
+            return
+        for item in recent_assistants:
+            self._sync_block(item)
+        self._mark_plain_text_dirty()
 
     def add_user(self, content: str, *, turn_index: int) -> None:
         self._items.append(TimelineItem(item_id=next(self._ids), role="user", turn_index=turn_index, content=content, title="你"))
@@ -219,7 +266,7 @@ class ConversationTimeline(VerticalScroll):
         item = self._assistant_item(turn_index)
         item.status = "streaming"
         self._sync_block(item)
-        self._sync_plain_text()
+        self._mark_plain_text_dirty()
 
     def update_assistant_delta(self, turn_index: int, delta: str) -> None:
         if not delta:
@@ -227,22 +274,26 @@ class ConversationTimeline(VerticalScroll):
         item = self._assistant_item(turn_index)
         item.content += delta
         item.status = "streaming"
-        self._sync_block(item)
-        self._sync_plain_text()
+        self._queue_assistant_delta_sync(item)
+        self._mark_plain_text_dirty()
 
     def finalize_assistant(self, turn_index: int, content: str) -> None:
+        self.flush_pending_assistant_delta()
         item = self._assistant_item(turn_index)
         if content:
             item.content = content
         item.status = "done"
-        self._sync_block(item)
-        self._sync_plain_text()
+        if self._interactive_updates_paused:
+            self._pending_assistant_delta_item_ids.add(item.item_id)
+        else:
+            self._sync_block(item)
+        self._mark_plain_text_dirty()
 
     def add_tool_activity(self, activity: ToolActivity) -> None:
         item = self._assistant_item(activity.turn_index)
         merge_tool_activity(item.tools, activity)
-        self._sync_block(item)
-        self._sync_plain_text()
+        self._queue_tool_activity_sync(item)
+        self._mark_plain_text_dirty()
 
     def add_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         item = self._assistant_item(turn_index)
@@ -252,8 +303,8 @@ class ConversationTimeline(VerticalScroll):
             item.tools.append(activity)
         if message not in activity.diagnostics:
             activity.diagnostics.append(message)
-        self._sync_block(item)
-        self._sync_plain_text()
+        self._queue_tool_activity_sync(item)
+        self._mark_plain_text_dirty()
 
     def _assistant_item(self, turn_index: int) -> TimelineItem:
         for item in self._items:
@@ -265,7 +316,7 @@ class ConversationTimeline(VerticalScroll):
 
     def _render_timeline(self) -> None:
         self._sync_blocks()
-        self._sync_plain_text()
+        self._mark_plain_text_dirty()
 
     def _sync_block(self, item: TimelineItem) -> None:
         block = self._blocks.get(item.item_id)
@@ -276,6 +327,93 @@ class ConversationTimeline(VerticalScroll):
         self.set_class(bool(self._items), "timeline-ready")
         if self._stick_to_bottom:
             self.call_after_refresh(self.scroll_end_if_sticky)
+
+    def _queue_tool_activity_sync(self, item: TimelineItem) -> None:
+        self._pending_tool_item_ids.add(item.item_id)
+        self._schedule_tool_activity_flush()
+
+    def _schedule_tool_activity_flush(self) -> None:
+        if self._tool_activity_flush_scheduled:
+            return
+        self._tool_activity_flush_scheduled = True
+        self.set_timer(
+            TOOL_ACTIVITY_FLUSH_INTERVAL_MS / 1000,
+            self.flush_pending_tool_activity,
+            name="tool-activity-flush",
+        )
+
+    def flush_pending_tool_activity(self) -> None:
+        if self._interactive_updates_paused:
+            self._tool_activity_flush_scheduled = False
+            return
+        if not self._pending_tool_item_ids:
+            self._tool_activity_flush_scheduled = False
+            return
+        pending_ids = set(self._pending_tool_item_ids)
+        self._pending_tool_item_ids.clear()
+        self._tool_activity_flush_scheduled = False
+        for item in self._items:
+            if item.item_id in pending_ids:
+                self._sync_block(item)
+
+    def _queue_assistant_delta_sync(self, item: TimelineItem) -> None:
+        self._pending_assistant_delta_item_ids.add(item.item_id)
+        self._schedule_assistant_delta_flush()
+
+    def _schedule_assistant_delta_flush(self) -> None:
+        if self._assistant_delta_flush_scheduled:
+            return
+        self._assistant_delta_flush_scheduled = True
+        self.set_timer(
+            MARKDOWN_DELTA_FLUSH_INTERVAL_MS / 1000,
+            self.flush_pending_assistant_delta,
+            name="assistant-delta-flush",
+        )
+
+    def flush_pending_assistant_delta(self) -> None:
+        if self._interactive_updates_paused:
+            self._assistant_delta_flush_scheduled = False
+            return
+        if not self._pending_assistant_delta_item_ids:
+            self._assistant_delta_flush_scheduled = False
+            return
+        pending_ids = set(self._pending_assistant_delta_item_ids)
+        self._pending_assistant_delta_item_ids.clear()
+        self._assistant_delta_flush_scheduled = False
+        for item in self._items:
+            if item.item_id in pending_ids:
+                self._sync_block(item)
+
+    def pause_interactive_updates(self) -> None:
+        self._interactive_updates_paused = True
+
+    def resume_interactive_updates(self) -> None:
+        self._interactive_updates_paused = False
+        self.flush_pending_assistant_delta()
+        self.flush_pending_tool_activity()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 1:
+            self._mouse_down_location = (event.x, event.y)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if self._mouse_down_location is None or event.button != 1:
+            return
+        start_x, start_y = self._mouse_down_location
+        if abs(event.x - start_x) + abs(event.y - start_y) >= 2:
+            self._selection_dragging = True
+            self.pause_interactive_updates()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self._mouse_down_location = None
+        if not self._selection_dragging:
+            return
+        self._selection_dragging = False
+        self.set_timer(
+            SELECTION_RESUME_DELAY_MS / 1000,
+            self.resume_interactive_updates,
+            name="selection-resume",
+        )
 
     def _sync_blocks(self) -> None:
         self._remove_singletons()
@@ -309,6 +447,10 @@ class ConversationTimeline(VerticalScroll):
 
     def _sync_plain_text(self) -> None:
         self._plain_text = "\n\n".join(_render_timeline_item(item, show_tool_details=self._tool_details_enabled) for item in self._items)
+        self._plain_text_dirty = False
+
+    def _mark_plain_text_dirty(self) -> None:
+        self._plain_text_dirty = True
 
     def _show_singleton(self, kind: str, text: str, classes: str) -> None:
         self._remove_singletons()
@@ -334,9 +476,63 @@ class ConversationTimeline(VerticalScroll):
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         self._stick_to_bottom = new_value >= self.max_scroll_y - 1
+        if self._stick_to_bottom:
+            self.resume_interactive_updates()
+        else:
+            self.pause_interactive_updates()
 
 
 ConversationView = ConversationTimeline
+
+
+class ToolActivityLog(Log):
+    """Timeline 内嵌工具详情日志，避免整段 Static 文本反复重绘。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("max_lines", 32)
+        kwargs.setdefault("auto_scroll", False)
+        kwargs.setdefault("highlight", False)
+        super().__init__(*args, **kwargs)
+        self._rendered_text = ""
+
+    @property
+    def plain_text(self) -> str:
+        return self._rendered_text
+
+    def _render_line(self, y: int, scroll_x: int, width: int) -> Strip:
+        if y >= len(self._lines):
+            return Strip([], 0)
+        line = self._render_line_strip(y, self.rich_style)
+        line = line.crop(scroll_x, scroll_x + width)
+        return line.apply_offsets(scroll_x, y)
+
+    def render_tools(self, tools: list[ToolActivity], *, show_details: bool) -> None:
+        lines = _render_tool_summary(tools, show_details=show_details)
+        self._rendered_text = "\n".join(lines)
+        if not self.is_attached:
+            return
+        self.clear()
+        if lines:
+            self.write_lines(lines, scroll_end=False)
+
+
+class AssistantMarkdown(Markdown):
+    """对话区 Markdown：保留渲染，禁用表格悬停浮窗。"""
+
+    def update(self, markdown: str) -> AwaitComplete:
+        return AwaitComplete(self._clear_table_tooltips_after(super().update(markdown)))
+
+    def append(self, markdown: str) -> AwaitComplete:
+        return AwaitComplete(self._clear_table_tooltips_after(super().append(markdown)))
+
+    async def _clear_table_tooltips_after(self, update: AwaitComplete) -> None:
+        await update
+        self.clear_table_tooltips()
+
+    def clear_table_tooltips(self) -> None:
+        for widget in self.walk_children():
+            if widget.has_class("cell") or widget.has_class("header"):
+                widget.tooltip = None
 
 
 def _render_timeline_item(item: TimelineItem, *, show_tool_details: bool) -> str:
@@ -352,6 +548,22 @@ def _render_timeline_item(item: TimelineItem, *, show_tool_details: bool) -> str
     return "\n".join(lines)
 
 
+def timeline_render_metrics(items: list[TimelineItem], *, show_tool_details: bool) -> TimelineRenderMetrics:
+    rendered_items = [_render_timeline_item(item, show_tool_details=show_tool_details) for item in items]
+    tool_count = sum(len(item.tools) for item in items)
+    diagnostic_count = sum(len(tool.diagnostics) for item in items for tool in item.tools)
+    detail_line_count = 0
+    if show_tool_details:
+        detail_line_count = sum(len(_render_tool_summary(item.tools, show_details=True)) for item in items if item.tools)
+    return TimelineRenderMetrics(
+        item_count=len(items),
+        tool_count=tool_count,
+        diagnostic_count=diagnostic_count,
+        detail_line_count=detail_line_count,
+        rendered_character_count=sum(len(item) for item in rendered_items),
+    )
+
+
 class TimelineBlock(Vertical):
     _STREAMING_INDICATOR_FRAMES = ("|", "/", "-", "\\")
 
@@ -361,9 +573,10 @@ class TimelineBlock(Vertical):
         self._header_widget: Static | None = None
         self._body_widget: Markdown | Static | None = None
         self._active_widget: Static | None = None
-        self._tools_widget: Static | None = None
+        self._tools_widget: ToolActivityLog | None = None
         self._markdown_stream: Any | None = None
         self._markdown_stream_content = ""
+        self._markdown_update_version = 0
         self._streaming_indicator_timer: Timer | None = None
         self._streaming_indicator_index = 0
         super().__init__(classes=_timeline_item_classes(item))
@@ -371,11 +584,11 @@ class TimelineBlock(Vertical):
     def compose(self) -> ComposeResult:
         self._header_widget = Static("", classes="timeline-header")
         if self._item.role == "assistant":
-            self._body_widget = Markdown("", classes="timeline-body timeline-answer", open_links=False)
+            self._body_widget = AssistantMarkdown("", classes="timeline-body timeline-answer", open_links=False)
         else:
             self._body_widget = Static("", classes="timeline-body")
         self._active_widget = Static("", classes="timeline-active")
-        self._tools_widget = Static("", classes="timeline-tools")
+        self._tools_widget = ToolActivityLog(classes="timeline-tools")
         yield self._header_widget
         yield self._tools_widget
         yield self._body_widget
@@ -412,9 +625,8 @@ class TimelineBlock(Vertical):
             active_text = ""
         active.update(active_text)
         active.display = bool(active_text)
-        tool_text = "\n".join(_render_tool_summary(item.tools, show_details=self._show_tool_details))
-        tools.update(tool_text)
-        tools.display = bool(tool_text)
+        tools.render_tools(item.tools, show_details=self._show_tool_details)
+        tools.display = bool(item.tools)
         self.set_class(item.role == "assistant" and item.status == "streaming", "timeline-streaming")
         self.set_class(item.role == "failure" or item.status == "failed", "timeline-failed")
         self.set_class(item.role == "user", "timeline-user")
@@ -427,12 +639,7 @@ class TimelineBlock(Vertical):
         if item.status == "streaming":
             if self._markdown_stream is None or not content.startswith(self._markdown_stream_content):
                 self._stop_markdown_stream()
-                self.run_worker(
-                    self._update_markdown_content(body, ""),
-                    group="markdown-update",
-                    exit_on_error=False,
-                    exclusive=True,
-                )
+                self._queue_markdown_update(body, "")
                 self._markdown_stream = Markdown.get_stream(body)
                 self._markdown_stream_content = ""
             delta = content[len(self._markdown_stream_content) :]
@@ -447,17 +654,24 @@ class TimelineBlock(Vertical):
             return
         self._stop_markdown_stream()
         if body.source != content:
-            self.run_worker(
-                self._update_markdown_content(body, content),
-                group="markdown-update",
-                exit_on_error=False,
-                exclusive=True,
-            )
+            self._queue_markdown_update(body, content)
 
-    async def _update_markdown_content(self, body: Markdown, content: str) -> None:
+    def _queue_markdown_update(self, body: Markdown, content: str) -> None:
+        self._markdown_update_version += 1
+        version = self._markdown_update_version
+        self.run_worker(
+            self._update_markdown_content(body, content, version),
+            group="markdown-update",
+            exit_on_error=False,
+        )
+
+    async def _update_markdown_content(self, body: Markdown, content: str, version: int) -> None:
+        if version != self._markdown_update_version:
+            return
         await body.update(content)
         self._scroll_timeline_to_end()
         self.call_after_refresh(self._scroll_timeline_to_end)
+        self.call_after_refresh(lambda: self.call_after_refresh(self._scroll_timeline_to_end))
 
     def _stop_markdown_stream(self) -> None:
         if self._markdown_stream is None:
@@ -540,10 +754,16 @@ def _render_tool_summary(tools: list[ToolActivity], *, show_details: bool) -> li
         summary_parts.append(f"当前：{'、'.join(compact_names)}")
     lines = [f"  [工具] {' · '.join(summary_parts)}"]
     if show_details:
-        visible_tools = tools
+        collapsed_tools = max(0, len(tools) - TOOL_DETAIL_VISIBLE_LIMIT)
+        visible_tools = tools[-TOOL_DETAIL_VISIBLE_LIMIT:]
+        if collapsed_tools:
+            lines.append(f"    ... 已折叠 {collapsed_tools} 条较早工具详情")
         for item in visible_tools:
             lines.append(f"    - 工具 {item.tool_name} {_tool_legacy_status(item.status)} · {item.summary}")
-            lines.extend(f"      诊断：{diagnostic}" for diagnostic in item.diagnostics)
+            collapsed_diagnostics = max(0, len(item.diagnostics) - TOOL_DIAGNOSTIC_VISIBLE_LIMIT)
+            if collapsed_diagnostics:
+                lines.append(f"      ... 已折叠 {collapsed_diagnostics} 条较早诊断")
+            lines.extend(f"      诊断：{diagnostic}" for diagnostic in item.diagnostics[-TOOL_DIAGNOSTIC_VISIBLE_LIMIT:])
     return lines
 
 

@@ -540,6 +540,14 @@ def _text(app: HaAgentTuiApp, selector: str) -> str:
     return str(widget.content)
 
 
+async def _wait_for_conversation_bottom(app: HaAgentTuiApp, pilot, *, attempts: int = 10) -> None:
+    conversation = app.query_one("#conversation")
+    for _ in range(attempts):
+        if conversation.scroll_y == conversation.max_scroll_y:
+            return
+        await pilot.pause(0.05)
+
+
 def _all_text(app: HaAgentTuiApp) -> str:
     widgets = list(app.query("*"))
     if app.screen is not None:
@@ -4446,6 +4454,13 @@ def test_tui_assistant_body_renders_markdown_without_opening_links(tmp_path: Pat
             assistant_body = conversation.query_one(".timeline-assistant .timeline-body")
             assert isinstance(assistant_body, Markdown)
             assert getattr(assistant_body, "_open_links") is False
+            table_cells = [
+                widget
+                for widget in assistant_body.walk_children()
+                if widget.has_class("cell") or widget.has_class("header")
+            ]
+            assert table_cells
+            assert all(widget.tooltip is None for widget in table_cells)
             assert markdown_reply in conversation.plain_text
 
     asyncio.run(run())
@@ -4472,6 +4487,50 @@ def test_tui_assistant_final_message_replaces_streamed_markdown(tmp_path: Path) 
             assert assistant_body.source == "# 最终\n\n- 完成"
             assert "# 草稿" not in conversation.plain_text
             assert "# 最终\n\n- 完成" in conversation.plain_text
+
+    asyncio.run(run())
+
+
+def test_tui_streamed_markdown_table_cells_do_not_show_tooltips(tmp_path: Path) -> None:
+    class BlockingAssistantService(FakeAssistantService):
+        def __init__(self, *args, release_event: threading.Event, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.release_event = release_event
+            self.stream_ready = threading.Event()
+
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+            self.prompts.append(prompt)
+            self.started.set()
+            if event_sink is not None:
+                event_sink(_assistant_event("assistant_delta", len(self.prompts), "| 来源 | 链接 |\n"))
+                event_sink(_assistant_event("assistant_delta", len(self.prompts), "| --- | --- |\n"))
+                event_sink(_assistant_event("assistant_delta", len(self.prompts), "| TASS | tass.com |\n"))
+            self.stream_ready.set()
+            self.release_event.wait(timeout=2)
+            return SimpleNamespace(status="completed")
+
+    async def run() -> None:
+        release_event = threading.Event()
+        service = BlockingAssistantService(workspace_root=tmp_path, release_event=release_event)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "生成表格"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.stream_ready.wait, 2)
+            await pilot.pause(0.3)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            assistant_body = conversation.query_one(".timeline-assistant .timeline-body", Markdown)
+            table_cells = [
+                widget
+                for widget in assistant_body.walk_children()
+                if widget.has_class("cell") or widget.has_class("header")
+            ]
+            assert table_cells
+            assert all(widget.tooltip is None for widget in table_cells)
+            release_event.set()
+            await pilot.pause(0.2)
 
     asyncio.run(run())
 
@@ -4751,6 +4810,27 @@ def test_tui_user_and_assistant_blocks_keep_spacing_and_alignment(tmp_path: Path
     asyncio.run(run())
 
 
+def test_tui_conversation_scrollbar_states_do_not_use_black_track(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, assistant_content="已经完成。")
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "帮我总结"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            assert conversation.styles.scrollbar_background == conversation.styles.background
+            assert conversation.styles.scrollbar_background_hover == conversation.styles.background
+            assert conversation.styles.scrollbar_background_active == conversation.styles.background
+            assert conversation.styles.scrollbar_size_vertical == 0
+            assert conversation.styles.scrollbar_size_horizontal == 0
+            assert conversation.styles.scrollbar_visibility == "hidden"
+
+    asyncio.run(run())
+
+
 def test_tui_tool_events_attach_to_turn_summary_and_keep_answer_readable(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
@@ -4967,6 +5047,39 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_tui_tool_details_use_inline_log_widget(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[
+                _tool_event("tool_started", 1, "web_search"),
+                _tool_event("tool_finished", 1, "web_search"),
+            ],
+            assistant_content="资料已经核对。",
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "联网核对"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            tool_log = app.query_one(".timeline-assistant .timeline-tools")
+            assert tool_log.__class__.__name__ == "ToolActivityLog"
+            assert getattr(tool_log, "max_lines") == 32
+            assert tool_log.styles.overflow_x == "hidden"
+            assert tool_log.styles.overflow_y == "hidden"
+            assert tool_log.show_horizontal_scrollbar is False
+            assert tool_log.show_vertical_scrollbar is False
+            assert tool_log.styles.color == app.screen.styles.color
+            selection_style = app.screen.get_component_rich_style("screen--selection")
+            assert selection_style.color is not None
+            assert selection_style.bgcolor is not None
+            assert selection_style.color != selection_style.bgcolor
+
+    asyncio.run(run())
+
+
 def test_tui_renders_full_long_assistant_message_from_event_sink(tmp_path: Path) -> None:
     async def run() -> None:
         long_reply = ("HaAgent 可以读取文件、整理内容、编辑文档、分析项目。" * 40) + "完整结尾"
@@ -4980,6 +5093,7 @@ def test_tui_renders_full_long_assistant_message_from_event_sink(tmp_path: Path)
             conversation = _text(app, "#conversation")
             assert "[truncated]" not in conversation
             assert "完整结尾" in conversation
+            await _wait_for_conversation_bottom(app, pilot)
             assert app.query_one("#conversation").scroll_y == app.query_one("#conversation").max_scroll_y
 
     asyncio.run(run())

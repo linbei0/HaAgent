@@ -29,4 +29,3 @@ __all__ = [
     "_end_location",
     "merge_tool_activity",
 ]
-
