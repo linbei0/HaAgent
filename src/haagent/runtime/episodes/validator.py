@@ -28,6 +28,7 @@ REQUIRED_PACKAGE_FILES = [
     "failure-attribution.md",
     "failure.json",
     "environment.json",
+    "cost.json",
     "sandbox.json",
 ]
 VERIFICATION_COMMANDS_FILE = "verification/commands.jsonl"
@@ -54,6 +55,8 @@ class EpisodePackageView:
     tool_calls: list[dict[str, Any]]
     verification_commands: list[dict[str, Any]]
     plan: dict[str, Any] = field(default_factory=dict)
+    environment: dict[str, Any] = field(default_factory=dict)
+    cost: dict[str, Any] = field(default_factory=dict)
     sandbox: dict[str, Any] = field(default_factory=dict)
     workspace_preflight: dict[str, Any] = field(default_factory=dict)
     verification_reached: bool = True
@@ -94,6 +97,7 @@ def _read_validated_episode_package(
     plan = _read_json(episode_path / "plan.json")
     context_manifest = _read_json(episode_path / "context-manifest.json")
     environment = _read_json(episode_path / "environment.json")
+    cost = _read_json(episode_path / "cost.json")
     sandbox = _read_json(episode_path / "sandbox.json")
     workspace_preflight = _read_workspace_preflight(episode_path)
 
@@ -118,6 +122,7 @@ def _read_validated_episode_package(
             f"episode package missing required file: {VERIFICATION_COMMANDS_FILE}",
         )
     _validate_environment(environment)
+    _validate_cost(cost)
     _validate_sandbox(sandbox)
     if workspace_preflight:
         _validate_workspace_preflight(workspace_preflight)
@@ -141,6 +146,8 @@ def _read_validated_episode_package(
         transcript=transcript,
         tool_calls=tool_calls,
         verification_commands=verification_commands,
+        environment=environment,
+        cost=cost,
         sandbox=sandbox,
         workspace_preflight=workspace_preflight,
         verification_reached=verification_reached,
@@ -197,6 +204,9 @@ def _read_inspect_episode_package(episode_path: Path) -> EpisodePackageView:
     environment = _read_optional_json(episode_path / "environment.json")
     if environment is not None:
         _validate_environment(environment)
+    cost = _read_optional_json(episode_path / "cost.json")
+    if cost is not None:
+        _validate_cost(cost)
     sandbox = _read_optional_json(episode_path / "sandbox.json")
     if sandbox is not None:
         _validate_sandbox(sandbox)
@@ -222,6 +232,8 @@ def _read_inspect_episode_package(episode_path: Path) -> EpisodePackageView:
         transcript=transcript,
         tool_calls=tool_calls,
         verification_commands=verification_commands,
+        environment=environment or {},
+        cost=cost or {},
         sandbox=sandbox or {},
         workspace_preflight=workspace_preflight,
         verification_reached=verification_reached,
@@ -364,7 +376,7 @@ def _tool_policy_not_evaluated(record: dict[str, Any]) -> bool:
     return (
         record.get("status") == "error"
         and isinstance(error, dict)
-        and error.get("type") in {"tool_not_allowed", "unknown_tool"}
+        and error.get("type") in {"tool_not_allowed", "unknown_tool", "tool_call_skipped"}
     )
 
 
@@ -421,16 +433,100 @@ def _validate_verification_commands(records: list[dict[str, Any]]) -> None:
 
 
 def _validate_environment(environment: dict[str, Any]) -> None:
-    """校验 environment.json 的最小审计字段类型。"""
-    for field_name in ["python", "platform"]:
+    """校验 environment.json 的稳定审计字段类型。"""
+    _reject_secret_like_metadata(environment, "environment.json")
+    for field_name in ["environment_schema_version", "python", "platform"]:
         if not isinstance(environment.get(field_name), str):
             raise EpisodeValidationError(f"environment.json {field_name} must be a string")
+    if not isinstance(environment.get("created_at"), str):
+        raise EpisodeValidationError("environment.json created_at must be a string")
     _validate_iso_datetime_field(
         environment.get("created_at"),
         label="environment.json created_at",
     )
-    if "workspace_root" in environment and not isinstance(environment["workspace_root"], str):
+    if not isinstance(environment.get("workspace_root"), str):
         raise EpisodeValidationError("environment.json workspace_root must be a string")
+    process = environment.get("process")
+    if not isinstance(process, dict):
+        raise EpisodeValidationError("environment.json process must be an object")
+    for field_name in ["executable", "cwd"]:
+        if not isinstance(process.get(field_name), str):
+            raise EpisodeValidationError(f"environment.json process.{field_name} must be a string")
+    haagent = environment.get("haagent")
+    if not isinstance(haagent, dict):
+        raise EpisodeValidationError("environment.json haagent must be an object")
+    for field_name in ["package_version", "entrypoint"]:
+        if not isinstance(haagent.get(field_name), str):
+            raise EpisodeValidationError(f"environment.json haagent.{field_name} must be a string")
+    model = environment.get("model")
+    if not isinstance(model, dict):
+        raise EpisodeValidationError("environment.json model must be an object")
+    if not isinstance(model.get("provider"), str):
+        raise EpisodeValidationError("environment.json model.provider must be a string")
+    for field_name in ["model", "endpoint", "base_url", "profile_name"]:
+        if model.get(field_name) is not None and not isinstance(model.get(field_name), str):
+            raise EpisodeValidationError(
+                f"environment.json model.{field_name} must be a string or null",
+            )
+    tools = environment.get("tools")
+    if not isinstance(tools, dict):
+        raise EpisodeValidationError("environment.json tools must be an object")
+    for field_name in ["allowed_tool_count", "registry_tool_count"]:
+        if not isinstance(tools.get(field_name), int) or isinstance(tools.get(field_name), bool):
+            raise EpisodeValidationError(f"environment.json tools.{field_name} must be an int")
+    allowed_tools = tools.get("allowed_tools")
+    if not isinstance(allowed_tools, list) or any(not isinstance(item, str) for item in allowed_tools):
+        raise EpisodeValidationError("environment.json tools.allowed_tools must be a list of strings")
+
+
+def _validate_cost(cost: dict[str, Any]) -> None:
+    """校验 cost.json 的 usage/cost metadata 结构，不接受伪造 token 类型。"""
+    _reject_secret_like_metadata(cost, "cost.json")
+    if not isinstance(cost.get("cost_schema_version"), str):
+        raise EpisodeValidationError("cost.json cost_schema_version must be a string")
+    for field_name in ["usage_available", "pricing_available"]:
+        if not isinstance(cost.get(field_name), bool):
+            raise EpisodeValidationError(f"cost.json {field_name} must be a bool")
+    for field_name in ["currency", "pricing_source", "reason"]:
+        if cost.get(field_name) is not None and not isinstance(cost.get(field_name), str):
+            raise EpisodeValidationError(f"cost.json {field_name} must be a string or null")
+    estimated_cost = cost.get("estimated_cost")
+    if estimated_cost is not None and (
+        isinstance(estimated_cost, bool) or not isinstance(estimated_cost, int | float)
+    ):
+        raise EpisodeValidationError("cost.json estimated_cost must be a number or null")
+    model_calls = cost.get("model_calls")
+    if not isinstance(model_calls, list):
+        raise EpisodeValidationError("cost.json model_calls must be a list")
+    for index, call in enumerate(model_calls):
+        if not isinstance(call, dict):
+            raise EpisodeValidationError(f"cost.json model_calls[{index}] must be an object")
+        if not isinstance(call.get("turn"), int) or isinstance(call.get("turn"), bool):
+            raise EpisodeValidationError(f"cost.json model_calls[{index}].turn must be an integer")
+        for field_name in ["provider", "raw_usage_source"]:
+            if not isinstance(call.get(field_name), str):
+                raise EpisodeValidationError(
+                    f"cost.json model_calls[{index}].{field_name} must be a string",
+                )
+        if call.get("model") is not None and not isinstance(call.get("model"), str):
+            raise EpisodeValidationError(
+                f"cost.json model_calls[{index}].model must be a string or null",
+            )
+        for field_name in ["input_tokens", "output_tokens", "total_tokens"]:
+            _validate_token_or_null(
+                call.get(field_name),
+                f"cost.json model_calls[{index}].{field_name}",
+            )
+    totals = cost.get("totals")
+    if not isinstance(totals, dict):
+        raise EpisodeValidationError("cost.json totals must be an object")
+    if not isinstance(totals.get("model_call_count"), int) or isinstance(
+        totals.get("model_call_count"),
+        bool,
+    ):
+        raise EpisodeValidationError("cost.json totals.model_call_count must be an integer")
+    for field_name in ["input_tokens", "output_tokens", "total_tokens"]:
+        _validate_token_or_null(totals.get(field_name), f"cost.json totals.{field_name}")
 
 
 def _validate_sandbox(sandbox: dict[str, Any]) -> None:
@@ -788,6 +884,55 @@ def _validate_context_index_budget(index: int, context_index: dict[str, Any], so
 
 def _non_empty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_token_or_null(value: Any, label: str) -> None:
+    if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+        raise EpisodeValidationError(f"{label} must be an integer or null")
+
+
+SECRET_LIKE_KEY_PARTS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "password",
+    "secret",
+    "token",
+}
+
+
+def _reject_secret_like_metadata(value: Any, label: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if _looks_secret_like_key(key_text):
+                raise EpisodeValidationError(f"{label} contains secret-like metadata key: {key}")
+            _reject_secret_like_metadata(item, label)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_secret_like_metadata(item, label)
+        return
+    if isinstance(value, str) and _looks_secret_like_value(value):
+        raise EpisodeValidationError(f"{label} contains secret-like metadata value")
+
+
+def _looks_secret_like_value(value: str) -> bool:
+    lowered = value.lower()
+    if "authorization:" in lowered or "bearer " in lowered:
+        return True
+    if any(marker in lowered for marker in ["api_key=", "apikey=", "access_token=", "token="]):
+        return True
+    if value.startswith(("sk-", "sk_", "xoxb-", "ghp_")):
+        return True
+    return False
+
+
+def _looks_secret_like_key(key_text: str) -> bool:
+    if key_text in SECRET_LIKE_KEY_PARTS:
+        return True
+    return key_text.endswith(("_api_key", "_apikey", "_authorization", "_password", "_secret", "_token"))
 
 
 def _is_episode_internal_file(episode_path: Path, relative_path: str) -> bool:

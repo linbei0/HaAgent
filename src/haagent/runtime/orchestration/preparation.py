@@ -58,7 +58,7 @@ def prepare_run_setup(
         workspace_root=workspace_root,
     )
     transition(RunStatus.PLANNING)
-    writer.write_environment(workspace_root)
+    writer.write_environment(workspace_root, entrypoint="run")
     raise_if_cancelled()
     plan = build_plan(task)
     writer.write_plan(plan)
@@ -102,6 +102,13 @@ def prepare_initial_messages(
     interaction_resolver: HumanInteractionResolver,
     tool_registry: ToolRuntimeRegistry | None = None,
 ) -> PreparedMessages:
+    writer.write_environment(
+        workspace_root,
+        model_metadata=_gateway_metadata(model_gateway, provider_name),
+        allowed_tools=task.allowed_tools,
+        registry_tool_count=_registry_tool_count(tool_registry),
+        entrypoint="run",
+    )
     context = context_builder_cls(
         task=task,
         workspace_root=workspace_root,
@@ -150,6 +157,27 @@ def prepare_initial_messages(
         write_full_compact_manifest_result(writer, context.context_id, full_compact_result.manifest)
         messages = full_compact_result.messages
     return PreparedMessages(context_id=context.context_id, messages=messages)
+
+
+def _gateway_metadata(model_gateway: ModelGateway, provider_name: str):
+    metadata_getter = getattr(model_gateway, "metadata", None)
+    if callable(metadata_getter):
+        return metadata_getter()
+    from haagent.models.gateway import ModelGatewayMetadata
+
+    return ModelGatewayMetadata(
+        provider=provider_name,
+        model=None,
+        endpoint=None,
+        base_url=None,
+        profile_name=None,
+    )
+
+
+def _registry_tool_count(tool_registry: ToolRuntimeRegistry | None) -> int:
+    if tool_registry is None:
+        return 0
+    return len(tool_registry.static_tools) + len(tool_registry.dynamic_tools)
 
 
 def full_compact_eligibility_from_manifest(contract: dict[str, Any]) -> FullCompactEligibility:

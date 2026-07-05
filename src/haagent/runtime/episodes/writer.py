@@ -13,9 +13,12 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata as package_metadata
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
+from haagent.models.gateway import ModelGatewayMetadata, ModelUsage
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.sandbox.base import SandboxMetadata
 
@@ -37,7 +40,9 @@ class EpisodeWriter:
         shutil.copyfile(task_path, episode_path / "task.yaml")
         (episode_path / "transcript.jsonl").write_text("", encoding="utf-8")
         (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
-        return cls(path=episode_path, task_path=task_path)
+        writer = cls(path=episode_path, task_path=task_path)
+        writer.write_cost_metadata()
+        return writer
 
     def append_transcript(self, record: dict[str, Any]) -> None:
         self._append_jsonl("transcript.jsonl", record)
@@ -81,15 +86,89 @@ class EpisodeWriter:
         )
         self._write_json("episode.json", metadata)
 
-    def write_environment(self, workspace_root: Path | None = None) -> None:
+    def write_environment(
+        self,
+        workspace_root: Path | None = None,
+        *,
+        model_metadata: ModelGatewayMetadata | None = None,
+        allowed_tools: list[str] | None = None,
+        registry_tool_count: int | None = None,
+        entrypoint: str = "unknown",
+    ) -> None:
+        allowed_tool_names = [str(name) for name in (allowed_tools or [])]
         environment = {
+            "environment_schema_version": "1.0",
+            "created_at": datetime.now(UTC).isoformat(),
+            "workspace_root": str(workspace_root) if workspace_root is not None else None,
             "python": sys.version,
             "platform": platform.platform(),
-            "created_at": datetime.now(UTC).isoformat(),
+            "process": {
+                "executable": sys.executable,
+                "cwd": str(Path.cwd()),
+            },
+            "haagent": {
+                "package_version": _package_version(),
+                "entrypoint": entrypoint,
+            },
+            "model": _environment_model_metadata(model_metadata),
+            "tools": {
+                "allowed_tool_count": len(allowed_tool_names),
+                "registry_tool_count": int(registry_tool_count or 0),
+                "allowed_tools": allowed_tool_names,
+            },
         }
-        if workspace_root is not None:
-            environment["workspace_root"] = str(workspace_root)
         self._write_json("environment.json", environment)
+
+    def write_cost_metadata(self) -> None:
+        self._write_json("cost.json", _empty_cost_metadata())
+
+    def append_model_usage(
+        self,
+        *,
+        turn: int,
+        provider: str,
+        model: str | None,
+        usage: ModelUsage | None,
+    ) -> None:
+        if usage is None:
+            self.finalize_cost_metadata()
+            return
+        cost = _read_cost_metadata(self.path / "cost.json")
+        cost["usage_available"] = True
+        cost["pricing_available"] = False
+        cost["currency"] = None
+        cost["estimated_cost"] = None
+        cost["pricing_source"] = None
+        cost["reason"] = "pricing unavailable: no reliable catalog match"
+        model_calls = cost.setdefault("model_calls", [])
+        if not isinstance(model_calls, list):
+            model_calls = []
+            cost["model_calls"] = model_calls
+        model_calls.append(
+            {
+                "turn": turn,
+                "provider": provider,
+                "model": model,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "raw_usage_source": usage.raw_source,
+            },
+        )
+        cost["totals"] = _usage_totals(model_calls)
+        self._write_json("cost.json", cost)
+
+    def finalize_cost_metadata(self) -> None:
+        cost_path = self.path / "cost.json"
+        if not cost_path.exists():
+            self.write_cost_metadata()
+            return
+        cost = _read_cost_metadata(cost_path)
+        if not cost.get("model_calls"):
+            cost.update(_empty_cost_metadata())
+        elif cost.get("usage_available") is True and not cost.get("pricing_available"):
+            cost["reason"] = cost.get("reason") or "pricing unavailable: no reliable catalog match"
+        self._write_json("cost.json", cost)
 
     def write_sandbox_metadata(self, metadata: SandboxMetadata) -> None:
         self._write_json("sandbox.json", metadata.to_dict())
@@ -142,3 +221,92 @@ class EpisodeWriter:
 def _validate_failure_category(category: str) -> None:
     if category not in {failure_category.value for failure_category in FailureCategory}:
         raise ValueError(f"unknown failure category: {category}")
+
+
+def _empty_cost_metadata() -> dict[str, Any]:
+    return {
+        "cost_schema_version": "1.0",
+        "usage_available": False,
+        "pricing_available": False,
+        "currency": None,
+        "estimated_cost": None,
+        "pricing_source": None,
+        "reason": "model gateway did not provide usage metadata",
+        "model_calls": [],
+        "totals": {
+            "model_call_count": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+        },
+    }
+
+
+def _read_cost_metadata(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return _empty_cost_metadata()
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return _empty_cost_metadata()
+    return parsed if isinstance(parsed, dict) else _empty_cost_metadata()
+
+
+def _usage_totals(model_calls: list[Any]) -> dict[str, int | None]:
+    input_total = _sum_token_field(model_calls, "input_tokens")
+    output_total = _sum_token_field(model_calls, "output_tokens")
+    total_total = _sum_token_field(model_calls, "total_tokens")
+    return {
+        "model_call_count": len(model_calls),
+        "input_tokens": input_total,
+        "output_tokens": output_total,
+        "total_tokens": total_total,
+    }
+
+
+def _sum_token_field(model_calls: list[Any], field_name: str) -> int | None:
+    values = [
+        call.get(field_name)
+        for call in model_calls
+        if isinstance(call, dict) and isinstance(call.get(field_name), int)
+    ]
+    if not values:
+        return None
+    return sum(values)
+
+
+def _environment_model_metadata(metadata: ModelGatewayMetadata | None) -> dict[str, str | None]:
+    if metadata is None:
+        return {
+            "provider": "unknown",
+            "model": None,
+            "endpoint": None,
+            "base_url": None,
+            "profile_name": None,
+        }
+    return {
+        "provider": metadata.provider or "unknown",
+        "model": metadata.model,
+        "endpoint": _safe_url(metadata.endpoint),
+        "base_url": _safe_url(metadata.base_url),
+        "profile_name": metadata.profile_name,
+    }
+
+
+def _safe_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    parsed = urlsplit(value.strip())
+    if not parsed.scheme or not parsed.hostname:
+        return value.strip().split("?", 1)[0]
+    netloc = parsed.hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _package_version() -> str:
+    try:
+        return package_metadata.version("haagent")
+    except package_metadata.PackageNotFoundError:
+        return "unknown"

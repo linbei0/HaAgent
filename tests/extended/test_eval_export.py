@@ -157,6 +157,20 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     assert eval_case["tool_argument_errors"] == []
     sandbox = json.loads((result.episode_path / "sandbox.json").read_text(encoding="utf-8"))
     assert eval_case["sandbox_summary"] == expanded_sandbox_summary(sandbox)
+    assert eval_case["environment_summary"]["model_provider"] == "fake"
+    assert eval_case["environment_summary"]["model"] == "fake-model"
+    assert eval_case["environment_summary"]["allowed_tool_count"] == 1
+    assert eval_case["cost_summary"] == {
+        "usage_available": False,
+        "pricing_available": False,
+        "model_call_count": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "estimated_cost": None,
+        "currency": None,
+        "reason": "model gateway did not provide usage metadata",
+    }
     assert eval_case["approval_summary"] == [
         {
             "tool_name": "fake_tool",
@@ -327,6 +341,41 @@ policy:
     ]
 
 
+def test_eval_export_approval_summary_marks_skipped_tool_as_not_evaluated(
+    tmp_path: Path,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "tool-calls.jsonl").write_text(
+        json.dumps(
+            {
+                "tool_name": "web_search",
+                "status": "error",
+                "error": {
+                    "type": "tool_call_skipped",
+                    "message": "tool call skipped because an earlier tool call failed.",
+                },
+                "policy": None,
+            },
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert eval_case["approval_summary"] == [
+        {
+            "tool_name": "web_search",
+            "action": "not_evaluated",
+            "approval_required": False,
+            "approval_status": "not_evaluated",
+            "approval_reason": "tool call skipped because an earlier tool call failed.",
+        },
+    ]
+
+
 def test_eval_export_includes_human_interaction_events_for_denied_approval(
     tmp_path: Path,
 ) -> None:
@@ -480,6 +529,61 @@ def test_eval_export_includes_expanded_sandbox_summary(tmp_path: Path) -> None:
     assert eval_case["sandbox_summary"]["degraded"] is False
 
 
+def test_eval_export_includes_environment_and_cost_summary(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    cost_path = result.episode_path / "cost.json"
+    cost = json.loads(cost_path.read_text(encoding="utf-8"))
+    cost.update(
+        {
+            "usage_available": True,
+            "reason": "pricing unavailable: no reliable catalog match",
+            "model_calls": [
+                {
+                    "turn": 1,
+                    "provider": "fake",
+                    "model": "fake-model",
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                    "raw_usage_source": "fake.usage",
+                }
+            ],
+            "totals": {
+                "model_call_count": 1,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            },
+        },
+    )
+    cost_path.write_text(json.dumps(cost), encoding="utf-8")
+
+    eval_case = export_eval_case(result.episode_path)
+
+    assert eval_case["environment_summary"] == {
+        "python": eval_case["environment_summary"]["python"],
+        "platform": eval_case["environment_summary"]["platform"],
+        "haagent_version": eval_case["environment_summary"]["haagent_version"],
+        "model_provider": "fake",
+        "model": "fake-model",
+        "endpoint": None,
+        "allowed_tool_count": 1,
+    }
+    assert eval_case["cost_summary"] == {
+        "usage_available": True,
+        "pricing_available": False,
+        "model_call_count": 1,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "estimated_cost": None,
+        "currency": None,
+        "reason": "pricing unavailable: no reliable catalog match",
+    }
+
+
 def test_eval_export_rejects_missing_sandbox_through_validator(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)
@@ -490,6 +594,16 @@ def test_eval_export_rejects_missing_sandbox_through_validator(tmp_path: Path) -
         EpisodeValidationError,
         match="episode package missing required file: sandbox.json",
     ):
+        export_eval_case(result.episode_path)
+
+
+def test_eval_export_rejects_missing_cost_through_validator(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "cost.json").unlink()
+
+    with pytest.raises(EpisodeValidationError, match="missing required file: cost.json"):
         export_eval_case(result.episode_path)
 
 

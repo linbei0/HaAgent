@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.gateway import ModelGatewayMetadata, ModelResponse, ToolCall
 
 
 class FakeModelGateway:
@@ -43,6 +43,15 @@ class FakeModelGateway:
         if tool_result_count > 0 and self._response.tool_calls:
             return ModelResponse(content="Fake model observed tool results.", tool_calls=[])
         return self._response
+
+    def metadata(self) -> ModelGatewayMetadata:
+        return ModelGatewayMetadata(
+            provider=self.provider_name,
+            model="fake-model",
+            endpoint=None,
+            base_url=None,
+            profile_name=None,
+        )
 
 
 def _tool_schema_available(tool_schemas: list[dict[str, Any]], tool_name: str) -> bool:

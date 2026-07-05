@@ -19,7 +19,7 @@ from haagent.context.messages import (
     build_tool_result_message,
     generate_tool_call_id,
 )
-from haagent.models.gateway import ModelGateway, ToolCall
+from haagent.models.gateway import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import check_assistant_output, guardrail_evidence
@@ -135,27 +135,37 @@ def run_turn_loop(
                 tool_schemas=tool_schemas,
             )
         deps.raise_if_cancelled()
+        model_metadata = _gateway_metadata(deps.model_gateway)
+        deps.writer.append_model_usage(
+            turn=turn,
+            provider=deps.model_gateway.provider_name,
+            model=model_metadata.get("model"),
+            usage=model_response.usage,
+        )
         output_guardrail = (
             check_assistant_output(model_response.content)
             if not model_response.tool_calls
             else None
         )
-        deps.writer.append_transcript(
-            {
-                "event": "model_response",
-                "provider": deps.model_gateway.provider_name,
-                "turn": turn,
-                "content": (
-                    "blocked by output guardrail"
-                    if output_guardrail is not None
-                    else model_response.content
-                ),
-                "tool_calls": [
-                    {"name": tc.name, "args": tc.args}
-                    for tc in model_response.tool_calls
-                ],
-            },
-        )
+        response_record: dict[str, Any] = {
+            "event": "model_response",
+            "provider": deps.model_gateway.provider_name,
+            "model": model_metadata.get("model"),
+            "turn": turn,
+            "content": (
+                "blocked by output guardrail"
+                if output_guardrail is not None
+                else model_response.content
+            ),
+            "tool_calls": [
+                {"name": tc.name, "args": tc.args}
+                for tc in model_response.tool_calls
+            ],
+        }
+        usage_record = _usage_record(model_response.usage)
+        if usage_record is not None:
+            response_record["usage"] = usage_record
+        deps.writer.append_transcript(response_record)
         if output_guardrail is not None:
             deps.record_guardrail(output_guardrail, turn)
             deps.recorder.transition(RunStatus.FAILED)
@@ -557,3 +567,22 @@ def _supports_event_sink(model_gateway: ModelGateway) -> bool:
     except (TypeError, ValueError):
         return False
     return "event_sink" in signature.parameters
+
+
+def _usage_record(usage: ModelUsage | None) -> dict[str, object] | None:
+    if usage is None:
+        return None
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "raw_usage_source": usage.raw_source,
+    }
+
+
+def _gateway_metadata(model_gateway: ModelGateway) -> dict[str, object]:
+    metadata_getter = getattr(model_gateway, "metadata", None)
+    if not callable(metadata_getter):
+        return {"model": None}
+    metadata = metadata_getter()
+    return {"model": metadata.model}

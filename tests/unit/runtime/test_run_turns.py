@@ -59,6 +59,9 @@ class _FakeWriter:
     def append_tool_call(self, record: dict[str, Any]) -> None:
         raise AssertionError(f"unexpected skipped tool call: {record}")
 
+    def append_model_usage(self, **kwargs) -> None:
+        self.model_usage = kwargs
+
     def write_failure_attribution(self, record: dict[str, Any] | None) -> None:
         self.failure_records.append(record)
 

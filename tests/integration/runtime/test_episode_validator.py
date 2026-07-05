@@ -65,6 +65,12 @@ def update_environment(episode_path: Path, **updates: object) -> None:
     write_json(episode_path / "environment.json", environment)
 
 
+def update_cost(episode_path: Path, **updates: object) -> None:
+    cost = read_json(episode_path / "cost.json")
+    cost.update(updates)
+    write_json(episode_path / "cost.json", cost)
+
+
 def update_sandbox(episode_path: Path, **updates: object) -> None:
     sandbox = read_json(episode_path / "sandbox.json")
     sandbox.update(updates)
@@ -230,6 +236,19 @@ def test_package_validator_accepts_new_run_episode(tmp_path: Path) -> None:
     validate_episode_package(result.episode_path)
 
 
+def test_load_validated_episode_package_returns_environment_and_cost(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+
+    package = load_validated_episode_package(result.episode_path)
+    assert package.environment["environment_schema_version"] == "1.0"
+    assert package.environment["model"]["provider"] == "fake"
+    assert package.cost["cost_schema_version"] == "1.0"
+    assert package.cost["usage_available"] is False
+
+
 def test_package_validator_rejects_missing_required_file(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)
@@ -239,6 +258,19 @@ def test_package_validator_rejects_missing_required_file(tmp_path: Path) -> None
     with pytest.raises(
         EpisodeValidationError,
         match="episode package missing required file: environment.json",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_missing_cost_json(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "cost.json").unlink()
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="episode package missing required file: cost.json",
     ):
         validate_episode_package(result.episode_path)
 
@@ -408,10 +440,16 @@ def test_package_validator_rejects_plan_field_type_error(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("field", "bad_value", "message"),
     [
+        ("environment_schema_version", 1, "environment.json environment_schema_version must be a string"),
         ("python", 123, "environment.json python must be a string"),
         ("platform", 123, "environment.json platform must be a string"),
+        ("created_at", 123, "environment.json created_at must be a string"),
         ("created_at", "not-a-date", "environment.json created_at is invalid: not-a-date"),
         ("workspace_root", 123, "environment.json workspace_root must be a string"),
+        ("process", [], "environment.json process must be an object"),
+        ("haagent", [], "environment.json haagent must be an object"),
+        ("model", [], "environment.json model must be an object"),
+        ("tools", [], "environment.json tools must be an object"),
         (
             "workspace_root",
             "__other_root__",
@@ -430,6 +468,89 @@ def test_package_validator_rejects_environment_field_errors(
     result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
     value = str(tmp_path / "other") if bad_value == "__other_root__" else bad_value
     update_environment(result.episode_path, **{field: value})
+
+    with pytest.raises(EpisodeValidationError, match=message):
+        validate_episode_package(result.episode_path)
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"cost_schema_version": 1}, "cost.json cost_schema_version must be a string"),
+        ({"usage_available": "false"}, "cost.json usage_available must be a bool"),
+        ({"pricing_available": "false"}, "cost.json pricing_available must be a bool"),
+        ({"estimated_cost": "0.01"}, "cost.json estimated_cost must be a number or null"),
+        ({"reason": 123}, "cost.json reason must be a string or null"),
+        ({"model_calls": {}}, "cost.json model_calls must be a list"),
+        ({"totals": []}, "cost.json totals must be an object"),
+    ],
+)
+def test_package_validator_rejects_cost_field_errors(
+    tmp_path: Path,
+    updates: dict[str, object],
+    message: str,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    update_cost(result.episode_path, **updates)
+
+    with pytest.raises(EpisodeValidationError, match=message):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_cost_token_type_error(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    cost = read_json(result.episode_path / "cost.json")
+    cost["model_calls"] = [
+        {
+            "turn": 1,
+            "provider": "openai",
+            "model": "gpt-test",
+            "input_tokens": "10",
+            "output_tokens": 2,
+            "total_tokens": 12,
+            "raw_usage_source": "openai.responses.usage",
+        }
+    ]
+    write_json(result.episode_path / "cost.json", cost)
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="cost.json model_calls\\[0\\].input_tokens must be an integer or null",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "updates", "message"),
+    [
+        (
+            "cost.json",
+            {"api_key": "sk-secret-value"},
+            "cost.json contains secret-like metadata key: api_key",
+        ),
+        (
+            "environment.json",
+            {"model": {"provider": "fake", "model": "x", "endpoint": "https://example.test?token=secret", "base_url": None, "profile_name": None}},
+            "environment.json contains secret-like metadata value",
+        ),
+    ],
+)
+def test_package_validator_rejects_secret_like_metadata(
+    tmp_path: Path,
+    relative_path: str,
+    updates: dict[str, object],
+    message: str,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    payload = read_json(result.episode_path / relative_path)
+    payload.update(updates)
+    write_json(result.episode_path / relative_path, payload)
 
     with pytest.raises(EpisodeValidationError, match=message):
         validate_episode_package(result.episode_path)
@@ -533,7 +654,7 @@ def test_package_validator_rejects_tool_call_missing_approval(tmp_path: Path) ->
         validate_episode_package(result.episode_path)
 
 
-@pytest.mark.parametrize("error_type", ["tool_not_allowed", "unknown_tool"])
+@pytest.mark.parametrize("error_type", ["tool_not_allowed", "unknown_tool", "tool_call_skipped"])
 def test_package_validator_allows_policy_none_for_policy_not_evaluated_errors(
     tmp_path: Path,
     error_type: str,

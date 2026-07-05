@@ -34,6 +34,8 @@ def render_episode_summary(episode_path: Path) -> str:
     verification = package_view.verification_commands
     verification_reached = package_view.verification_reached
     failure_record = package_view.failure_record
+    environment = package_view.environment
+    cost = package_view.cost
     sandbox = package_view.sandbox
     workspace_preflight = package_view.workspace_preflight
 
@@ -68,6 +70,10 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_contexts(episode_path, context_manifest.get("contexts", [])))
     lines.extend(["", "Plan"])
     lines.extend(_format_plan(plan))
+    lines.extend(["", "Environment"])
+    lines.extend(_format_environment(environment))
+    lines.extend(["", "Cost"])
+    lines.extend(_format_cost(cost))
     lines.extend(["", "Sandbox"])
     lines.extend(_format_sandbox(sandbox))
     lines.extend(["", "Workspace Preflight"])
@@ -260,6 +266,56 @@ def _format_plan(plan: dict[str, Any]) -> list[str]:
     return [f"- {step}" for step in planned_steps]
 
 
+def _format_environment(environment: dict[str, Any]) -> list[str]:
+    if not environment:
+        return ["- none"]
+    model = environment.get("model", {})
+    tools = environment.get("tools", {})
+    haagent = environment.get("haagent", {})
+    if not isinstance(model, dict):
+        model = {}
+    if not isinstance(tools, dict):
+        tools = {}
+    if not isinstance(haagent, dict):
+        haagent = {}
+    provider = model.get("provider", "unknown")
+    model_name = model.get("model") or "unknown"
+    return [
+        f"- python: {environment.get('python', 'unknown')}",
+        f"- platform: {environment.get('platform', 'unknown')}",
+        f"- haagent_version: {haagent.get('package_version', 'unknown')}",
+        f"- model: {provider}/{model_name}",
+        f"- endpoint: {model.get('endpoint') or 'unknown'}",
+        f"- allowed_tool_count: {tools.get('allowed_tool_count', 'unknown')}",
+    ]
+
+
+def _format_cost(cost: dict[str, Any]) -> list[str]:
+    if not cost:
+        return ["- none"]
+    totals = cost.get("totals", {})
+    if not isinstance(totals, dict):
+        totals = {}
+    estimated_cost = cost.get("estimated_cost")
+    currency = cost.get("currency")
+    if estimated_cost is None:
+        estimated = "unavailable"
+    elif currency:
+        estimated = f"{estimated_cost} {currency}"
+    else:
+        estimated = str(estimated_cost)
+    return [
+        f"- usage_available: {_format_bool(cost.get('usage_available'))}",
+        f"- pricing_available: {_format_bool(cost.get('pricing_available'))}",
+        f"- model_call_count: {totals.get('model_call_count', 'unknown')}",
+        f"- input_tokens: {_format_optional_count(totals.get('input_tokens'))}",
+        f"- output_tokens: {_format_optional_count(totals.get('output_tokens'))}",
+        f"- total_tokens: {_format_optional_count(totals.get('total_tokens'))}",
+        f"- estimated_cost: {estimated}",
+        f"- reason: {cost.get('reason') or 'none'}",
+    ]
+
+
 def _format_sandbox(sandbox: dict[str, Any]) -> list[str]:
     resource_limits = sandbox.get("resource_limits", {})
     if not isinstance(resource_limits, dict):
@@ -331,6 +387,12 @@ def _format_bool(value: Any) -> str:
     return "unknown"
 
 
+def _format_optional_count(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return "unavailable"
+
+
 def _format_next_actions(episode_path: Path, contexts: list[dict[str, Any]]) -> list[str]:
     if not contexts:
         return ["- none"]
@@ -343,13 +405,21 @@ def _format_next_actions(episode_path: Path, contexts: list[dict[str, Any]]) -> 
 def _format_model_calls(model_calls: list[dict[str, Any]]) -> list[str]:
     if not model_calls:
         return ["- none"]
-    return [
-        (
-            f"- provider={call.get('provider', 'unknown')} "
-            f"context_id={call.get('context_id', 'unknown')}"
+    lines = []
+    for call in model_calls:
+        usage = call.get("usage")
+        usage_text = ""
+        if isinstance(usage, dict):
+            usage_text = f" total_tokens={_format_optional_count(usage.get('total_tokens'))}"
+        lines.append(
+            (
+                f"- provider={call.get('provider', 'unknown')} "
+                f"model={call.get('model', 'unknown')} "
+                f"context_id={call.get('context_id', 'unknown')}"
+                f"{usage_text}"
+            ),
         )
-        for call in model_calls
-    ]
+    return lines
 
 
 def _format_final_response(transcript: list[dict[str, Any]]) -> list[str]:
@@ -450,7 +520,7 @@ def _policy_not_evaluated(call: dict[str, Any]) -> bool:
     return (
         call.get("status") == "error"
         and isinstance(error, dict)
-        and error.get("type") in {"tool_not_allowed", "unknown_tool"}
+        and error.get("type") in {"tool_not_allowed", "unknown_tool", "tool_call_skipped"}
     )
 
 

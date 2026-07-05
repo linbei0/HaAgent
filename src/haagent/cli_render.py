@@ -23,6 +23,10 @@ def print_run_summary(result) -> None:
         return
 
     print(f"provider={summary_provider(package_view.episode_metadata)}")
+    print(f"model={summary_value(summary_model(package_view.environment))}")
+    print(f"usage_available={summary_bool(package_view.cost.get('usage_available'))}")
+    print(f"total_tokens={summary_token_total(package_view.cost)}")
+    print(f"estimated_cost={summary_estimated_cost(package_view.cost)}")
     if result.status.value == "completed":
         print(f"final_response={summary_value(run_final_response(package_view.transcript))}")
         return
@@ -108,6 +112,40 @@ def run_final_response(transcript: list[dict[str, Any]]) -> str:
 
 def summary_provider(episode_metadata: dict[str, Any]) -> str:
     return str(episode_metadata.get("provider", "unknown"))
+
+
+def summary_model(environment: dict[str, Any]) -> str:
+    model = environment.get("model") if isinstance(environment, dict) else None
+    if not isinstance(model, dict):
+        return "unknown"
+    provider = str(model.get("provider") or "unknown")
+    model_name = str(model.get("model") or "unknown")
+    return f"{provider}/{model_name}"
+
+
+def summary_bool(value: object) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "unknown"
+
+
+def summary_token_total(cost: dict[str, Any]) -> str:
+    totals = cost.get("totals") if isinstance(cost, dict) else None
+    if not isinstance(totals, dict):
+        return "unavailable"
+    value = totals.get("total_tokens")
+    return str(value) if isinstance(value, int) and not isinstance(value, bool) else "unavailable"
+
+
+def summary_estimated_cost(cost: dict[str, Any]) -> str:
+    value = cost.get("estimated_cost") if isinstance(cost, dict) else None
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        currency = cost.get("currency")
+        return f"{value} {currency}" if currency else str(value)
+    reason = cost.get("reason") if isinstance(cost, dict) else None
+    return summary_value(str(reason or "unavailable"))
 
 
 def last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:

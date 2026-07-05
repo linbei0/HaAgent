@@ -19,6 +19,7 @@ from haagent.models.gateway import (
     GoogleGeminiGateway,
     ModelCallError,
     ModelResponse,
+    ModelUsage,
     OpenAIChatCompletionsGateway,
     OpenAIResponsesGateway,
     ToolCall,
@@ -225,6 +226,26 @@ def test_gateway_registry_builds_google_gemini_gateway() -> None:
     assert isinstance(gateway, GoogleGeminiGateway)
 
 
+def test_gateway_metadata_redacts_secret_like_endpoint_parts() -> None:
+    gateway = OpenAIChatCompletionsGateway(
+        api_key="sk-test-secret",
+        model="gpt-test",
+        base_url="https://user:pass@example.test/v1?api_key=secret",
+    )
+
+    metadata = gateway.metadata()
+
+    assert metadata.provider == "openai-chat"
+    assert metadata.model == "gpt-test"
+    assert metadata.endpoint == "https://example.test/v1/chat/completions"
+    assert metadata.base_url == "https://example.test/v1"
+    serialized = json.dumps(metadata.__dict__, ensure_ascii=False)
+    assert "sk-test-secret" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "user:pass" not in serialized
+
+
 def test_gateway_registry_maps_google_catalog_provider_to_gemini_gateway() -> None:
     provider = ModelCatalogProvider(
         id="google",
@@ -275,6 +296,33 @@ def test_anthropic_gateway_text_response_uses_messages_payload() -> None:
     }
     assert captured["api_key"] == "sk-ant-test"
     assert captured["endpoint"] == "https://api.anthropic.com/v1/messages"
+
+
+def test_anthropic_gateway_parses_usage_metadata() -> None:
+    def transport(
+        payload: dict[str, object],
+        api_key: str,
+        endpoint: str,
+    ) -> dict[str, object]:
+        return {
+            "content": [{"type": "text", "text": "hello"}],
+            "usage": {"input_tokens": 12, "output_tokens": 4},
+        }
+
+    gateway = AnthropicMessagesGateway(
+        api_key="sk-ant-test",
+        model="claude-test",
+        transport=transport,
+    )
+
+    result = gateway.generate([{"role": "user", "content": "hi"}], [])
+
+    assert result.usage == ModelUsage(
+        input_tokens=12,
+        output_tokens=4,
+        total_tokens=16,
+        raw_source="anthropic.messages.usage",
+    )
 
 
 def test_anthropic_gateway_normalizes_tool_use_blocks() -> None:
@@ -564,6 +612,39 @@ def test_google_gemini_gateway_text_response_uses_generate_content_payload() -> 
     assert captured["endpoint"] == (
         "https://generativelanguage.googleapis.com/v1beta/"
         "models/gemini-2.5-pro:generateContent"
+    )
+
+
+def test_google_gemini_gateway_parses_usage_metadata() -> None:
+    def transport(
+        payload: dict[str, object],
+        api_key: str,
+        endpoint: str,
+    ) -> dict[str, object]:
+        return {
+            "candidates": [
+                {"content": {"parts": [{"text": "hello"}], "role": "model"}}
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 20,
+                "candidatesTokenCount": 6,
+                "totalTokenCount": 26,
+            },
+        }
+
+    gateway = GoogleGeminiGateway(
+        api_key="gemini-test-key",
+        model="gemini-test",
+        transport=transport,
+    )
+
+    result = gateway.generate([{"role": "user", "content": "hi"}], [])
+
+    assert result.usage == ModelUsage(
+        input_tokens=20,
+        output_tokens=6,
+        total_tokens=26,
+        raw_source="google.gemini.usageMetadata",
     )
 
 
@@ -1099,6 +1180,33 @@ def test_openai_chat_gateway_text_only_response_uses_messages_payload() -> None:
     }
 
 
+def test_openai_chat_gateway_parses_usage_metadata() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "choices": [{"message": {"content": "provider text"}}],
+            "usage": {
+                "prompt_tokens": 30,
+                "completion_tokens": 9,
+                "total_tokens": 39,
+            },
+        }
+
+    gateway = OpenAIChatCompletionsGateway(
+        api_key="test-key",
+        model="chat-test",
+        transport=transport,
+    )
+
+    response = generate(gateway)
+
+    assert response.usage == ModelUsage(
+        input_tokens=30,
+        output_tokens=9,
+        total_tokens=39,
+        raw_source="openai.chat_completions.usage",
+    )
+
+
 def test_openai_chat_gateway_streams_text_deltas_and_returns_complete_response() -> None:
     deltas: list[str] = []
 
@@ -1285,6 +1393,33 @@ def test_openai_gateway_payload_uses_model_input_and_tools() -> None:
     }
 
 
+def test_openai_responses_gateway_parses_usage_metadata() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {
+            "output_text": "provider text",
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+            },
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        transport=transport,
+    )
+
+    response = generate(gateway)
+
+    assert response.usage == ModelUsage(
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=18,
+        raw_source="openai.responses.usage",
+    )
+
+
 def test_openai_gateway_normalizes_tool_call_response() -> None:
     def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
         return {
@@ -1334,6 +1469,21 @@ def test_openai_gateway_text_only_response_with_output_message_has_no_tool_calls
     response = generate(gateway)
 
     assert response == ModelResponse(content="provider text", tool_calls=[])
+
+
+def test_openai_responses_gateway_leaves_usage_none_when_missing() -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        return {"output_text": "provider text"}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        transport=transport,
+    )
+
+    response = generate(gateway)
+
+    assert response.usage is None
 
 
 def test_openai_gateway_rejects_unknown_output_type() -> None:
@@ -1446,6 +1596,54 @@ verification_commands: []
     model_call = next(record for record in transcript if record.get("event") == "model_call")
     assert model_call["context_id"] == "0001"
     assert any(record.get("event") == "model_response" for record in transcript)
+
+
+def test_model_usage_is_written_to_transcript_and_cost_by_orchestrator(tmp_path: Path) -> None:
+    from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Record model usage
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+    response = ModelResponse(
+        content="done",
+        tool_calls=[],
+        usage=ModelUsage(
+            input_tokens=12,
+            output_tokens=3,
+            total_tokens=15,
+            raw_source="fake.usage",
+        ),
+    )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=FakeModelGateway(response),
+    ).run(task_path)
+
+    transcript = [
+        json.loads(line)
+        for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    model_response = next(record for record in transcript if record.get("event") == "model_response")
+    assert model_response["usage"] == {
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "total_tokens": 15,
+        "raw_usage_source": "fake.usage",
+    }
+    cost = json.loads((result.episode_path / "cost.json").read_text(encoding="utf-8"))
+    assert cost["usage_available"] is True
+    assert cost["totals"]["total_tokens"] == 15
+    assert cost["model_calls"][0]["turn"] == 1
 
 
 def test_full_compact_contract_is_written_to_transcript_by_orchestrator(tmp_path: Path) -> None:

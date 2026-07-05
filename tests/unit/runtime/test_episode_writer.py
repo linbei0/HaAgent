@@ -4,8 +4,10 @@ tests/unit/runtime/test_episode_writer.py - EpisodeWriter 文件产物测试
 验证 episode package 的核心文件会被稳定创建。
 """
 
+import json
 from pathlib import Path
 
+from haagent.models.gateway import ModelGatewayMetadata, ModelUsage
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 
@@ -42,3 +44,156 @@ verification_commands: []
     assert (writer.path / "failure-attribution.md").exists()
     assert (writer.path / "environment.json").exists()
     assert (writer.path / "sandbox.json").exists()
+    assert (writer.path / "cost.json").exists()
+
+
+def test_episode_writer_initializes_cost_metadata(tmp_path: Path) -> None:
+    writer = create_writer(tmp_path)
+
+    cost = json.loads((writer.path / "cost.json").read_text(encoding="utf-8"))
+
+    assert cost == {
+        "cost_schema_version": "1.0",
+        "usage_available": False,
+        "pricing_available": False,
+        "currency": None,
+        "estimated_cost": None,
+        "pricing_source": None,
+        "reason": "model gateway did not provide usage metadata",
+        "model_calls": [],
+        "totals": {
+            "model_call_count": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+        },
+    }
+
+
+def test_episode_writer_writes_extended_environment_schema(tmp_path: Path) -> None:
+    writer = create_writer(tmp_path)
+
+    writer.write_environment(
+        workspace_root=tmp_path,
+        model_metadata=ModelGatewayMetadata(
+            provider="openai-chat",
+            model="gpt-test",
+            endpoint="https://user:pass@example.test/v1/chat/completions?key=secret",
+            base_url="https://token@example.test/v1?api_key=secret",
+            profile_name="main",
+        ),
+        allowed_tools=["fake_tool"],
+        registry_tool_count=3,
+        entrypoint="run",
+    )
+
+    environment = json.loads((writer.path / "environment.json").read_text(encoding="utf-8"))
+    assert environment["environment_schema_version"] == "1.0"
+    assert environment["workspace_root"] == str(tmp_path)
+    assert isinstance(environment["process"]["executable"], str)
+    assert isinstance(environment["process"]["cwd"], str)
+    assert environment["haagent"]["entrypoint"] == "run"
+    assert environment["haagent"]["package_version"]
+    assert environment["model"] == {
+        "provider": "openai-chat",
+        "model": "gpt-test",
+        "endpoint": "https://example.test/v1/chat/completions",
+        "base_url": "https://example.test/v1",
+        "profile_name": "main",
+    }
+    assert environment["tools"] == {
+        "allowed_tool_count": 1,
+        "registry_tool_count": 3,
+        "allowed_tools": ["fake_tool"],
+    }
+
+
+def test_episode_writer_appends_usage_and_accumulates_totals(tmp_path: Path) -> None:
+    writer = create_writer(tmp_path)
+
+    writer.append_model_usage(
+        turn=1,
+        provider="openai",
+        model="gpt-test",
+        usage=ModelUsage(
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            raw_source="openai.responses.usage",
+        ),
+    )
+    writer.append_model_usage(
+        turn=2,
+        provider="openai",
+        model="gpt-test",
+        usage=ModelUsage(
+            input_tokens=7,
+            output_tokens=3,
+            total_tokens=10,
+            raw_source="openai.responses.usage",
+        ),
+    )
+
+    cost = json.loads((writer.path / "cost.json").read_text(encoding="utf-8"))
+    assert cost["usage_available"] is True
+    assert cost["pricing_available"] is False
+    assert cost["estimated_cost"] is None
+    assert cost["reason"] == "pricing unavailable: no reliable catalog match"
+    assert cost["model_calls"] == [
+        {
+            "turn": 1,
+            "provider": "openai",
+            "model": "gpt-test",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "raw_usage_source": "openai.responses.usage",
+        },
+        {
+            "turn": 2,
+            "provider": "openai",
+            "model": "gpt-test",
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "total_tokens": 10,
+            "raw_usage_source": "openai.responses.usage",
+        },
+    ]
+    assert cost["totals"] == {
+        "model_call_count": 2,
+        "input_tokens": 17,
+        "output_tokens": 8,
+        "total_tokens": 25,
+    }
+
+
+def test_episode_writer_keeps_usage_unavailable_when_usage_is_none(tmp_path: Path) -> None:
+    writer = create_writer(tmp_path)
+
+    writer.append_model_usage(turn=1, provider="fake", model="fake-model", usage=None)
+
+    cost = json.loads((writer.path / "cost.json").read_text(encoding="utf-8"))
+    assert cost["usage_available"] is False
+    assert cost["model_calls"] == []
+    assert cost["totals"] == {
+        "model_call_count": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+    }
+
+
+def create_writer(tmp_path: Path) -> EpisodeWriter:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Create episode package
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+    return EpisodeWriter.create(runs_root=tmp_path / ".runs", task_path=task_path)

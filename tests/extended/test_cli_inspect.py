@@ -74,16 +74,10 @@ verification_commands: []
             encoding="utf-8",
         )
         (episode_path / "environment.json").write_text(
-            json.dumps(
-                {
-                    "python": "3.13",
-                    "platform": "test",
-                    "created_at": "2026-06-19T00:00:00+00:00",
-                    "workspace_root": episode_json.get("workspace_root"),
-                },
-            ),
+            json.dumps(valid_environment_json(str(episode_json.get("workspace_root")))),
             encoding="utf-8",
         )
+        (episode_path / "cost.json").write_text(json.dumps(valid_cost_json()), encoding="utf-8")
         (episode_path / "sandbox.json").write_text(
             json.dumps(expanded_sandbox_json(str(episode_json.get("workspace_root")))),
             encoding="utf-8",
@@ -123,6 +117,55 @@ def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, o
         "status": status,
         "provider": "fake",
         "workspace_root": str(tmp_path),
+    }
+
+
+def valid_environment_json(workspace_root: str) -> dict[str, object]:
+    return {
+        "environment_schema_version": "1.0",
+        "created_at": "2026-06-19T00:00:00+00:00",
+        "workspace_root": workspace_root,
+        "python": "3.13",
+        "platform": "test",
+        "process": {
+            "executable": "python",
+            "cwd": workspace_root,
+        },
+        "haagent": {
+            "package_version": "0.1.0",
+            "entrypoint": "run",
+        },
+        "model": {
+            "provider": "fake",
+            "model": "fake-model",
+            "endpoint": None,
+            "base_url": None,
+            "profile_name": None,
+        },
+        "tools": {
+            "allowed_tool_count": 1,
+            "registry_tool_count": 1,
+            "allowed_tools": ["fake_tool"],
+        },
+    }
+
+
+def valid_cost_json() -> dict[str, object]:
+    return {
+        "cost_schema_version": "1.0",
+        "usage_available": False,
+        "pricing_available": False,
+        "currency": None,
+        "estimated_cost": None,
+        "pricing_source": None,
+        "reason": "model gateway did not provide usage metadata",
+        "model_calls": [],
+        "totals": {
+            "model_call_count": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+        },
     }
 
 
@@ -356,16 +399,10 @@ verification_commands: []
     )
     (episode_path / "failure-attribution.md").write_text("# Failure Attribution\n\n未失败。\n", encoding="utf-8")
     (episode_path / "environment.json").write_text(
-        json.dumps(
-            {
-                "python": "3.13",
-                "platform": "test",
-                "created_at": "2026-06-19T00:00:00+00:00",
-                "workspace_root": str(tmp_path),
-            },
-        ),
+        json.dumps(valid_environment_json(str(tmp_path))),
         encoding="utf-8",
     )
+    (episode_path / "cost.json").write_text(json.dumps(valid_cost_json()), encoding="utf-8")
     (episode_path / "sandbox.json").write_text(
         json.dumps(expanded_sandbox_json(str(tmp_path))),
         encoding="utf-8",
@@ -450,6 +487,81 @@ verification_commands: []
     assert "未失败" in output
 
 
+def test_cli_inspect_outputs_environment_and_cost_summary(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Inspect metadata
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    cost_path = result.episode_path / "cost.json"
+    cost = json.loads(cost_path.read_text(encoding="utf-8"))
+    cost.update(
+        {
+            "usage_available": True,
+            "reason": "pricing unavailable: no reliable catalog match",
+            "model_calls": [
+                {
+                    "turn": 1,
+                    "provider": "fake",
+                    "model": "fake-model",
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                    "raw_usage_source": "fake.usage",
+                }
+            ],
+            "totals": {
+                "model_call_count": 1,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            },
+        },
+    )
+    cost_path.write_text(json.dumps(cost), encoding="utf-8")
+
+    output = cli_inspect.render_episode_summary(result.episode_path)
+
+    assert "Environment" in output
+    assert "- model: fake/fake-model" in output
+    assert "- allowed_tool_count: 1" in output
+    assert "Cost" in output
+    assert "- usage_available: true" in output
+    assert "- total_tokens: 15" in output
+    assert "- estimated_cost: unavailable" in output
+    assert "- reason: pricing unavailable: no reliable catalog match" in output
+
+
+def test_cli_inspect_outputs_usage_unavailable_reason(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Inspect unavailable usage
+constraints: []
+allowed_tools:
+  - fake_tool
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+
+    output = cli_inspect.render_episode_summary(result.episode_path)
+
+    assert "- usage_available: false" in output
+    assert "- total_tokens: unavailable" in output
+    assert "- reason: model gateway did not provide usage metadata" in output
+
+
 def test_cli_inspect_outputs_verification_evidence(tmp_path: Path, capsys) -> None:
     episode_path = tmp_path / "episode-1"
     (episode_path / "verification").mkdir(parents=True)
@@ -520,16 +632,10 @@ verification_commands: []
         encoding="utf-8",
     )
     (episode_path / "environment.json").write_text(
-        json.dumps(
-            {
-                "python": "3.13",
-                "platform": "test",
-                "created_at": "2026-06-19T00:00:00+00:00",
-                "workspace_root": str(tmp_path),
-            },
-        ),
+        json.dumps(valid_environment_json(str(tmp_path))),
         encoding="utf-8",
     )
+    (episode_path / "cost.json").write_text(json.dumps(valid_cost_json()), encoding="utf-8")
     (episode_path / "sandbox.json").write_text(
         json.dumps(expanded_sandbox_json(str(tmp_path))),
         encoding="utf-8",
@@ -861,6 +967,90 @@ def test_cli_inspect_approval_summary_shows_none_without_tool_calls(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "Approval Summary\n- none" in output
+
+
+def test_cli_inspect_approval_summary_shows_skipped_tool_not_evaluated(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    (episode_path / "tool-calls.jsonl").write_text(
+        json.dumps(
+            {
+                "tool_name": "web_search",
+                "status": "error",
+                "error": {
+                    "type": "tool_call_skipped",
+                    "message": "tool call skipped because an earlier tool call failed.",
+                },
+                "policy": None,
+            },
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "web_search: policy=not_evaluated" in output
+    assert "tool call skipped because an earlier tool call failed." in output
+
+
+def test_cli_inspect_handles_console_encoding_for_unicode_output(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    episode_path = tmp_path / "episode-1"
+    write_minimal_episode(
+        episode_path,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    (episode_path / "transcript.jsonl").write_text(
+        json.dumps({"event": "state_transition", "status": "completed"}) + "\n"
+        + json.dumps(
+            {
+                "event": "model_response",
+                "provider": "fake",
+                "turn": 1,
+                "content": "今日新闻 📰",
+                "tool_calls": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class GbkStdout:
+        encoding = "gbk"
+
+        def __init__(self) -> None:
+            self.buffer = bytearray()
+
+        def write(self, text: str) -> int:
+            text.encode("gbk")
+            self.buffer.extend(text.encode("utf-8"))
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    fake_stdout = GbkStdout()
+    monkeypatch.setattr("sys.stdout", fake_stdout)
+
+    exit_code = cli.main(["inspect", str(episode_path)])
+
+    assert exit_code == 0
+    assert b"?" in bytes(fake_stdout.buffer)
 
 
 def test_cli_inspect_rejects_tool_call_missing_policy(

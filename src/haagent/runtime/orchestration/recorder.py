@@ -30,5 +30,6 @@ class RunRecorder:
         self.writer.append_transcript({"event": "state_transition", "status": status.value})
 
     def finish(self, status: RunStatus) -> RunResult:
+        self.writer.finalize_cost_metadata()
         self.writer.write_episode_metadata(status=status.value)
         return RunResult(status, list(self.state_history), self.writer.path)

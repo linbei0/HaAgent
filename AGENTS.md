@@ -1,109 +1,114 @@
 # AGENTS.md
 
-## Project Overview
+## 当前事实源
 
-HaAgent is a local personal AI assistant written in Python. Its product target is: configure a model once, enter any local directory, run `haagent`, and talk naturally while HaAgent reads files, organizes material, edits documents, analyzes local projects, runs commands, and continues multi-turn tasks inside that directory.
+本文件只做进入项目后的短入口地图。当前 `docs` 目录中唯一仍有效的深层规则文档是：
 
-HaAgent is not a Codex clone, not an IDE, and not only a code repository assistant. Code development remains one task type, but ordinary product language and default CLI flow must cover personal assistant work across local files and folders.
+- `docs/active-rules-summary.md`
 
-Harness remains important, but it stays behind the scenes. The runtime should constrain tools, record model/tool traces, write episode packages, and support inspect/eval without forcing ordinary users to understand `task.yaml`, episode internals, dogfood, or eval export before using the assistant.
+进行非平凡变更前，先阅读该文件中与任务相关的章节。不要再引用已经移除或过时的旧深层规则文档。
 
-## Project Reference Documents
+如果本文件与 `docs/active-rules-summary.md` 冲突，以 `docs/active-rules-summary.md` 为准，并在本次任务包含文档维护时同步修正冲突。
 
-Before making non-trivial changes, consult the relevant project documents:
+## 项目定位
 
-- `docs/harness-requirements.md` defines the product direction, current stage, non-goals, and the two baseline constraints:
-  - do not increase user mental burden;
-  - do not increase model input token usage.
-- `docs/unresolved-risks-and-roadmap.md` defines the current unresolved risks and near-term roadmap. It must stay aligned with `docs/harness-requirements.md`; if they conflict, the requirements document wins.
-- `docs/code-governance.md` defines code ownership boundaries, unique runtime entry points, change categories, verification expectations, and refactoring guardrails.
+HaAgent 是本地个人 AI 助手。用户配置一次模型后，在任意目录运行 `haagent`，通过 Textual TUI 围绕当前目录完成文件阅读、资料整理、文档修改、项目分析、命令执行和多轮任务延续。
 
-Use these documents as decision inputs, not as permission to expand scope. For small mechanical edits, read only the directly relevant document. For feature, contract, runtime, context, episode, tool, provider, or CLI behavior changes, read the relevant sections before editing.
+HaAgent 不是 Codex clone、不是 IDE，也不是纯代码仓库助手。代码开发只是支持的一类任务；普通产品语言和默认 CLI 流程必须覆盖本地文件夹中的个人助手工作。
 
-The current priority is the TUI-first personal assistant startup experience:
+Harness 能力仍然重要，但应留在后台：runtime 约束工具、记录模型和工具 trace、写 episode package，并支持 inspect/eval，不把 `task.yaml`、episode、dogfood、eval export 暴露成普通用户主路径。
 
-- Prefer plain `haagent` as the primary user path:
+## 普通入口
 
-  ```powershell
-  cd E:\some-folder
-  uv run haagent
-  ```
+普通交互入口是无子命令 `haagent`：
 
-- Plain `haagent` opens the Textual TUI and is the only ordinary interactive entry point.
-- Configure model profiles inside TUI via `/model`; the old `haagent setup` command only reports the migration.
-- Keep `haagent chat`, `haagent sessions`, `haagent memory`, and `haagent tui` as migration stubs, not real alternate interaction paths.
-- Keep `task.yaml` for advanced reproducibility, batch tasks, smoke cases, and eval construction; do not treat it as the ordinary user entry point.
-- Do not block real task execution on harness completeness. Build the direct Agent experience first, keep harness constraints and traces intact, and fill in missing harness engineering after the experience proves useful.
-- Plain `haagent` should default to the current working directory as workspace root, allow explicit `--workspace-root`, and keep file/shell tools bounded by that root.
-- The real task tool pack includes `file_read`, `file_write`, `apply_patch`, `shell`, and `code_run`; keep these tools atomic and workspace-bound.
-- Tasks may be file organization, document summarization, CSV inspection, draft editing, project analysis, code-changing, or verification-oriented. Do not assume every task must modify code or have a verification command.
+```powershell
+cd E:\some-folder
+uv run haagent
+```
 
-## Document Precedence
+关键规则：
 
-- `AGENTS.md` defines the active working rules for coding agents.
-- `docs/harness-requirements.md` defines product and engineering direction.
-- `docs/code-governance.md` defines code organization and change discipline.
-- `docs/unresolved-risks-and-roadmap.md` defines current priorities and known risks.
+- 无子命令 `haagent` 默认打开 Textual TUI，是唯一普通交互入口。
+- 模型配置、会话恢复、自然语言任务、联网开关、工具审批、记忆候选和失败状态都应通过 TUI 管理。
+- `haagent setup`、`haagent chat`、`haagent sessions`、`haagent memory`、`haagent tui` 只保留迁移提示，不作为真实普通交互入口。
+- `task.yaml`、`run`、`inspect`、`eval`、`export-eval`、`dogfood`、`check`、`smoke` 属于高级、开发、复现、验证或 CI 能力。
+- 默认 workspace root 是当前目录；允许通过 `--workspace-root` 显式指定。
+- `haagent --continue` 和 `haagent --resume <session>` 作为启动参数进入 TUI 后恢复会话。
 
-If documents disagree, prefer the narrower and more current rule. Do not silently choose one; mention the conflict and update the stale document when the task scope includes documentation.
+## 核心架构边界
 
-## Setup Commands
+- CLI 只负责解析启动参数、打开 TUI，并保留非交互开发/CI 命令的短输出。
+- TUI 是普通交互前端，只负责交互和展示，不实现 Agent loop，不解析 CLI 文本输出，不绕过 runtime。
+- `AssistantService` 是 CLI 与 TUI 共享的应用服务层，负责读取 profile、检查非敏感凭据状态、管理 session，并转发事件流。
+- `AgentSession` 负责多轮会话、bounded summary、working state、session package 和前端无关事件流。
+- `RunOrchestrator` 负责 task contract、模型调用、工具执行、episode trace 和 verification。
+- 所有模型调用必须经过 `ModelGateway`。
+- 所有工具调用必须经过 `ToolRouter`。
+- 文件和命令工具必须受 workspace root 限制。
+- 每条用户 prompt 仍写独立 episode；session package 只保存索引、摘要和有界工作状态，不复制 episode 证据。
 
-- Install dependencies: `uv sync`
-- Run a focused test file during development: `uv run pytest tests/integration/tools/test_tool_router.py -q`
-- Run the default fast suite (parallel, skips `tests/tui`, `tests/e2e`, and `tests/extended` unless explicitly selected): `uv run pytest -q`
-- Run serial diagnostics for the default suite: `uv run pytest -q -n 0`
-- Run full TUI wiring tests explicitly: `uv run pytest tests/tui -q`
-- Run extended harness/eval regressions explicitly: `uv run pytest tests/extended -q`
-- Run long/real-flow tests explicitly: `uv run pytest tests/e2e -q --run-e2e`
-- Run the fast local quality gate: `uv run haagent check`
+## 工具、权限与上下文
 
-## Development Workflow
+- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell` 和 `code_run` 等 workspace-bound 原子工具。
+- 自然语言入口不要求用户写 `task.yaml`，但 runtime 仍应生成结构化临时 `TaskSpec`，并写入 episode 供 inspect。
+- `policy` 只影响 Policy Engine 对工具调用的决策，不改变工具自身执行方式，也不自动引入交互式审批。
+- 高风险工具缺少允许或批准时必须被 policy 拒绝，handler 不执行，并记录 `policy_denied` 与 `approval.status=missing`。
+- 模型输入默认保持薄，只放本轮必需的高信号内容。
+- 完整历史、完整 audit、完整 episode、完整 transcript、完整 tool trace、完整工具输出、完整候选记忆池、长文件和大表格应留在磁盘、工具、执行环境或检索索引里。
+- 上下文按需加载必须由结构化信号触发，不靠用户话术表或“复杂度判断”猜测。
+- 工具注册可以完整，但模型可见工具集应是当前任务需要的最小集合。
+- 不用 prompt 规则修 runtime、工具、记忆或上下文状态 bug；优先用代码、状态机、schema、工具契约、验证或确定性上下文事实解决。
 
-- Use `uv` for virtual environment and dependency management.
-- Keep the package in `src/haagent`.
-- Keep tests in `tests`.
-- Prefer `apply_patch` for file edits to avoid PowerShell encoding issues.
-- Do not add UI, browser automation, multi-agent behavior, or long-term memory unless explicitly requested.
-- For CLI work, prioritize the direct personal assistant experience: interactive TUI from any directory via plain `haagent`.
-- Interactive `haagent` is backed by `AgentSession`; keep session state and bounded summaries in runtime code, not in `cli.py`.
-- Keep `run`, `inspect`, and `export-eval` functional, but do not optimize them ahead of the chat experience unless the task explicitly asks.
+## Secret 与凭据
 
-## Compatibility Policy
+- Profile 是模型连接配置，支持 OpenAI Responses-compatible endpoint（`openai`）和 OpenAI Chat Completions-compatible endpoint（`openai-chat`）。
+- 默认 profile 存放在用户级 `~/.haagent/providers.json`；active profile 存放在 `~/.haagent/settings.json`。
+- 真实 API key 解析优先级是：当前环境变量、系统凭据库、显式 opt-in 的明文用户文件。
+- TUI 模型配置默认使用系统凭据库；环境变量适合 CI 或临时覆盖；明文用户文件必须显式选择并标记为 insecure。
+- 真实 API key 不写入项目配置、episode、transcript、日志、session summary、UI snapshot 或 tool-calls。
+- UI 只能展示环境变量名、凭据来源和 key 是否可用等非敏感状态，不能输入、保存、复制或显示真实 API key。
 
-- HaAgent is currently a pre-user, pre-1.0 development project.
-- Do not preserve compatibility for historical `.runs`, old episode schemas, old context manifests, old eval cases, or old internal test interfaces unless explicitly requested.
-- Do not add legacy paths, fallback behavior, old-field support, old-status support, or silent degradation just to keep development artifacts readable.
-- Schema and trace format changes may break old local run artifacts; new runs must remain explicit, validated, inspectable, and covered by tests.
-- Compatibility is allowed only for current real needs:
-  - external provider differences, such as OpenAI Responses and OpenAI-compatible Chat Completions;
-  - task authoring ergonomics, such as omitted `policy` or `workspace_root`;
-  - real partial-failure states, such as a run failing before verification files are written.
-- If compatibility seems necessary, state who depends on it, what real failure it prevents, and why fail-fast behavior is not better.
+## 开发工作流
 
-## Boundary and Matching Policy
+- 使用 `uv` 管理依赖和虚拟环境。
+- 代码放在 `src/haagent`。
+- 测试放在 `tests`。
+- 优先用 `apply_patch` 编辑文件，避免 PowerShell 编码问题。
+- 优先做小而明确的改动，避免把个人助手体验改造成 IDE、多 Agent 系统或平台化产品。
+- 不为了旧实验 artifact 增加复杂兼容逻辑。
+- 不靠自然语言匹配实现 slash commands、安全边界、上下文选择或 runtime 决策；命令、工具、session、workspace 都应走结构化 service 方法和明确状态字段。
+- 不把完整 stdout、patch、episode trace 或工具详情默认塞进主对话；默认展示摘要，详情按需打开。
 
-- Do not use brittle hard-coded matching as a runtime, tool, memory, UI, provider, or context-state boundary. In particular, do not route or block behavior by matching user-language phrase lists, AI-output wording, profile/memory filename token lists, content vocabulary, or shell/code strings. User language habits vary, model outputs are stochastic, and these checks create false confidence while missing easy bypasses.
-- Prefer explicit capability and protocol boundaries: structured tool schemas, typed events, task/session state, approval policy, normalized workspace paths, exact storage roots, service methods, and validated metadata. If the system needs a durable decision, make that decision a field, state transition, API call, or path/capability check rather than a guess over free text.
-- Matching is acceptable only when it operates on a stable technical surface and is not interpreting intent: schema enum values, exact tool names, known protocol fields, normalized path containment, parser selection by file extension, or security-focused secret detection. Keep these rules narrow, named, tested, and documented.
-- Before adding any new string/regex/table-based rule, state what stable contract it represents, why a structured boundary is not better, what false positives/false negatives are acceptable, and which tests prove that ordinary user phrasing or model randomness cannot change the outcome.
+## 常用命令
 
-## Testing Instructions
+```powershell
+uv sync
+uv run haagent
+uv run haagent --workspace-root E:\some-folder
+uv run pytest tests/integration/tools/test_tool_router.py -q
+uv run pytest -q
+uv run pytest -q -n 0
+uv run pytest tests/tui -q
+uv run pytest tests/extended -q
+uv run pytest tests/e2e -q --run-e2e
+uv run haagent check
+```
 
-- Add or update pytest coverage for every behavior change.
-- For bug fixes and new behavior, write the failing test first, then implement the smallest code that passes.
-- During the TDD inner loop, run the smallest relevant pytest target first: a single test, a single test file, or the directly affected test group.
-- Do not automatically run full `uv run pytest` after every small edit.
-- For a broad-but-fast check, run the default `uv run pytest -q`; `tests/conftest.py` keeps TUI, e2e, and extended harness/eval tests out of default collection unless those paths or their flags are explicitly selected.
-- Before claiming completion, run the tests directly relevant to the changed behavior.
-- Run full `uv run pytest -q` when a change crosses multiple core modules, changes shared runtime contracts, touches `ToolRouter`, `ModelGateway`, context, episode, CLI entry points, workspace boundaries, or secret handling, or when preparing a commit, merge, release, or user-facing handoff.
-- Run `uv run haagent check` before user-facing handoff when the change affects harness, eval, smoke behavior, CLI quality gates, or runtime task execution.
-- Prefer extending or parameterizing existing tests over adding near-duplicate tests. TDD scaffolding tests may be removed before completion when they no longer provide independent behavioral signal.
+测试选择规则：
 
-## Code Style
+- 行为变更必须有 pytest 覆盖。
+- Bug 修复和新行为优先写失败测试，再实现最小代码通过。
+- TDD 内循环优先运行最小相关测试。
+- 改动共享 runtime 合同、`ToolRouter`、`ModelGateway`、context、episode、CLI 入口、workspace 边界或 secret 处理时，运行完整 `uv run pytest -q`。
+- 改动 harness、eval、smoke、CLI 质量门禁或 runtime 任务执行时，交付前运行 `uv run haagent check`。
+- `tests/tui/`、`tests/e2e/`、`tests/extended/` 默认不进入快测；需要时显式运行对应路径和 flags。
 
-- Responses and code comments should use Simplified Chinese when explaining project-specific behavior.
-- Every Python file must start with a module docstring in this style:
+## 代码风格
+
+- 面向用户的回复使用简体中文。
+- 项目内解释性注释使用简体中文。
+- 每个 Python 文件必须以模块 docstring 开头，格式如下：
 
   ```python
   """
@@ -113,26 +118,12 @@ If documents disagree, prefer the narrower and more current rule. Do not silentl
   """
   ```
 
-- Add concise comments for complex workflows, failure boundaries, provider/tool behavior, or security-sensitive checks.
-- Do not comment obvious assignments or one-line boilerplate.
-- Keep comments current when changing behavior.
+- 只为复杂流程、失败边界、provider/tool 行为或安全敏感检查添加简洁注释。
+- 不注释显而易见的赋值或一行样板。
+- 改动行为时保持注释同步。
 
-## Runtime Rules
+## 详细规则
 
-- Model calls must go through the `ModelGateway` interface.
-- Tool calls must go through `ToolRouter`.
-- Every tool call must append a record to `tool-calls.jsonl`.
-- Model calls and responses must append records to `transcript.jsonl`.
-- Failures must be explicit and structured; do not add silent fallbacks or simulated success paths.
-- Path-mutating and execution tools must stay inside the configured workspace root and must not bypass ToolRouter policy or approval decisions.
-- TUI natural-language turns must not bypass the runtime contracts. If they generate temporary task contracts internally, those contracts must be recorded in the episode for later inspection.
-- Interactive TUI sessions may carry only bounded session summaries into the next model input; they must not copy full history, full episode traces, or full tool outputs.
-- Harness audit data should not be copied wholesale into model input. Use compact observations and bounded source budgets.
+产品、架构、运行时、上下文、记忆、TUI、测试和非目标的完整当前规则见：
 
-## Context and Prompt Engineering
-
-- Do not fix runtime, tool, session, UI, provider, or context-state bugs by adding symptom-specific prompt instructions to model input.
-- Before adding any model-visible instruction, first determine whether the behavior should be enforced by code, state machines, schemas, tool contracts, validation, or deterministic context facts.
-- Model input should contain durable task facts, bounded observations, compact state, and reusable workflow rules. It should not accumulate one-off corrective instructions for individual failures.
-- If a new prompt/context line is necessary, it must be general, reusable across task types, token-conscious, and backed by tests that prove why code-level enforcement is not the right boundary.
-- Prefer neutral structured facts over imperative prompt patches. For example, expose a compact state record only when the model needs that fact; do not add instructions that merely tell the model not to repeat a previously observed mistake.
+- `docs/active-rules-summary.md`

@@ -43,6 +43,8 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "failure": _failure_summary(failure_record),
         "verification": _verification_summary(package_view.verification_commands),
         "sandbox_summary": _sandbox_summary(package_view.sandbox),
+        "environment_summary": _environment_summary(package_view.environment),
+        "cost_summary": _cost_summary(package_view.cost),
         "tool_names_used": _tool_names_used(package_view.tool_calls),
         "tool_argument_errors": _tool_argument_errors(package_view.tool_calls),
         "approval_summary": _approval_summary(package_view.tool_calls),
@@ -121,6 +123,44 @@ def _sandbox_summary(sandbox: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _environment_summary(environment: dict[str, Any]) -> dict[str, Any]:
+    haagent = environment.get("haagent", {})
+    model = environment.get("model", {})
+    tools = environment.get("tools", {})
+    if not isinstance(haagent, dict):
+        haagent = {}
+    if not isinstance(model, dict):
+        model = {}
+    if not isinstance(tools, dict):
+        tools = {}
+    return {
+        "python": environment.get("python"),
+        "platform": environment.get("platform"),
+        "haagent_version": haagent.get("package_version"),
+        "model_provider": model.get("provider"),
+        "model": model.get("model"),
+        "endpoint": model.get("endpoint"),
+        "allowed_tool_count": tools.get("allowed_tool_count"),
+    }
+
+
+def _cost_summary(cost: dict[str, Any]) -> dict[str, Any]:
+    totals = cost.get("totals", {})
+    if not isinstance(totals, dict):
+        totals = {}
+    return {
+        "usage_available": cost.get("usage_available"),
+        "pricing_available": cost.get("pricing_available"),
+        "model_call_count": totals.get("model_call_count"),
+        "input_tokens": totals.get("input_tokens"),
+        "output_tokens": totals.get("output_tokens"),
+        "total_tokens": totals.get("total_tokens"),
+        "estimated_cost": cost.get("estimated_cost"),
+        "currency": cost.get("currency"),
+        "reason": cost.get("reason"),
+    }
+
+
 def _tool_names_used(records: list[dict[str, Any]]) -> list[str]:
     names = {str(record["tool_name"]) for record in records}
     return sorted(names)
@@ -171,7 +211,7 @@ def _policy_not_evaluated(record: dict[str, Any]) -> bool:
     return (
         record.get("status") == "error"
         and isinstance(error, dict)
-        and error.get("type") in {"tool_not_allowed", "unknown_tool"}
+        and error.get("type") in {"tool_not_allowed", "unknown_tool", "tool_call_skipped"}
     )
 
 

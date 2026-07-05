@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import urlsplit, urlunsplit
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -25,9 +26,27 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ModelUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    raw_source: str = "unknown"
+
+
+@dataclass(frozen=True)
+class ModelGatewayMetadata:
+    provider: str
+    model: str | None
+    endpoint: str | None
+    base_url: str | None = None
+    profile_name: str | None = None
+
+
+@dataclass(frozen=True)
 class ModelResponse:
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: ModelUsage | None = None
 
 
 class ModelGateway(Protocol):
@@ -40,6 +59,9 @@ class ModelGateway(Protocol):
         event_sink: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Generate a model response given a conversation messages list."""
+
+    def metadata(self) -> ModelGatewayMetadata:
+        """Return non-sensitive metadata for episode audit records."""
 
 
 Transport = Callable[[dict[str, object], str], dict[str, object]]
@@ -94,6 +116,14 @@ class OpenAIResponsesGateway:
         """返回本次 gateway 会请求的 Responses API endpoint，便于审计和测试。"""
         return self._responses_endpoint
 
+    def metadata(self) -> ModelGatewayMetadata:
+        return ModelGatewayMetadata(
+            provider=self.provider_name,
+            model=self._model,
+            endpoint=_redact_url(self._responses_endpoint),
+            base_url=_endpoint_base_url(self._responses_endpoint),
+        )
+
     def generate(
         self,
         messages: list[dict[str, Any]],
@@ -125,7 +155,11 @@ class OpenAIResponsesGateway:
         output_text = response.get("output_text")
         if not isinstance(output_text, str):
             raise ModelCallError("OpenAI response did not include output_text")
-        return ModelResponse(content=output_text, tool_calls=_parse_tool_calls(response))
+        return ModelResponse(
+            content=output_text,
+            tool_calls=_parse_tool_calls(response),
+            usage=_parse_openai_responses_usage(response),
+        )
 
 
 class OpenAIChatCompletionsGateway:
@@ -162,6 +196,14 @@ class OpenAIChatCompletionsGateway:
     def chat_completions_endpoint(self) -> str:
         """返回本次 gateway 会请求的 Chat Completions endpoint，便于审计和测试。"""
         return self._chat_completions_endpoint
+
+    def metadata(self) -> ModelGatewayMetadata:
+        return ModelGatewayMetadata(
+            provider=self.provider_name,
+            model=self._model,
+            endpoint=_redact_url(self._chat_completions_endpoint),
+            base_url=_endpoint_base_url(self._chat_completions_endpoint),
+        )
 
     def generate(
         self,
@@ -215,6 +257,14 @@ class AnthropicMessagesGateway:
     def messages_endpoint(self) -> str:
         """返回本次 gateway 会请求的 Anthropic Messages endpoint，便于审计和测试。"""
         return self._messages_endpoint
+
+    def metadata(self) -> ModelGatewayMetadata:
+        return ModelGatewayMetadata(
+            provider=self.provider_name,
+            model=self._model,
+            endpoint=_redact_url(self._messages_endpoint),
+            base_url=_endpoint_base_url(self._messages_endpoint),
+        )
 
     def generate(
         self,
@@ -270,6 +320,14 @@ class GoogleGeminiGateway:
     def generate_content_endpoint(self) -> str:
         """返回本次 gateway 会请求的 Gemini generateContent endpoint，便于审计和测试。"""
         return self._endpoint
+
+    def metadata(self) -> ModelGatewayMetadata:
+        return ModelGatewayMetadata(
+            provider=self.provider_name,
+            model=self._model,
+            endpoint=_redact_url(self._endpoint),
+            base_url=_endpoint_base_url(self._endpoint),
+        )
 
     def generate(
         self,
@@ -373,6 +431,7 @@ def _parse_chat_completion_response(response: dict[str, object]) -> ModelRespons
     return ModelResponse(
         content=content,
         tool_calls=_parse_chat_tool_calls(message.get("tool_calls")),
+        usage=_parse_openai_chat_usage(response),
     )
 
 
@@ -528,7 +587,11 @@ def _parse_anthropic_response(response: dict[str, object]) -> ModelResponse:
             tool_calls.append(ToolCall(name=name, args=raw_input, id=tool_id))
             continue
         raise ModelCallError(f"unsupported Anthropic content block type: {block_type}")
-    return ModelResponse(content="".join(text_parts), tool_calls=tool_calls)
+    return ModelResponse(
+        content="".join(text_parts),
+        tool_calls=tool_calls,
+        usage=_parse_anthropic_usage(response),
+    )
 
 
 def _gemini_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -666,7 +729,90 @@ def _parse_gemini_response(response: dict[str, object]) -> ModelResponse:
             tool_calls.append(ToolCall(name=name, args=args))
             continue
         raise ModelCallError("unsupported Gemini part")
-    return ModelResponse(content="".join(text_parts), tool_calls=tool_calls)
+    return ModelResponse(
+        content="".join(text_parts),
+        tool_calls=tool_calls,
+        usage=_parse_gemini_usage(response),
+    )
+
+
+def _parse_openai_responses_usage(response: dict[str, object]) -> ModelUsage | None:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return _usage_from_fields(
+        usage,
+        input_field="input_tokens",
+        output_field="output_tokens",
+        total_field="total_tokens",
+        raw_source="openai.responses.usage",
+    )
+
+
+def _parse_openai_chat_usage(response: dict[str, object]) -> ModelUsage | None:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return _usage_from_fields(
+        usage,
+        input_field="prompt_tokens",
+        output_field="completion_tokens",
+        total_field="total_tokens",
+        raw_source="openai.chat_completions.usage",
+    )
+
+
+def _parse_anthropic_usage(response: dict[str, object]) -> ModelUsage | None:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return _usage_from_fields(
+        usage,
+        input_field="input_tokens",
+        output_field="output_tokens",
+        total_field=None,
+        raw_source="anthropic.messages.usage",
+    )
+
+
+def _parse_gemini_usage(response: dict[str, object]) -> ModelUsage | None:
+    usage = response.get("usageMetadata")
+    if not isinstance(usage, dict):
+        return None
+    return _usage_from_fields(
+        usage,
+        input_field="promptTokenCount",
+        output_field="candidatesTokenCount",
+        total_field="totalTokenCount",
+        raw_source="google.gemini.usageMetadata",
+    )
+
+
+def _usage_from_fields(
+    usage: dict[str, object],
+    *,
+    input_field: str,
+    output_field: str,
+    total_field: str | None,
+    raw_source: str,
+) -> ModelUsage | None:
+    input_tokens = _optional_int(usage.get(input_field))
+    output_tokens = _optional_int(usage.get(output_field))
+    total_tokens = _optional_int(usage.get(total_field)) if total_field is not None else None
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+    if input_tokens is None and output_tokens is None and total_tokens is None:
+        return None
+    return ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        raw_source=raw_source,
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -702,7 +848,7 @@ def _normalize_responses_endpoint(base_url: str | None) -> str:
     """把裸域名或 /v1 base URL 规范化为 Responses API endpoint。"""
     if base_url is None or not base_url.strip():
         return DEFAULT_RESPONSES_ENDPOINT
-    endpoint = base_url.strip().rstrip("/")
+    endpoint = (_redact_url(base_url) or "").rstrip("/")
     if "://" not in endpoint:
         endpoint = f"https://{endpoint}"
     if endpoint.endswith("/v1/responses"):
@@ -716,7 +862,7 @@ def _normalize_chat_completions_endpoint(base_url: str | None) -> str:
     """把裸域名或 /v1 base URL 规范化为 Chat Completions endpoint。"""
     if base_url is None or not base_url.strip():
         return DEFAULT_CHAT_COMPLETIONS_ENDPOINT
-    endpoint = base_url.strip().rstrip("/")
+    endpoint = (_redact_url(base_url) or "").rstrip("/")
     if "://" not in endpoint:
         endpoint = f"https://{endpoint}"
     if endpoint.endswith("/v1/chat/completions"):
@@ -730,7 +876,7 @@ def _normalize_anthropic_messages_endpoint(base_url: str | None) -> str:
     """把裸域名或 /v1 base URL 规范化为 Anthropic Messages endpoint。"""
     if base_url is None or not base_url.strip():
         return DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT
-    endpoint = base_url.strip().rstrip("/")
+    endpoint = (_redact_url(base_url) or "").rstrip("/")
     if "://" not in endpoint:
         endpoint = f"https://{endpoint}"
     if endpoint.endswith("/v1/messages"):
@@ -746,12 +892,43 @@ def _normalize_gemini_generate_content_endpoint(base_url: str | None, model: str
     if base_url is None or not base_url.strip():
         base = DEFAULT_GEMINI_API_BASE_URL
     else:
-        base = base_url.strip().rstrip("/")
+        base = (_redact_url(base_url) or "").rstrip("/")
         if "://" not in base:
             base = f"https://{base}"
     if base.endswith(":generateContent"):
         return base
     return f"{base}/{model_path}:generateContent"
+
+
+def _redact_url(url: str | None) -> str | None:
+    if url is None or not url.strip():
+        return None
+    parsed = urlsplit(url.strip())
+    if not parsed.scheme or not parsed.hostname:
+        return url.strip().split("?", 1)[0]
+    netloc = parsed.hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _endpoint_base_url(endpoint: str | None) -> str | None:
+    redacted = _redact_url(endpoint)
+    if redacted is None:
+        return None
+    parsed = urlsplit(redacted)
+    path = parsed.path.rstrip("/")
+    for suffix in (
+        "/chat/completions",
+        "/responses",
+        "/messages",
+    ):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    if "/models/" in path:
+        path = path.split("/models/", 1)[0]
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _responses_transport(
@@ -982,7 +1159,11 @@ def _iter_sse_events(response) -> list[dict[str, object]]:
 def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
     content_parts: list[str] = []
     tool_calls: dict[int, dict[str, object]] = {}
+    usage: dict[str, object] | None = None
     for event in _iter_sse_events(response):
+        raw_usage = event.get("usage")
+        if isinstance(raw_usage, dict):
+            usage = raw_usage
         choices = event.get("choices")
         if not isinstance(choices, list):
             continue
@@ -1017,7 +1198,7 @@ def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict
                     aggregated_function["name"] = function["name"]
                 if isinstance(function.get("arguments"), str):
                     aggregated_function["arguments"] += function["arguments"]
-    return {
+    parsed: dict[str, object] = {
         "choices": [
             {
                 "message": {
@@ -1027,6 +1208,9 @@ def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict
             },
         ],
     }
+    if usage is not None:
+        parsed["usage"] = usage
+    return parsed
 
 
 def _parse_openai_responses_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
@@ -1054,6 +1238,7 @@ def _parse_anthropic_stream(response, on_delta: Callable[[str], None]) -> dict[s
     text_parts: list[str] = []
     content_blocks: list[dict[str, object]] = []
     current_tool_block: dict[str, object] | None = None
+    usage: dict[str, object] | None = None
     for event in _iter_sse_events(response):
         event_type = event.get("type")
         if event_type == "content_block_start":
@@ -1086,16 +1271,29 @@ def _parse_anthropic_stream(response, on_delta: Callable[[str], None]) -> dict[s
             current_tool_block = None
         elif event_type == "message_stop":
             break
+        raw_usage = event.get("usage")
+        if isinstance(raw_usage, dict):
+            usage = raw_usage
+        delta = event.get("delta")
+        if isinstance(delta, dict) and isinstance(delta.get("usage"), dict):
+            usage = delta["usage"]
     if text_parts:
         content_blocks.insert(0, {"type": "text", "text": "".join(text_parts)})
-    return {"content": content_blocks}
+    parsed: dict[str, object] = {"content": content_blocks}
+    if usage is not None:
+        parsed["usage"] = usage
+    return parsed
 
 
 def _parse_gemini_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
     parts: list[dict[str, object]] = []
     text_parts: list[str] = []
     function_calls: list[dict[str, object]] = []
+    usage_metadata: dict[str, object] | None = None
     for event in _iter_sse_events(response):
+        raw_usage = event.get("usageMetadata")
+        if isinstance(raw_usage, dict):
+            usage_metadata = raw_usage
         candidates = event.get("candidates")
         if not isinstance(candidates, list):
             continue
@@ -1118,4 +1316,7 @@ def _parse_gemini_stream(response, on_delta: Callable[[str], None]) -> dict[str,
                     function_calls.append(part["functionCall"])
     parts.extend({"text": item} for item in text_parts)
     parts.extend({"functionCall": item} for item in function_calls)
-    return {"candidates": [{"content": {"parts": parts}}]}
+    parsed: dict[str, object] = {"candidates": [{"content": {"parts": parts}}]}
+    if usage_metadata is not None:
+        parsed["usageMetadata"] = usage_metadata
+    return parsed

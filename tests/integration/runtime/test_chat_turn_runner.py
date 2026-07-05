@@ -186,6 +186,9 @@ def test_prepare_initial_messages_injects_worker_context_system_prompt(tmp_path:
             )
 
     class _Writer:
+        def write_environment(self, *args, **kwargs) -> None:
+            self.environment_args = (args, kwargs)
+
         def append_transcript(self, event) -> None:
             raise AssertionError(f"unexpected transcript event: {event}")
 

@@ -7,6 +7,7 @@ haagent/cli_commands.py - CLI 子命令处理器
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -174,11 +175,20 @@ def handle_dogfood(args, runtime: CliRuntime) -> int:
 
 def handle_inspect(args) -> int:
     try:
-        print(render_episode_summary(args.episode_path))
+        _safe_print(render_episode_summary(args.episode_path))
     except EpisodeInspectError as error:
         print(f"error: {error}")
         return 1
     return 0
+
+
+def _safe_print(text: str) -> None:
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(encoding)
+        print(safe_text)
 
 
 def handle_eval(args, runtime: CliRuntime) -> int:
