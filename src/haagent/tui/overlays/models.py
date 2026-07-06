@@ -79,11 +79,12 @@ class ModelCenterState:
         for index, profile in enumerate(visible):
             selected = ">" if index == min(self.selected_index, len(visible) - 1) else " "
             active = "*" if profile.active else " "
+            current = "@" if getattr(profile, "current_session", False) else " "
             credential = "key:ok" if profile.credential_available else "key:missing"
             capability = getattr(profile.capability, "status", "-")
             model = safe_summary(profile.model, 36)
-            lines.append(f"{selected}{active} {profile.name:<16} {profile.provider:<12} {model} {credential} {capability}")
-        lines.extend(["", "输入过滤  ↑/↓ 移动  Enter 切当前会话  p 默认  d 删除  n 目录新建  m 手动  r 刷新  t 测试  Esc 关闭"])
+            lines.append(f"{selected}{active}{current} {profile.name:<16} {profile.provider:<12} {model} {credential} {capability}")
+        lines.extend(["", "* 默认  @ 当前会话  输入过滤  ↑/↓ 移动  Enter 切当前会话  p 默认  d 删除  n 目录新建  m 手动  r 刷新  t 测试  Esc 关闭"])
         return "\n".join(lines)
 
 

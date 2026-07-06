@@ -908,9 +908,15 @@ def test_service_switches_current_session_model_without_changing_default(
     service.create_session()
 
     status = service.switch_current_session_model("router")
+    workspace_status = service.get_workspace_status()
 
     assert status.model_profile_name == "router"
     assert service.current_session().model_profile_name == "router"
+    assert workspace_status.profile_name == "router"
+    assert workspace_status.model == "openai/gpt-5.2-chat"
+    assert workspace_status.base_url == "https://openrouter.ai/api/v1"
+    assert workspace_status.api_key_env == "OPENROUTER_API_KEY"
+    assert workspace_status.api_key_available is True
     assert provider_profile.load_active_profile_name(settings_path=config_dir / "settings.json") == "local"
 
 

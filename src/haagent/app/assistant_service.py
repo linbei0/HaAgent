@@ -204,6 +204,7 @@ class AssistantModelProfile:
     credential_available: bool
     credential_source_used: str | None
     capability: GatewayCapability
+    current_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -334,6 +335,8 @@ class AssistantService:
         self.install_marketplace_skill_card_fn = lambda card: install_marketplace_skill_card(card)
 
     def get_workspace_status(self) -> AssistantWorkspaceStatus:
+        session_status = self.current_session()
+        profile_name_override = session_status.model_profile_name if session_status is not None else None
         profile_name: str | None = None
         provider: str | None = None
         base_url: str | None = None
@@ -346,13 +349,25 @@ class AssistantService:
         credential_store_error: str | None = None
         profile_error: str | None = None
         try:
-            record = load_active_provider_profile_record()
+            record = (
+                load_provider_profile_record(profile_name_override)
+                if profile_name_override is not None
+                else load_active_provider_profile_record()
+            )
             profile_name = record.name
             provider = record.provider
             base_url = record.base_url
             model = record.model
             api_key_env = record.api_key_env
-            credential = active_provider_credential_status(environ=self.environ)
+            credential = (
+                provider_profile_credential_status(
+                    record.name,
+                    environ=self.environ,
+                    config_dir=user_config_dir(),
+                )
+                if profile_name_override is not None
+                else active_provider_credential_status(environ=self.environ)
+            )
             api_key_available = credential.api_key_available
             credential_source_configured = credential.credential_source_configured
             credential_source_used = credential.credential_source_used
@@ -360,7 +375,6 @@ class AssistantService:
             credential_store_error = credential.credential_store_error
         except ProviderProfileError as error:
             profile_error = str(error)
-        session_status = self.current_session()
         sandbox_status = _sandbox_status()
         return AssistantWorkspaceStatus(
             workspace_root=self.workspace_root,

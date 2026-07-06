@@ -41,6 +41,8 @@ def list_model_profiles(service: "AssistantService") -> list["AssistantModelProf
         active_profile_name = load_active_profile_name()
     except ProviderProfileError:
         active_profile_name = None
+    session_status = service.current_session()
+    current_profile_name = session_status.model_profile_name if session_status is not None else None
     profiles: list["AssistantModelProfile"] = []
     for record in list_provider_profile_records():
         credential = provider_profile_credential_status(
@@ -60,6 +62,7 @@ def list_model_profiles(service: "AssistantService") -> list["AssistantModelProf
                 credential_available=credential.api_key_available,
                 credential_source_used=credential.credential_source_used,
                 capability=service.gateway_capability_for_profile(record),
+                current_session=record.name == current_profile_name,
             )
         )
     return profiles

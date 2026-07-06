@@ -172,6 +172,7 @@ class FakeAssistantService:
         self.sandbox_disabled_count = 0
         self.model_profiles: list[SimpleNamespace] = []
         self.switched_model_profile: str | None = None
+        self.current_session_model_profile: str | None = None
         self.default_model_profile: str | None = None
         self.deleted_model_profile: str | None = None
         self.catalog_providers: list[SimpleNamespace] = []
@@ -191,13 +192,20 @@ class FakeAssistantService:
         self.catalog_refresh_release: threading.Event | None = None
 
     def get_workspace_status(self) -> AssistantWorkspaceStatus:
+        current_profile = next(
+            (profile for profile in self.model_profiles if profile.name == self.current_session_model_profile),
+            None,
+        )
+        profile_name = getattr(current_profile, "name", self.profile_name)
+        provider = getattr(current_profile, "provider", self.provider)
+        model = getattr(current_profile, "model", self.model)
         return AssistantWorkspaceStatus(
             workspace_root=self.workspace_root,
             runs_root=self.workspace_root / ".runs",
-            profile_name=self.profile_name,
-            provider=self.provider,
+            profile_name=profile_name,
+            provider=provider,
             base_url="https://api.deepseek.com",
-            model=self.model,
+            model=model,
             api_key_env=self.api_key_env,
             api_key_available=self.api_key_available,
             credential_source_configured=self.credential_source_configured,
@@ -377,6 +385,11 @@ class FakeAssistantService:
 
     def switch_current_session_model(self, profile_name: str) -> AssistantSessionStatus:
         self.switched_model_profile = profile_name
+        self.current_session_model_profile = profile_name
+        for index, profile in enumerate(self.model_profiles):
+            self.model_profiles[index] = SimpleNamespace(
+                **{**profile.__dict__, "current_session": profile.name == profile_name},
+            )
         return AssistantSessionStatus(
             session_id=self.current_session_id,
             workspace_root=self.workspace_root,
@@ -396,7 +409,11 @@ class FakeAssistantService:
         self.default_model_profile = profile_name
         for index, profile in enumerate(self.model_profiles):
             self.model_profiles[index] = SimpleNamespace(
-                **{**profile.__dict__, "active": profile.name == profile_name},
+                **{
+                    **profile.__dict__,
+                    "active": profile.name == profile_name,
+                    "current_session": profile.name == self.current_session_model_profile,
+                },
             )
 
     def set_web_enabled(self, enabled: bool) -> AssistantWorkspaceStatus:
@@ -1766,10 +1783,12 @@ def test_tui_model_overlay_switches_session_and_sets_default(tmp_path: Path) -> 
             await pilot.pause(0.1)
             assert service.switched_model_profile == "router"
             assert "模型已切换到当前会话：router" in _text(app, "#conversation")
+            assert "openai/gpt" in _text(app, "#status-bar")
 
             await pilot.press("/")
             await pilot.press("m", "o", "d", "e", "l", "enter")
             await pilot.pause(0.1)
+            assert "@ router" in _all_text(app)
             await pilot.press("p")
             await pilot.pause(0.1)
             assert service.default_model_profile == "router"
