@@ -67,6 +67,7 @@ from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 from haagent.tools.registry import default_tool_runtime_registry
 
 CHAT_MAX_TURNS = DEFAULT_INTERACTIVE_MAX_TURNS
+ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT = 4000
 
 
 class ChatSessionError(RuntimeError):
@@ -132,6 +133,7 @@ class SessionTurnSummary:
     status: str
     episode_path: Path
     verification_status: str
+    assistant_display_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -772,6 +774,7 @@ class AgentSession:
             "status": result.status,
             "episode_path": str(result.episode_path),
             "verification_status": result.verification_status,
+            "assistant_display_text": _assistant_display_text(result.final_response),
         }
         with (self.session_path / "turns.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -961,6 +964,8 @@ def _read_session_turns(session_path: Path) -> list[dict[str, object]]:
         for field_name in ["request", "summary", "status", "episode_path", "verification_status"]:
             if not isinstance(record[field_name], str):
                 raise ChatSessionError(f"invalid turns.jsonl line {index}: {field_name} must be a string")
+        if "assistant_display_text" in record and not isinstance(record["assistant_display_text"], str):
+            raise ChatSessionError(f"invalid turns.jsonl line {index}: assistant_display_text must be a string")
         turns.append(record)
     return turns
 
@@ -993,6 +998,7 @@ def _manual_compaction_summary_text(messages: list[dict[str, Any]]) -> str | Non
 
 
 def _session_turn_summary(record: dict[str, object]) -> SessionTurnSummary:
+    assistant_display_text = record.get("assistant_display_text")
     return SessionTurnSummary(
         turn_index=int(record["turn_index"]),
         request=str(record["request"]),
@@ -1000,6 +1006,7 @@ def _session_turn_summary(record: dict[str, object]) -> SessionTurnSummary:
         status=str(record["status"]),
         episode_path=Path(str(record["episode_path"])),
         verification_status=str(record["verification_status"]),
+        assistant_display_text=assistant_display_text if isinstance(assistant_display_text, str) else None,
     )
 
 
@@ -1007,6 +1014,13 @@ def _optional_string(value: object) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _assistant_display_text(value: str) -> str:
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(normalized) <= ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT:
+        return normalized
+    return normalized[:ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT] + "... [truncated]"
 
 
 def _new_session_id() -> str:

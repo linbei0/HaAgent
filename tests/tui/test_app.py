@@ -3541,6 +3541,51 @@ def test_tui_restored_session_renders_final_response_not_raw_turn_summary(tmp_pa
     asyncio.run(run())
 
 
+def test_tui_restored_session_prefers_assistant_display_text(tmp_path: Path) -> None:
+    sessions = [_session_summary(tmp_path, "session-display", "恢复长回答", 1)]
+    raw_summary = "\n".join(
+        [
+            "- user_request: 恢复长回答",
+            "  status: completed",
+            f"  episode_path: {tmp_path / '.runs' / 'episode-1'}",
+            "  assistant_final_response: 摘要里的短回答... [truncated]",
+            "  verification: success",
+        ],
+    )
+    full_display_text = "这是用于恢复展示的较完整回答，不应该退回到摘要里的截断文本。"
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        sessions=sessions,
+        session_histories={
+            "session-display": [
+                SimpleNamespace(
+                    turn_index=1,
+                    request="恢复长回答",
+                    summary=raw_summary,
+                    status="completed",
+                    assistant_display_text=full_display_text,
+                ),
+            ],
+        },
+    )
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "/sessions"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            conversation = _text(app, "#conversation")
+            assert full_display_text in conversation
+            assert "摘要里的短回答" not in conversation
+
+    asyncio.run(run())
+
+
 def test_tui_restores_initial_resume_session_on_mount(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)

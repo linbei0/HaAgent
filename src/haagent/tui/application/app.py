@@ -1390,7 +1390,7 @@ def run_tui(service: AssistantService) -> int:
 
 
 def _session_turn_assistant_text(turn: object) -> str:
-    for field_name in ("assistant_final_response", "final_response", "response", "content"):
+    for field_name in ("assistant_display_text", "assistant_final_response", "final_response", "response", "content"):
         value = getattr(turn, field_name, None)
         if isinstance(value, str) and value.strip():
             return value.strip()

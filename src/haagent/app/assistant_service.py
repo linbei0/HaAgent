@@ -171,6 +171,7 @@ class AssistantSessionTurn:
     status: str
     episode_path: Path
     verification_status: str
+    assistant_display_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -697,6 +698,7 @@ def _session_turn(turn: SessionTurnSummary) -> AssistantSessionTurn:
         status=turn.status,
         episode_path=turn.episode_path,
         verification_status=turn.verification_status,
+        assistant_display_text=turn.assistant_display_text,
     )
 
 
