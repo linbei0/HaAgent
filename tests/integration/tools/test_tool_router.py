@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from haagent.context.messages import build_tool_result_message
 from haagent.mcp.runtime import McpRuntimeTimeoutError
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
@@ -484,8 +485,9 @@ def test_tool_router_unknown_tool_keeps_existing_failure_semantics(tmp_path: Pat
 
 
 class FakeMcpRuntime:
-    def __init__(self) -> None:
+    def __init__(self, output: str = "echo:hi") -> None:
         self.calls: list[tuple[str, str, dict[str, object]]] = []
+        self.output = output
 
     def call_tool(
         self,
@@ -496,7 +498,7 @@ class FakeMcpRuntime:
     ) -> str:
         del kwargs
         self.calls.append((server_name, tool_name, arguments))
-        return "echo:hi"
+        return self.output
 
     def list_resources(self) -> list[object]:
         return []
@@ -547,6 +549,46 @@ def test_tool_router_dispatches_dynamic_mcp_tool_through_trace(tmp_path: Path) -
     assert record["tool_name"] == "mcp__fixture__echo"
     assert record["status"] == "success"
     assert record["policy"]["risk_level"] == "high"
+
+
+def test_tool_router_offloads_large_mcp_output_for_model_visibility(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    dynamic = ToolDefinition(
+        name="mcp__fixture__fetch",
+        description="Fetch remote content",
+        risk_level="high",
+        parameters={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    )
+    large_output = "start " + ("middle " * 2200) + "important tail"
+    runtime = FakeMcpRuntime(output=large_output)
+    router = ToolRouter(
+        allowed_tools=["mcp__fixture__fetch"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approved_tools=["mcp__fixture__fetch"],
+        tool_registry=default_tool_runtime_registry({"mcp__fixture__fetch": dynamic}),
+        mcp_runtime=runtime,
+    )
+
+    result = router.dispatch("mcp__fixture__fetch", {"url": "https://example.com"})
+
+    visible = result["model_visible"]
+    assert visible["truncated"] is True
+    assert visible["original_chars"] == len(large_output)
+    assert "start" in visible["output"]
+    assert "important tail" in visible["output"]
+    assert len(visible["output"]) < len(large_output)
+    artifact_path = tmp_path / visible["artifact_path"]
+    assert artifact_path.exists()
+    assert artifact_path.read_text(encoding="utf-8") == large_output
+    message = build_tool_result_message("call_large", "mcp__fixture__fetch", result)
+    assert large_output not in message["content"]
+    assert str(visible["artifact_path"]) in message["content"]
 
 
 def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -> None:

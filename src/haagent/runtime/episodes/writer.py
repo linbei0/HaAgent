@@ -170,6 +170,16 @@ class EpisodeWriter:
             cost["reason"] = cost.get("reason") or "pricing unavailable: no reliable catalog match"
         self._write_json("cost.json", cost)
 
+    def write_tool_artifact(self, tool_name: str, content: str, *, suffix: str = ".txt") -> str:
+        artifact_dir = self.path / "artifacts" / "tool-results"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / f"{_safe_artifact_name(tool_name)}-{uuid.uuid4().hex[:8]}{suffix}"
+        artifact_path.write_text(content, encoding="utf-8")
+        try:
+            return artifact_path.relative_to(self.task_path.parent.resolve()).as_posix()
+        except ValueError:
+            return artifact_path.as_posix()
+
     def write_sandbox_metadata(self, metadata: SandboxMetadata) -> None:
         self._write_json("sandbox.json", metadata.to_dict())
 
@@ -273,6 +283,11 @@ def _sum_token_field(model_calls: list[Any], field_name: str) -> int | None:
     if not values:
         return None
     return sum(values)
+
+
+def _safe_artifact_name(value: str) -> str:
+    safe = "".join(ch if ch.isalnum() else "_" for ch in value.lower()).strip("_")
+    return safe or "tool"
 
 
 def _environment_model_metadata(metadata: ModelGatewayMetadata | None) -> dict[str, str | None]:

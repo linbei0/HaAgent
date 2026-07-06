@@ -396,6 +396,8 @@ def _microcompact_old_tool_messages(
         content = message.get("content")
         if not isinstance(content, str) or len(content) <= OBSERVATION_MICROCOMPACT_CHAR_LIMIT:
             continue
+        if _is_artifact_backed_tool_message(content):
+            continue
         compacted = _collapse_text_head_tail(
             content,
             head_chars=OBSERVATION_MICROCOMPACT_HEAD_CHARS,
@@ -427,6 +429,16 @@ def _collapse_text_head_tail(text: str, *, head_chars: int, tail_chars: int) -> 
     if tail:
         return f"{head}\n{marker}\n{tail}"
     return f"{head}\n{marker}"
+
+
+def _is_artifact_backed_tool_message(content: str) -> bool:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return isinstance(payload.get("artifact_path"), str) and payload.get("truncated") is True
 
 
 def _verification_loop_limit_evidence(max_turns: int, verification_result) -> str:

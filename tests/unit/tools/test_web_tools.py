@@ -162,6 +162,44 @@ def test_web_fetch_simplified_html_removes_low_value_page_chrome() -> None:
     assert "value=" not in visible_content
 
 
+def test_web_fetch_offloads_long_simplified_content_to_artifact() -> None:
+    saved: dict[str, str] = {}
+    long_body = "start " + ("middle " * 2200) + "important tail"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text=f"<html><body><main><p>{long_body}</p></main></body></html>",
+            request=request,
+        )
+
+    def artifact_writer(tool_name: str, content: str) -> str:
+        saved["tool_name"] = tool_name
+        saved["content"] = content
+        return ".runs/episode/artifacts/tool-results/web_fetch-test.txt"
+
+    result = web_fetch(
+        {"url": "https://example.com/long", "max_chars": 12000},
+        transport=httpx.MockTransport(handler),
+        resolver=_public_resolver,
+        artifact_writer=artifact_writer,
+    )
+
+    visible = result["model_visible"]
+    assert visible["truncated"] is True
+    assert visible["artifact_path"] == ".runs/episode/artifacts/tool-results/web_fetch-test.txt"
+    assert visible["original_chars"] == len(saved["content"])
+    assert "file_read" in visible["continuation_hint"]
+    assert visible["artifact_path"] in visible["continuation_hint"]
+    assert len(visible["content"]) < len(saved["content"])
+    assert "start" in visible["content"]
+    assert "important tail" in visible["content"]
+    assert saved["tool_name"] == "web_fetch"
+    assert saved["content"].startswith("<main>")
+    assert "important tail" in saved["content"]
+
+
 def test_tavily_web_search_maps_results_without_leaking_api_key() -> None:
     seen: dict[str, object] = {}
 
@@ -210,6 +248,18 @@ def test_tavily_web_search_maps_results_without_leaking_api_key() -> None:
         "topic": "news",
         "time_range": "week",
         "search_depth": "basic",
+    }
+    assert result["model_visible"] == {
+        "provider": "tavily",
+        "query": "haagent docs",
+        "returned_count": 1,
+        "results": [
+            {
+                "title": "HaAgent Docs",
+                "url": "https://example.com/docs",
+                "snippet": "Docs snippet",
+            },
+        ],
     }
     assert "tvly-secret" not in json.dumps(result, ensure_ascii=False)
 
