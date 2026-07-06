@@ -575,6 +575,7 @@ def test_active_profile_status_reports_api_key_available(tmp_path: Path, monkeyp
     assert status.credential_source_configured == "keyring"
     assert status.credential_source_used == "env"
     assert status.credential_store_available is True
+    assert status.image_input_supported is False
     assert status.profile_error is None
     assert "sk-secret" not in repr(status)
 

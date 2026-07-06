@@ -6,6 +6,7 @@ haagent/tui/app.py - HaAgent TUI 应用编排
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from haagent.models.gateway_registry import catalog_provider_capability
 from haagent.memory import MemoryCandidate
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.session.attachments import ImageAttachment, MAX_IMAGE_ATTACHMENTS
 from haagent.tui.commands.suggestions import CommandSuggestionOverlay
 from haagent.tui.commands import command_registry, is_prompt_mode_command, parse_slash_command
 from haagent.tui.design.copy import BLOCK_TITLES
@@ -65,6 +67,8 @@ from haagent.tui.widgets import (
     ToolStatus,
     _end_location,
 )
+
+IMAGE_TOKEN_PATTERN = re.compile(r"\[image\s+(\d+)\]")
 
 
 def find_untrusted_absolute_paths(
@@ -117,6 +121,9 @@ class HaAgentTuiApp(App[None]):
         self._pending_external_path: Path | None = None
         self._pending_full_trust_prompt: str | None = None
         self._pending_full_trust_path: Path | None = None
+        self._pending_attachments: list[ImageAttachment] = []
+        self._pending_attachment_tokens: dict[int, ImageAttachment] = {}
+        self._session_image_count = 0
         self._model_catalog_providers: list[object] | None = None
         self._commands = command_registry()
         self._theme_choice = select_theme()
@@ -204,9 +211,12 @@ class HaAgentTuiApp(App[None]):
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area.id != "prompt-input" or self._file_ref_overlay is None:
             if event.text_area.id == "prompt-input":
-                self._sync_command_suggestions_with_prompt(self._prompt_value(event.text_area))
+                text = self._prompt_value(event.text_area)
+                self._sync_pending_attachments_with_prompt(text)
+                self._sync_command_suggestions_with_prompt(text)
             return
         text = self._prompt_value(event.text_area)
+        self._sync_pending_attachments_with_prompt(text)
         query = query_after_at(text)
         if query is None:
             self._close_file_ref_overlay()
@@ -222,7 +232,9 @@ class HaAgentTuiApp(App[None]):
 
     def _submit_prompt(self, prompt_input: PromptInput) -> None:
         prompt = self._prompt_value(prompt_input).strip()
-        if not prompt:
+        attachments = self._attachments_from_prompt(prompt)
+        prompt_text = _prompt_without_image_tokens(prompt)
+        if not prompt_text and not attachments:
             return
         command = parse_slash_command(prompt, self._commands)
         if command is not None:
@@ -235,25 +247,34 @@ class HaAgentTuiApp(App[None]):
             return
         if self._state in {"running", "cancelling", "waiting approval"}:
             return
+        if attachments and not self._current_model_accepts_images():
+            return
         self._set_prompt_value(prompt_input, "")
         if is_prompt_mode_command(prompt):
             self._start_prompt(prompt)
             return
         if path_authorization.handle_prompt_path_authorization(self, prompt):
             return
-        self._start_prompt(prompt)
+        self._pending_attachments = []
+        self._pending_attachment_tokens = {}
+        self._start_prompt(prompt_text, attachments=attachments, display_prompt=prompt)
 
-    def _start_prompt(self, prompt: str) -> None:
+    def _start_prompt(
+        self,
+        prompt: str,
+        attachments: list[ImageAttachment] | None = None,
+        display_prompt: str | None = None,
+    ) -> None:
         self._active_turn_index = self._next_turn_index()
         self._conversation_stick_to_bottom = True
         self.query_one("#conversation", ConversationTimeline).set_stick_to_bottom(True)
-        self._append_block("You", prompt)
+        self._append_block("You", display_prompt or prompt)
         self.query_one("#conversation", ConversationTimeline).start_assistant_response(
             turn_index=self._active_turn_index,
         )
         self._state = "running"
         self._refresh()
-        self._run_prompt(prompt)
+        self._run_prompt(prompt, attachments=attachments or [])
 
     def _next_turn_index(self) -> int:
         try:
@@ -450,6 +471,7 @@ class HaAgentTuiApp(App[None]):
         except Exception as error:
             self._append_block("Session warning", f"新建会话失败：{error}")
         else:
+            self._reset_image_input_state()
             self._clear_conversation_for_new_session()
         self._refresh()
 
@@ -459,6 +481,7 @@ class HaAgentTuiApp(App[None]):
         except Exception as error:
             self._append_block("Session warning", f"继续最新会话失败：{error}")
         else:
+            self._reset_image_input_state()
             self._append_line(f"已恢复会话：{status.session_id}")
         self._refresh()
 
@@ -510,6 +533,34 @@ class HaAgentTuiApp(App[None]):
             self.action_new_session()
         elif command.action == "resume_latest":
             self.action_resume_latest()
+
+    def action_paste_image_from_input(self) -> None:
+        self._paste_image_into_prompt()
+
+    def _paste_image_into_prompt(self) -> None:
+        if self._state in {"running", "cancelling", "waiting approval"}:
+            self._append_block("Command", "运行中不能修改待发送附件。")
+            self._refresh()
+            return
+        if len(self._pending_attachments) >= MAX_IMAGE_ATTACHMENTS:
+            self._append_block("Command", "每条消息最多 5 张图片。")
+            self._refresh()
+            return
+        try:
+            attachment = self.service.paste_clipboard_image(existing=list(self._pending_attachments))
+        except Exception as error:
+            self._append_block("Command", f"添加图片附件失败：{error}")
+            self._refresh()
+            return
+        self._session_image_count += 1
+        image_number = self._session_image_count
+        self._pending_attachments.append(attachment)
+        self._pending_attachment_tokens[image_number] = attachment
+        prompt_input = self.query_one("#prompt-input", PromptInput)
+        current = self._prompt_value(prompt_input)
+        token = f"[image {image_number}]"
+        prefix = f"{current} " if current and not current.endswith((" ", "\n")) else current
+        self._set_prompt_value(prompt_input, f"{prefix}{token}")
 
     def _handle_turns_command(self, argument: str) -> None:
         usage = "用法：/turns [show|unlimited|COUNT]"
@@ -745,6 +796,7 @@ class HaAgentTuiApp(App[None]):
         except Exception as error:
             self._append_block("Session warning", f"会话操作失败：{error}")
         else:
+            self._reset_image_input_state()
             if result.action == "new":
                 self._clear_conversation_for_new_session()
             else:
@@ -991,12 +1043,13 @@ class HaAgentTuiApp(App[None]):
         self.set_timer(0.01, self._restore_prompt_focus)
 
     @work(thread=True, exclusive=True)
-    def _run_prompt(self, prompt: str) -> None:
+    def _run_prompt(self, prompt: str, attachments: list[ImageAttachment] | None = None) -> None:
         try:
             result = self.service.run_prompt_events(
                 prompt,
                 event_sink=lambda event: self.call_from_thread(self._handle_chat_event, event),
                 interaction_handler=self._handle_interaction,
+                attachments=list(attachments or []),
             )
         except Exception as error:
             self.call_from_thread(self._handle_prompt_error, error)
@@ -1112,6 +1165,52 @@ class HaAgentTuiApp(App[None]):
                 self._conversation_rendered_count = 0
                 return
         self._conversation_lines.append(replacement)
+
+    def _attachments_from_prompt(self, prompt: str) -> list[ImageAttachment]:
+        attachments: list[ImageAttachment] = []
+        seen: set[int] = set()
+        for match in IMAGE_TOKEN_PATTERN.finditer(prompt):
+            image_number = int(match.group(1))
+            if image_number in seen:
+                continue
+            attachment = self._pending_attachment_tokens.get(image_number)
+            if attachment is not None:
+                attachments.append(attachment)
+                seen.add(image_number)
+        return attachments
+
+    def _sync_pending_attachments_with_prompt(self, prompt: str) -> None:
+        referenced = {int(match.group(1)) for match in IMAGE_TOKEN_PATTERN.finditer(prompt)}
+        self._pending_attachment_tokens = {
+            image_number: attachment
+            for image_number, attachment in self._pending_attachment_tokens.items()
+            if image_number in referenced
+        }
+        self._pending_attachments = list(self._pending_attachment_tokens.values())
+
+    def _current_model_accepts_images(self) -> bool:
+        try:
+            status = self.service.get_workspace_status()
+        except Exception as error:
+            self._append_block("Command", f"无法确认当前模型是否支持图片输入：{error}")
+            self._refresh()
+            return False
+        if getattr(status, "image_input_supported", None) is not False:
+            return True
+        model_label = status.model or status.profile_name or "当前模型"
+        self._append_block(
+            "Command",
+            f"当前模型不支持图片输入：{model_label}。请切换到支持视觉的模型后再发送。",
+        )
+        self._refresh()
+        return False
+
+    def _reset_image_input_state(self) -> None:
+        self._pending_attachments = []
+        self._pending_attachment_tokens = {}
+        self._session_image_count = 0
+        prompt_input = self.query_one("#prompt-input", PromptInput)
+        self._set_prompt_value(prompt_input, "")
 
     def _prompt_value(self, prompt_input: PromptInput) -> str:
         return prompt_input.text
@@ -1411,6 +1510,13 @@ def _summary_field(summary: str, field_name: str) -> str:
         if normalized.startswith(equals_prefix):
             return normalized.removeprefix(equals_prefix).strip()
     return ""
+
+
+def _prompt_without_image_tokens(prompt: str) -> str:
+    text = IMAGE_TOKEN_PATTERN.sub(" ", prompt)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    return text.strip()
 
 
 def _configurable_model_catalog_providers(providers: list[object]) -> list[object]:

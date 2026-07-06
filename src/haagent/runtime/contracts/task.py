@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from haagent.runtime.session.attachments import ImageAttachment, image_attachments_from_raw
+
 class TaskLoadError(ValueError):
     """Raised when task.yaml cannot be loaded as a valid task spec."""
 
@@ -27,6 +29,7 @@ class TaskSpec:
     path_policy: dict[str, Any] | None = None
     target_paths: list[str] = field(default_factory=list)
     prompt_pack_ids: list[str] = field(default_factory=list)
+    attachments: list[ImageAttachment] = field(default_factory=list)
     policy: dict[str, list[str]] = field(
         default_factory=lambda: {"approval_allowed_tools": [], "approved_tools": []},
     )
@@ -40,6 +43,7 @@ def load_task(path: Path) -> TaskSpec:
         raise TaskLoadError("task.yaml must contain a mapping")
 
     goal = _required_str(raw, "goal")
+    attachments = [attachment.with_base_path(path.parent) for attachment in _optional_attachments(raw)]
     return TaskSpec(
         goal=goal,
         constraints=_required_str_list(raw, "constraints"),
@@ -50,6 +54,7 @@ def load_task(path: Path) -> TaskSpec:
         path_policy=_optional_path_policy(raw),
         target_paths=_optional_str_list(raw, "target_paths"),
         prompt_pack_ids=_optional_str_list(raw, "prompt_pack_ids"),
+        attachments=attachments,
         policy=_optional_policy(raw, allowed_tools),
         worker_context=_optional_mapping(raw, "worker_context"),
     )
@@ -163,3 +168,10 @@ def _optional_mapping(raw: dict[str, Any], field: str) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise TaskLoadError(f"{field} must be a mapping")
     return dict(value)
+
+
+def _optional_attachments(raw: dict[str, Any]) -> list[ImageAttachment]:
+    try:
+        return image_attachments_from_raw(raw.get("attachments", []))
+    except ValueError as error:
+        raise TaskLoadError(f"invalid attachments: {error}") from error

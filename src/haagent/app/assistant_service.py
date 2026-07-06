@@ -51,6 +51,7 @@ from haagent.runtime.session.agent import (
     find_latest_session,
     list_sessions,
 )
+from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathAccess, PermissionMode
@@ -122,6 +123,7 @@ class AssistantWorkspaceStatus:
         degraded=True,
         reason="docker sandbox disabled",
     )
+    image_input_supported: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -380,6 +382,7 @@ class AssistantService:
             external_roots=session_status.external_roots if session_status is not None else [],
             permission_mode=session_status.permission_mode if session_status is not None else "request_approval",
             sandbox_status=session_status.sandbox_status if session_status is not None else sandbox_status,
+            image_input_supported=_image_input_supported(provider, base_url, model),
         )
 
     def current_session(self) -> AssistantSessionStatus | None:
@@ -579,6 +582,7 @@ class AssistantService:
         event_sink: EventSink | None = None,
         include_session_events: bool = True,
         interaction_handler: HumanInteractionHandler | None = None,
+        attachments: list[ImageAttachment] | None = None,
     ) -> ChatTurnResult:
         return session_usecases.run_prompt_events(
             self,
@@ -586,7 +590,11 @@ class AssistantService:
             event_sink=event_sink,
             include_session_events=include_session_events,
             interaction_handler=interaction_handler,
+            attachments=attachments,
         )
+
+    def paste_clipboard_image(self, *, existing: list[ImageAttachment] | None = None) -> ImageAttachment:
+        return session_usecases.paste_clipboard_image(self, existing=existing)
 
     def cancel_current_run(self) -> AssistantCancelResult:
         return session_usecases.cancel_current_run(self)
@@ -750,6 +758,19 @@ def _load_profile_record_for_result(profile_name: str):
         return load_provider_profile_record(profile_name)
     except ProviderProfileError:
         return None
+
+
+def _image_input_supported(provider: str | None, base_url: str | None, model: str | None) -> bool | None:
+    provider_key = (provider or "").strip().lower()
+    model_key = (model or "").strip().lower()
+    base_url_key = (base_url or "").strip().lower()
+    if provider_key in {"openai", "anthropic", "google"}:
+        return True
+    if provider_key != "openai-chat":
+        return None
+    if "deepseek" in base_url_key or model_key.startswith("deepseek"):
+        return False
+    return None
 
 
 def _secret_candidates(environ: Mapping[str, str]) -> list[str]:

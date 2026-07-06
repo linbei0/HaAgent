@@ -25,6 +25,16 @@ def test_turns_command_is_registered_and_parsed() -> None:
     assert result.argument == "set 80"
 
 
+def test_paste_command_is_not_registered() -> None:
+    registry = command_registry()
+
+    result = parse_slash_command("/paste", registry)
+
+    assert result is not None
+    assert result.command is None
+    assert result.error == "未知命令：/paste"
+
+
 def test_prompt_pack_commands_are_forwarded_as_chat_prompts() -> None:
     registry = command_registry()
 

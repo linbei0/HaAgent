@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from haagent.runtime.session.agent import ChatSessionError, find_latest_session, list_sessions
+from haagent.runtime.session.attachments import ImageAttachment
 
 if TYPE_CHECKING:
     from haagent.app.assistant_service import (
@@ -116,6 +117,7 @@ def run_prompt_events(
     event_sink: "EventSink | None"=None,
     include_session_events: bool=True,
     interaction_handler: "HumanInteractionHandler | None"=None,
+    attachments: list[ImageAttachment] | None = None,
 ):
     session = _ensure_session(service)
     return session.run_prompt_events(
@@ -123,7 +125,20 @@ def run_prompt_events(
         event_sink=event_sink,
         include_session_events=include_session_events,
         interaction_handler=interaction_handler,
+        attachments=attachments,
     )
+
+
+def paste_clipboard_image(
+    service: "AssistantService",
+    *,
+    existing: list[ImageAttachment] | None = None,
+) -> ImageAttachment:
+    session = _ensure_session(service)
+    try:
+        return session.paste_clipboard_image(existing=existing)
+    except ChatSessionError as error:
+        _raise_service_error(service, error)
 
 
 def cancel_current_run(service: "AssistantService") -> "AssistantCancelResult":

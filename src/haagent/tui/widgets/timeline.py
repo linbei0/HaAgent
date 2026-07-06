@@ -28,6 +28,7 @@ class PromptInput(TextArea):
         Binding("shift+enter", "insert_newline_from_input", "换行", priority=True),
         Binding("ctrl+f", "open_search_from_input", "搜索", priority=True),
         Binding("ctrl+x", "cancel_current_task_from_input", "取消任务", priority=True),
+        Binding("ctrl+v", "paste_image_from_input", "粘贴图片", priority=True),
     ]
 
     class Submitted(Message):
@@ -97,6 +98,9 @@ class PromptInput(TextArea):
 
     def action_cancel_current_task_from_input(self) -> None:
         self.app.action_cancel_current_task()
+
+    def action_paste_image_from_input(self) -> None:
+        self.app.action_paste_image_from_input()
 
     def action_submit_from_input(self) -> None:
         if getattr(self.app, "command_suggestions_is_open", lambda: False)():

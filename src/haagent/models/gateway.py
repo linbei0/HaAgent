@@ -6,8 +6,10 @@ haagent/models/gateway.py - 统一模型网关接口
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 import urllib.error
 import urllib.request
@@ -219,7 +221,7 @@ class OpenAIChatCompletionsGateway:
 
         payload: dict[str, object] = {
             "model": self._model,
-            "messages": messages,
+            "messages": _openai_chat_messages(messages),
         }
         if tool_schemas:
             payload["tools"] = _chat_tool_schemas(tool_schemas)
@@ -232,7 +234,7 @@ class OpenAIChatCompletionsGateway:
                 else self._transport(payload, self._api_key)
             )
         except Exception as error:
-            raise ModelCallError(str(error)) from error
+            raise ModelCallError(_openai_chat_error_message(str(error))) from error
         return _parse_chat_completion_response(response)
 
 
@@ -462,22 +464,56 @@ def _parse_chat_tool_calls(raw_tool_calls: object) -> list[ToolCall]:
     return tool_calls
 
 
+def _openai_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            item["content"] = _openai_chat_content_parts(content)
+        converted.append(item)
+    return converted
+
+
+def _openai_chat_content_parts(content: list[Any]) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise ModelCallError("message content parts must be objects")
+        if part.get("type") == "text":
+            parts.append({"type": "text", "text": str(part.get("text", ""))})
+        elif part.get("type") == "image_attachment":
+            parts.append({"type": "image_url", "image_url": {"url": _image_data_url(part)}})
+        else:
+            raise ModelCallError(f"unsupported message content part: {part.get('type')}")
+    return parts
+
+
+def _openai_chat_error_message(message: str) -> str:
+    normalized = message.lower()
+    if "image_url" in normalized and "expected" in normalized and "text" in normalized:
+        return "当前模型或接口不支持图片输入，请切换到支持视觉的模型后重试。"
+    return message
+
+
 def _anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
     system_parts: list[str] = []
     normalized: list[dict[str, Any]] = []
     for message in messages:
         role = message.get("role")
         content = message.get("content", "")
-        if not isinstance(content, str):
-            raise ModelCallError("Anthropic message content must be a string")
         if role == "system":
+            if not isinstance(content, str):
+                raise ModelCallError("Anthropic system message content must be a string")
             if content:
                 system_parts.append(content)
             continue
         if role == "user":
-            normalized.append({"role": "user", "content": content})
+            normalized.append({"role": "user", "content": _anthropic_user_content(content)})
             continue
         if role == "assistant":
+            if not isinstance(content, str):
+                raise ModelCallError("Anthropic assistant message content must be a string")
             normalized.append(_anthropic_assistant_message(content, message.get("tool_calls")))
             continue
         if role == "tool":
@@ -490,6 +526,34 @@ def _anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, lis
         raise ModelCallError(f"unsupported Anthropic message role: {role}")
     system = "\n\n".join(system_parts) if system_parts else None
     return system, normalized
+
+
+def _anthropic_user_content(content: object) -> str | list[dict[str, Any]]:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise ModelCallError("Anthropic user message content must be a string or content parts")
+    images: list[dict[str, Any]] = []
+    texts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise ModelCallError("Anthropic content parts must be objects")
+        if part.get("type") == "image_attachment":
+            images.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": _image_mime_type(part),
+                    "data": _image_base64(part),
+                },
+            })
+        elif part.get("type") == "text":
+            text = str(part.get("text", ""))
+            if text:
+                texts.append({"type": "text", "text": text})
+        else:
+            raise ModelCallError(f"unsupported Anthropic content part: {part.get('type')}")
+    return [*images, *texts]
 
 
 def _anthropic_assistant_message(content: str, raw_tool_calls: object) -> dict[str, Any]:
@@ -600,19 +664,23 @@ def _gemini_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[d
     for message in messages:
         raw_role = message.get("role")
         content = message.get("content", "")
-        if not isinstance(content, str):
-            raise ModelCallError("Gemini message content must be a string")
         if raw_role == "system":
+            if not isinstance(content, str):
+                raise ModelCallError("Gemini system message content must be a string")
             if content:
                 system_parts.append(content)
             continue
         if raw_role == "user":
-            contents.append({"role": "user", "parts": [{"text": content}]})
+            contents.append({"role": "user", "parts": _gemini_user_parts(content)})
             continue
         if raw_role == "assistant":
+            if not isinstance(content, str):
+                raise ModelCallError("Gemini assistant message content must be a string")
             contents.append(_gemini_assistant_content(content, message.get("tool_calls")))
             continue
         if raw_role == "model":
+            if not isinstance(content, str):
+                raise ModelCallError("Gemini model message content must be a string")
             contents.append({"role": "model", "parts": [{"text": content}]})
             continue
         if raw_role == "tool":
@@ -621,6 +689,29 @@ def _gemini_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[d
         raise ModelCallError(f"unsupported Gemini message role: {raw_role}")
     system = "\n\n".join(system_parts) if system_parts else None
     return system, contents
+
+
+def _gemini_user_parts(content: object) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"text": content}]
+    if not isinstance(content, list):
+        raise ModelCallError("Gemini user message content must be a string or content parts")
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise ModelCallError("Gemini content parts must be objects")
+        if part.get("type") == "text":
+            parts.append({"text": str(part.get("text", ""))})
+        elif part.get("type") == "image_attachment":
+            parts.append({
+                "inline_data": {
+                    "mime_type": _image_mime_type(part),
+                    "data": _image_base64(part),
+                },
+            })
+        else:
+            raise ModelCallError(f"unsupported Gemini content part: {part.get('type')}")
+    return parts
 
 
 def _gemini_assistant_content(content: str, raw_tool_calls: object) -> dict[str, Any]:
@@ -823,7 +914,7 @@ def _messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[st
         if role == "system":
             result.append({"role": "system", "content": msg.get("content", "")})
         elif role == "user":
-            result.append({"role": "user", "content": msg.get("content", "")})
+            result.append({"role": "user", "content": _responses_user_content(msg.get("content", ""))})
         elif role == "assistant":
             item: dict[str, Any] = {"role": "assistant", "content": msg.get("content", "")}
             for tc in msg.get("tool_calls", []):
@@ -842,6 +933,45 @@ def _messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[st
                 "output": msg.get("content", ""),
             })
     return result
+
+
+def _responses_user_content(content: object) -> str | list[dict[str, Any]]:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise ModelCallError("Responses user message content must be a string or content parts")
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise ModelCallError("Responses content parts must be objects")
+        if part.get("type") == "text":
+            parts.append({"type": "input_text", "text": str(part.get("text", ""))})
+        elif part.get("type") == "image_attachment":
+            parts.append({"type": "input_image", "image_url": _image_data_url(part)})
+        else:
+            raise ModelCallError(f"unsupported Responses content part: {part.get('type')}")
+    return parts
+
+
+def _image_data_url(part: dict[str, Any]) -> str:
+    return f"data:{_image_mime_type(part)};base64,{_image_base64(part)}"
+
+
+def _image_base64(part: dict[str, Any]) -> str:
+    path = part.get("path")
+    if not isinstance(path, str) or not path:
+        raise ModelCallError("image attachment missing path")
+    try:
+        return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    except OSError as error:
+        raise ModelCallError(f"failed to read image attachment: {error}") from error
+
+
+def _image_mime_type(part: dict[str, Any]) -> str:
+    mime_type = part.get("mime_type")
+    if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+        raise ModelCallError("image attachment missing mime_type")
+    return mime_type
 
 
 def _normalize_responses_endpoint(base_url: str | None) -> str:

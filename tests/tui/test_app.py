@@ -93,6 +93,7 @@ class FakeAssistantService:
         agents: list[dict[str, object]] | None = None,
         sandbox_status: AssistantSandboxStatus | None = None,
         sandbox_doctor_report: SandboxDoctorReport | None = None,
+        image_input_supported: bool | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.profile_name = profile_name
@@ -138,6 +139,7 @@ class FakeAssistantService:
             reason="docker sandbox disabled",
             next_action="Run `haagent sandbox enable docker` to enable Docker isolation.",
         )
+        self.image_input_supported = image_input_supported
         self.mcp_status = dict(
             mcp_status
             or {
@@ -157,6 +159,8 @@ class FakeAssistantService:
         self.started = threading.Event()
         self.release = threading.Event()
         self.prompts: list[str] = []
+        self.prompt_attachments: list[list[object]] = []
+        self.clipboard_attachments: list[object] = []
         self.interaction_responses: list[HumanInteractionResponse] = []
         self.confirmed_candidate_ids: list[str] = []
         self.rejected_candidate_ids: list[tuple[str, str]] = []
@@ -207,6 +211,7 @@ class FakeAssistantService:
             external_roots=list(self.external_roots),
             permission_mode=self.permission_mode,
             sandbox_status=self.sandbox_status,
+            image_input_supported=self.image_input_supported,
         )
 
     def get_mcp_status(self) -> dict[str, object]:
@@ -239,8 +244,9 @@ class FakeAssistantService:
         )
         return self.sandbox_status
 
-    def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+    def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
         self.prompts.append(prompt)
+        self.prompt_attachments.append(list(attachments or []))
         self.started.set()
         if event_sink is not None:
             if self.failure_event is not None:
@@ -290,6 +296,19 @@ class FakeAssistantService:
                 ),
             )
         return SimpleNamespace(status="completed")
+
+    def paste_clipboard_image(self, *, existing=None):
+        attachment = SimpleNamespace(
+            id=f"img-{len(self.clipboard_attachments) + 1}",
+            filename=f"img-{len(self.clipboard_attachments) + 1}.png",
+            mime_type="image/png",
+            size_bytes=123,
+            width=2,
+            height=1,
+            relative_path=f"attachments/img-{len(self.clipboard_attachments) + 1}.png",
+        )
+        self.clipboard_attachments.append(attachment)
+        return attachment
 
     def create_session(self) -> AssistantSessionStatus:
         session_id = f"session-new-{len(self.created_sessions) + 1}"
@@ -5281,5 +5300,83 @@ def test_tui_shows_assistant_placeholder_immediately_after_submit(tmp_path: Path
 
             service.release.set()
             await pilot.pause(0.2)
+
+    asyncio.run(run())
+
+
+def test_tui_ctrl_v_queues_image_token_in_prompt_and_next_prompt_sends_then_clears(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, assistant_content="收到图片。")
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            await pilot.press("ctrl+v")
+            await pilot.press("ctrl+v")
+            await pilot.pause(0.1)
+
+            conversation = _text(app, "#conversation")
+            assert "已添加图片附件" not in conversation
+            assert "待发送附件" not in conversation
+            assert input_widget.value == "[image 1] [image 2]"
+
+            input_widget.value = f"{input_widget.value} 描述这张图"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            assert service.prompts == ["描述这张图"]
+            assert service.prompt_attachments == [[service.clipboard_attachments[0], service.clipboard_attachments[1]]]
+            assert app._pending_attachments == []
+            assert input_widget.value == ""
+            conversation_after_send = _text(app, "#conversation")
+            assert "[image 1] [image 2] 描述这张图" in conversation_after_send
+            assert "待发送附件" not in conversation_after_send
+
+    asyncio.run(run())
+
+
+def test_tui_ctrl_v_image_paste_is_rejected_while_running(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, block_until_released=True)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "长任务"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.started.wait, 2)
+
+            await pilot.press("ctrl+v")
+            await pilot.pause(0.1)
+
+            assert service.clipboard_attachments == []
+            assert "运行中不能修改待发送附件" in _text(app, "#conversation")
+            service.release.set()
+            await pilot.pause(0.2)
+
+    asyncio.run(run())
+
+
+def test_tui_image_prompt_requires_vision_capable_model(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            model="deepseek-chat",
+            image_input_supported=False,
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            await pilot.press("ctrl+v")
+            await pilot.pause(0.1)
+
+            input_widget.value = f"{input_widget.value} 厉害吗"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert service.prompts == []
+            assert service.prompt_attachments == []
+            assert input_widget.value == "[image 1] 厉害吗"
+            conversation = _text(app, "#conversation")
+            assert "当前模型不支持图片输入" in conversation
+            assert "deepseek-chat" in conversation
 
     asyncio.run(run())

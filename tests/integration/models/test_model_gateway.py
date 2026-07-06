@@ -4,6 +4,7 @@ tests/integration/models/test_model_gateway.py - ModelGateway 接口与 provider
 验证 fake model、OpenAI 适配和模型失败显式暴露。
 """
 
+import base64
 import json
 import socket
 from pathlib import Path
@@ -92,6 +93,24 @@ verification_commands: []
         encoding="utf-8",
     )
     return EpisodeWriter.create(runs_root=tmp_path / ".runs", task_path=task_path)
+
+
+def _image_user_message(tmp_path: Path) -> dict[str, object]:
+    image_path = tmp_path / "attachments" / "img.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"image-bytes")
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this image"},
+            {
+                "type": "image_attachment",
+                "mime_type": "image/png",
+                "path": str(image_path),
+                "relative_path": "attachments/img.png",
+            },
+        ],
+    }
 
 
 def test_gateway_registry_maps_openai_chat_profile_to_runnable_gateway() -> None:
@@ -296,6 +315,32 @@ def test_anthropic_gateway_text_response_uses_messages_payload() -> None:
     }
     assert captured["api_key"] == "sk-ant-test"
     assert captured["endpoint"] == "https://api.anthropic.com/v1/messages"
+
+
+def test_anthropic_gateway_converts_image_attachment_to_image_block(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def transport(
+        payload: dict[str, object],
+        api_key: str,
+        endpoint: str,
+    ) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    gateway = AnthropicMessagesGateway(api_key="test", transport=transport)
+    generate(gateway, messages=[_image_user_message(tmp_path)])
+
+    content = captured["payload"]["messages"][0]["content"]
+    assert content[0] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.b64encode(b"image-bytes").decode("ascii"),
+        },
+    }
+    assert content[1] == {"type": "text", "text": "Describe this image"}
 
 
 def test_anthropic_gateway_parses_usage_metadata() -> None:
@@ -613,6 +658,30 @@ def test_google_gemini_gateway_text_response_uses_generate_content_payload() -> 
         "https://generativelanguage.googleapis.com/v1beta/"
         "models/gemini-2.5-pro:generateContent"
     )
+
+
+def test_google_gemini_gateway_converts_image_attachment_to_inline_data(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def transport(
+        payload: dict[str, object],
+        api_key: str,
+        endpoint: str,
+    ) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    gateway = GoogleGeminiGateway(api_key="test", transport=transport)
+    generate(gateway, messages=[_image_user_message(tmp_path)])
+
+    parts = captured["payload"]["contents"][0]["parts"]
+    assert parts[0] == {"text": "Describe this image"}
+    assert parts[1] == {
+        "inline_data": {
+            "mime_type": "image/png",
+            "data": base64.b64encode(b"image-bytes").decode("ascii"),
+        },
+    }
 
 
 def test_google_gemini_gateway_parses_usage_metadata() -> None:
@@ -1089,6 +1158,25 @@ def test_openai_gateway_uses_unified_response_shape() -> None:
     assert captured["payload"] == {"model": "gpt-test", "input": [{"role": "user", "content": "standardized context"}]}
 
 
+def test_openai_responses_gateway_converts_image_attachment_to_input_image(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"output_text": "ok"}
+
+    gateway = OpenAIResponsesGateway(api_key="test", transport=transport)
+    generate(gateway, messages=[_image_user_message(tmp_path)])
+
+    user_input = captured["payload"]["input"][0]
+    assert user_input["role"] == "user"
+    assert user_input["content"][0] == {"type": "input_text", "text": "Describe this image"}
+    assert user_input["content"][1] == {
+        "type": "input_image",
+        "image_url": f"data:image/png;base64,{base64.b64encode(b'image-bytes').decode('ascii')}",
+    }
+
+
 def test_openai_gateway_defaults_to_official_responses_endpoint() -> None:
     gateway = OpenAIResponsesGateway(
         api_key="test-key",
@@ -1311,6 +1399,38 @@ def test_openai_chat_gateway_normalizes_tool_calls_and_tools_payload() -> None:
             },
         ],
     }
+
+
+def test_openai_chat_gateway_converts_image_attachment_to_image_url_part(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    gateway = OpenAIChatCompletionsGateway(api_key="test", transport=transport)
+    generate(gateway, messages=[_image_user_message(tmp_path)])
+
+    content = captured["payload"]["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "Describe this image"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{base64.b64encode(b'image-bytes').decode('ascii')}"},
+    }
+
+
+def test_openai_chat_gateway_explains_text_only_compatible_image_rejection(tmp_path: Path) -> None:
+    def transport(payload: dict[str, object], api_key: str) -> dict[str, object]:
+        raise RuntimeError(
+            "OpenAI chat request failed with HTTP 400: "
+            "Failed to deserialize the JSON body into the target type: "
+            "messages[1]: unknown variant `image_url`, expected `text`"
+        )
+
+    gateway = OpenAIChatCompletionsGateway(api_key="test", transport=transport)
+
+    with pytest.raises(ModelCallError, match="当前模型或接口不支持图片输入"):
+        generate(gateway, messages=[_image_user_message(tmp_path)])
 
 
 def test_openai_chat_gateway_rejects_invalid_tool_arguments_json() -> None:

@@ -38,6 +38,9 @@ class EpisodeWriter:
         episode_path = runs_root / run_id
         episode_path.mkdir(parents=True, exist_ok=False)
         shutil.copyfile(task_path, episode_path / "task.yaml")
+        attachments_dir = task_path.parent / "attachments"
+        if attachments_dir.exists():
+            shutil.copytree(attachments_dir, episode_path / "attachments")
         (episode_path / "transcript.jsonl").write_text("", encoding="utf-8")
         (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
         writer = cls(path=episode_path, task_path=task_path)

@@ -6,7 +6,9 @@ src/haagent/runtime/session/agent.py - 自然语言 Agent 会话
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -21,6 +23,7 @@ from haagent.models.provider_profile import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.session.attachments import ImageAttachment, save_clipboard_image
 from haagent.runtime.session.turn import ChatTurnRequest, ChatTurnRunner, summary_value as _summary_value
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.session.ui_events import (
@@ -294,8 +297,9 @@ class AgentSession:
         self,
         prompt: str,
         interaction_handler: HumanInteractionHandler | None = None,
+        attachments: list[ImageAttachment] | None = None,
     ) -> ChatTurnResult:
-        return self.run_prompt_events(prompt, interaction_handler=interaction_handler)
+        return self.run_prompt_events(prompt, interaction_handler=interaction_handler, attachments=attachments)
 
     def run_prompt_events(
         self,
@@ -303,6 +307,7 @@ class AgentSession:
         event_sink: RuntimeUiEventSink = None,
         include_session_events: bool = False,
         interaction_handler: HumanInteractionHandler | None = None,
+        attachments: list[ImageAttachment] | None = None,
     ) -> ChatTurnResult:
         clean_prompt = prompt.strip()
         if not clean_prompt:
@@ -336,6 +341,7 @@ class AgentSession:
         target_paths = list(self._next_turn_target_paths)
         self._next_turn_target_paths = []
         session_memory = self._session_memory()
+        prompt_attachments = list(attachments or [])
         try:
             result = ChatTurnRunner().run(
                 ChatTurnRequest(
@@ -364,6 +370,7 @@ class AgentSession:
                     approved_tools_override=self._approved_tools_override,
                     worker_context=self._worker_context,
                     worker_permission_requester=self._worker_permission_requester,
+                    attachments=prompt_attachments,
                 ),
             )
         except Exception:
@@ -460,6 +467,15 @@ class AgentSession:
             self._current_cancellation_token.cancel()
             return True
         return False
+
+    def paste_clipboard_image(self, existing: list[ImageAttachment] | None = None) -> ImageAttachment:
+        if self._current_cancellation_token is not None:
+            raise ChatSessionError("current task is running")
+        return save_clipboard_image(
+            _read_clipboard_image_bytes(),
+            session_path=self.session_path,
+            existing=list(existing or []),
+        )
 
     def switch_model_gateway(
         self,
@@ -875,6 +891,21 @@ def _count_historical_tool_compression_events(runtime_events: list[dict[str, obj
         if (event.get("event_type") == "compression_diagnostic" or event.get("event") == "compression_diagnostic")
         and event.get("stage") == "historical_tool_message"
     )
+
+
+def _read_clipboard_image_bytes() -> bytes:
+    if sys.platform != "win32":
+        raise ChatSessionError("当前仅支持 Windows 剪贴板图片粘贴。")
+    try:
+        from PIL import ImageGrab
+    except ImportError as error:
+        raise ChatSessionError("Pillow is required for image paste support") from error
+    image = ImageGrab.grabclipboard()
+    if image is None or not hasattr(image, "save"):
+        raise ChatSessionError("剪贴板中没有图片。")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:

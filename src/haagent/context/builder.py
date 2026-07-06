@@ -90,6 +90,10 @@ class BuiltContext:
             content = msg.get("content")
             if isinstance(content, str) and content:
                 parts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        parts.append(part["text"])
         return "\n".join(parts)
 
 
@@ -164,7 +168,7 @@ class ContextBuilder:
 
         snapshot_path = contexts_dir / f"{context_id}.json"
         snapshot_path.write_text(
-            json.dumps(messages, ensure_ascii=False, indent=2),
+            json.dumps(_messages_for_snapshot(messages), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -658,3 +662,25 @@ def _safe_state_value(value: object, fallback: str) -> str:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _messages_for_snapshot(messages: list[dict]) -> list[dict]:
+    sanitized: list[dict] = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            item["content"] = [
+                _snapshot_content_part(part) if isinstance(part, dict) else part
+                for part in content
+            ]
+        sanitized.append(item)
+    return sanitized
+
+
+def _snapshot_content_part(part: dict) -> dict:
+    if part.get("type") != "image_attachment":
+        return dict(part)
+    sanitized = dict(part)
+    sanitized.pop("path", None)
+    return sanitized

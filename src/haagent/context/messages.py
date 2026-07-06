@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from haagent.context.compression.tool_results import render_tool_result_view
@@ -124,7 +125,13 @@ def build_task_message(
         lines.append("Interaction History:")
         lines.extend(interaction_state_lines)
 
-    return {"role": "user", "content": "\n".join(lines)}
+    text = "\n".join(lines)
+    if not task.attachments:
+        return {"role": "user", "content": text}
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for attachment in task.attachments:
+        content.append(attachment.with_absolute_path(Path(task.workspace_root or ".")))
+    return {"role": "user", "content": content}
 
 
 def build_assistant_message(
