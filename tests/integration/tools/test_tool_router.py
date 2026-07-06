@@ -543,7 +543,11 @@ def test_tool_router_dispatches_dynamic_mcp_tool_through_trace(tmp_path: Path) -
 
     result = router.dispatch("mcp__fixture__echo", {"text": "hi"})
 
-    assert result == {"status": "success", "output": "echo:hi"}
+    assert result["status"] == "success"
+    assert result["output"] == "echo:hi"
+    assert result["model_visible"]["kind"] == "tool_result_view"
+    assert result["model_visible"]["content"] == "echo:hi"
+    assert result["model_visible"]["artifact"] is None
     assert runtime.calls == [("fixture", "echo", {"text": "hi"})]
     record = _read_single_tool_call(writer)
     assert record["tool_name"] == "mcp__fixture__echo"
@@ -578,17 +582,18 @@ def test_tool_router_offloads_large_mcp_output_for_model_visibility(tmp_path: Pa
     result = router.dispatch("mcp__fixture__fetch", {"url": "https://example.com"})
 
     visible = result["model_visible"]
+    assert visible["kind"] == "tool_result_view"
     assert visible["truncated"] is True
-    assert visible["original_chars"] == len(large_output)
-    assert "start" in visible["output"]
-    assert "important tail" in visible["output"]
-    assert len(visible["output"]) < len(large_output)
-    artifact_path = tmp_path / visible["artifact_path"]
+    assert visible["artifact"]["original_chars"] == len(large_output)
+    assert "start" in visible["content"]
+    assert "important tail" in visible["content"]
+    assert len(visible["content"]) < len(large_output)
+    artifact_path = tmp_path / visible["artifact"]["path"]
     assert artifact_path.exists()
     assert artifact_path.read_text(encoding="utf-8") == large_output
     message = build_tool_result_message("call_large", "mcp__fixture__fetch", result)
     assert large_output not in message["content"]
-    assert str(visible["artifact_path"]) in message["content"]
+    assert str(visible["artifact"]["path"]) in message["content"]
 
 
 def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -> None:

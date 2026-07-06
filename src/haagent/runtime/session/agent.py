@@ -39,8 +39,7 @@ from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
 )
-from haagent.runtime.compaction.full import maybe_full_compact_messages
-from haagent.runtime.compaction.contract import FullCompactEligibility
+from haagent.context.compression.full import FullCompactEligibility, maybe_full_compact_messages
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.execution.path_policy import (
@@ -52,7 +51,7 @@ from haagent.runtime.execution.path_policy import (
     load_path_policy,
     serialize_path_policy,
 )
-from haagent.runtime.session.memory_compaction import (
+from haagent.context.compression.session_memory import (
     DEFAULT_PRESERVED_RECENT_TURNS,
     SESSION_MEMORY_CHAR_LIMIT,
     compact_session_memory,
@@ -191,7 +190,7 @@ class AgentSession:
         self._manual_compaction_summary: str | None = None
         self._manual_compaction_turn_count = 0
         self._next_turn_target_paths: list[str] = []
-        self._tool_result_microcompact_count = 0
+        self._historical_tool_compression_count = 0
         self._working_state = empty_working_state()
         self._current_cancellation_token: CancellationToken | None = None
         self._mcp_settings = load_mcp_settings()
@@ -254,7 +253,7 @@ class AgentSession:
         instance._manual_compaction_summary = compaction_summary
         instance._manual_compaction_turn_count = compacted_turn_count
         instance._next_turn_target_paths = []
-        instance._tool_result_microcompact_count = 0
+        instance._historical_tool_compression_count = 0
         try:
             instance._working_state = load_working_state(session_path / "working_state.json")
         except WorkingStateError as error:
@@ -345,7 +344,7 @@ class AgentSession:
                     max_turns=self.max_turns,
                     session_summary=session_memory.summary_text,
                     session_compaction=session_memory.diagnostics,
-                    tool_result_microcompact_count=self._tool_result_microcompact_count,
+                    historical_tool_compression_count=self._historical_tool_compression_count,
                     working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
                     path_policy=self.path_policy,
                     enable_web=self.enable_web,
@@ -378,7 +377,7 @@ class AgentSession:
             runtime_events=runtime_events,
         )
         self._write_working_state()
-        self._tool_result_microcompact_count += _count_runtime_events(runtime_events, "tool_result_microcompact")
+        self._historical_tool_compression_count += _count_historical_tool_compression_events(runtime_events)
         turn_summary = _turn_summary(clean_prompt, turn_result)
         self._summaries.append(turn_summary)
         self._record_turn(clean_prompt, turn_result, turn_summary)
@@ -866,8 +865,13 @@ def _memory_update_requested(runtime_events: list[dict[str, object]]) -> bool:
     return False
 
 
-def _count_runtime_events(runtime_events: list[dict[str, object]], event_type: str) -> int:
-    return sum(1 for event in runtime_events if event.get("event_type") == event_type or event.get("event") == event_type)
+def _count_historical_tool_compression_events(runtime_events: list[dict[str, object]]) -> int:
+    return sum(
+        1
+        for event in runtime_events
+        if (event.get("event_type") == "compression_diagnostic" or event.get("event") == "compression_diagnostic")
+        and event.get("stage") == "historical_tool_message"
+    )
 
 
 def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:

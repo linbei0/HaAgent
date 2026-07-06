@@ -31,7 +31,7 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "user_input_requested",
         "user_input_received",
         "guardrail_triggered",
-        "tool_result_microcompact",
+        "compression_diagnostic",
         "loop_suggestion_added",
         "safety_abort",
         "interaction_reused",
@@ -162,17 +162,18 @@ def test_runtime_ui_event_mapper_groups_failure_notice() -> None:
     )
 
 
-def test_runtime_ui_event_mapper_groups_tool_result_microcompact_as_warning() -> None:
+def test_runtime_ui_event_mapper_groups_compression_diagnostic_as_warning() -> None:
     event = RuntimeUiEventMapper.to_ui_event(
         {
-            "event_type": "tool_result_microcompact",
+            "event_type": "compression_diagnostic",
             "turn": 2,
             "message_index": 4,
-            "tool_name": "web_fetch",
+            "stage": "historical_tool_message",
+            "subject": "web_fetch",
             "original_chars": 20000,
             "final_chars": 2400,
             "decision": "collapsed",
-            "reason": "old_tool_result_over_budget",
+            "reason": "long_text_result",
         },
         session_id="session-1",
         turn_index=1,
@@ -181,20 +182,49 @@ def test_runtime_ui_event_mapper_groups_tool_result_microcompact_as_warning() ->
     assert event == WarningNoticeEvent(
         session_id="session-1",
         turn_index=1,
-        title="Tool result compacted",
-        message="web_fetch result compacted from 20000 to 2400 chars",
-        notice_kind="tool_result_microcompact",
+        title="压缩诊断",
+        message="旧工具消息降级：web_fetch 20000 chars -> 2400 chars",
+        notice_kind="compression_diagnostic",
         surface="tool_detail",
         details={
             "turn": 2,
             "message_index": 4,
-            "tool_name": "web_fetch",
+            "stage": "historical_tool_message",
+            "subject": "web_fetch",
             "original_chars": 20000,
             "final_chars": 2400,
             "decision": "collapsed",
-            "reason": "old_tool_result_over_budget",
+            "reason": "long_text_result",
         },
     )
+
+
+def test_runtime_ui_event_mapper_labels_all_compression_stages() -> None:
+    expected = {
+        "tool_output_artifact": "工具输出落盘",
+        "historical_tool_message": "旧工具消息降级",
+        "context_section": "上下文 section 折叠",
+        "session_memory": "会话记忆压缩",
+        "full_compact": "自动 full compact",
+    }
+
+    for stage, label in expected.items():
+        event = RuntimeUiEventMapper.to_ui_event(
+            {
+                "event_type": "compression_diagnostic",
+                "stage": stage,
+                "subject": "subject",
+                "original_chars": 10,
+                "final_chars": 5,
+                "decision": "collapsed",
+                "reason": "test",
+            },
+            session_id="session-1",
+            turn_index=1,
+        )
+
+        assert isinstance(event, WarningNoticeEvent)
+        assert label in event.message
 
 
 def test_runtime_ui_event_mapper_groups_loop_suggestion_as_warning() -> None:

@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from haagent.context.compression.budget import derive_compression_budget
+from haagent.context.compression.tool_results import prepare_tool_result_for_model
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.guardrails import GuardrailResult, check_tool_input, guardrail_evidence
@@ -40,7 +42,7 @@ from haagent.tools.registry import (
 from haagent.tools.shell import shell
 from haagent.tools.skill_market import skill_market_search
 from haagent.tools.skills import skill_list, skill_read
-from haagent.tools.web import TOOL_OUTPUT_INLINE_CHAR_LIMIT, TOOL_OUTPUT_PREVIEW_CHAR_LIMIT, web_fetch, web_search
+from haagent.tools.web import web_fetch, web_search
 
 
 class ToolRouter:
@@ -90,7 +92,7 @@ class ToolRouter:
             "skill_read": lambda args: skill_read(args, self._workspace_root, self._skill_settings),
             "skill_market_search": skill_market_search,
             "web_search": web_search,
-            "web_fetch": lambda args: web_fetch(args, artifact_writer=self._episode_writer.write_tool_artifact),
+            "web_fetch": web_fetch,
             "list_mcp_resources": lambda args: list_mcp_resources(args, self._mcp_runtime),
             "read_mcp_resource": lambda args: read_mcp_resource(args, self._mcp_runtime),
             "file_write": lambda args: file_write(args, self._workspace_root, self._path_policy),
@@ -188,24 +190,12 @@ class ToolRouter:
             )
 
     def _prepare_model_visible_result(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
-        if result.get("status") != "success" or not tool_name.startswith("mcp__"):
-            return result
-        output = result.get("output")
-        if not isinstance(output, str) or len(output) <= TOOL_OUTPUT_INLINE_CHAR_LIMIT:
-            return result
-        artifact_path = self._episode_writer.write_tool_artifact(tool_name, output)
-        preview = _head_tail_preview(output, TOOL_OUTPUT_PREVIEW_CHAR_LIMIT)
-        return {
-            **result,
-            "model_visible": {
-                "output": preview,
-                "artifact_path": artifact_path,
-                "original_chars": len(output),
-                "preview_chars": len(preview),
-                "truncated": True,
-                "continuation_hint": f"Use file_read with path={artifact_path} to inspect the full tool output.",
-            },
-        }
+        return prepare_tool_result_for_model(
+            tool_name,
+            result,
+            derive_compression_budget(None),
+            self._episode_writer.write_tool_artifact,
+        )
 
     def wait_for_agent_task(self, task_id: str, timeout: float | None = None) -> dict[str, Any]:
         if self._agent_runtime is None:
@@ -479,18 +469,6 @@ def _matches_json_type(value: Any, expected_type: str) -> bool:
     if expected_type == "array":
         return isinstance(value, list)
     return True
-
-
-def _head_tail_preview(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
-        return value
-    marker = "\n...[model-visible output truncated]...\n"
-    keep = max_chars - len(marker)
-    if keep <= 0:
-        return value[:max_chars]
-    head = keep // 2
-    tail = keep - head
-    return f"{value[:head].rstrip()}{marker}{value[-tail:].lstrip()}"
 
 
 def _agent_runtime_result(result: dict[str, Any]) -> dict[str, Any]:

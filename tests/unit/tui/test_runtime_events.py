@@ -133,7 +133,7 @@ def test_runtime_ui_event_handler_keeps_approval_denials_visible() -> None:
     assert app.lines == ["审批已拒绝：shell"]
 
 
-def test_runtime_ui_event_handler_routes_tool_result_compaction_to_tool_detail() -> None:
+def test_runtime_ui_event_handler_routes_compression_diagnostic_to_tool_detail() -> None:
     app = FakeRuntimeEventApp()
 
     handle_runtime_ui_event(
@@ -141,16 +141,44 @@ def test_runtime_ui_event_handler_routes_tool_result_compaction_to_tool_detail()
         WarningNoticeEvent(
             session_id="session-1",
             turn_index=1,
-            title="Tool result compacted",
-            message="web_search result compacted from 1854 to 929 chars",
-            notice_kind="tool_result_microcompact",
+            title="压缩诊断",
+            message="旧工具消息降级：web_search 1854 chars -> 929 chars",
+            notice_kind="compression_diagnostic",
             surface="tool_detail",
-            details={"tool_name": "web_search", "original_chars": 1854, "final_chars": 929},
+            details={
+                "stage": "historical_tool_message",
+                "subject": "web_search",
+                "original_chars": 1854,
+                "final_chars": 929,
+            },
         ),
     )
 
     assert app.blocks == []
-    assert app.tool_diagnostics == [(1, "web_search", "结果已压缩 1854 -> 929 字符")]
+    assert app.tool_diagnostics == [(1, "web_search", "旧工具消息降级：web_search 1854 chars -> 929 chars")]
+
+
+def test_runtime_ui_event_handler_does_not_special_case_legacy_microcompact_notice() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        WarningNoticeEvent(
+            session_id="session-1",
+            turn_index=1,
+            title="Runtime warning",
+            message="Unknown runtime event: tool_result_microcompact",
+            notice_kind="runtime_warning",
+            surface="tool_detail",
+            details={
+                "tool_name": "web_search",
+                "original_chars": 1854,
+                "final_chars": 929,
+            },
+        ),
+    )
+
+    assert app.tool_diagnostics == [(1, "web_search", "Unknown runtime event: tool_result_microcompact")]
 
 
 def test_runtime_ui_event_handler_hides_loop_guidance() -> None:

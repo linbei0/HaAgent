@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from haagent.context.builder import ContextBuilder
-from haagent.context.compaction import (
+from haagent.context.compression.sections import (
     ContextBudget,
     ContextCompactionResult,
     ContextSection,
@@ -13,9 +13,10 @@ from haagent.context.compaction import (
     assess_auto_compact_trigger,
     compact_context_sections,
 )
-from haagent.runtime.session.memory_compaction import compact_session_memory
+from haagent.context.compression.session_memory import compact_session_memory
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec
+from haagent.runtime.orchestration.preparation import prepare_initial_messages
 
 
 def test_collapse_oversized_section_keeps_head_and_tail() -> None:
@@ -194,7 +195,7 @@ def test_auto_compact_trigger_not_needed_under_low_pressure() -> None:
         compact_readiness=readiness,
         compaction=result,
         budget=ContextBudget(max_total_chars=100),
-        tool_result_microcompact_count=0,
+        historical_tool_compression_count=0,
         session_summary_count=2,
         session_summary_chars=160,
     )
@@ -222,7 +223,7 @@ def test_auto_compact_trigger_watches_near_budget_limit() -> None:
         compact_readiness=readiness,
         compaction=result,
         budget=budget,
-        tool_result_microcompact_count=0,
+        historical_tool_compression_count=0,
         session_summary_count=4,
         session_summary_chars=300,
     )
@@ -250,7 +251,7 @@ def test_auto_compact_trigger_applies_session_memory_for_history_over_budget() -
         compact_readiness=readiness,
         compaction=result,
         budget=budget,
-        tool_result_microcompact_count=1,
+        historical_tool_compression_count=1,
         session_summary_count=12,
         session_summary_chars=1800,
     )
@@ -386,7 +387,7 @@ def test_context_builder_returns_compaction_diagnostics_and_manifest(tmp_path: P
     assert "full_compact_contract" not in context.model_input
 
 
-def test_context_builder_records_tool_microcompact_count_in_auto_trigger(tmp_path: Path) -> None:
+def test_context_builder_records_historical_tool_compression_count_in_auto_trigger(tmp_path: Path) -> None:
     writer = _make_writer(tmp_path)
     context = ContextBuilder(
         task=_task("summarize project"),
@@ -394,17 +395,17 @@ def test_context_builder_records_tool_microcompact_count_in_auto_trigger(tmp_pat
         provider_name="test-provider",
         episode_writer=writer,
         session_summary="\n".join(f"- user_request: turn {index}" for index in range(1, 8)),
-        tool_result_microcompact_count=2,
+        historical_tool_compression_count=2,
     ).build()
 
     manifest_path = writer.path / "contexts" / f"{context.context_id}-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["auto_compact_trigger"]["tool_result_microcompact_count"] == 2
-    assert "tool_result_microcompact_present" in manifest["auto_compact_trigger"]["reasons"]
+    assert manifest["auto_compact_trigger"]["historical_tool_compression_count"] == 2
+    assert "historical_tool_compression_present" in manifest["auto_compact_trigger"]["reasons"]
 
 
-def test_context_builder_records_observation_compaction_source_diagnostics(tmp_path: Path) -> None:
+def test_context_builder_records_observation_compression_source_diagnostics(tmp_path: Path) -> None:
     writer = _make_writer(tmp_path)
     raw_output = "OBS-HEAD-" + ("body-" * 500) + "OBS-TAIL"
 
@@ -477,6 +478,47 @@ def test_context_builder_diagnostics_match_real_model_input(tmp_path: Path) -> N
     assert "...[collapsed " in context.model_input
     assert "SESSION-KEPT" in context.model_input
     assert "task_envelope" not in {record.key for record in context.diagnostics}
+
+
+def test_prepare_initial_messages_derives_context_budget_from_model_metadata(tmp_path: Path) -> None:
+    (tmp_path / "small").mkdir()
+    (tmp_path / "large").mkdir()
+    small_writer = _make_writer(tmp_path / "small")
+    large_writer = _make_writer(tmp_path / "large")
+
+    prepare_initial_messages(
+        context_builder_cls=ContextBuilder,
+        task=_task("small window"),
+        workspace_root=tmp_path,
+        provider_name="test-provider",
+        writer=small_writer,
+        model_gateway=_GatewayWithContextWindow(32_000),
+        session_summary=None,
+        session_compaction=None,
+        historical_tool_compression_count=0,
+        working_state=None,
+        interaction_resolver=_InteractionResolver(),
+    )
+    prepare_initial_messages(
+        context_builder_cls=ContextBuilder,
+        task=_task("large window"),
+        workspace_root=tmp_path,
+        provider_name="test-provider",
+        writer=large_writer,
+        model_gateway=_GatewayWithContextWindow(256_000),
+        session_summary=None,
+        session_compaction=None,
+        historical_tool_compression_count=0,
+        working_state=None,
+        interaction_resolver=_InteractionResolver(),
+    )
+
+    small_manifest = _latest_context_manifest(small_writer)
+    large_manifest = _latest_context_manifest(large_writer)
+
+    assert small_manifest["contexts"][0]["budget"]["max_tokens"] == 8_000
+    assert large_manifest["contexts"][0]["budget"]["max_tokens"] > small_manifest["contexts"][0]["budget"]["max_tokens"]
+    assert large_manifest["contexts"][0]["budget"]["max_chars"] > small_manifest["contexts"][0]["budget"]["max_chars"]
 
 
 def test_context_builder_records_memory_source_diagnostics_when_memory_is_skipped(tmp_path: Path, monkeypatch) -> None:
@@ -560,6 +602,38 @@ class _FakeMemoryResult:
         }
 
 
+class _GatewayWithContextWindow:
+    provider_name = "test-provider"
+
+    def __init__(self, context_window_tokens: int) -> None:
+        self._context_window_tokens = context_window_tokens
+
+    def metadata(self):
+        from haagent.models.gateway import ModelGatewayMetadata
+
+        metadata = ModelGatewayMetadata(
+            provider="test-provider",
+            model="test-model",
+            endpoint=None,
+            base_url=None,
+            profile_name=None,
+        )
+        object.__setattr__(metadata, "context_window_tokens", self._context_window_tokens)
+        return metadata
+
+    def generate(self, messages, tool_schemas):
+        raise AssertionError("generate is not used")
+
+
+class _InteractionResolver:
+    def state_records(self) -> list[dict]:
+        return []
+
+
+def _latest_context_manifest(writer: EpisodeWriter) -> dict:
+    return json.loads((writer.path / "context-manifest.json").read_text(encoding="utf-8"))
+
+
 def _make_writer(tmp_path: Path) -> EpisodeWriter:
     task_path = tmp_path / "task.yaml"
     task_path.write_text("goal: test\n", encoding="utf-8")
@@ -586,3 +660,4 @@ def _task(goal: str) -> TaskSpec:
         constraints=[],
         policy={"approval_allowed_tools": [], "approved_tools": []},
     )
+

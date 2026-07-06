@@ -88,6 +88,8 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_tool_calls(tool_calls))
     lines.extend(["", "Human Interactions"])
     lines.extend(_format_human_interactions(transcript))
+    lines.extend(["", "Compression Diagnostics"])
+    lines.extend(_format_compression_diagnostics(transcript))
     lines.extend(["", "Approval Summary"])
     lines.extend(_format_approval_summary(tool_calls))
     lines.extend(["", "Tool Argument Errors"])
@@ -488,6 +490,28 @@ def _format_human_interactions(transcript: list[dict[str, Any]]) -> list[str]:
             lines.append(f"- {event}: tool={tool_name} approved={approved} question={question}")
         else:
             lines.append(f"- {event}: tool={tool_name} question={question}")
+    return lines
+
+
+def _format_compression_diagnostics(transcript: list[dict[str, Any]]) -> list[str]:
+    records = [record for record in transcript if record.get("event") == "compression_diagnostic"]
+    if not records:
+        return ["- none"]
+    lines: list[str] = []
+    for record in records:
+        stage = str(record.get("stage", "unknown"))
+        subject = str(record.get("subject") or record.get("tool_name") or "unknown")
+        original_chars = record.get("original_chars")
+        final_chars = record.get("final_chars")
+        artifact = record.get("artifact_path")
+        saved = ""
+        if isinstance(original_chars, int) and isinstance(final_chars, int):
+            saved = f" chars={original_chars}->{final_chars}"
+        artifact_text = f" artifact={artifact}" if isinstance(artifact, str) and artifact else ""
+        lines.append(
+            f"- {stage}: subject={subject} decision={record.get('decision', 'unknown')} "
+            f"reason={record.get('reason', 'unknown')}{saved}{artifact_text}",
+        )
     return lines
 
 

@@ -1682,7 +1682,7 @@ def test_full_compact_success_is_written_to_transcript_by_orchestrator(tmp_path:
     from haagent.context.builder import BuiltContext
     from haagent.context.manifest import ContextManifest
     from haagent.models.gateway import ModelResponse
-    from haagent.runtime.compaction.contract import FullCompactEligibility
+    from haagent.context.compression.full import FullCompactEligibility
     from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     task_path = tmp_path / "task.yaml"
@@ -1772,7 +1772,7 @@ def test_full_compact_failure_is_written_to_transcript_and_original_messages_con
     from haagent.context.builder import BuiltContext
     from haagent.context.manifest import ContextManifest
     from haagent.models.gateway import ModelResponse
-    from haagent.runtime.compaction.contract import FullCompactEligibility
+    from haagent.context.compression.full import FullCompactEligibility
     from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     class TwoStepGateway:
@@ -1894,9 +1894,11 @@ verification_commands: []
         json.loads(line)
         for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert any(record.get("event") == "tool_result_microcompact" for record in transcript)
+    assert any(record.get("event") == "compression_diagnostic" for record in transcript)
     microcompact_events = [
-        event for event in runtime_events if event.get("event_type") == "tool_result_microcompact"
+        event for event in runtime_events if event.get("event_type") == "compression_diagnostic"
     ]
     assert len(microcompact_events) == 1
     assert "event" not in microcompact_events[0]
+    assert microcompact_events[0]["stage"] == "historical_tool_message"
+    assert microcompact_events[0]["reason"] == "long_text_result"

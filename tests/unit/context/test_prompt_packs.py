@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from haagent.context.builder import ContextBuilder
-from haagent.context.compaction import ContextBudget
+from haagent.context.compression.sections import ContextBudget
 from haagent.prompts import packs
 from haagent.prompts.packs import PromptPack
 from haagent.runtime.contracts.task import TaskSpec

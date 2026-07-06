@@ -143,15 +143,15 @@ def _warning_tool_name(event: WarningNoticeEvent) -> str:
     value = event.details.get("tool_name")
     if isinstance(value, str) and value:
         return value
+    subject = event.details.get("subject")
+    if isinstance(subject, str) and subject:
+        return subject
     return "unknown_tool"
 
 
 def _warning_detail_message(event: WarningNoticeEvent) -> str:
-    if event.notice_kind == "tool_result_microcompact":
-        original_chars = event.details.get("original_chars")
-        final_chars = event.details.get("final_chars")
-        if isinstance(original_chars, int) and isinstance(final_chars, int):
-            return f"结果已压缩 {original_chars} -> {final_chars} 字符"
+    if event.notice_kind == "compression_diagnostic":
+        return event.message
     return event.message
 
 

@@ -88,7 +88,7 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
         max_turns=3,
         raise_if_cancelled=lambda: None,
         emit_event=lambda event: None,
-        microcompact_old_tool_messages=lambda messages, writer, turn, emit_event: None,
+        compress_historical_tool_messages=lambda messages, writer, turn, emit_event: None,
         interaction_handler=None,
         interaction_resolver=SimpleNamespace(),
         safety_guard=SimpleNamespace(check=lambda name, args, result: None),
@@ -311,7 +311,7 @@ def _deps(
         max_turns=3,
         raise_if_cancelled=lambda: None,
         emit_event=emit_event,
-        microcompact_old_tool_messages=lambda messages, writer, turn, emit_event: None,
+        compress_historical_tool_messages=lambda messages, writer, turn, emit_event: None,
         interaction_handler=None,
         interaction_resolver=SimpleNamespace(),
         safety_guard=SimpleNamespace(check=lambda name, args, result: None),
@@ -332,3 +332,4 @@ def _replace_dep(deps: TurnLoopDependencies, field_name: str, value: Any) -> Tur
     values = {name: getattr(deps, name) for name in deps.__dataclass_fields__}
     values[field_name] = value
     return TurnLoopDependencies(**values)
+

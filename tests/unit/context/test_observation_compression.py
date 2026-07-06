@@ -1,12 +1,12 @@
 """
-tests/unit/context/test_observation_compaction.py - 工具 observation microcompact 测试
+ tests/unit/context/test_observation_compression.py - 工具 observation 压缩测试
 
 验证工具 observation 的确定性折叠和机器可读压缩记录。
 """
 
 from __future__ import annotations
 
-from haagent.context.observation_compaction import compact_observation_with_record
+from haagent.context.compression.sections import compact_observation_with_record
 
 
 def test_long_observation_collapses_with_record() -> None:

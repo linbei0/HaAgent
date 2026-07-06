@@ -5002,13 +5002,14 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
                 _tool_event("tool_started", 1, "web_search"),
                 _tool_event("tool_finished", 1, "web_search"),
                 _runtime_event(
-                    "tool_result_microcompact",
+                    "compression_diagnostic",
                     1,
-                    tool_name="web_search",
+                    subject="web_search",
+                    stage="historical_tool_message",
                     original_chars=1854,
                     final_chars=929,
                     decision="collapsed",
-                    reason="old_tool_result_over_budget",
+                    reason="long_text_result",
                 ),
                 _runtime_event(
                     "loop_suggestion_added",
@@ -5031,7 +5032,7 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             assert "web_fetch" in compact
             assert "result compacted" not in compact
             assert "File change succeeded" not in compact
-            assert "结果已压缩" not in compact
+            assert "旧工具消息降级" not in compact
 
             input_widget.value = "/details"
             await pilot.press("enter")
@@ -5041,7 +5042,7 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             assert "web_fetch" in detailed
             assert "工具 file_read ok" in detailed
             assert "工具 web_search ok" in detailed
-            assert "结果已压缩 1854 -> 929 字符" in detailed
+            assert "旧工具消息降级：web_search 1854 chars -> 929 chars" in detailed
             assert "File change succeeded" not in detailed
 
     asyncio.run(run())

@@ -44,7 +44,7 @@ def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> 
             max_turns=3,
             session_summary="summary",
             session_compaction={"decision": "kept"},
-            tool_result_microcompact_count=2,
+            historical_tool_compression_count=2,
             working_state={"current_goal": "", "key_findings": [], "completed_actions": [], "next_steps": [], "last_updated_turn": 0},
             path_policy=default_path_policy(tmp_path),
             enable_web=True,
@@ -62,7 +62,7 @@ def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> 
     assert task.target_paths == ["README.md"]
     assert "web_search" in task.allowed_tools
     assert captured["session_summary"] == "summary"
-    assert captured["tool_result_microcompact_count"] == 2
+    assert captured["historical_tool_compression_count"] == 2
     assert result.status == RunStatus.COMPLETED
 
 
@@ -78,7 +78,7 @@ def test_chat_turn_runner_writes_prompt_pack_ids_from_explicit_command(tmp_path:
             max_turns=3,
             session_summary=None,
             session_compaction=None,
-            tool_result_microcompact_count=0,
+            historical_tool_compression_count=0,
             working_state=None,
             path_policy=default_path_policy(tmp_path),
             enable_web=False,
@@ -114,7 +114,7 @@ def test_chat_turn_runner_allows_dynamic_mcp_tool_in_task_contract(tmp_path: Pat
             max_turns=1,
             session_summary=None,
             session_compaction=None,
-            tool_result_microcompact_count=0,
+            historical_tool_compression_count=0,
             working_state=None,
             path_policy=default_path_policy(tmp_path),
             enable_web=False,
@@ -156,7 +156,7 @@ def test_chat_turn_runner_writes_worker_context_to_task_contract(tmp_path: Path)
             max_turns=1,
             session_summary=None,
             session_compaction=None,
-            tool_result_microcompact_count=0,
+            historical_tool_compression_count=0,
             working_state=None,
             path_policy=default_path_policy(tmp_path),
             enable_web=False,
@@ -221,10 +221,11 @@ def test_prepare_initial_messages_injects_worker_context_system_prompt(tmp_path:
         model_gateway=_Gateway(),
         session_summary=None,
         session_compaction=None,
-        tool_result_microcompact_count=0,
+        historical_tool_compression_count=0,
         working_state=None,
         interaction_resolver=_InteractionResolver(),
     )
 
     system_messages = [message for message in prepared.messages if message["role"] == "system"]
     assert any("你是只读探索助手。" in message["content"] for message in system_messages)
+

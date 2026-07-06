@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from haagent.context.compaction import collapse_text_head_tail
-from haagent.context.compaction import ContextBudget, ContextSection as CompactionSection
+from haagent.context.compression.sections import ContextBudget, ContextSection as CompactionSection
+from haagent.context.compression.sections import collapse_text_head_tail
 from haagent.context.sources import ContextCandidate, ContextDecision, ContextSection
 
 

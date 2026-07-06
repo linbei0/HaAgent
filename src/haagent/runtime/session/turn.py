@@ -56,7 +56,7 @@ class OrchestratorFactory(Protocol):
         max_turns: int | None,
         session_summary: str | None,
         session_compaction: dict[str, object] | None,
-        tool_result_microcompact_count: int,
+        historical_tool_compression_count: int,
         working_state: dict[str, object] | None,
         event_sink,
         interaction_handler: HumanInteractionHandler | None,
@@ -78,7 +78,7 @@ class ChatTurnRequest:
     max_turns: int | None
     session_summary: str | None
     session_compaction: dict[str, object] | None
-    tool_result_microcompact_count: int
+    historical_tool_compression_count: int
     working_state: dict[str, object] | None
     path_policy: PathPolicy
     enable_web: bool
@@ -128,7 +128,7 @@ class ChatTurnRunner:
                 max_turns=request.max_turns,
                 session_summary=request.session_summary,
                 session_compaction=request.session_compaction,
-                tool_result_microcompact_count=request.tool_result_microcompact_count,
+                historical_tool_compression_count=request.historical_tool_compression_count,
                 working_state=request.working_state,
                 event_sink=request.event_sink,
                 interaction_handler=request.interaction_handler,

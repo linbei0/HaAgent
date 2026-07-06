@@ -64,7 +64,7 @@ class TurnLoopDependencies:
     max_turns: int | None
     raise_if_cancelled: Callable[[], None]
     emit_event: Callable[[dict[str, object]], None]
-    microcompact_old_tool_messages: Callable[[list[dict[str, Any]], EpisodeWriter, int, Callable[[dict[str, object]]]], None]
+    compress_historical_tool_messages: Callable[[list[dict[str, Any]], EpisodeWriter, int, Callable[[dict[str, object]]]], object]
     interaction_handler: HumanInteractionHandler | None
     interaction_resolver: HumanInteractionResolver
     safety_guard: object
@@ -102,7 +102,7 @@ def run_turn_loop(
             deps.allowed_tools,
             registry=deps.tool_registry,
         )
-        deps.microcompact_old_tool_messages(state.messages, deps.writer, turn, deps.emit_event)
+        deps.compress_historical_tool_messages(state.messages, deps.writer, turn, deps.emit_event)
 
         deps.writer.append_transcript(
             {

@@ -187,11 +187,12 @@ def test_web_fetch_offloads_long_simplified_content_to_artifact() -> None:
     )
 
     visible = result["model_visible"]
+    assert visible["kind"] == "tool_result_view"
     assert visible["truncated"] is True
-    assert visible["artifact_path"] == ".runs/episode/artifacts/tool-results/web_fetch-test.txt"
-    assert visible["original_chars"] == len(saved["content"])
+    assert visible["artifact"]["path"] == ".runs/episode/artifacts/tool-results/web_fetch-test.txt"
+    assert visible["artifact"]["original_chars"] == len(saved["content"])
     assert "file_read" in visible["continuation_hint"]
-    assert visible["artifact_path"] in visible["continuation_hint"]
+    assert visible["artifact"]["path"] in visible["continuation_hint"]
     assert len(visible["content"]) < len(saved["content"])
     assert "start" in visible["content"]
     assert "important tail" in visible["content"]

@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from haagent.context.compression.budget import derive_compression_budget
+from haagent.context.compression.messages import compress_historical_tool_messages
 from haagent.context.builder import ContextBuildError, ContextBuilder
 from haagent.context.messages import (
     build_assistant_message,
@@ -18,11 +20,6 @@ from haagent.context.messages import (
     build_suggestion_message,
     build_tool_result_message,
     generate_tool_call_id,
-)
-from haagent.context.observation_compaction import (
-    OBSERVATION_MICROCOMPACT_CHAR_LIMIT,
-    OBSERVATION_MICROCOMPACT_HEAD_CHARS,
-    OBSERVATION_MICROCOMPACT_TAIL_CHARS,
 )
 from haagent.models.fake import FakeModelGateway
 from haagent.models.gateway import ModelCallError, ModelGateway, ToolCall
@@ -75,7 +72,7 @@ class RunOrchestrator:
         max_turns: int | None = DEFAULT_RUN_MAX_TURNS,
         session_summary: str | None = None,
         session_compaction: dict[str, object] | None = None,
-        tool_result_microcompact_count: int = 0,
+        historical_tool_compression_count: int = 0,
         working_state: dict[str, object] | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         interaction_handler: HumanInteractionHandler | None = None,
@@ -90,7 +87,7 @@ class RunOrchestrator:
         self._max_turns = max_turns
         self._session_summary = session_summary
         self._session_compaction = session_compaction
-        self._tool_result_microcompact_count = max(0, tool_result_microcompact_count)
+        self._historical_tool_compression_count = max(0, historical_tool_compression_count)
         self._working_state = working_state
         self._event_sink = event_sink
         self._interaction_handler = interaction_handler
@@ -198,7 +195,7 @@ class RunOrchestrator:
                 model_gateway=self._model_gateway,
                 session_summary=self._session_summary,
                 session_compaction=self._session_compaction,
-                tool_result_microcompact_count=self._tool_result_microcompact_count,
+                historical_tool_compression_count=self._historical_tool_compression_count,
                 working_state=self._working_state,
                 interaction_resolver=interaction_resolver,
                 tool_registry=self._tool_registry,
@@ -229,7 +226,13 @@ class RunOrchestrator:
                     max_turns=self._max_turns,
                     raise_if_cancelled=self._raise_if_cancelled,
                     emit_event=self._emit_event,
-                    microcompact_old_tool_messages=_microcompact_old_tool_messages,
+                    compress_historical_tool_messages=lambda messages, writer, turn, emit_event: compress_historical_tool_messages(
+                        messages,
+                        _compression_budget_for_gateway(self._model_gateway),
+                        writer=writer,
+                        turn=turn,
+                        emit_event=emit_event,
+                    ),
                     interaction_handler=self._interaction_handler,
                     interaction_resolver=interaction_resolver,
                     safety_guard=safety_guard,
@@ -384,61 +387,12 @@ def _write_full_compact_manifest_result(
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _microcompact_old_tool_messages(
-    messages: list[dict[str, Any]],
-    writer: EpisodeWriter,
-    turn: int,
-    emit_event: Callable[[dict[str, object]], None] | None = None,
-) -> None:
-    for index, message in enumerate(messages):
-        if message.get("role") != "tool":
-            continue
-        content = message.get("content")
-        if not isinstance(content, str) or len(content) <= OBSERVATION_MICROCOMPACT_CHAR_LIMIT:
-            continue
-        if _is_artifact_backed_tool_message(content):
-            continue
-        compacted = _collapse_text_head_tail(
-            content,
-            head_chars=OBSERVATION_MICROCOMPACT_HEAD_CHARS,
-            tail_chars=OBSERVATION_MICROCOMPACT_TAIL_CHARS,
-        )
-        if len(compacted) >= len(content):
-            continue
-        message["content"] = compacted
-        event = {
-            "event_type": "tool_result_microcompact",
-            "turn": turn,
-            "message_index": index,
-            "tool_name": str(message.get("name", "unknown_tool")),
-            "original_chars": len(content),
-            "final_chars": len(compacted),
-            "decision": "collapsed",
-            "reason": "old_tool_result_over_budget",
-        }
-        writer.append_transcript({"event": "tool_result_microcompact", **_transcript_event(event)})
-        if emit_event is not None:
-            emit_event(event)
-
-
-def _collapse_text_head_tail(text: str, *, head_chars: int, tail_chars: int) -> str:
-    head = text[:head_chars].rstrip()
-    tail = text[-tail_chars:].lstrip() if tail_chars > 0 else ""
-    collapsed_chars = len(text) - head_chars - tail_chars
-    marker = f"...[collapsed {collapsed_chars} chars]..."
-    if tail:
-        return f"{head}\n{marker}\n{tail}"
-    return f"{head}\n{marker}"
-
-
-def _is_artifact_backed_tool_message(content: str) -> bool:
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    return isinstance(payload.get("artifact_path"), str) and payload.get("truncated") is True
+def _compression_budget_for_gateway(model_gateway: ModelGateway):
+    metadata = None
+    metadata_fn = getattr(model_gateway, "metadata", None)
+    if callable(metadata_fn):
+        metadata = metadata_fn()
+    return derive_compression_budget(metadata)
 
 
 def _verification_loop_limit_evidence(max_turns: int, verification_result) -> str:

@@ -254,22 +254,53 @@ def _guardrail_event(event: dict[str, object], context: RawRuntimeUiEventContext
     )
 
 
-def _tool_result_microcompact_event(
+def _compression_diagnostic_event(
     event: dict[str, object],
     context: RawRuntimeUiEventContext,
 ) -> WarningNoticeEvent:
-    name = tool_name(event)
-    original_chars = event.get("original_chars", "")
-    final_chars = event.get("final_chars", "")
+    subject = _compression_subject(event)
     return WarningNoticeEvent(
         session_id=context.session_id,
         turn_index=context.turn_index,
-        title="Tool result compacted",
-        message=f"{name} result compacted from {original_chars} to {final_chars} chars",
-        notice_kind="tool_result_microcompact",
+        title="压缩诊断",
+        message=_compression_message(event, subject),
+        notice_kind="compression_diagnostic",
         surface="tool_detail",
         details=without_event_type(event),
     )
+
+
+def _compression_message(event: dict[str, object], subject: str) -> str:
+    label = _compression_stage_label(str(event.get("stage", "")))
+    original_chars = event.get("original_chars")
+    final_chars = event.get("final_chars")
+    if isinstance(original_chars, int) and isinstance(final_chars, int):
+        return f"{label}：{subject} {original_chars} chars -> {final_chars} chars"
+    original_tokens = event.get("original_tokens")
+    final_tokens = event.get("final_tokens")
+    if isinstance(original_tokens, int) and isinstance(final_tokens, int):
+        return f"{label}：{subject} {original_tokens} tokens -> {final_tokens} tokens"
+    return f"{label}：{subject}"
+
+
+def _compression_stage_label(stage: str) -> str:
+    return {
+        "tool_output_artifact": "工具输出落盘",
+        "historical_tool_message": "旧工具消息降级",
+        "context_section": "上下文 section 折叠",
+        "session_memory": "会话记忆压缩",
+        "full_compact": "自动 full compact",
+    }.get(stage, "压缩诊断")
+
+
+def _compression_subject(event: dict[str, object]) -> str:
+    subject = event.get("subject")
+    if isinstance(subject, str) and subject:
+        return subject
+    name = event.get("tool_name")
+    if isinstance(name, str) and name:
+        return name
+    return "unknown"
 
 
 def _loop_suggestion_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
@@ -344,7 +375,7 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("user_input_requested", UserInputStateEvent, _user_input_requested_event),
     _spec("user_input_received", UserInputStateEvent, _user_input_received_event),
     _spec("guardrail_triggered", WarningNoticeEvent, _guardrail_event),
-    _spec("tool_result_microcompact", WarningNoticeEvent, _tool_result_microcompact_event),
+    _spec("compression_diagnostic", WarningNoticeEvent, _compression_diagnostic_event),
     _spec("loop_suggestion_added", WarningNoticeEvent, _loop_suggestion_event),
     _spec("safety_abort", WarningNoticeEvent, _safety_abort_event),
     _spec("interaction_reused", WarningNoticeEvent, _interaction_reused_event),

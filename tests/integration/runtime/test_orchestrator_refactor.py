@@ -10,9 +10,10 @@ import json
 from pathlib import Path
 
 from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.context.compression.budget import derive_compression_budget
+from haagent.context.compression.messages import compress_historical_tool_messages
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
-from haagent.runtime.orchestration.orchestrator import _microcompact_old_tool_messages
 from haagent.runtime.orchestration.state import RunStatus
 
 
@@ -148,7 +149,14 @@ verification_commands: []
     ]
     events: list[dict[str, object]] = []
 
-    _microcompact_old_tool_messages(messages, writer, turn=2, emit_event=events.append)
+    diagnostics = compress_historical_tool_messages(
+        messages,
+        derive_compression_budget(None),
+        writer=writer,
+        turn=2,
+        emit_event=events.append,
+    )
 
     assert messages[0]["content"] == tool_content
     assert events == []
+    assert diagnostics == []

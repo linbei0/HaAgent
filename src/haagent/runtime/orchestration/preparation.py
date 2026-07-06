@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from haagent.context.compression.budget import derive_compression_budget
+from haagent.context.compression.sections import context_budget_from_compression_budget
 from haagent.models.gateway import ModelGateway
 from haagent.runtime.episodes.writer import EpisodeWriter
-from haagent.runtime.compaction.full import FullCompactResult, maybe_full_compact_messages
-from haagent.runtime.compaction.contract import FullCompactEligibility
+from haagent.context.compression.full import FullCompactEligibility, FullCompactResult, maybe_full_compact_messages
 from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
 from haagent.runtime.execution.path_policy import default_path_policy, load_path_policy
 from haagent.runtime.contracts.plan import build_plan
@@ -97,7 +98,7 @@ def prepare_initial_messages(
     model_gateway: ModelGateway,
     session_summary: str | None,
     session_compaction: dict[str, object] | None,
-    tool_result_microcompact_count: int,
+    historical_tool_compression_count: int,
     working_state: dict[str, object] | None,
     interaction_resolver: HumanInteractionResolver,
     tool_registry: ToolRuntimeRegistry | None = None,
@@ -116,9 +117,12 @@ def prepare_initial_messages(
         episode_writer=writer,
         session_summary=session_summary,
         session_compaction=session_compaction,
-        tool_result_microcompact_count=tool_result_microcompact_count,
+        historical_tool_compression_count=historical_tool_compression_count,
         working_state=working_state,
         interaction_state=interaction_resolver.state_records(),
+        compaction_budget=context_budget_from_compression_budget(
+            derive_compression_budget(_gateway_metadata(model_gateway, provider_name)),
+        ),
         tool_registry=tool_registry,
     ).build()
     if context.manifest.full_compact_contract is not None:

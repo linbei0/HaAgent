@@ -11,14 +11,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from haagent.context.compaction import (
+from haagent.context.compression.sections import (
     ContextBudget,
     ContextCompactionResult,
     ContextSection,
     ContextSelectionRecord,
+    ObservationCompactionRecord,
     assess_auto_compact_trigger,
     assess_compact_readiness,
     compact_context_sections,
+    compact_observation_with_record,
 )
 from haagent.context.manifest import (
     ContextIndex,
@@ -27,10 +29,6 @@ from haagent.context.manifest import (
 from haagent.context.messages import (
     build_system_message,
     build_task_message,
-)
-from haagent.context.observation_compaction import (
-    ObservationCompactionRecord,
-    compact_observation_with_record,
 )
 from haagent.context.selection import (
     ContextCandidateInputs,
@@ -46,7 +44,7 @@ from haagent.memory.retrieval import (
 )
 from haagent.prompts.packs import get_prompt_pack
 from haagent.runtime.episodes.writer import EpisodeWriter
-from haagent.runtime.compaction.contract import assess_full_compact_eligibility
+from haagent.context.compression.full import assess_full_compact_eligibility
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.runtime.session.working_state import (
     WorkingStateError,
@@ -106,7 +104,7 @@ class ContextBuilder:
         final_response_requested: bool = False,
         session_summary: str | None = None,
         session_compaction: dict | None = None,
-        tool_result_microcompact_count: int = 0,
+        historical_tool_compression_count: int = 0,
         working_state: dict | None = None,
         interaction_state: list[dict] | None = None,
         compaction_budget: ContextBudget | None = None,
@@ -119,7 +117,7 @@ class ContextBuilder:
         self._observations = list(observations or [])
         self._session_summary = session_summary
         self._session_compaction = session_compaction
-        self._tool_result_microcompact_count = max(0, tool_result_microcompact_count)
+        self._historical_tool_compression_count = max(0, historical_tool_compression_count)
         self._working_state = working_state
         self._interaction_state = list(interaction_state or [])
         self._compaction_budget = compaction_budget or ContextBudget()
@@ -175,7 +173,7 @@ class ContextBuilder:
             compact_readiness=compact_readiness,
             compaction=compaction,
             budget=self._compaction_budget,
-            tool_result_microcompact_count=self._tool_result_microcompact_count,
+            historical_tool_compression_count=self._historical_tool_compression_count,
             session_summary_count=_session_trigger_count(self._session_summary, self._session_compaction),
             session_summary_chars=_session_trigger_chars(self._session_summary, self._session_compaction),
         )
@@ -185,7 +183,7 @@ class ContextBuilder:
             session_compaction=self._session_compaction,
             message_count=_session_trigger_count(self._session_summary, self._session_compaction),
             summary_count=_session_trigger_count(self._session_summary, self._session_compaction),
-            recent_microcompact=self._tool_result_microcompact_count > 0,
+            recent_microcompact=self._historical_tool_compression_count > 0,
         )
         manifest = ContextManifest(
             context_id=context_id,
@@ -471,7 +469,7 @@ def _compaction_manifest(compaction: ContextCompactionResult) -> dict:
 
 def _context_index_budget(context_id: str, compaction: ContextCompactionResult, budget: ContextBudget) -> dict:
     included_count = sum(1 for record in compaction.diagnostics if record.decision != "skipped")
-    return {
+    payload = {
         "context_id": context_id,
         "total_chars": compaction.final_chars,
         "max_chars": budget.max_total_chars,
@@ -479,6 +477,9 @@ def _context_index_budget(context_id: str, compaction: ContextCompactionResult, 
         "included_source_count": included_count,
         "status": "within_limit" if compaction.final_chars <= budget.max_total_chars else "over_limit",
     }
+    if budget.max_total_tokens is not None:
+        payload["max_tokens"] = budget.max_total_tokens
+    return payload
 
 
 def _source_diagnostics(

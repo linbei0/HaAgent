@@ -5,6 +5,7 @@ tests/unit/runtime/test_session_ui_events.py - Session UI 事件发射测试
 """
 
 from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent
+from haagent.runtime.session.agent import _count_historical_tool_compression_events
 from haagent.runtime.session.ui_events import emit_runtime_ui_event, emit_ui_event, session_started_event
 
 
@@ -40,3 +41,14 @@ def test_session_started_event_uses_typed_lifecycle_event() -> None:
         status="ready",
         details={"status": "ready"},
     )
+
+
+def test_session_counts_only_historical_tool_compression_diagnostics() -> None:
+    events = [
+        {"event_type": "tool_result_microcompact", "stage": "historical_tool_message"},
+        {"event_type": "compression_diagnostic", "stage": "tool_output_artifact"},
+        {"event_type": "compression_diagnostic", "stage": "historical_tool_message"},
+        {"event": "compression_diagnostic", "stage": "historical_tool_message"},
+    ]
+
+    assert _count_historical_tool_compression_events(events) == 2

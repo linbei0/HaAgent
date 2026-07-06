@@ -10,6 +10,7 @@ import json
 import os
 from typing import Any
 
+from haagent.context.compression.tool_results import render_tool_result_view
 from haagent.context.instructions import AGENT_INSTRUCTIONS
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
@@ -173,6 +174,8 @@ def _format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         return f"error ({error_type}): {message}"
 
     display = result.get("model_visible")
+    if isinstance(display, dict) and display.get("kind") == "tool_result_view":
+        return render_tool_result_view(display)
     if display is None:
         # Remove status key from display, keep everything else.
         display = {k: v for k, v in result.items() if k != "status"}
