@@ -20,6 +20,7 @@ from haagent.tools.registry import (
 def test_tool_registry_contains_mvp_tools() -> None:
     assert set(TOOL_REGISTRY) == {
         "fake_tool",
+        "load_image_attachment",
         "file_list",
         "file_search",
         "file_read",

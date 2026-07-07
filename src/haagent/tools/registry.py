@@ -73,6 +73,25 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": True,
         },
     ),
+    "load_image_attachment": ToolDefinition(
+        name="load_image_attachment",
+        description=(
+            "load a previously attached session image by image_id so the next model call "
+            "can inspect it as visual input"
+        ),
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "image_id": {
+                    "type": "string",
+                    "description": "id from Image Attachment History, for example img-123abc",
+                },
+            },
+            "required": ["image_id"],
+            "additionalProperties": False,
+        },
+    ),
     "agent": ToolDefinition(
         name="agent",
         description="spawn a background worker agent for delegated research, implementation, or verification",

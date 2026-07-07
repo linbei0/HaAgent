@@ -15,6 +15,8 @@ import yaml
 from haagent.context.builder import ContextBuilder
 from haagent.runtime.contracts.task import TaskLoadError, TaskSpec, load_task
 from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.session import agent as agent_module
+from haagent.runtime.session.agent import ChatSessionError
 from haagent.runtime.session.attachments import (
     AttachmentLimitError,
     ImageAttachment,
@@ -71,8 +73,40 @@ def test_save_clipboard_image_enforces_count_and_size_limits(tmp_path: Path) -> 
         )
 
 
+def test_read_clipboard_image_bytes_accepts_copied_image_file(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "copied.png"
+    image_path.write_bytes(_png_bytes())
+
+    class FakeImageGrab:
+        @staticmethod
+        def grabclipboard():
+            return [str(image_path)]
+
+    monkeypatch.setattr(agent_module.sys, "platform", "win32")
+    monkeypatch.setitem(agent_module.sys.modules, "PIL.ImageGrab", FakeImageGrab)
+
+    assert agent_module._read_clipboard_image_bytes() == _png_bytes()
+
+
+def test_read_clipboard_image_bytes_rejects_copied_non_image_file(tmp_path: Path, monkeypatch) -> None:
+    text_path = tmp_path / "note.txt"
+    text_path.write_text("not an image", encoding="utf-8")
+
+    class FakeImageGrab:
+        @staticmethod
+        def grabclipboard():
+            return [str(text_path)]
+
+    monkeypatch.setattr(agent_module.sys, "platform", "win32")
+    monkeypatch.setitem(agent_module.sys.modules, "PIL.ImageGrab", FakeImageGrab)
+
+    with pytest.raises(ChatSessionError, match="剪贴板中没有图片"):
+        agent_module._read_clipboard_image_bytes()
+
+
 def test_write_and_load_chat_task_yaml_preserves_attachment_metadata(tmp_path: Path) -> None:
     attachment = _attachment()
+    history_attachment = _attachment("img-history").with_base_path(tmp_path)
     task_path = tmp_path / "task.yaml"
 
     write_chat_task_yaml(
@@ -80,13 +114,43 @@ def test_write_and_load_chat_task_yaml_preserves_attachment_metadata(tmp_path: P
         "describe image",
         tmp_path,
         attachments=[attachment],
+        image_attachment_history=[history_attachment],
     )
     raw = yaml.safe_load(task_path.read_text(encoding="utf-8"))
     task = load_task(task_path)
 
     assert raw["attachments"] == [attachment.to_dict()]
+    assert raw["image_attachment_history"] == [
+        {**history_attachment.to_dict(), "base_path": str(tmp_path.resolve())}
+    ]
     assert [item.to_dict() for item in task.attachments] == [attachment.to_dict()]
+    assert [item.to_dict() for item in task.image_attachment_history] == [history_attachment.to_dict()]
     assert task.attachments[0].base_path == str(tmp_path.resolve())
+    assert task.image_attachment_history[0].base_path == str(tmp_path.resolve())
+
+
+def test_chat_task_exposes_image_load_tool_only_when_history_exists(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+
+    write_chat_task_yaml(
+        task_path,
+        "describe current image",
+        tmp_path,
+        attachments=[_attachment()],
+    )
+    first_turn = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+
+    assert "load_image_attachment" not in first_turn["allowed_tools"]
+
+    write_chat_task_yaml(
+        task_path,
+        "compare with previous image",
+        tmp_path,
+        image_attachment_history=[_attachment("img-history")],
+    )
+    followup_turn = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+
+    assert "load_image_attachment" in followup_turn["allowed_tools"]
 
 
 def test_load_task_rejects_attachment_path_outside_controlled_directory(tmp_path: Path) -> None:
@@ -136,6 +200,7 @@ def test_context_builder_message_contains_attachment_metadata_without_base64_sna
             verification_commands=[],
             workspace_root=str(tmp_path),
             attachments=[attachment],
+            image_attachment_history=[attachment],
         ),
         workspace_root=tmp_path,
         provider_name="openai-chat",
@@ -152,6 +217,7 @@ def test_context_builder_message_contains_attachment_metadata_without_base64_sna
     snapshot = (writer.path / "contexts" / "0001.json").read_text(encoding="utf-8")
     assert "base64" not in snapshot
     assert attachment.relative_path in snapshot
+    assert "Image Attachment History:" in snapshot
 
 
 def _png_bytes() -> bytes:
@@ -162,16 +228,16 @@ def _png_bytes() -> bytes:
     )
 
 
-def _attachment() -> ImageAttachment:
+def _attachment(attachment_id: str = "img-test") -> ImageAttachment:
     return ImageAttachment(
-        id="img-test",
-        filename="img-test.png",
+        id=attachment_id,
+        filename=f"{attachment_id}.png",
         mime_type="image/png",
         size_bytes=10,
         width=2,
         height=1,
         sha256="a" * 64,
-        relative_path="attachments/img-test.png",
+        relative_path=f"attachments/{attachment_id}.png",
     )
 
 

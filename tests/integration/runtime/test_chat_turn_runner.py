@@ -12,6 +12,7 @@ from haagent.runtime.orchestration.recorder import RunResult
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.runtime.contracts.task import load_task
+from haagent.runtime.session.attachments import ImageAttachment
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 
 
@@ -93,6 +94,95 @@ def test_chat_turn_runner_writes_prompt_pack_ids_from_explicit_command(tmp_path:
     task = captured["task"]
     assert task.goal == "看看改动"
     assert task.prompt_pack_ids == ["code-review"]
+
+
+def test_chat_turn_runner_preserves_history_attachment_session_root(tmp_path: Path) -> None:
+    session_root = tmp_path / "session"
+    image_path = session_root / "attachments" / "img-history.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    history_attachment = ImageAttachment(
+        id="img-history",
+        filename="img-history.png",
+        mime_type="image/png",
+        size_bytes=5,
+        width=2,
+        height=1,
+        sha256="a" * 64,
+        relative_path="attachments/img-history.png",
+        base_path=str(session_root),
+    )
+    captured: dict[str, object] = {}
+
+    ChatTurnRunner().run(
+        ChatTurnRequest(
+            prompt="load previous image",
+            workspace_root=tmp_path,
+            runs_root=tmp_path / ".runs",
+            model_gateway=_Gateway(),
+            max_turns=3,
+            session_summary=None,
+            session_compaction=None,
+            historical_tool_compression_count=0,
+            working_state=None,
+            path_policy=default_path_policy(tmp_path),
+            enable_web=False,
+            target_paths=[],
+            event_sink=lambda event: None,
+            interaction_handler=None,
+            cancellation_token=CancellationToken(),
+            orchestrator_factory=lambda **kwargs: _Orchestrator(captured, **kwargs),
+            image_attachment_history=[history_attachment],
+        ),
+    )
+
+    task = captured["task"]
+    assert task.image_attachment_history[0].base_path == str(session_root.resolve())
+
+
+def test_chat_turn_runner_references_session_attachment_without_copying_to_episode(tmp_path: Path) -> None:
+    session_root = tmp_path / "session"
+    image_path = session_root / "attachments" / "img-current.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    attachment = ImageAttachment(
+        id="img-current",
+        filename="img-current.png",
+        mime_type="image/png",
+        size_bytes=5,
+        width=2,
+        height=1,
+        sha256="a" * 64,
+        relative_path="attachments/img-current.png",
+        base_path=str(session_root),
+    )
+    captured: dict[str, object] = {}
+
+    result = ChatTurnRunner().run(
+        ChatTurnRequest(
+            prompt="describe image",
+            workspace_root=tmp_path,
+            runs_root=tmp_path / ".runs",
+            model_gateway=_Gateway(),
+            max_turns=3,
+            session_summary=None,
+            session_compaction=None,
+            historical_tool_compression_count=0,
+            working_state=None,
+            path_policy=default_path_policy(tmp_path),
+            enable_web=False,
+            target_paths=[],
+            event_sink=lambda event: None,
+            interaction_handler=None,
+            cancellation_token=CancellationToken(),
+            orchestrator_factory=lambda **kwargs: _Orchestrator(captured, **kwargs),
+            attachments=[attachment],
+        ),
+    )
+
+    task = captured["task"]
+    assert task.attachments[0].base_path == str(session_root.resolve())
+    assert not (result.episode_path / "attachments" / "img-current.png").exists()
 
 
 def test_chat_turn_runner_allows_dynamic_mcp_tool_in_task_contract(tmp_path: Path) -> None:

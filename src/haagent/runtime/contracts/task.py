@@ -30,6 +30,7 @@ class TaskSpec:
     target_paths: list[str] = field(default_factory=list)
     prompt_pack_ids: list[str] = field(default_factory=list)
     attachments: list[ImageAttachment] = field(default_factory=list)
+    image_attachment_history: list[ImageAttachment] = field(default_factory=list)
     policy: dict[str, list[str]] = field(
         default_factory=lambda: {"approval_allowed_tools": [], "approved_tools": []},
     )
@@ -43,7 +44,10 @@ def load_task(path: Path) -> TaskSpec:
         raise TaskLoadError("task.yaml must contain a mapping")
 
     goal = _required_str(raw, "goal")
-    attachments = [attachment.with_base_path(path.parent) for attachment in _optional_attachments(raw)]
+    attachments = [
+        _with_default_base_path(attachment, path.parent)
+        for attachment in _optional_attachments(raw)
+    ]
     return TaskSpec(
         goal=goal,
         constraints=_required_str_list(raw, "constraints"),
@@ -55,6 +59,10 @@ def load_task(path: Path) -> TaskSpec:
         target_paths=_optional_str_list(raw, "target_paths"),
         prompt_pack_ids=_optional_str_list(raw, "prompt_pack_ids"),
         attachments=attachments,
+        image_attachment_history=[
+            _with_default_base_path(attachment, path.parent)
+            for attachment in _optional_image_attachment_history(raw)
+        ],
         policy=_optional_policy(raw, allowed_tools),
         worker_context=_optional_mapping(raw, "worker_context"),
     )
@@ -175,3 +183,16 @@ def _optional_attachments(raw: dict[str, Any]) -> list[ImageAttachment]:
         return image_attachments_from_raw(raw.get("attachments", []))
     except ValueError as error:
         raise TaskLoadError(f"invalid attachments: {error}") from error
+
+
+def _with_default_base_path(attachment: ImageAttachment, base_path: Path) -> ImageAttachment:
+    if attachment.base_path:
+        return attachment
+    return attachment.with_base_path(base_path)
+
+
+def _optional_image_attachment_history(raw: dict[str, Any]) -> list[ImageAttachment]:
+    try:
+        return image_attachments_from_raw(raw.get("image_attachment_history", []))
+    except ValueError as error:
+        raise TaskLoadError(f"invalid image_attachment_history: {error}") from error

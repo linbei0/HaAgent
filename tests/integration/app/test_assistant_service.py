@@ -21,6 +21,7 @@ from haagent.models import provider_profile
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.provider_profile import ProviderProfileRecord, save_active_profile, save_provider_profile
 from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent
+from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills.marketplace import MarketplaceProvider, MarketplaceSearchResult, MarketplaceSkillCard
 
 
@@ -29,7 +30,7 @@ class RecordingGateway:
 
     def __init__(self, profile_name: str = "local") -> None:
         self.profile_name = profile_name
-        self.model_inputs: list[str] = []
+        self.model_inputs: list[object] = []
 
     def generate(self, messages, tool_schemas):
         task_content = next((m["content"] for m in messages if m.get("role") == "user"), "")
@@ -145,6 +146,46 @@ def _write_user_profile(
     (config_dir / "settings.json").write_text(
         json.dumps({"active_profile": name}),
         encoding="utf-8",
+    )
+
+
+def _session_image_attachment(session_path: Path, attachment_id: str) -> ImageAttachment:
+    image_path = session_path / "attachments" / f"{attachment_id}.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(_png_bytes())
+    return ImageAttachment.from_file(
+        image_path,
+        session_root=session_path,
+        attachment_id=attachment_id,
+    )
+
+
+def _image_attachment_paths(content) -> list[str]:
+    if not isinstance(content, list):
+        return []
+    return [
+        str(part.get("relative_path"))
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "image_attachment"
+    ]
+
+
+def _text_part(content) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            return str(part.get("text", ""))
+    return ""
+
+
+def _png_bytes() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x02\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00{@\xe8\xdd\x00\x00\x00\x0cIDATx\x9cc\xfc\xcf"
+        b"\x00\x02\x00\x06\x08\x01\x01Z\xcf\x06H\x00\x00\x00\x00IEND\xaeB`\x82"
     )
 
 
@@ -1204,6 +1245,88 @@ def test_run_prompt_events_forwards_chat_events(tmp_path: Path, monkeypatch) -> 
         "session_finished",
     ]
     assert any(isinstance(event, AssistantMessageEvent) for event in events)
+
+
+def test_service_reuses_last_sent_image_attachments_for_followup_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_profile(Path.home())
+    gateways: list[RecordingGateway] = []
+
+    def gateway_factory(profile):
+        gateway = RecordingGateway(profile.name)
+        gateways.append(gateway)
+        return gateway
+
+    service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
+    created = service.create_session()
+    attachment = _session_image_attachment(created.session_path, "img-one")
+
+    service.run_prompt_events("描述图片", attachments=[attachment])
+    service.run_prompt_events("继续分析")
+
+    assert len(gateways[0].model_inputs) == 2
+    first_content = gateways[0].model_inputs[0]
+    second_content = gateways[0].model_inputs[1]
+    assert _image_attachment_paths(first_content) == [attachment.relative_path]
+    assert _image_attachment_paths(second_content) == [attachment.relative_path]
+
+
+def test_service_replaces_auto_reused_images_when_new_images_are_sent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_profile(Path.home())
+    gateways: list[RecordingGateway] = []
+
+    def gateway_factory(profile):
+        gateway = RecordingGateway(profile.name)
+        gateways.append(gateway)
+        return gateway
+
+    service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
+    created = service.create_session()
+    first = _session_image_attachment(created.session_path, "img-one")
+    second = _session_image_attachment(created.session_path, "img-two")
+
+    service.run_prompt_events("描述第一张", attachments=[first])
+    service.run_prompt_events("描述第二张", attachments=[second])
+    service.run_prompt_events("继续分析")
+
+    assert _image_attachment_paths(gateways[0].model_inputs[1]) == [second.relative_path]
+    assert _image_attachment_paths(gateways[0].model_inputs[2]) == [second.relative_path]
+    followup_text = _text_part(gateways[0].model_inputs[2])
+    assert "Image Attachment History:" in followup_text
+    assert first.relative_path in followup_text
+    assert second.relative_path in followup_text
+
+
+def test_resumed_session_reuses_last_sent_image_attachments_for_followup_turn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_profile(Path.home())
+    gateways: list[RecordingGateway] = []
+
+    def gateway_factory(profile):
+        gateway = RecordingGateway(profile.name)
+        gateways.append(gateway)
+        return gateway
+
+    service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
+    created = service.create_session()
+    attachment = _session_image_attachment(created.session_path, "img-one")
+    service.run_prompt_events("描述图片", attachments=[attachment])
+
+    service.resume_session(created.session_path)
+    service.run_prompt_events("继续分析")
+
+    assert len(gateways) == 2
+    assert _image_attachment_paths(gateways[1].model_inputs[0]) == [attachment.relative_path]
 
 
 def test_session_creation_requires_usable_active_profile(tmp_path: Path, monkeypatch) -> None:

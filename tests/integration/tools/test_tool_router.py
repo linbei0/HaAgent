@@ -15,6 +15,7 @@ from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
+from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
@@ -622,9 +623,66 @@ def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -
             "message": "MCP tool fixture.echo timed out after 0.05 seconds",
         },
     }
+
+
+def test_load_image_attachment_returns_registered_history_image(tmp_path: Path) -> None:
+    session_root = tmp_path / "session"
+    image_path = session_root / "attachments" / "img-one.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image-bytes")
+    attachment = ImageAttachment(
+        id="img-one",
+        filename="img-one.png",
+        mime_type="image/png",
+        size_bytes=11,
+        width=2,
+        height=1,
+        sha256="a" * 64,
+        relative_path="attachments/img-one.png",
+        base_path=str(session_root),
+    )
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["load_image_attachment"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        image_attachment_history=[attachment],
+    )
+
+    result = router.dispatch("load_image_attachment", {"image_id": "img-one"})
+
+    assert result["status"] == "success"
+    assert result["loaded_image_attachment"] == {
+        **attachment.to_dict(),
+        "type": "image_attachment",
+        "path": str(image_path.resolve()),
+    }
+    assert result["model_visible"]["image_id"] == "img-one"
+    trace = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8")
+    record = json.loads(trace)
+    assert record["tool_name"] == "load_image_attachment"
+    assert record["status"] == "success"
+    assert "path" not in record["result"]["loaded_image_attachment"]
+    assert record["result"]["loaded_image_attachment"]["relative_path"] == "attachments/img-one.png"
+    assert "base64" not in trace
+
+
+def test_load_image_attachment_reports_unknown_image_id(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["load_image_attachment"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        image_attachment_history=[],
+    )
+
+    result = router.dispatch("load_image_attachment", {"image_id": "missing"})
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "image_attachment_not_found"
     record = _read_single_tool_call(writer)
     assert record["status"] == "error"
-    assert record["error"]["type"] == "mcp_timeout"
+    assert record["error"]["type"] == "image_attachment_not_found"
 
 
 def test_shell_uses_sandbox_backend_when_provided(tmp_path: Path) -> None:

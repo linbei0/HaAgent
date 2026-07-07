@@ -92,6 +92,18 @@ def build_task_message(
     for tool in task.allowed_tools:
         lines.append(f"- {tool}: {runtime_registry.get(tool).description}")
 
+    if task.image_attachment_history:
+        lines.append("Image Attachment History:")
+        for index, attachment in enumerate(task.image_attachment_history, start=1):
+            lines.append(
+                "- "
+                f"image {index}: id={attachment.id} "
+                f"path={attachment.relative_path} "
+                f"mime={attachment.mime_type} "
+                f"size_bytes={attachment.size_bytes} "
+                f"dimensions={attachment.width}x{attachment.height}"
+            )
+
     if task.acceptance_criteria:
         lines.append("acceptance_criteria:")
         for c in task.acceptance_criteria:

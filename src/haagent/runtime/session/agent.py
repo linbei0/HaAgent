@@ -195,6 +195,8 @@ class AgentSession:
         self._manual_compaction_summary: str | None = None
         self._manual_compaction_turn_count = 0
         self._next_turn_target_paths: list[str] = []
+        self._last_user_image_attachments: list[ImageAttachment] = []
+        self._image_attachment_history: list[ImageAttachment] = []
         self._historical_tool_compression_count = 0
         self._working_state = empty_working_state()
         self._current_cancellation_token: CancellationToken | None = None
@@ -258,6 +260,8 @@ class AgentSession:
         instance._manual_compaction_summary = compaction_summary
         instance._manual_compaction_turn_count = compacted_turn_count
         instance._next_turn_target_paths = []
+        instance._last_user_image_attachments = _read_session_image_attachments(metadata, session_path)
+        instance._image_attachment_history = _read_image_attachment_history(metadata, session_path)
         instance._historical_tool_compression_count = 0
         try:
             instance._working_state = load_working_state(session_path / "working_state.json")
@@ -341,7 +345,8 @@ class AgentSession:
         target_paths = list(self._next_turn_target_paths)
         self._next_turn_target_paths = []
         session_memory = self._session_memory()
-        prompt_attachments = list(attachments or [])
+        new_attachments = list(attachments or [])
+        prompt_attachments = new_attachments if new_attachments else list(self._last_user_image_attachments)
         try:
             result = ChatTurnRunner().run(
                 ChatTurnRequest(
@@ -371,6 +376,7 @@ class AgentSession:
                     worker_context=self._worker_context,
                     worker_permission_requester=self._worker_permission_requester,
                     attachments=prompt_attachments,
+                    image_attachment_history=self._image_attachment_history,
                 ),
             )
         except Exception:
@@ -379,6 +385,12 @@ class AgentSession:
 
         turn_result = self._build_turn_result(clean_prompt, result)
         self.turn_count += 1
+        if new_attachments:
+            self._last_user_image_attachments = list(new_attachments)
+            self._image_attachment_history = _merge_image_attachment_history(
+                self._image_attachment_history,
+                new_attachments,
+            )
         self._working_state = update_working_state(
             self._working_state,
             prompt=clean_prompt,
@@ -635,6 +647,8 @@ class AgentSession:
         self._summaries = []
         self._manual_compaction_summary = None
         self._manual_compaction_turn_count = 0
+        self._last_user_image_attachments = []
+        self._image_attachment_history = []
         self._working_state = empty_working_state()
         self.path_policy = default_path_policy(self.workspace_root)
         self.session_path = self.runs_root / "sessions" / self.session_id
@@ -820,6 +834,14 @@ class AgentSession:
             "model": self.model_name,
             "base_url": self.model_base_url,
             "enable_web": self.enable_web,
+            "last_user_image_attachments": [
+                attachment.to_dict()
+                for attachment in self._last_user_image_attachments
+            ],
+            "image_attachment_history": [
+                attachment.to_dict()
+                for attachment in self._image_attachment_history
+            ],
             "created_at": created_at,
             "updated_at": datetime.now(UTC).isoformat(),
             "turn_count": self.turn_count,
@@ -901,11 +923,33 @@ def _read_clipboard_image_bytes() -> bytes:
     except ImportError as error:
         raise ChatSessionError("Pillow is required for image paste support") from error
     image = ImageGrab.grabclipboard()
+    if isinstance(image, list):
+        image_bytes = _read_first_clipboard_image_file(image)
+        if image_bytes is not None:
+            return image_bytes
     if image is None or not hasattr(image, "save"):
         raise ChatSessionError("剪贴板中没有图片。")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _read_first_clipboard_image_file(paths: list[object]) -> bytes | None:
+    for raw_path in paths:
+        if not isinstance(raw_path, str):
+            continue
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+            from haagent.runtime.session.attachments import _inspect_image
+
+            _inspect_image(data)
+        except Exception:
+            continue
+        return data
+    return None
 
 
 def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:
@@ -971,6 +1015,66 @@ def _read_session_metadata(session_path: Path) -> dict[str, object]:
     if str(metadata["session_id"]) != session_path.name:
         raise ChatSessionError("invalid session.json: session_id does not match session path")
     return metadata
+
+
+def _read_session_image_attachments(
+    metadata: dict[str, object],
+    session_path: Path,
+) -> list[ImageAttachment]:
+    raw_attachments = metadata.get("last_user_image_attachments")
+    if raw_attachments is None:
+        return []
+    if not isinstance(raw_attachments, list):
+        raise ChatSessionError("invalid session.json: last_user_image_attachments must be a list")
+    attachments: list[ImageAttachment] = []
+    for index, raw_attachment in enumerate(raw_attachments, start=1):
+        if not isinstance(raw_attachment, dict):
+            raise ChatSessionError(
+                f"invalid session.json: last_user_image_attachments[{index}] must be an object"
+            )
+        try:
+            attachment = ImageAttachment.from_dict(raw_attachment).with_base_path(session_path)
+        except ValueError as error:
+            raise ChatSessionError(
+                f"invalid session.json: last_user_image_attachments[{index}]: {error}"
+            ) from error
+        attachments.append(attachment)
+    return attachments
+
+
+def _read_image_attachment_history(
+    metadata: dict[str, object],
+    session_path: Path,
+) -> list[ImageAttachment]:
+    raw_attachments = metadata.get("image_attachment_history")
+    if raw_attachments is None:
+        return list(_read_session_image_attachments(metadata, session_path))
+    if not isinstance(raw_attachments, list):
+        raise ChatSessionError("invalid session.json: image_attachment_history must be a list")
+    attachments: list[ImageAttachment] = []
+    for index, raw_attachment in enumerate(raw_attachments, start=1):
+        if not isinstance(raw_attachment, dict):
+            raise ChatSessionError(
+                f"invalid session.json: image_attachment_history[{index}] must be an object"
+            )
+        try:
+            attachment = ImageAttachment.from_dict(raw_attachment).with_base_path(session_path)
+        except ValueError as error:
+            raise ChatSessionError(
+                f"invalid session.json: image_attachment_history[{index}]: {error}"
+            ) from error
+        attachments.append(attachment)
+    return attachments
+
+
+def _merge_image_attachment_history(
+    existing: list[ImageAttachment],
+    new_attachments: list[ImageAttachment],
+) -> list[ImageAttachment]:
+    by_id = {attachment.id: attachment for attachment in existing}
+    for attachment in new_attachments:
+        by_id[attachment.id] = attachment
+    return list(by_id.values())
 
 
 def _read_session_turns(session_path: Path) -> list[dict[str, object]]:

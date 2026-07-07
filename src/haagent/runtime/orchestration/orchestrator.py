@@ -178,6 +178,7 @@ class RunOrchestrator:
                 ),
                 worker_permission_requester=self._worker_permission_requester,
                 sandbox_backend=sandbox_backend,
+                image_attachment_history=task.image_attachment_history,
             )
             verification_engine: VerificationEngine | None = None
             passed_verification_commands: set[str] = set()

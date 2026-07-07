@@ -312,6 +312,7 @@ def _run_tool_calls(
     deps: TurnLoopDependencies,
 ) -> RunResult | None:
     turn_broke_early = False
+    loaded_image_attached_this_turn = False
     pending_suggestion_messages: list[str] = []
     visible_result_fingerprints: set[str] = set()
     for tool_index, tool_call in enumerate(tool_calls_with_ids):
@@ -371,6 +372,10 @@ def _run_tool_calls(
             else:
                 visible_result_fingerprints.add(fingerprint)
         state.messages.append(build_tool_result_message(tool_call.id, tool_call.name, message_result))
+        loaded_image_message = _build_loaded_image_attachment_message(tool_result)
+        if loaded_image_message is not None:
+            state.messages.append(loaded_image_message)
+            loaded_image_attached_this_turn = True
         if tool_call.name == "agent" and tool_result.get("status") == "running":
             task_id = str(tool_result.get("task_id") or "").strip()
             if task_id:
@@ -481,7 +486,7 @@ def _run_tool_calls(
         if suggestion_message:
             state.messages.append(build_suggestion_message(suggestion_message))
 
-    if not turn_broke_early and (
+    if not turn_broke_early and not loaded_image_attached_this_turn and (
         deps.all_declared_verification_commands_passed(
             deps.verification_commands,
             state.passed_verification_commands,
@@ -514,6 +519,35 @@ def _wait_for_pending_worker_tasks(
                 break
     state.pending_worker_task_ids.clear()
     return notifications
+
+
+def _build_loaded_image_attachment_message(tool_result: dict[str, Any]) -> dict[str, Any] | None:
+    if tool_result.get("status") != "success":
+        return None
+    attachment = tool_result.get("loaded_image_attachment")
+    if not isinstance(attachment, dict):
+        return None
+    image_id = str(attachment.get("id") or "").strip()
+    if not image_id:
+        return None
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"Loaded historical image: {image_id}"},
+            {
+                "type": "image_attachment",
+                "id": image_id,
+                "filename": str(attachment.get("filename") or ""),
+                "mime_type": str(attachment.get("mime_type") or ""),
+                "size_bytes": int(attachment.get("size_bytes") or 0),
+                "width": int(attachment.get("width") or 0),
+                "height": int(attachment.get("height") or 0),
+                "sha256": str(attachment.get("sha256") or ""),
+                "relative_path": str(attachment.get("relative_path") or ""),
+                "path": str(attachment.get("path") or ""),
+            },
+        ],
+    }
 
 
 def _build_worker_notifications_message(notifications: list[dict[str, Any]]) -> dict[str, Any]:

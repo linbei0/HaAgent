@@ -259,6 +259,85 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
     assert any(record["event"] == "worker_notifications_collected" for record in writer.transcript)
 
 
+def test_turn_loop_adds_loaded_image_attachment_to_next_model_call(tmp_path: Path) -> None:
+    image_path = tmp_path / "attachments" / "img-one.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"image-bytes")
+    loaded_attachment = {
+        "id": "img-one",
+        "filename": "img-one.png",
+        "mime_type": "image/png",
+        "size_bytes": 11,
+        "width": 2,
+        "height": 1,
+        "sha256": "a" * 64,
+        "relative_path": "attachments/img-one.png",
+        "path": str(image_path),
+    }
+    router = _FakeRouter(
+        {
+            "status": "success",
+            "loaded_image_attachment": loaded_attachment,
+            "model_visible": {
+                "message": "图片已加载，将在下一次模型调用中作为视觉输入。",
+                "image_id": "img-one",
+            },
+        }
+    )
+    writer = _FakeWriter()
+    model_messages: list[list[dict[str, Any]]] = []
+    finish_statuses: list[object] = []
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas):
+            del tool_schemas
+            model_messages.append(list(messages))
+            if len(model_messages) == 1:
+                return ModelResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            name="load_image_attachment",
+                            args={"image_id": "img-one"},
+                            id="call_image",
+                        )
+                    ],
+                )
+            return ModelResponse(content="loaded image observed", tool_calls=[])
+
+    deps = _deps(
+        router=router,
+        writer=writer,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.PLANNING],
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "allowed_tools", ["load_image_attachment"])
+    deps = _replace_dep(deps, "all_declared_verification_commands_passed", lambda commands, passed: True)
+
+    result = run_turn_loop(
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=deps,
+    )
+
+    assert result is not None
+    assert len(model_messages) == 2
+    second_call_content = model_messages[1][-1]["content"]
+    assert isinstance(second_call_content, list)
+    assert second_call_content[0] == {
+        "type": "text",
+        "text": "Loaded historical image: img-one",
+    }
+    assert second_call_content[1]["type"] == "image_attachment"
+    assert second_call_content[1]["relative_path"] == "attachments/img-one.png"
+    assert second_call_content[1]["path"] == str(image_path)
+
+
 def test_turn_loop_allows_unlimited_max_turns(tmp_path: Path) -> None:
     finish_statuses: list[object] = []
 

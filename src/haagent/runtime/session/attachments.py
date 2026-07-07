@@ -71,6 +71,7 @@ class ImageAttachment:
             height=_required_int(raw, "height"),
             sha256=_required_str(raw, "sha256"),
             relative_path=_validate_relative_path(_required_str(raw, "relative_path")),
+            base_path=_optional_base_path(raw.get("base_path")),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -204,6 +205,14 @@ def _required_int(raw: dict[str, Any], field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError(f"attachments.{field} must be a non-negative integer")
     return value
+
+
+def _optional_base_path(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError("attachments.base_path must be a non-empty string when present")
+    return str(Path(value).resolve())
 
 
 def _raise_attachment_item() -> ImageAttachment:

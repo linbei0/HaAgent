@@ -7,7 +7,6 @@ src/haagent/runtime/session/turn.py - Chat 单轮运行适配
 from __future__ import annotations
 
 import tempfile
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -100,6 +99,7 @@ class ChatTurnRequest:
     worker_context: dict[str, object] | None = None
     worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None
     attachments: list[ImageAttachment] = field(default_factory=list)
+    image_attachment_history: list[ImageAttachment] = field(default_factory=list)
 
 
 class ChatTurnRunner:
@@ -111,7 +111,6 @@ class ChatTurnRunner:
         prompt_pack_ids = [*request.prompt_pack_ids, *parsed_prompt.prompt_pack_ids]
         with tempfile.TemporaryDirectory(prefix="haagent-chat-") as task_dir:
             task_path = Path(task_dir) / "task.yaml"
-            attachments = _copy_attachments_for_task(request.attachments, Path(task_dir))
             write_chat_task_yaml(
                 task_path,
                 parsed_prompt.normalized_prompt,
@@ -125,7 +124,8 @@ class ChatTurnRunner:
                 approval_allowed_tools_override=request.approval_allowed_tools_override,
                 approved_tools_override=request.approved_tools_override,
                 worker_context=request.worker_context,
-                attachments=attachments,
+                attachments=request.attachments,
+                image_attachment_history=request.image_attachment_history,
             )
             orchestrator = request.orchestrator_factory(
                 runs_root=request.runs_root,
@@ -146,23 +146,6 @@ class ChatTurnRunner:
             return orchestrator.run(task_path)
 
 
-def _copy_attachments_for_task(
-    attachments: list[ImageAttachment],
-    task_dir: Path,
-) -> list[ImageAttachment]:
-    copied: list[ImageAttachment] = []
-    for attachment in attachments:
-        if attachment.base_path is None:
-            source = Path(attachment.relative_path)
-        else:
-            source = Path(attachment.base_path) / attachment.relative_path
-        destination = task_dir / attachment.relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
-        copied.append(attachment.with_base_path(task_dir))
-    return copied
-
-
 def write_chat_task_yaml(
     path: Path,
     request: str,
@@ -178,10 +161,13 @@ def write_chat_task_yaml(
     approved_tools_override: list[str] | None = None,
     worker_context: dict[str, object] | None = None,
     attachments: list[ImageAttachment] | None = None,
+    image_attachment_history: list[ImageAttachment] | None = None,
 ) -> None:
     mcp_tools = list(mcp_tool_names or [])
     if allowed_tools_override is None:
         allowed_tools = list(CHAT_ALLOWED_TOOLS)
+        if image_attachment_history:
+            allowed_tools.append("load_image_attachment")
         if enable_web:
             allowed_tools.extend(CHAT_WEB_TOOLS)
         if load_skill_registry(workspace_root=workspace_root).list_skills():
@@ -220,10 +206,26 @@ def write_chat_task_yaml(
         },
     }
     if attachments:
-        task["attachments"] = [attachment.to_dict() for attachment in attachments]
+        task["attachments"] = [_attachment_dict(attachment) for attachment in attachments]
+    if image_attachment_history:
+        task["image_attachment_history"] = [
+            _history_attachment_dict(attachment)
+            for attachment in image_attachment_history
+        ]
     if worker_context is not None:
         task["worker_context"] = dict(worker_context)
     path.write_text(yaml.safe_dump(task, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _history_attachment_dict(attachment: ImageAttachment) -> dict[str, object]:
+    return _attachment_dict(attachment)
+
+
+def _attachment_dict(attachment: ImageAttachment) -> dict[str, object]:
+    data = attachment.to_dict()
+    if attachment.base_path:
+        data["base_path"] = str(Path(attachment.base_path).resolve())
+    return data
 
 
 def runtime_event_message(event_type: str, payload: dict[str, object]) -> str:

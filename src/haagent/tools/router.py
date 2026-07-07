@@ -28,6 +28,7 @@ from haagent.runtime.execution.policy import (
     grant_tool_approval,
 )
 from haagent.runtime.sandbox.base import SandboxBackend
+from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
 from haagent.tools.code_run import code_run
@@ -61,6 +62,7 @@ class ToolRouter:
         agent_runtime: Any | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], PolicyDecision], Any] | None = None,
         sandbox_backend: SandboxBackend | None = None,
+        image_attachment_history: list[ImageAttachment] | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -74,9 +76,14 @@ class ToolRouter:
         self._agent_runtime = agent_runtime
         self._worker_permission_requester = worker_permission_requester
         self._sandbox_backend = sandbox_backend
+        self._image_attachment_history = {
+            attachment.id: attachment
+            for attachment in image_attachment_history or []
+        }
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
         self._handlers: dict[str, ToolHandler] = {
             "fake_tool": self._fake_tool,
+            "load_image_attachment": self._load_image_attachment,
             "agent": self._agent,
             "send_message": self._send_message,
             "task_stop": self._task_stop,
@@ -204,6 +211,41 @@ class ToolRouter:
 
     def _fake_tool(self, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "success", "args": args}
+
+    def _load_image_attachment(self, args: dict[str, Any]) -> dict[str, Any]:
+        image_id = str(args["image_id"]).strip()
+        attachment = self._image_attachment_history.get(image_id)
+        if attachment is None:
+            return tool_error(
+                "image_attachment_not_found",
+                f"image attachment not found in session history: {image_id}",
+            )
+        root = Path(attachment.base_path).resolve() if attachment.base_path else self._workspace_root
+        image_path = (root / attachment.relative_path).resolve()
+        if not image_path.is_relative_to(root):
+            return tool_error(
+                "image_attachment_path_invalid",
+                f"image attachment path escapes its session root: {image_id}",
+            )
+        if not image_path.is_file():
+            return tool_error(
+                "image_attachment_missing_file",
+                f"image attachment file is missing: {image_id}",
+            )
+        loaded_attachment = attachment.with_absolute_path(root)
+        return {
+            "status": "success",
+            "loaded_image_attachment": loaded_attachment,
+            "model_visible": {
+                "message": "图片已加载，将在下一次模型调用中作为视觉输入。",
+                "image_id": attachment.id,
+                "filename": attachment.filename,
+                "mime_type": attachment.mime_type,
+                "size_bytes": attachment.size_bytes,
+                "dimensions": f"{attachment.width}x{attachment.height}",
+                "relative_path": attachment.relative_path,
+            },
+        }
 
     def _request_user_input_without_handler(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._request_user_input(args, None)
@@ -402,12 +444,13 @@ class ToolRouter:
         policy_decision: PolicyDecision | None,
         guardrail_result: GuardrailResult | None,
     ) -> None:
+        trace_result = _result_for_trace(result)
         self._episode_writer.append_tool_call(
             {
                 "tool_name": tool_name,
                 "args": args,
                 "status": result["status"],
-                "result": result if result["status"] == "success" else None,
+                "result": trace_result if result["status"] == "success" else None,
                 "error": result.get("error"),
                 "policy": policy_decision.to_dict() if policy_decision else None,
                 "path_policy": {
@@ -453,6 +496,18 @@ def _validate_args(
                 f"argument {name} must be {expected_type}",
             )
     return None
+
+
+def _result_for_trace(result: dict[str, Any]) -> dict[str, Any]:
+    trace_result = dict(result)
+    attachment = trace_result.get("loaded_image_attachment")
+    if isinstance(attachment, dict) and "path" in attachment:
+        trace_result["loaded_image_attachment"] = {
+            key: value
+            for key, value in attachment.items()
+            if key != "path"
+        }
+    return trace_result
 
 
 def _matches_json_type(value: Any, expected_type: str) -> bool:
