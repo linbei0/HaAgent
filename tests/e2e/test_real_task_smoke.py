@@ -128,12 +128,12 @@ def test_real_task_smoke_modifies_python_file_and_runs_tests(tmp_path: Path) -> 
     assert shell_call["result"]["exit_code"] == 0
 
 
-def test_real_task_smoke_file_search_read_patch_set_and_runs_tests(tmp_path: Path) -> None:
+def test_real_task_smoke_grep_read_patch_set_and_runs_tests(tmp_path: Path) -> None:
     workspace = _make_project_workspace(tmp_path)
     gateway = ScriptedGateway(
         [
             ModelResponse("list files", [ToolCall("file_list", {"path": ".", "max_depth": 2})]),
-            ModelResponse("search greeting feature", [ToolCall("file_search", {"query": "greet", "root": "."})]),
+            ModelResponse("search greeting feature", [ToolCall("grep", {"pattern": "greet", "root": "."})]),
             ModelResponse("read app", [ToolCall("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})]),
             ModelResponse("read test", [ToolCall("file_read", {"path": "tests/test_app.py", "keyword": "test_greet", "limit": 20})]),
             ModelResponse(
@@ -168,7 +168,7 @@ def test_real_task_smoke_file_search_read_patch_set_and_runs_tests(tmp_path: Pat
     assert result.status == "completed"
     assert [call["tool_name"] for call in _tool_calls(result.episode_path)] == [
         "file_list",
-        "file_search",
+        "grep",
         "file_read",
         "file_read",
         "apply_patch_set",
@@ -606,7 +606,7 @@ def test_real_task_smoke_searches_and_reads_before_edit_without_path(tmp_path: P
     gateway = ScriptedGateway(
         [
             ModelResponse("list files", [ToolCall("file_list", {"path": ".", "max_depth": 2})]),
-            ModelResponse("search greeting implementation", [ToolCall("file_search", {"query": "greet", "root": "."})]),
+            ModelResponse("search greeting implementation", [ToolCall("grep", {"pattern": "greet", "root": "."})]),
             ModelResponse("read candidate", [ToolCall("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})]),
             ModelResponse(
                 "patch found file",
@@ -631,7 +631,7 @@ def test_real_task_smoke_searches_and_reads_before_edit_without_path(tmp_path: P
     assert 'return f"Howdy, {name}!"' in (workspace / "src" / "app.py").read_text(encoding="utf-8")
     assert [call["tool_name"] for call in _tool_calls(result.episode_path)] == [
         "file_list",
-        "file_search",
+        "grep",
         "file_read",
         "apply_patch",
     ]

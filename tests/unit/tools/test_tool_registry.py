@@ -22,7 +22,7 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "fake_tool",
         "load_image_attachment",
         "file_list",
-        "file_search",
+        "grep",
         "file_read",
         "request_user_input",
         "start_memory_update",
@@ -111,14 +111,15 @@ def test_file_read_schema_supports_keyword() -> None:
     assert schema["parameters"]["properties"]["keyword"]["type"] == "string"
 
 
-def test_file_search_schema_stays_deterministic() -> None:
-    schemas = export_tool_schemas(["file_search"])
+def test_grep_schema_stays_deterministic() -> None:
+    schemas = export_tool_schemas(["grep"])
     schema = schemas[0]
 
-    assert "search workspace text" in schema["description"]
-    assert schema["parameters"]["required"] == ["query"]
-    assert set(schema["parameters"]["properties"]) == {"query", "root"}
-    assert TOOL_REGISTRY["file_search"].risk_level == "low"
+    assert "regular expression" in schema["description"]
+    assert schema["parameters"]["required"] == ["pattern"]
+    assert set(schema["parameters"]["properties"]) == {"pattern", "root", "file_glob", "case_sensitive", "max_matches"}
+    assert "directory or file" in schema["parameters"]["properties"]["root"]["description"]
+    assert TOOL_REGISTRY["grep"].risk_level == "low"
 
 
 def test_task_tools_are_low_risk_worker_inspection_tools() -> None:

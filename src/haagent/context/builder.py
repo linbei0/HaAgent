@@ -51,6 +51,10 @@ from haagent.runtime.session.working_state import (
     format_working_state_for_model,
     raw_working_state_text,
 )
+from haagent.runtime.session.task_ledger import (
+    TaskLedgerError,
+    format_task_ledger_for_model,
+)
 from haagent.skills import discover_project_skill_dirs, is_project_root_trusted, load_skill_registry, load_skill_settings
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 
@@ -60,7 +64,7 @@ PROJECT_INSTRUCTIONS_CHAR_LIMIT = 4000
 SESSION_SUMMARY_CHAR_LIMIT = 2000
 TOOL_WORKFLOW_HINTS = [
     "Use file_list to inspect directory structure or narrow the search scope.",
-    "Use file_search for exact deterministic text search when you know the phrase, symbol, or filename fragment.",
+    "Use grep for exact deterministic text search when you know the phrase, symbol, or filename fragment.",
     "Then use file_read on candidate files before editing or summarizing.",
     "Use apply_patch_set for related edits across multiple files or multiple replacements.",
     "Use apply_patch only for a single isolated replacement.",
@@ -110,6 +114,7 @@ class ContextBuilder:
         session_compaction: dict | None = None,
         historical_tool_compression_count: int = 0,
         working_state: dict | None = None,
+        task_ledger: dict | None = None,
         interaction_state: list[dict] | None = None,
         compaction_budget: ContextBudget | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
@@ -123,6 +128,7 @@ class ContextBuilder:
         self._session_compaction = session_compaction
         self._historical_tool_compression_count = max(0, historical_tool_compression_count)
         self._working_state = working_state
+        self._task_ledger = task_ledger
         self._interaction_state = list(interaction_state or [])
         self._compaction_budget = compaction_budget or ContextBudget()
         self._selection_budget = selection_budget_for_initial_audit(self._compaction_budget)
@@ -155,6 +161,7 @@ class ContextBuilder:
         task_msg = build_task_message(
             task=self._task,
             plan_steps=list(plan.get("planned_steps", [])),
+            task_ledger_content=selected_sections.get("task_ledger") or None,
             working_state_content=selected_sections.get("working_state") or None,
             memory_index_block=selected_sections.get("memory_index") or None,
             memory_block=selected_sections.get("memory") or None,
@@ -277,7 +284,7 @@ class ContextBuilder:
     def _tool_workflow_hints(self) -> list[str]:
         allowed_tools = set(self._task.allowed_tools)
         hints: list[str] = []
-        if {"file_list", "file_search", "file_read"} <= allowed_tools:
+        if {"file_list", "grep", "file_read"} <= allowed_tools:
             hints.extend(TOOL_WORKFLOW_HINTS[:3])
         if "apply_patch_set" in allowed_tools:
             hints.append(TOOL_WORKFLOW_HINTS[3])
@@ -299,6 +306,15 @@ class ContextBuilder:
             return content or None
         except WorkingStateError as error:
             raise ContextBuildError(f"invalid working_state: {error}") from error
+
+    def _task_ledger_content(self) -> str | None:
+        if self._task_ledger is None:
+            return None
+        try:
+            content = format_task_ledger_for_model(self._task_ledger)
+            return content or None
+        except TaskLedgerError as error:
+            raise ContextBuildError(f"invalid task_ledger: {error}") from error
 
     def _memory_result(self):
         if not hasattr(self, "_cached_memory_result"):
@@ -369,6 +385,7 @@ class ContextBuilder:
                 prompt_pack_metadata=prompt_pack_metadata,
                 session_summary=(self._session_summary or "").strip()[:SESSION_SUMMARY_CHAR_LIMIT],
                 working_state=self._working_state_content(),
+                task_ledger=self._task_ledger_content(),
                 memory_index=self._memory_index_block(),
                 memory_index_skip_reason=(
                     None

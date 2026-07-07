@@ -326,8 +326,8 @@ def observation_summary(observation: dict[str, object]) -> dict[str, object]:
         return _request_user_input_observation_summary(args, result)
     if tool_name == "file_list":
         return _file_list_observation_summary(args, result)
-    if tool_name == "file_search":
-        return _file_search_observation_summary(args, result)
+    if tool_name == "grep":
+        return _grep_observation_summary(args, result)
     if tool_name == "shell":
         return _shell_observation_summary(args, result)
     if tool_name == "code_run":
@@ -449,14 +449,14 @@ def _file_list_observation_summary(args: dict[str, Any], result: dict[str, Any])
     }
 
 
-def _file_search_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
+def _grep_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
     matches = result.get("matches")
     formatted_matches = []
     if isinstance(matches, list):
         formatted_matches = [_format_search_match(match) for match in matches[:8]]
     return {
         "status": result.get("status", "unknown"),
-        "query": _first_present_string(result.get("query"), args.get("query")),
+        "pattern": _first_present_string(result.get("pattern"), args.get("pattern")),
         "match_count": result.get("match_count", len(formatted_matches)),
         "truncated": result.get("truncated", False),
         "matches": formatted_matches,

@@ -24,8 +24,8 @@ class BadFileReadGateway:
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
 
-class RecoverableFileSearchGateway:
-    provider_name = "recoverable-file-search"
+class GrepFileRootGateway:
+    provider_name = "grep-file-root"
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -33,8 +33,21 @@ class RecoverableFileSearchGateway:
     def generate(self, messages, tool_schemas):
         self.call_count += 1
         if self.call_count == 1:
-            return ModelResponse("", [ToolCall("file_search", {"query": "needle", "root": "alpha.txt"})])
-        return ModelResponse("done after suggestion", [])
+            return ModelResponse("", [ToolCall("grep", {"pattern": "needle", "root": "alpha.txt"})])
+        return ModelResponse("done after grep file root", [])
+
+
+class UnexpectedArgumentGateway:
+    provider_name = "unexpected-argument"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def generate(self, messages, tool_schemas):
+        self.call_count += 1
+        if self.call_count == 1:
+            return ModelResponse("", [ToolCall("grep", {"pattern": "needle", "root": ".", "path": "src"})])
+        return ModelResponse("done after unexpected argument feedback", [])
 
 
 def test_tool_observation_is_written_before_terminal_tool_routing_failure(tmp_path: Path) -> None:
@@ -75,7 +88,7 @@ verification_commands: []
     }
 
 
-def test_recoverable_tool_argument_error_continues_turn_loop(tmp_path: Path) -> None:
+def test_grep_file_root_continues_turn_loop(tmp_path: Path) -> None:
     (tmp_path / "alpha.txt").write_text("needle appears here\n", encoding="utf-8")
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -83,14 +96,14 @@ def test_recoverable_tool_argument_error_continues_turn_loop(tmp_path: Path) -> 
 goal: Recover from a tool argument error
 constraints: []
 allowed_tools:
-  - file_search
+  - grep
   - file_read
 acceptance_criteria: []
 verification_commands: []
 """.strip(),
         encoding="utf-8",
     )
-    gateway = RecoverableFileSearchGateway()
+    gateway = GrepFileRootGateway()
 
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
@@ -106,12 +119,39 @@ verification_commands: []
 
     assert result.status is RunStatus.COMPLETED
     assert gateway.call_count == 2
+    assert tool_call["status"] == "success"
+    assert observation["result"]["matches"] == [
+        {"path": "alpha.txt", "line": 1, "column": 1, "text": "needle appears here"},
+    ]
+
+
+def test_unexpected_tool_argument_feedback_continues_turn_loop(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Recover from an unexpected tool argument
+constraints: []
+allowed_tools:
+  - grep
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+    gateway = UnexpectedArgumentGateway()
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+    ).run(task_path)
+
+    tool_call = json.loads((result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()[0])
+
+    assert result.status is RunStatus.COMPLETED
+    assert gateway.call_count == 2
     assert tool_call["status"] == "error"
     assert tool_call["error"]["type"] == "tool_argument_invalid"
-    assert observation["result"]["suggested_tool"] == {
-        "name": "file_read",
-        "args": {"path": "alpha.txt", "keyword": "needle"},
-    }
+    assert tool_call["error"]["message"] == "unexpected argument: path"
 
 
 def test_microcompact_preserves_artifact_backed_tool_result_messages(tmp_path: Path) -> None:

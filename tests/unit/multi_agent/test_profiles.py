@@ -29,7 +29,7 @@ def test_get_agent_profile_returns_builtin_profile() -> None:
 
     assert isinstance(profile, AgentProfile)
     assert profile.name == "explorer"
-    assert profile.allowed_tools == ["file_list", "file_search", "file_read", "skill_list", "skill_read"]
+    assert profile.allowed_tools == ["file_list", "grep", "file_read", "skill_list", "skill_read"]
 
 
 def test_get_agent_profile_unknown_name_fails_explicitly() -> None:

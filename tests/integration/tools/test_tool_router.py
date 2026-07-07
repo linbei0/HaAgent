@@ -362,15 +362,15 @@ def test_tool_router_rejects_disallowed_tool(tmp_path: Path) -> None:
 
 def test_tool_router_rejects_missing_required_argument_and_writes_trace(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
-    router = ToolRouter(allowed_tools=["file_search"], episode_writer=writer, workspace_root=tmp_path)
+    router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("file_search", {})
+    result = router.dispatch("grep", {})
 
     assert result["status"] == "error"
     assert result["error"]["type"] == "tool_argument_invalid"
-    assert "missing required argument: query" in result["error"]["message"]
+    assert "missing required argument: pattern" in result["error"]["message"]
     record = _read_single_tool_call(writer)
-    assert record["tool_name"] == "file_search"
+    assert record["tool_name"] == "grep"
     assert record["status"] == "error"
     assert record["error"]["type"] == "tool_argument_invalid"
 
@@ -388,9 +388,9 @@ def test_tool_router_rejects_argument_type_mismatch(tmp_path: Path) -> None:
 
 def test_tool_router_rejects_extra_argument_when_schema_disallows_it(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
-    router = ToolRouter(allowed_tools=["file_search"], episode_writer=writer, workspace_root=tmp_path)
+    router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("file_search", {"query": "needle", "extra": True})
+    result = router.dispatch("grep", {"pattern": "needle", "extra": True})
 
     assert result["status"] == "error"
     assert result["error"]["type"] == "tool_argument_invalid"
@@ -1060,48 +1060,46 @@ def test_file_list_skips_noise_directories_by_default(tmp_path: Path) -> None:
     }
 
 
-def test_file_search_finds_matching_text_and_writes_trace(tmp_path: Path) -> None:
+def test_grep_finds_matching_text_and_writes_trace(tmp_path: Path) -> None:
     (tmp_path / "alpha.txt").write_text("needle appears here\n", encoding="utf-8")
     (tmp_path / "beta.txt").write_text("nothing useful\n", encoding="utf-8")
     writer = make_writer(tmp_path)
-    router = ToolRouter(allowed_tools=["file_search"], episode_writer=writer, workspace_root=tmp_path)
+    router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("file_search", {"query": "needle"})
+    result = router.dispatch("grep", {"pattern": "needle"})
 
     assert result["status"] == "success"
     assert result["matches"][0]["path"] == "alpha.txt"
     trace_lines = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(trace_lines) == 1
-    assert json.loads(trace_lines[0])["tool_name"] == "file_search"
+    assert json.loads(trace_lines[0])["tool_name"] == "grep"
 
 
-def test_file_search_missing_root_returns_short_argument_error(tmp_path: Path) -> None:
+def test_grep_missing_root_returns_short_argument_error(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
-    router = ToolRouter(allowed_tools=["file_search"], episode_writer=writer, workspace_root=tmp_path)
+    router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("file_search", {"query": "needle", "root": "missing"})
+    result = router.dispatch("grep", {"pattern": "needle", "root": "missing"})
 
     assert result["status"] == "error"
     assert result["error"] == {
         "type": "tool_argument_invalid",
-        "message": 'root does not exist: missing; root is relative to workspace_root; use "." or omit root',
+        "message": 'root does not exist: missing; root is relative to workspace_root and may be a directory or file; use "." or omit root',
     }
     assert str(tmp_path) not in result["error"]["message"]
 
 
-def test_file_search_file_root_suggests_file_read(tmp_path: Path) -> None:
+def test_grep_file_root_searches_single_file(tmp_path: Path) -> None:
     (tmp_path / "alpha.txt").write_text("needle appears here\n", encoding="utf-8")
     writer = make_writer(tmp_path)
-    router = ToolRouter(allowed_tools=["file_search"], episode_writer=writer, workspace_root=tmp_path)
+    router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("file_search", {"query": "needle", "root": "alpha.txt"})
+    result = router.dispatch("grep", {"pattern": "needle", "root": "alpha.txt"})
 
-    assert result["status"] == "error"
-    assert result["error"] == {
-        "type": "tool_argument_invalid",
-        "message": 'root must be a directory: alpha.txt; root is relative to workspace_root; use "." or omit root',
-    }
-    assert result["suggested_tool"] == {"name": "file_read", "args": {"path": "alpha.txt", "keyword": "needle"}}
+    assert result["status"] == "success"
+    assert result["matches"] == [
+        {"path": "alpha.txt", "line": 1, "column": 1, "text": "needle appears here"},
+    ]
 
 
 def test_apply_patch_is_denied_before_handler(tmp_path: Path) -> None:

@@ -39,7 +39,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     gateway = ScriptedGateway(
         [
             ModelResponse("list files", [ToolCall("file_list", {"path": ".", "max_depth": 2})]),
-            ModelResponse("search greet", [ToolCall("file_search", {"query": "greet", "root": "."})]),
+            ModelResponse("search greet", [ToolCall("grep", {"pattern": "greet", "root": "."})]),
             ModelResponse("read app", [ToolCall("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})]),
             ModelResponse("read test", [ToolCall("file_read", {"path": "tests/test_app.py", "keyword": "test_greet", "limit": 20})]),
             ModelResponse(
@@ -124,7 +124,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
 
     assert report.status == "completed"
     assert [task.status for task in report.tasks] == ["completed", "completed", "completed"]
-    assert report.tasks[0].tools[:4] == ["file_list", "file_search", "file_read", "file_read"]
+    assert report.tasks[0].tools[:4] == ["file_list", "grep", "file_read", "file_read"]
     assert "apply_patch_set" in report.tasks[0].tools
     assert "shell" in report.tasks[1].tools
     assert report.tasks[2].failure_reason == "none"
@@ -136,7 +136,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     assert patch_call["policy"]["approval"]["status"] == "granted"
     assert (report.tasks[0].episode_path / "contexts").exists()
     assert "Use file_list to inspect directory structure" in gateway.calls[0]["model_input"]
-    assert "Use file_search for exact deterministic text search" in gateway.calls[0]["model_input"]
+    assert "Use grep for exact deterministic text search" in gateway.calls[0]["model_input"]
     assert "context_find" not in gateway.calls[0]["model_input"]
     assert "Prefer this over repeated apply_patch calls" in json.dumps(gateway.calls[0]["tool_schemas"])
     assert "Most needed improvement: none" in render_dogfood_report(report)

@@ -134,7 +134,7 @@ def _dogfood_tasks() -> list[_DogfoodTask]:
             name="context-edit",
             prompt=(
                 "把问候功能从 Hello 改成 Howdy，并同步相关断言。不要假设文件路径；"
-                "先用 file_list 查看目录结构，再用 file_search 做确定性文本搜索，随后 file_read 候选文件，"
+                "先用 file_list 查看目录结构，再用 grep 做确定性文本搜索，随后 file_read 候选文件，"
                 "最后用 apply_patch_set 一次完成相关修改。"
             ),
             setup=_setup_greeting_workspace,
@@ -197,8 +197,8 @@ def _verify_howdy_workspace(workspace: Path, tool_calls: list[dict[str, Any]]) -
     if "Howdy" not in app or "Howdy" not in test:
         return False, "expected Howdy in implementation and test"
     tools = _tool_names(tool_calls)
-    if not all(tool in tools for tool in ("file_list", "file_search", "file_read", "apply_patch_set")):
-        return False, "expected file_list, file_search, file_read, and apply_patch_set"
+    if not all(tool in tools for tool in ("file_list", "grep", "file_read", "apply_patch_set")):
+        return False, "expected file_list, grep, file_read, and apply_patch_set"
     return True, "none"
 
 
@@ -275,8 +275,8 @@ def _task_improvement(
     tools = set(_tool_names(tool_calls))
     if status == "completed":
         return "none"
-    if name == "context-edit" and not {"file_list", "file_search", "file_read"} <= tools:
-        return "prompt/schema should steer context discovery through file_list, file_search, and file_read"
+    if name == "context-edit" and not {"file_list", "grep", "file_read"} <= tools:
+        return "prompt/schema should steer context discovery through file_list, grep, and file_read"
     if name in {"context-edit", "edit-and-test"} and "apply_patch_set" not in tools:
         return "tool schema should steer multi-file edits toward apply_patch_set"
     if name == "edit-and-test" and "shell" not in tools:

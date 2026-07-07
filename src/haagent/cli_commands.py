@@ -41,7 +41,7 @@ from haagent.runtime.sandbox.status import (
 from haagent.tui.application.app import run_tui
 
 
-AUTHORING_ALLOWED_TOOLS = ["file_list", "file_read", "file_search", "apply_patch", "shell"]
+AUTHORING_ALLOWED_TOOLS = ["file_list", "grep", "file_read", "apply_patch", "shell"]
 AUTHORING_APPROVED_TOOLS = ["apply_patch", "shell"]
 
 

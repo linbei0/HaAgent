@@ -7,6 +7,7 @@ haagent/tools/file_tools.py - 文件类本地工具
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from difflib import SequenceMatcher, unified_diff
@@ -24,7 +25,7 @@ from haagent.tools.base import tool_error
 
 
 PATH_GUIDANCE = "path is relative to workspace_root"
-ROOT_GUIDANCE = 'root is relative to workspace_root; use "." or omit root'
+ROOT_GUIDANCE = 'root is relative to workspace_root and may be a directory or file; use "." or omit root'
 NOISE_DIRECTORIES = {
     ".git",
     ".runs",
@@ -84,57 +85,90 @@ def file_list(args: dict[str, Any], workspace_root: Path, path_policy: PathPolic
     }
 
 
-def file_search(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def grep(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
     """优先使用 ripgrep 搜索文本；rg 不可用时退回 Python 遍历。"""
-    query = args.get("query")
-    if not isinstance(query, str) or not query:
-        return tool_error("tool_argument_invalid", "query must be a non-empty string")
+    pattern = args.get("pattern")
+    if not isinstance(pattern, str) or not pattern:
+        return tool_error("tool_argument_invalid", "pattern must be a non-empty string")
 
     root_arg = args.get("root", ".")
     if not isinstance(root_arg, str):
         return tool_error("tool_argument_invalid", "root must be a string")
+    file_glob = args.get("file_glob", "**/*")
+    if not isinstance(file_glob, str) or not file_glob:
+        return tool_error("tool_argument_invalid", "file_glob must be a non-empty string")
+    case_sensitive = args.get("case_sensitive", True)
+    if not isinstance(case_sensitive, bool):
+        return tool_error("tool_argument_invalid", "case_sensitive must be a boolean")
+    max_matches = args.get("max_matches", 200)
+    if not isinstance(max_matches, int) or max_matches <= 0:
+        return tool_error("tool_argument_invalid", "max_matches must be a positive integer")
+
     policy = path_policy or default_path_policy(workspace_root)
     root = resolve_path_for_access(root_arg, policy, "read")
     if isinstance(root, str):
         return tool_error("path_policy_denied", root)
     if not root.exists():
         return tool_error("tool_argument_invalid", f"root does not exist: {root_arg}; {ROOT_GUIDANCE}")
-    if not root.is_dir():
-        result = tool_error("tool_argument_invalid", f"root must be a directory: {root_arg}; {ROOT_GUIDANCE}")
-        if root.is_file():
-            result["suggested_tool"] = {
-                "name": "file_read",
-                "args": {"path": _display_path(root, workspace_root), "keyword": query},
-            }
-        return result
 
     rg = shutil.which("rg")
     if rg:
         # 使用 JSON 输出避免 Windows 盘符冒号破坏 path:line:column 解析。
-        command = [rg, "--json", "--", query, str(root)]
+        command = [rg, "--json"]
+        if not case_sensitive:
+            command.append("-i")
+        if not root.is_file():
+            command.extend(["--glob", file_glob])
+        command.extend(["--", pattern, str(root)])
         completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if completed.returncode not in (0, 1):
             return tool_error("search_failed", completed.stderr.strip() or "ripgrep failed")
-        return {"status": "success", "matches": _parse_rg_json(completed.stdout, workspace_root)}
+        matches = _parse_rg_json(completed.stdout, workspace_root, max_matches=max_matches)
+        return {
+            "status": "success",
+            "pattern": pattern,
+            "matches": matches,
+            "match_count": len(matches),
+            "truncated": _rg_match_count_exceeds(completed.stdout, max_matches),
+        }
 
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        compiled = re.compile(pattern, flags)
+    except re.error as error:
+        return tool_error("tool_argument_invalid", f"invalid regex pattern: {error}")
     matches = []
-    for path in root.rglob("*"):
+    paths = [root] if root.is_file() else root.rglob("*")
+    for path in paths:
+        if len(matches) >= max_matches:
+            break
         if not path.is_file():
+            continue
+        if not root.is_file() and not path.relative_to(root).match(file_glob):
             continue
         try:
             for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if query in line:
+                match = compiled.search(line)
+                if match:
                     matches.append(
                         {
-            "path": _display_path(path, workspace_root),
+                            "path": _display_path(path, workspace_root),
                             "line": line_number,
-                            "column": line.find(query) + 1,
+                            "column": match.start() + 1,
                             "text": line,
                         },
                     )
+                    if len(matches) >= max_matches:
+                        break
         except UnicodeDecodeError:
             continue
-    return {"status": "success", "matches": matches}
+    return {
+        "status": "success",
+        "pattern": pattern,
+        "matches": matches,
+        "match_count": len(matches),
+        "truncated": len(matches) >= max_matches,
+    }
 
 
 def file_read(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
@@ -738,7 +772,7 @@ def _suggest_file_list_parent(path: Path, workspace_root: Path) -> dict[str, obj
     }
 
 
-def _parse_rg_json(output: str, workspace_root: Path) -> list[dict[str, Any]]:
+def _parse_rg_json(output: str, workspace_root: Path, *, max_matches: int | None = None) -> list[dict[str, Any]]:
     """解析 ripgrep JSON 事件流，只保留 match 事件。"""
     root = workspace_root.resolve()
     matches = []
@@ -746,6 +780,8 @@ def _parse_rg_json(output: str, workspace_root: Path) -> list[dict[str, Any]]:
         event = json.loads(line)
         if event.get("type") != "match":
             continue
+        if max_matches is not None and len(matches) >= max_matches:
+            break
         data = event["data"]
         submatches = data.get("submatches") or [{"start": 0}]
         matches.append(
@@ -753,7 +789,19 @@ def _parse_rg_json(output: str, workspace_root: Path) -> list[dict[str, Any]]:
                 "path": Path(data["path"]["text"]).resolve().relative_to(root).as_posix(),
                 "line": data["line_number"],
                 "column": submatches[0]["start"] + 1,
-                "text": data["lines"]["text"].rstrip("\n"),
+                "text": data["lines"]["text"].rstrip("\r\n"),
             },
         )
     return matches
+
+
+def _rg_match_count_exceeds(output: str, max_matches: int) -> bool:
+    count = 0
+    for line in output.splitlines():
+        event = json.loads(line)
+        if event.get("type") != "match":
+            continue
+        count += 1
+        if count > max_matches:
+            return True
+    return False

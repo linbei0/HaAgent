@@ -14,6 +14,7 @@ from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
 )
+from haagent.runtime.session.task_ledger import TaskLedgerError, task_ledger_from_dict
 
 
 class EpisodeInspectError(RuntimeError):
@@ -48,11 +49,7 @@ def render_episode_summary(episode_path: Path) -> str:
     ]
     final_status = state_flow[-1] if state_flow else "unknown"
     final_status = episode_metadata.get("status", final_status)
-    model_calls = [
-        record
-        for record in transcript
-        if record.get("event") == "model_call"
-    ]
+    model_calls = cost.get("model_calls", [])
 
     lines = [
         "Run Summary",
@@ -78,6 +75,8 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(_format_sandbox(sandbox))
     lines.extend(["", "Workspace Preflight"])
     lines.extend(_format_workspace_preflight(workspace_preflight))
+    lines.extend(["", "Task Ledger"])
+    lines.extend(_format_task_ledger_for_episode(episode_path))
     lines.extend(["", "Next Actions"])
     lines.extend(_format_next_actions(episode_path, context_manifest.get("contexts", [])))
     lines.extend(["", "Model Calls"])
@@ -104,6 +103,68 @@ def render_episode_summary(episode_path: Path) -> str:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _format_task_ledger_for_episode(episode_path: Path) -> list[str]:
+    ledger_path = _find_task_ledger_for_episode(episode_path)
+    if ledger_path is None:
+        return ["- none"]
+    try:
+        ledger = task_ledger_from_dict(_read_json(ledger_path))
+    except (OSError, json.JSONDecodeError, TaskLedgerError) as error:
+        return [f"- invalid: {error}"]
+    active = ledger.active_step()
+    blocked = [step for step in ledger.steps if step.status == "blocked"]
+    completed = [step for step in ledger.steps if step.status == "completed"]
+    lines = [
+        f"- session_ledger: {ledger_path}",
+        f"- status: {ledger.status}",
+        f"- current_step_id: {ledger.current_step_id or 'none'}",
+        f"- steps: total={len(ledger.steps)} completed={len(completed)} blocked={len(blocked)}",
+        f"- checkpoints: {len(ledger.checkpoints)}",
+    ]
+    if active is not None:
+        lines.append(f"- active_step: {active.id} [{active.status}/{active.owner}] {active.title}")
+        if active.blocker:
+            category = active.blocker.get("category", "blocked")
+            reason = active.blocker.get("reason", "")
+            lines.append(f"- recovery: {category} {reason}".strip())
+    return lines
+
+
+def _find_task_ledger_for_episode(episode_path: Path) -> Path | None:
+    runs_root = _find_runs_root_for_episode(episode_path)
+    if runs_root is None:
+        return None
+    sessions_root = runs_root / "sessions"
+    if not sessions_root.exists():
+        return None
+    targets = {str(episode_path)}
+    try:
+        targets.add(str(episode_path.resolve()))
+    except OSError:
+        pass
+    for turns_path in sessions_root.glob("*/turns.jsonl"):
+        try:
+            lines = turns_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and str(record.get("episode_path", "")) in targets:
+                ledger_path = turns_path.parent / "task-ledger.json"
+                return ledger_path if ledger_path.exists() else None
+    return None
+
+
+def _find_runs_root_for_episode(episode_path: Path) -> Path | None:
+    for candidate in (episode_path.parent, *episode_path.parents):
+        if candidate.name == ".runs":
+            return candidate
+    return None
 
 
 def _summary_provider(episode_metadata: dict[str, Any]) -> str:
@@ -409,16 +470,16 @@ def _format_model_calls(model_calls: list[dict[str, Any]]) -> list[str]:
         return ["- none"]
     lines = []
     for call in model_calls:
-        usage = call.get("usage")
-        usage_text = ""
-        if isinstance(usage, dict):
-            usage_text = f" total_tokens={_format_optional_count(usage.get('total_tokens'))}"
+        token_text = ""
+        total = call.get("total_tokens")
+        if total is not None:
+            token_text = f" total_tokens={total}"
         lines.append(
             (
-                f"- provider={call.get('provider', 'unknown')} "
-                f"model={call.get('model', 'unknown')} "
-                f"context_id={call.get('context_id', 'unknown')}"
-                f"{usage_text}"
+                f"- turn={call.get('turn', '?')} "
+                f"provider={call.get('provider', 'unknown')} "
+                f"model={call.get('model', 'unknown')}"
+                f"{token_text}"
             ),
         )
     return lines

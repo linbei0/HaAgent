@@ -74,6 +74,7 @@ class RunOrchestrator:
         session_compaction: dict[str, object] | None = None,
         historical_tool_compression_count: int = 0,
         working_state: dict[str, object] | None = None,
+        task_ledger: dict[str, object] | None = None,
         event_sink: Callable[[dict[str, object]], None] | None = None,
         interaction_handler: HumanInteractionHandler | None = None,
         cancellation_token: CancellationToken | None = None,
@@ -89,6 +90,7 @@ class RunOrchestrator:
         self._session_compaction = session_compaction
         self._historical_tool_compression_count = max(0, historical_tool_compression_count)
         self._working_state = working_state
+        self._task_ledger = task_ledger
         self._event_sink = event_sink
         self._interaction_handler = interaction_handler
         self._cancellation_token = cancellation_token
@@ -175,6 +177,7 @@ class RunOrchestrator:
                     tool_registry=self._tool_registry,
                     mcp_runtime=self._mcp_runtime,
                     worker_max_turns=self._max_turns,
+                    parent_task_step_id=_current_task_step_id(self._task_ledger),
                 ),
                 worker_permission_requester=self._worker_permission_requester,
                 sandbox_backend=sandbox_backend,
@@ -198,6 +201,7 @@ class RunOrchestrator:
                 session_compaction=self._session_compaction,
                 historical_tool_compression_count=self._historical_tool_compression_count,
                 working_state=self._working_state,
+                task_ledger=self._task_ledger,
                 interaction_resolver=interaction_resolver,
                 tool_registry=self._tool_registry,
             )
@@ -467,6 +471,8 @@ def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:
         return False
     if tool_result.get("suggested_tool"):
         return False
+    if error_type == "tool_argument_invalid" and str(error.get("message", "")).startswith("unexpected argument:"):
+        return False
     return error_type == "tool_argument_invalid"
 
 
@@ -640,6 +646,13 @@ def _workspace_root_candidate(raw_root: str | None, task_path: Path) -> Path:
     return candidate.resolve(strict=False)
 
 
+def _current_task_step_id(task_ledger: dict[str, object] | None) -> str:
+    if not isinstance(task_ledger, dict):
+        return ""
+    value = task_ledger.get("current_step_id")
+    return value if isinstance(value, str) else ""
+
+
 def _worker_notification_context(leader_session_id: str) -> str | None:
     store = TeamStore(user_config_dir() / "teams")
     lines: list[str] = []
@@ -652,6 +665,9 @@ def _worker_notification_context(leader_session_id: str) -> str | None:
             request_id = str(item.get("request_id", "")).strip()
             if request_id:
                 details.append(f"request={request_id}")
+            parent_step_id = str(item.get("parent_step_id", "")).strip()
+            if parent_step_id:
+                details.append(f"parent_step={parent_step_id}")
             if item.get("needs_attention") is True:
                 details.append("attention=yes")
             suffix = f" ({', '.join(details)})" if details else ""

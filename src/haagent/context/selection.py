@@ -119,6 +119,7 @@ class ContextCandidateInputs:
     prompt_pack_metadata: dict[str, Any] = field(default_factory=dict)
     session_summary: str | None = None
     working_state: str | None = None
+    task_ledger: str | None = None
     memory_index: str | None = None
     memory_index_skip_reason: str | None = None
     memory_index_metadata: dict[str, Any] = field(default_factory=dict)
@@ -170,6 +171,16 @@ def collect_context_candidates(inputs: ContextCandidateInputs) -> list[ContextCa
         content=inputs.working_state,
         reason="working_state_present",
         priority=20,
+    )
+    _append_candidate(
+        candidates,
+        source_type="task_ledger",
+        source_id="task_ledger",
+        placement="task",
+        title="Task Ledger",
+        content=inputs.task_ledger,
+        reason="task_ledger_present",
+        priority=18,
     )
     _append_candidate(
         candidates,
@@ -339,6 +350,7 @@ def _compaction_priority(source_type: str) -> int:
     return {
         "prompt_pack": 85,
         "project_instructions": 80,
+        "task_ledger": 78,
         "working_state": 75,
         "session_summary": 70,
         "memory_index": 65,

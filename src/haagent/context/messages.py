@@ -66,6 +66,7 @@ def build_system_message(
 def build_task_message(
     task: TaskSpec,
     plan_steps: list[str],
+    task_ledger_content: str | None = None,
     working_state_content: str | None = None,
     memory_index_block: str | None = None,
     memory_block: str | None = None,
@@ -118,6 +119,11 @@ def build_task_message(
         lines.append("plan:")
         for step in plan_steps:
             lines.append(f"- {step}")
+
+    if task_ledger_content and task_ledger_content.strip():
+        lines.append("")
+        lines.append("Task Ledger:")
+        lines.append(task_ledger_content.strip())
 
     if working_state_content and working_state_content.strip():
         lines.append("")

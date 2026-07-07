@@ -66,6 +66,13 @@ from haagent.runtime.session.working_state import (
     update_working_state,
     write_working_state,
 )
+from haagent.runtime.session.task_ledger import (
+    TaskLedgerError,
+    empty_task_ledger,
+    load_task_ledger,
+    update_task_ledger,
+    write_task_ledger,
+)
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 from haagent.tools.registry import default_tool_runtime_registry
 
@@ -201,6 +208,7 @@ class AgentSession:
         self._image_attachment_history: list[ImageAttachment] = []
         self._historical_tool_compression_count = 0
         self._working_state = empty_working_state()
+        self._task_ledger = empty_task_ledger()
         self._current_cancellation_token: CancellationToken | None = None
         self._mcp_settings = load_mcp_settings()
         if mcp_runtime is None:
@@ -221,6 +229,7 @@ class AgentSession:
         self._created_at = datetime.now(UTC).isoformat()
         self._write_session_metadata()
         self._write_working_state()
+        self._write_task_ledger()
 
     @classmethod
     def resume(
@@ -270,6 +279,10 @@ class AgentSession:
         try:
             instance._working_state = load_working_state(session_path / "working_state.json")
         except WorkingStateError as error:
+            raise ChatSessionError(str(error)) from error
+        try:
+            instance._task_ledger = load_task_ledger(session_path / "task-ledger.json")
+        except TaskLedgerError as error:
             raise ChatSessionError(str(error)) from error
         instance._mcp_settings = load_mcp_settings()
         instance._mcp_runtime = SyncMcpRuntime(instance._mcp_settings)
@@ -363,6 +376,7 @@ class AgentSession:
                     session_compaction=session_memory.diagnostics,
                     historical_tool_compression_count=self._historical_tool_compression_count,
                     working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
+                    task_ledger=self._task_ledger.to_dict(),
                     path_policy=self.path_policy,
                     enable_web=self.enable_web,
                     target_paths=target_paths,
@@ -402,6 +416,15 @@ class AgentSession:
             runtime_events=runtime_events,
         )
         self._write_working_state()
+        self._task_ledger = update_task_ledger(
+            self._task_ledger,
+            prompt=clean_prompt,
+            turn_index=turn_index,
+            result_status=turn_result.status,
+            episode_path=turn_result.episode_path,
+            runtime_events=runtime_events,
+        )
+        self._write_task_ledger()
         self._historical_tool_compression_count += _count_historical_tool_compression_events(runtime_events)
         turn_summary = _turn_summary(clean_prompt, turn_result)
         self._summaries.append(turn_summary)
@@ -627,6 +650,7 @@ class AgentSession:
             "provider": self.provider_name,
             "turn_count": self.turn_count,
             "working_state": self._working_state.status_summary(),
+            "task_ledger": self._task_ledger.status_summary(),
         }
 
     def mcp_status(self) -> dict[str, object]:
@@ -656,11 +680,16 @@ class AgentSession:
         self._last_user_image_attachments = []
         self._image_attachment_history = []
         self._working_state = empty_working_state()
+        self._task_ledger = empty_task_ledger()
         self.path_policy = default_path_policy(self.workspace_root)
         self.session_path = self.runs_root / "sessions" / self.session_id
         self._created_at = datetime.now(UTC).isoformat()
         self._write_session_metadata()
         self._write_working_state()
+        self._write_task_ledger()
+
+    def _write_task_ledger(self) -> None:
+        write_task_ledger(self.session_path / "task-ledger.json", self._task_ledger)
 
     def close(self) -> None:
         try:

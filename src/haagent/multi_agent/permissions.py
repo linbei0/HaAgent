@@ -36,7 +36,7 @@ def worker_tool_policy(
             approved_tools=list(inherited_approved_tools),
         )
     if subagent_type == "explorer":
-        allowed = ["file_list", "file_search", "file_read", "skill_list", "skill_read"]
+        allowed = ["file_list", "grep", "file_read", "skill_list", "skill_read"]
         if web_enabled:
             allowed.extend(["web_search", "web_fetch"])
         if mcp_tool_names:
@@ -48,7 +48,7 @@ def worker_tool_policy(
             approved_tools=[],
         )
     if subagent_type == "verification":
-        allowed = ["file_read", "file_search", "shell", "code_run"]
+        allowed = ["file_read", "grep", "shell", "code_run"]
         approval_allowed = [
             tool
             for tool in inherited_approval_allowed_tools

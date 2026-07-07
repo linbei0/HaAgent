@@ -15,11 +15,11 @@ def _obs(tool_name: str, args: dict, result: dict) -> dict:
 
 # --- 成功路径：只对特定工具生成建议 ---
 
-def test_file_search_success_suggests_file_read() -> None:
+def test_grep_success_suggests_file_read() -> None:
     suggestion = suggestion_for_observation(
         _obs(
-            "file_search",
-            {"query": "greet"},
+            "grep",
+            {"pattern": "greet"},
             {"status": "success", "matches": [{"path": "src/app.py", "line": 1, "text": "def greet"}]},
         )
     )
@@ -30,9 +30,9 @@ def test_file_search_success_suggests_file_read() -> None:
     assert "src/app.py" in suggestion.message
 
 
-def test_file_search_no_results_suggests_refine() -> None:
+def test_grep_no_results_suggests_refine() -> None:
     suggestion = suggestion_for_observation(
-        _obs("file_search", {"query": "missing"}, {"status": "success", "matches": []})
+        _obs("grep", {"pattern": "missing"}, {"status": "success", "matches": []})
     )
 
     assert suggestion is not None
@@ -122,21 +122,20 @@ def test_file_read_directory_error_suggests_file_list() -> None:
     assert "src" in suggestion.message
 
 
-def test_file_search_file_root_suggests_file_read() -> None:
+def test_grep_file_root_success_suggests_file_read() -> None:
     suggestion = suggestion_for_observation(
         _obs(
-            "file_search",
-            {"query": "needle", "root": "alpha.txt"},
+            "grep",
+            {"pattern": "needle", "root": "alpha.txt"},
             {
-                "status": "error",
-                "error": {"type": "tool_argument_invalid", "message": "root must be a directory: alpha.txt"},
-                "suggested_tool": {"name": "file_read", "args": {"path": "alpha.txt", "keyword": "needle"}},
+                "status": "success",
+                "matches": [{"path": "alpha.txt", "line": 1, "text": "needle appears here"}],
             },
         )
     )
 
     assert suggestion is not None
-    assert suggestion.trigger == "tool_error"
+    assert suggestion.trigger == "tool_success"
     assert "file_read" in suggestion.message
     assert "alpha.txt" in suggestion.message
 

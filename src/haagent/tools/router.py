@@ -32,7 +32,7 @@ from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
 from haagent.tools.code_run import code_run
-from haagent.tools.file_tools import apply_patch, apply_patch_set, file_list, file_read, file_search, file_write
+from haagent.tools.file_tools import apply_patch, apply_patch_set, file_list, file_read, file_write, grep
 from haagent.tools.mcp_tools import list_mcp_resources, read_mcp_resource, run_mcp_tool
 from haagent.tools.registry import (
     TOOL_REGISTRY,
@@ -91,7 +91,7 @@ class ToolRouter:
             "task_list": self._task_list,
             "task_output": self._task_output,
             "file_list": lambda args: file_list(args, self._workspace_root, self._path_policy),
-            "file_search": lambda args: file_search(args, self._workspace_root, self._path_policy),
+            "grep": lambda args: grep(args, self._workspace_root, self._path_policy),
             "file_read": lambda args: file_read(args, self._workspace_root, self._path_policy),
             "request_user_input": self._request_user_input_without_handler,
             "start_memory_update": self._start_memory_update,

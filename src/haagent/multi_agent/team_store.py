@@ -35,6 +35,7 @@ class WorkerRecord:
     status_note: str = ""
     profile: str = ""
     model_profile: str = ""
+    parent_step_id: str = ""
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 

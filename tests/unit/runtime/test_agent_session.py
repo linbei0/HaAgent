@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 from haagent.runtime.session.agent import AgentSession, ChatTurnResult
+from haagent.runtime.session.task_ledger import load_task_ledger
 from haagent.runtime.session.turn import ChatTurnRunner
+from haagent.runtime.orchestration.recorder import RunResult
+from haagent.runtime.orchestration.state import RunStatus
 
 
 def test_agent_session_clears_cancellation_token_after_run_exception(
@@ -118,3 +121,69 @@ def test_agent_session_turn_summaries_keep_legacy_records_compatible(tmp_path: P
 
     assert turn.request == "旧问题"
     assert turn.assistant_display_text is None
+
+
+def test_agent_session_writes_and_resumes_task_ledger(tmp_path: Path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+    ledger_path = session.session_path / "task-ledger.json"
+
+    assert ledger_path.exists()
+    ledger = load_task_ledger(ledger_path)
+    assert ledger.status == "planning"
+
+    resumed = AgentSession.resume(
+        session.session_path,
+        model_gateway=None,
+    )
+
+    assert resumed.status()["task_ledger"]["status"] == "planning"
+    assert resumed.status()["task_ledger"]["step_count"] == 0
+
+
+def test_agent_session_passes_task_ledger_to_turn_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def _run(self, request):
+        del self
+        captured["task_ledger"] = request.task_ledger
+        return RunResult(
+            status=RunStatus.COMPLETED,
+            state_history=[RunStatus.EXECUTING, RunStatus.COMPLETED],
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-1",
+        )
+
+    def _build_result(self, prompt, result):
+        del prompt, result
+        return ChatTurnResult(
+            session_id=self.session_id,
+            turn_index=1,
+            status="completed",
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-1",
+            provider="fake",
+            final_response="ok",
+            verification_status="not_run",
+        )
+
+    monkeypatch.setattr(ChatTurnRunner, "run", _run)
+    monkeypatch.setattr(AgentSession, "_build_turn_result", _build_result)
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+
+    session.run_prompt_events("完成一个需要多步骤恢复的长任务")
+
+    assert captured["task_ledger"]["status"] == "planning"
+    assert captured["task_ledger"]["goal"] == ""
+    persisted = load_task_ledger(session.session_path / "task-ledger.json")
+    assert persisted.goal == "完成一个需要多步骤恢复的长任务"
+    assert persisted.updated_turn == 1
+    assert persisted.checkpoints

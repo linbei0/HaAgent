@@ -27,7 +27,7 @@ from haagent.tools.presentation import summarize_tool_args, summarize_tool_resul
 
 CHAT_ALLOWED_TOOLS = [
     "file_list",
-    "file_search",
+    "grep",
     "file_read",
     "request_user_input",
     "start_memory_update",
@@ -59,6 +59,7 @@ class OrchestratorFactory(Protocol):
         session_compaction: dict[str, object] | None,
         historical_tool_compression_count: int,
         working_state: dict[str, object] | None,
+        task_ledger: dict[str, object] | None,
         event_sink,
         interaction_handler: HumanInteractionHandler | None,
         cancellation_token: CancellationToken,
@@ -88,6 +89,7 @@ class ChatTurnRequest:
     interaction_handler: HumanInteractionHandler | None
     cancellation_token: CancellationToken
     orchestrator_factory: OrchestratorFactory
+    task_ledger: dict[str, object] | None = None
     leader_session_id: str | None = None
     tool_registry: ToolRuntimeRegistry | None = None
     mcp_runtime: object | None = None
@@ -135,6 +137,7 @@ class ChatTurnRunner:
                 session_compaction=request.session_compaction,
                 historical_tool_compression_count=request.historical_tool_compression_count,
                 working_state=request.working_state,
+                task_ledger=request.task_ledger,
                 event_sink=request.event_sink,
                 interaction_handler=request.interaction_handler,
                 cancellation_token=request.cancellation_token,

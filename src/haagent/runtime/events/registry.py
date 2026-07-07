@@ -25,6 +25,7 @@ from haagent.runtime.events.types import (
     FailureNoticeEvent,
     RuntimeUiEvent,
     RuntimeUiEventType,
+    TaskProgressEvent,
     ToolActivityEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
@@ -352,6 +353,31 @@ def _failure_event(event: dict[str, object], context: RawRuntimeUiEventContext) 
     )
 
 
+def _task_progress_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> TaskProgressEvent:
+    return TaskProgressEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        model_turn=context.model_turn,
+        event_name=str(event.get("event_type", "task_progress")),
+        step_id=summary_value(str(event.get("step_id", "")), 80),
+        title=summary_value(str(event.get("title", "")), 160),
+        status=summary_value(str(event.get("status", "")), 80),
+        summary=summary_value(str(event.get("summary", "")), 240),
+        owner=summary_value(str(event.get("owner", "main")), 80),
+        category=summary_value(str(event.get("category", "")), 80),
+        suggested_action=summary_value(str(event.get("suggested_action", "")), 120),
+        evidence_count=_int_value(event.get("evidence_count")),
+        checkpoint_count=_int_value(event.get("checkpoint_count")),
+        reason_chars=_int_value(event.get("reason_chars")),
+    )
+
+
+def _int_value(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 0
+
+
 def _spec(
     event_type: str,
     ui_event_type: RuntimeUiEventType,
@@ -380,6 +406,14 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("safety_abort", WarningNoticeEvent, _safety_abort_event),
     _spec("interaction_reused", WarningNoticeEvent, _interaction_reused_event),
     _spec("failure", FailureNoticeEvent, _failure_event),
+    _spec("task_plan_created", TaskProgressEvent, _task_progress_event),
+    _spec("task_step_started", TaskProgressEvent, _task_progress_event),
+    _spec("task_step_progress", TaskProgressEvent, _task_progress_event),
+    _spec("task_step_finished", TaskProgressEvent, _task_progress_event),
+    _spec("task_step_blocked", TaskProgressEvent, _task_progress_event),
+    _spec("task_checkpoint_saved", TaskProgressEvent, _task_progress_event),
+    _spec("task_recovery_suggested", TaskProgressEvent, _task_progress_event),
+    _spec("task_budget_warning", TaskProgressEvent, _task_progress_event),
     _spec("worker_started", ToolActivityEvent, _worker_event),
     _spec("worker_completed", ToolActivityEvent, _worker_event),
     _spec("worker_failed", ToolActivityEvent, _worker_event),

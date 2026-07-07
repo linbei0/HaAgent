@@ -214,23 +214,35 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
-    "file_search": ToolDefinition(
-        name="file_search",
-        description="search workspace text using ripgrep when available",
+    "grep": ToolDefinition(
+        name="grep",
+        description="search file contents with a regular expression using ripgrep when available",
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
-                "query": {
+                "pattern": {
                     "type": "string",
-                    "description": "text to search for in workspace files",
+                    "description": "regular expression to search for in workspace files",
                 },
                 "root": {
                     "type": "string",
-                    "description": "optional workspace-relative directory to search",
+                    "description": "optional workspace-relative directory or file to search",
+                },
+                "file_glob": {
+                    "type": "string",
+                    "description": "optional file glob for directory roots; defaults to **/*",
+                },
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "optional case sensitivity flag; defaults to true",
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "optional total match limit; defaults to 200",
                 },
             },
-            "required": ["query"],
+            "required": ["pattern"],
             "additionalProperties": False,
         },
     ),

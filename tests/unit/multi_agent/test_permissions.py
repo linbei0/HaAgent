@@ -10,7 +10,7 @@ from haagent.multi_agent.permissions import worker_tool_policy
 def test_worker_tool_policy_layers_tools_by_agent_type() -> None:
     inherited_tools = [
         "file_list",
-        "file_search",
+        "grep",
         "file_read",
         "file_write",
         "apply_patch",
@@ -29,7 +29,7 @@ def test_worker_tool_policy_layers_tools_by_agent_type() -> None:
     )
     assert explorer.allowed_tools == [
         "file_list",
-        "file_search",
+        "grep",
         "file_read",
         "skill_list",
         "skill_read",
@@ -62,6 +62,6 @@ def test_worker_tool_policy_layers_tools_by_agent_type() -> None:
         web_enabled=False,
         mcp_tool_names=[],
     )
-    assert verification.allowed_tools == ["file_read", "file_search", "shell", "code_run"]
+    assert verification.allowed_tools == ["file_read", "grep", "shell", "code_run"]
     assert verification.approval_allowed_tools == ["shell", "code_run"]
     assert verification.approved_tools == ["shell"]

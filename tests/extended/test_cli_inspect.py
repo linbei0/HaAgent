@@ -16,6 +16,7 @@ from haagent.runtime.episodes.validator import EpisodePackageView
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
+from haagent.runtime.session.task_ledger import TaskCheckpoint, TaskLedger, TaskStep
 
 
 class FakeResult:
@@ -538,6 +539,7 @@ verification_commands: []
     assert "- total_tokens: 15" in output
     assert "- estimated_cost: unavailable" in output
     assert "- reason: pricing unavailable: no reliable catalog match" in output
+    assert "- turn=1 provider=fake model=fake-model total_tokens=15" in output
 
 
 def test_cli_inspect_outputs_usage_unavailable_reason(tmp_path: Path) -> None:
@@ -696,6 +698,113 @@ verification_commands: []
     assert "exists: true" in output
     assert "git_status: not_git_repo" in output
     assert "modifies_original_workspace: true" in output
+
+
+def test_cli_inspect_outputs_task_ledger_summary(tmp_path: Path) -> None:
+    episode = tmp_path / ".runs" / "episodes" / "episode-ledger"
+    write_minimal_episode(
+        episode,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    session = tmp_path / ".runs" / "sessions" / "session-1"
+    session.mkdir(parents=True)
+    (session / "turns.jsonl").write_text(
+        json.dumps({"turn_index": 1, "episode_path": str(episode)}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    ledger = TaskLedger(
+        goal="增强长任务能力",
+        status="blocked",
+        current_step_id="step-002",
+        steps=[
+            TaskStep(
+                id="step-001",
+                title="建立任务账本",
+                kind="plan",
+                owner="main",
+                status="completed",
+                updated_turn=1,
+            ),
+            TaskStep(
+                id="step-002",
+                title="恢复 worker 子任务",
+                kind="delegate",
+                owner="main",
+                status="blocked",
+                blocker={"category": "worker_failure", "reason": "reason_chars=2000"},
+                updated_turn=1,
+            ),
+        ],
+        checkpoints=[
+            TaskCheckpoint(
+                id="ckpt-0001",
+                step_id="step-002",
+                turn_index=1,
+                episode_path=str(episode),
+                changed_paths=[],
+                state_digest="digest",
+                created_at="2026-07-07T00:00:00+00:00",
+            )
+        ],
+        updated_turn=1,
+    )
+    (session / "task-ledger.json").write_text(
+        json.dumps(ledger.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    output = cli_inspect.render_episode_summary(episode)
+
+    assert "Task Ledger" in output
+    assert "- status: blocked" in output
+    assert "- current_step_id: step-002" in output
+    assert "- steps: total=2 completed=1 blocked=1" in output
+    assert "- checkpoints: 1" in output
+    assert "- recovery: worker_failure reason_chars=2000" in output
+
+
+def test_cli_inspect_finds_task_ledger_for_direct_runs_episode(tmp_path: Path) -> None:
+    episode = tmp_path / ".runs" / "episode-direct"
+    write_minimal_episode(
+        episode,
+        episode_json=valid_episode_json(tmp_path),
+        failure_json={"status": "success", "failure": None},
+    )
+    session = tmp_path / ".runs" / "sessions" / "session-1"
+    session.mkdir(parents=True)
+    (session / "turns.jsonl").write_text(
+        json.dumps({"turn_index": 1, "episode_path": str(episode)}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    ledger = TaskLedger(
+        goal="检查直接 run episode",
+        status="completed",
+        current_step_id="step-001",
+        steps=[
+            TaskStep(
+                id="step-001",
+                title="完成 inspect 关联",
+                kind="plan",
+                owner="main",
+                status="completed",
+                updated_turn=1,
+            ),
+        ],
+        checkpoints=[],
+        updated_turn=1,
+    )
+    (session / "task-ledger.json").write_text(
+        json.dumps(ledger.to_dict(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    output = cli_inspect.render_episode_summary(episode)
+
+    assert "Task Ledger" in output
+    assert "- status: completed" in output
+    assert "- current_step_id: step-001" in output
+    assert "- steps: total=1 completed=1 blocked=0" in output
 
 
 def test_cli_inspect_outputs_context_compaction_summary(tmp_path: Path) -> None:

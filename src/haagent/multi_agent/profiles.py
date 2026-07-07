@@ -56,7 +56,7 @@ def load_builtin_agent_profiles() -> dict[str, AgentProfile]:
             description="只读探索文件、资料和项目结构。",
             subagent_type="explorer",
             system_prompt="你是只读探索助手。读取资料、总结发现，不修改文件。",
-            allowed_tools=["file_list", "file_search", "file_read", "skill_list", "skill_read"],
+            allowed_tools=["file_list", "grep", "file_read", "skill_list", "skill_read"],
         ),
         "worker": AgentProfile(
             name="worker",
@@ -69,7 +69,7 @@ def load_builtin_agent_profiles() -> dict[str, AgentProfile]:
             description="运行验证、读取结果并指出风险。",
             subagent_type="verification",
             system_prompt="你是验证助手。运行检查、解释结果，不做无关修改。",
-            allowed_tools=["file_read", "file_search", "shell", "code_run"],
+            allowed_tools=["file_read", "grep", "shell", "code_run"],
         ),
     }
 

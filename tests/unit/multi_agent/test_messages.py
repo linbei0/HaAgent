@@ -34,6 +34,8 @@ def test_worker_notification_to_dict_has_stable_fields() -> None:
         "error": "",
         "needs_attention": False,
         "request_id": "",
+        "parent_step_id": "",
+        "evidence_refs": (),
     }
 
 

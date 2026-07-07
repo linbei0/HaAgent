@@ -148,6 +148,7 @@ def _watch_subprocess_worker(runtime: Any, worker: Any, process: subprocess.Pope
         status=status,
         subagent_type=record.subagent_type if record is not None else "",
         description=record.description if record is not None else "",
+        episode_path=episode_path,
     )
 
 

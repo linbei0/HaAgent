@@ -56,6 +56,7 @@ class _WorkerTask:
     notification: dict[str, Any] | None = None
     restart_count: int = 0
     permission_request_to_consume: str = ""
+    parent_step_id: str = ""
 
 
 class _EmptyMcpRuntime:
@@ -94,6 +95,7 @@ class MultiAgentRuntime:
         worker_max_turns: int | None = DEFAULT_INTERACTIVE_MAX_TURNS,
         environ: Mapping[str, str] | None = None,
         gateway_factory: GatewayFactory = gateway_from_profile,
+        parent_task_step_id: str = "",
     ) -> None:
         self.runs_root = runs_root
         self.workspace_root = workspace_root
@@ -112,6 +114,7 @@ class MultiAgentRuntime:
         self.worker_max_turns = worker_max_turns
         self.environ = environ
         self.gateway_factory = gateway_factory
+        self.parent_task_step_id = parent_task_step_id
         self.store = TeamStore(team_root or (user_config_dir() / "teams"))
         self._profile_resolver = resolve_worker_profile
         self._scope = (
@@ -188,6 +191,7 @@ class MultiAgentRuntime:
             session_id=session.session_id,
             profile=worker_profile.name,
             model_profile=resolved_model_profile or "",
+            parent_step_id=self.parent_task_step_id,
         )
         self.store.upsert_worker(team.team_id, record)
         worker = _WorkerTask(
@@ -197,6 +201,7 @@ class MultiAgentRuntime:
             session=session,
             backend=backend.backend_type,
             worktree_lease=worktree_lease,
+            parent_step_id=self.parent_task_step_id,
         )
         with self._lock:
             self._tasks[task_id] = worker
@@ -215,6 +220,7 @@ class MultiAgentRuntime:
             "status": "running",
             "profile": worker_profile.name,
             "backend": backend.backend_type,
+            "parent_step_id": self.parent_task_step_id,
             **({"process_id": worker.process.pid} if worker.process is not None else {}),
             **({"worktree_path": str(worktree_lease.worktree_path)} if worktree_lease is not None else {}),
         }
@@ -568,6 +574,7 @@ class MultiAgentRuntime:
             status=status,
             subagent_type=record.subagent_type if record is not None else "",
             description=record.description if record is not None else "",
+            episode_path=str(notification.get("episode_path", "")),
         )
 
     def _start_worker_thread(self, worker: _WorkerTask, prompt: str) -> None:
@@ -609,6 +616,8 @@ class MultiAgentRuntime:
             error=error or "",
             needs_attention=bool(error),
             request_id=request_id,
+            parent_step_id=worker.parent_step_id,
+            evidence_refs=tuple(_worker_evidence_refs(worker, episode_path=episode_path)),
         ).to_dict()
 
     def _find_worker(self, agent_id: str) -> _WorkerTask | None:
@@ -787,6 +796,7 @@ class MultiAgentRuntime:
         status: str,
         subagent_type: str,
         description: str,
+        episode_path: str = "",
     ) -> None:
         if self.event_sink is None:
             return
@@ -799,6 +809,9 @@ class MultiAgentRuntime:
                 "subagent_type": subagent_type,
                 "description": description,
                 "status": status,
+                "parent_step_id": worker.parent_step_id,
+                "evidence_refs": _worker_evidence_refs(worker, episode_path=episode_path),
+                "episode_path": episode_path,
             },
         )
 
@@ -866,8 +879,16 @@ def _worker_record_payload(team_id: str, worker: WorkerRecord) -> dict[str, Any]
         "status_note": worker.status_note,
         "profile": worker.profile,
         "model_profile": worker.model_profile,
+        "parent_step_id": worker.parent_step_id,
         "updated_at": worker.updated_at,
     }
+
+
+def _worker_evidence_refs(worker: _WorkerTask, *, episode_path: str = "") -> list[str]:
+    refs = [f"worker={worker.agent_id}", f"task={worker.task_id}"]
+    if episode_path:
+        refs.append(f"episode={episode_path}")
+    return refs
 
 
 def _worker_output_text(worker: WorkerRecord) -> str:

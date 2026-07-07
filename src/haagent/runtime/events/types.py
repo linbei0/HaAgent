@@ -102,6 +102,24 @@ class FailureNoticeEvent:
 
 
 @dataclass(frozen=True)
+class TaskProgressEvent:
+    session_id: str
+    turn_index: int
+    model_turn: int | None
+    event_name: str
+    step_id: str
+    title: str
+    status: str
+    summary: str
+    owner: str = "main"
+    category: str = ""
+    suggested_action: str = ""
+    evidence_count: int = 0
+    checkpoint_count: int = 0
+    reason_chars: int = 0
+
+
+@dataclass(frozen=True)
 class SessionLifecycleEvent:
     session_id: str
     turn_index: int
@@ -123,6 +141,7 @@ RuntimeUiEvent: TypeAlias = (
     | MemoryNoticeEvent
     | WarningNoticeEvent
     | FailureNoticeEvent
+    | TaskProgressEvent
     | SessionLifecycleEvent
 )
 
@@ -135,6 +154,7 @@ RuntimeUiEventType: TypeAlias = (
     | type[MemoryNoticeEvent]
     | type[WarningNoticeEvent]
     | type[FailureNoticeEvent]
+    | type[TaskProgressEvent]
     | type[SessionLifecycleEvent]
 )
 
@@ -147,5 +167,6 @@ RUNTIME_UI_EVENT_TYPES: tuple[RuntimeUiEventType, ...] = (
     MemoryNoticeEvent,
     WarningNoticeEvent,
     FailureNoticeEvent,
+    TaskProgressEvent,
     SessionLifecycleEvent,
 )

@@ -17,6 +17,7 @@ from haagent.runtime.events import (
     MemoryNoticeEvent,
     RuntimeUiEvent,
     SessionLifecycleEvent,
+    TaskProgressEvent,
     ToolActivityEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
@@ -107,6 +108,10 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
     app._finalize_streaming_assistant_if_needed()
 
 
+def _handle_task_progress(app, event: TaskProgressEvent) -> None:
+    app._timeline.add_task_progress(event)
+
+
 def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
     if event.surface == "hidden":
         return
@@ -164,6 +169,7 @@ RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {
     MemoryNoticeEvent: _handle_memory_notice,
     WarningNoticeEvent: _handle_warning_notice,
     FailureNoticeEvent: _handle_failure_notice,
+    TaskProgressEvent: _handle_task_progress,
     SessionLifecycleEvent: _handle_session_lifecycle,
 }
 

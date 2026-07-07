@@ -21,6 +21,8 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Log, Markdown, Static, TextArea
 
+from haagent.runtime.events.types import TaskProgressEvent
+
 
 class PromptInput(TextArea):
     BINDINGS = [
@@ -257,6 +259,21 @@ class ConversationTimeline(VerticalScroll):
     def add_system(self, title: str, content: str, *, turn_index: int = 0) -> None:
         self._items.append(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
         self._render_timeline()
+
+    def add_task_progress(self, event: TaskProgressEvent) -> None:
+        self._items.append(
+            TimelineItem(
+                item_id=next(self._ids),
+                role="system",
+                turn_index=event.turn_index,
+                content=_task_progress_text(event),
+                title="任务进度",
+            )
+        )
+        if self.is_attached:
+            self._render_timeline()
+            return
+        self._mark_plain_text_dirty()
 
     def add_failure(self, content: str, *, turn_index: int) -> None:
         self._items.append(TimelineItem(item_id=next(self._ids), role="failure", turn_index=turn_index, content=content, status="failed", title="失败"))
@@ -549,6 +566,32 @@ def _render_timeline_item(item: TimelineItem, *, show_tool_details: bool) -> str
         lines.extend(item.content.splitlines())
     if item.role == "assistant" and item.status == "streaming":
         lines.append("  生成中 · HaAgent")
+    return "\n".join(lines)
+
+
+def _task_progress_text(event: TaskProgressEvent) -> str:
+    parts = [f"{event.step_id} [{event.status}/{event.owner}]", event.title]
+    lines = [" ".join(part for part in parts if part).strip()]
+    details: list[str] = []
+    if event.event_name:
+        details.append(f"event={event.event_name}")
+    if event.category:
+        details.append(f"category={event.category}")
+    if event.suggested_action:
+        details.append(f"suggested_action={event.suggested_action}")
+    if event.evidence_count:
+        details.append(f"evidence={event.evidence_count}")
+    if event.checkpoint_count:
+        details.append(f"checkpoints={event.checkpoint_count}")
+    if event.reason_chars:
+        details.append(f"reason={event.reason_chars} chars")
+    if details:
+        lines.append("  " + " · ".join(details))
+    summary = event.summary.strip()
+    if summary:
+        if len(summary) > 240:
+            summary = summary[:237].rstrip() + "..."
+        lines.append("  " + summary)
     return "\n".join(lines)
 
 

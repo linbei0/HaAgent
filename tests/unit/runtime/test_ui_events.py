@@ -40,6 +40,14 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "worker_completed",
         "worker_failed",
         "worker_stopped",
+        "task_plan_created",
+        "task_step_started",
+        "task_step_progress",
+        "task_step_finished",
+        "task_step_blocked",
+        "task_checkpoint_saved",
+        "task_recovery_suggested",
+        "task_budget_warning",
     }
 
 
