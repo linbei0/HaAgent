@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
-from haagent.models.provider_profile import (
+from haagent.models.model_connections import (
+    ModelSelection,
     ProviderProfile,
     ProviderProfileError,
-    load_active_provider_profile,
-    load_provider_profile,
+    load_active_model_selection,
+    load_model_selection_profile,
 )
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
@@ -59,16 +60,21 @@ class CliRuntime:
 
     def build_run_model_gateway(self, args: argparse.Namespace) -> Any:
         if args.profile is not None:
-            if args.provider not in {None, "fake"} or args.model is not None or args.base_url is not None:
+            if args.provider not in {None, "fake"} or args.base_url is not None:
                 raise ProviderProfileError(
-                    "--profile cannot be combined with --provider, --model, or --base-url",
+                    "--profile cannot be combined with --provider or --base-url",
                 )
-            return self.gateway_from_profile(load_provider_profile(args.profile))
+            active_selection = load_active_model_selection()
+            selection = ModelSelection(
+                connection_id=args.profile,
+                model=args.model or active_selection.model,
+            )
+            return self.gateway_from_profile(load_model_selection_profile(selection))
 
         if args.provider is None:
             if args.model is not None or args.base_url is not None:
                 raise ProviderProfileError("--model and --base-url require --provider or --profile")
-            return self.gateway_from_profile(load_active_provider_profile())
+            return self.gateway_from_profile(load_model_selection_profile(load_active_model_selection()))
 
         if args.provider in {"openai", "openai-chat"}:
             gateway_kwargs = {}
@@ -86,11 +92,16 @@ class CliRuntime:
 
     def build_dogfood_model_gateway(self, args: argparse.Namespace) -> Any:
         if args.profile is not None:
-            if args.provider is not None or args.model is not None or args.base_url is not None:
+            if args.provider is not None or args.base_url is not None:
                 raise ProviderProfileError(
-                    "--profile cannot be combined with --provider, --model, or --base-url",
+                    "--profile cannot be combined with --provider or --base-url",
                 )
-            return self.gateway_from_profile(load_provider_profile(args.profile))
+            active_selection = load_active_model_selection()
+            selection = ModelSelection(
+                connection_id=args.profile,
+                model=args.model or active_selection.model,
+            )
+            return self.gateway_from_profile(load_model_selection_profile(selection))
         if args.provider is None:
             return None
         if not os.environ.get("OPENAI_API_KEY"):

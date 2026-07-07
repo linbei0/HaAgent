@@ -35,6 +35,7 @@ class CredentialRecord:
     profile_name: str
     api_key_env: str
     credential_source: str = "keyring"
+    credential_username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,18 @@ def save_keyring_api_key(
     store.set_password(KEYRING_SERVICE_NAME, _credential_username(profile_name), api_key)
 
 
+def save_connection_keyring_api_key(
+    connection_id: str,
+    api_key: str,
+    *,
+    credential_store: CredentialStore | None = None,
+) -> None:
+    if not api_key.strip():
+        raise CredentialError("API key is required")
+    store = credential_store or KeyringCredentialStore()
+    store.set_password(KEYRING_SERVICE_NAME, _connection_credential_username(connection_id), api_key)
+
+
 def save_insecure_api_key(profile_name: str, api_key: str, *, config_dir: Path) -> Path:
     if not api_key.strip():
         raise CredentialError("API key is required")
@@ -171,6 +184,17 @@ def save_insecure_api_key(profile_name: str, api_key: str, *, config_dir: Path) 
     return path
 
 
+def save_connection_insecure_api_key(connection_id: str, api_key: str, *, config_dir: Path) -> Path:
+    if not api_key.strip():
+        raise CredentialError("API key is required")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / INSECURE_CREDENTIALS_FILE
+    data = _read_insecure_credentials(path) if path.exists() else {}
+    data[_connection_credential_username(connection_id)] = api_key
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def _resolve_keyring(
     record: CredentialRecord,
     *,
@@ -178,7 +202,7 @@ def _resolve_keyring(
 ) -> ResolvedCredential:
     store = credential_store or KeyringCredentialStore()
     try:
-        api_key = store.get_password(KEYRING_SERVICE_NAME, _credential_username(record.profile_name))
+        api_key = store.get_password(KEYRING_SERVICE_NAME, _record_credential_username(record))
     except CredentialError as error:
         return ResolvedCredential(
             api_key_available=False,
@@ -208,7 +232,7 @@ def _resolve_insecure_file(
         raise CredentialError("config_dir is required for insecure_file credentials")
     path = config_dir / INSECURE_CREDENTIALS_FILE
     data = _read_insecure_credentials(path) if path.exists() else {}
-    api_key = data.get(_credential_username(record.profile_name))
+    api_key = data.get(_record_credential_username(record))
     if not api_key:
         return _missing(record, credential_store_available=None)
     return ResolvedCredential(
@@ -250,6 +274,14 @@ def _read_insecure_credentials(path: Path) -> dict[str, str]:
 
 def _credential_username(profile_name: str) -> str:
     return f"profile:{profile_name}"
+
+
+def _connection_credential_username(connection_id: str) -> str:
+    return f"connection:{connection_id}"
+
+
+def _record_credential_username(record: CredentialRecord) -> str:
+    return record.credential_username or _credential_username(record.profile_name)
 
 
 def _validate_credential_source(source: str) -> None:

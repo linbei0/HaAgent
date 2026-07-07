@@ -19,7 +19,7 @@ from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.settings import load_mcp_settings
 from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.gateway import ModelGateway
-from haagent.models.provider_profile import user_config_dir
+from haagent.models.model_connections import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken
@@ -157,6 +157,7 @@ class AgentSession:
         runs_root: Path,
         model_gateway: ModelGateway | None = None,
         model_profile_name: str | None = None,
+        model_connection_id: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
         max_turns: int | None = CHAT_MAX_TURNS,
@@ -175,6 +176,7 @@ class AgentSession:
         self.runs_root = runs_root
         self.model_gateway = model_gateway
         self.model_profile_name = model_profile_name
+        self.model_connection_id = model_connection_id
         self.model_name = model_name
         self.model_base_url = model_base_url
         self.max_turns = max_turns
@@ -228,6 +230,7 @@ class AgentSession:
         runs_root: Path | None = None,
         model_gateway: ModelGateway | None = None,
         model_profile_name: str | None = None,
+        model_connection_id: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
         max_turns: int | None = CHAT_MAX_TURNS,
@@ -248,6 +251,7 @@ class AgentSession:
         instance.runs_root = session_path.parent.parent
         instance.model_gateway = model_gateway
         instance.model_profile_name = model_profile_name or _optional_string(metadata.get("model_profile_name"))
+        instance.model_connection_id = model_connection_id or _optional_string(metadata.get("model_connection_id"))
         instance.model_name = model_name or _optional_string(metadata.get("model"))
         instance.model_base_url = model_base_url or _optional_string(metadata.get("base_url"))
         instance.max_turns = max_turns
@@ -493,6 +497,7 @@ class AgentSession:
         self,
         *,
         profile_name: str,
+        model_connection_id: str | None = None,
         provider: str,
         model: str,
         base_url: str,
@@ -502,6 +507,7 @@ class AgentSession:
             raise ChatSessionError("current task is running")
         self.model_gateway = gateway
         self.model_profile_name = profile_name
+        self.model_connection_id = model_connection_id
         self.model_name = model
         self.model_base_url = base_url
         self._write_session_metadata()
@@ -831,6 +837,7 @@ class AgentSession:
             "path_policy": serialize_path_policy(self.path_policy),
             "provider": self.provider_name,
             "model_profile_name": self.model_profile_name,
+            "model_connection_id": self.model_connection_id,
             "model": self.model_name,
             "base_url": self.model_base_url,
             "enable_web": self.enable_web,

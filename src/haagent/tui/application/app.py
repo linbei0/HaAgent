@@ -33,12 +33,16 @@ from haagent.tui.overlays.modals import ConfirmModal, EditDiffModal, HelpModal, 
 from haagent.tui.flows import path_authorization
 from haagent.tui.flows import permissions
 from haagent.tui.flows import skills
+from haagent.tui.overlays.connections import (
+    ConnectionCenterOverlay,
+    ConnectionCenterResult,
+    ConnectionSetupResult,
+    ConnectionSetupWizard,
+)
 from haagent.tui.overlays.models import (
-    ManualModelSetupWizard,
     ModelCatalogLoadingOverlay,
-    ModelCenterOverlay,
-    ModelCenterResult,
-    ModelSetupWizard,
+    ModelSwitchOverlay,
+    ModelSwitchResult,
 )
 from haagent.tui.design.renderers import status_line
 from haagent.tui.application.runtime_events import handle_runtime_ui_event
@@ -297,7 +301,19 @@ class HaAgentTuiApp(App[None]):
         prompt_input = self.query_one("#prompt-input", PromptInput)
         if prompt_input.has_focus and self._prompt_value(prompt_input):
             return
-        self.push_screen(ModelCenterOverlay(self.service.list_model_profiles()), self._handle_model_center_result)
+        self.push_screen(ModelCatalogLoadingOverlay())
+        self._load_model_switch_catalog()
+
+    def action_open_connections(self) -> None:
+        prompt_input = self.query_one("#prompt-input", PromptInput)
+        if prompt_input.has_focus and self._prompt_value(prompt_input):
+            return
+        connections = self.service.list_model_connections()
+        if connections:
+            self.push_screen(ConnectionCenterOverlay(connections), self._handle_connection_center_result)
+            return
+        self.push_screen(ModelCatalogLoadingOverlay())
+        self._refresh_model_catalog_and_open_connection_setup()
 
     def action_open_search(self) -> None:
         prompt_input = self.query_one("#prompt-input", PromptInput)
@@ -499,6 +515,8 @@ class HaAgentTuiApp(App[None]):
             self.action_open_sessions()
         elif command.action == "compact_session":
             self.action_compact_session()
+        elif command.action == "open_connections":
+            self.action_open_connections()
         elif command.action == "open_models":
             self.action_open_models()
         elif command.action == "mcp":
@@ -804,78 +822,67 @@ class HaAgentTuiApp(App[None]):
         self._refresh()
         self.set_timer(0.01, self._restore_prompt_focus)
 
-    def _handle_model_center_result(self, result: ModelCenterResult | None) -> None:
+    def _handle_connection_center_result(self, result: ConnectionCenterResult | None) -> None:
         if result is None:
             self.set_timer(0.01, self._restore_prompt_focus)
             return
         try:
-            if result.action == "switch_session":
-                status = self.service.switch_current_session_model(result.profile_name)
-                profile_name = status.model_profile_name or result.profile_name
-                self._append_line(f"模型已切换到当前会话：{profile_name}")
-            elif result.action == "set_default":
-                self.service.set_default_model_profile(result.profile_name)
-                self._append_line(f"默认模型 profile 已设为：{result.profile_name}")
-            elif result.action == "delete_profile" and result.profile_name is not None:
+            if result.action == "delete_connection" and result.connection_id is not None:
                 self.push_screen(
                     ConfirmModal(
-                        f"删除模型 profile：{result.profile_name}",
-                        "删除后不会清理 keyring 中的 API key。确认删除？",
+                        f"删除模型连接：{result.connection_id}",
+                        "删除后会影响该连接下的默认/会话模型选择。确认删除？",
                     ),
-                    lambda confirmed, profile_name=result.profile_name: self._handle_delete_model_profile_result(
-                        profile_name,
+                    lambda confirmed, connection_id=result.connection_id: self._handle_delete_model_connection_result(
+                        connection_id,
                         confirmed,
                     ),
                 )
                 return
-            elif result.action == "new_profile":
+            elif result.action == "new_connection":
                 self.push_screen(ModelCatalogLoadingOverlay())
-                self._refresh_model_catalog_and_open_setup()
-                return
-            elif result.action == "manual_profile":
-                self.push_screen(ManualModelSetupWizard(), self._handle_model_setup_result)
+                self._refresh_model_catalog_and_open_connection_setup()
                 return
             elif result.action == "refresh_catalog":
                 self._refresh_model_catalog_only()
                 return
-            elif result.action == "test_profile" and result.profile_name is not None:
-                self._run_model_connection_test(result.profile_name)
+            elif result.action == "test_connection" and result.connection_id is not None:
+                self._run_model_connection_test(result.connection_id)
                 return
         except Exception as error:
-            self._append_block("Model warning", f"模型操作失败：{error}")
+            self._append_block("Model warning", f"连接操作失败：{error}")
         self._refresh()
         self.set_timer(0.01, self._restore_prompt_focus)
 
-    def _handle_delete_model_profile_result(self, profile_name: str, confirmed: bool | None) -> None:
+    def _handle_delete_model_connection_result(self, connection_id: str, confirmed: bool | None) -> None:
         if not confirmed:
-            self.action_open_models()
+            self.action_open_connections()
             return
         try:
-            self.service.delete_model_profile(profile_name)
+            self.service.delete_model_connection(connection_id)
         except Exception as error:
             self._append_block("Model warning", f"模型删除失败：{error}")
         else:
-            self._append_line(f"模型 profile 已删除：{profile_name}")
+            self._append_line(f"模型连接已删除：{connection_id}")
         self._refresh()
-        self.action_open_models()
+        self.action_open_connections()
 
-    def _handle_model_setup_result(self, request) -> None:
-        if request is None:
+    def _handle_connection_setup_result(self, result: ConnectionSetupResult | None) -> None:
+        if result is None:
             self.set_timer(0.01, self._restore_prompt_focus)
             return
         try:
-            record = self.service.configure_model_profile(request)
+            self.service.configure_model_connection(result.connection)
+            self._run_model_connection_test(result.connection.id, result.test_model)
         except Exception as error:
-            self._append_block("Model warning", f"模型配置失败：{error}")
-        else:
-            self._append_line(f"模型 profile 已保存：{record.name}")
+            self._append_block("Model warning", f"连接配置失败：{error}")
         self._refresh()
         self.set_timer(0.01, self._restore_prompt_focus)
 
     @work(thread=True, exclusive=True)
-    def _refresh_model_catalog_and_open_setup(self) -> None:
+    def _refresh_model_catalog_and_open_connection_setup(self) -> None:
         if self._model_catalog_providers is not None:
-            self.call_from_thread(self._open_model_setup_wizard, list(self._model_catalog_providers))
+            self.call_from_thread(self._open_connection_setup_wizard, list(self._model_catalog_providers))
             return
         try:
             catalog = self.service.get_model_catalog()
@@ -888,7 +895,24 @@ class HaAgentTuiApp(App[None]):
             return
         if _configurable_model_catalog_providers(providers):
             self._model_catalog_providers = providers
-        self.call_from_thread(self._open_model_setup_wizard, providers)
+        self.call_from_thread(self._open_connection_setup_wizard, providers)
+
+    @work(thread=True, exclusive=True)
+    def _load_model_switch_catalog(self) -> None:
+        if self._model_catalog_providers is not None:
+            self.call_from_thread(self._open_model_switch_overlay, list(self._model_catalog_providers))
+            return
+        try:
+            catalog = self.service.get_model_catalog()
+            providers = list(catalog.providers)
+            if not providers:
+                catalog = self.service.refresh_model_catalog()
+                providers = list(catalog.providers)
+        except Exception as error:
+            self.call_from_thread(self._handle_model_catalog_error, error)
+            return
+        self._model_catalog_providers = providers
+        self.call_from_thread(self._open_model_switch_overlay, providers)
 
     @work(thread=True, exclusive=True)
     def _refresh_model_catalog_only(self) -> None:
@@ -902,15 +926,15 @@ class HaAgentTuiApp(App[None]):
         self.call_from_thread(self._handle_model_catalog_success, providers)
 
     @work(thread=True, exclusive=True)
-    def _run_model_connection_test(self, profile_name: str) -> None:
+    def _run_model_connection_test(self, connection_id: str, model: str | None = None) -> None:
         try:
-            result = self.service.test_model_profile(profile_name)
+            result = self.service.test_model_connection(connection_id, model=model)
         except Exception as error:
             self.call_from_thread(self._handle_model_catalog_error, error)
             return
         self.call_from_thread(self._handle_model_connection_test_result, result)
 
-    def _open_model_setup_wizard(self, providers: list[object]) -> None:
+    def _open_connection_setup_wizard(self, providers: list[object]) -> None:
         configurable_providers = _configurable_model_catalog_providers(providers)
         if not configurable_providers:
             self._dismiss_model_catalog_loading_overlay()
@@ -922,7 +946,31 @@ class HaAgentTuiApp(App[None]):
             self.set_timer(0.01, self._restore_prompt_focus)
             return
         self._dismiss_model_catalog_loading_overlay()
-        self.push_screen(ModelSetupWizard(configurable_providers), self._handle_model_setup_result)
+        self.push_screen(ConnectionSetupWizard(configurable_providers), self._handle_connection_setup_result)
+
+    def _open_model_switch_overlay(self, providers: list[object]) -> None:
+        self._dismiss_model_catalog_loading_overlay()
+        self.push_screen(
+            ModelSwitchOverlay(self.service.list_model_connections(), providers),
+            self._handle_model_switch_result,
+        )
+
+    def _handle_model_switch_result(self, result: ModelSwitchResult | None) -> None:
+        if result is None:
+            self.set_timer(0.01, self._restore_prompt_focus)
+            return
+        try:
+            if result.action == "set_default":
+                self.service.set_default_model_selection(result.selection)
+                self._append_line(f"默认模型：{result.selection.model}")
+            else:
+                status = self.service.switch_current_session_model_selection(result.selection)
+                model_name = status.model or result.selection.model
+                self._append_line(f"当前会话：{model_name}")
+        except Exception as error:
+            self._append_block("Model warning", f"模型切换失败：{error}")
+        self._refresh()
+        self.set_timer(0.01, self._restore_prompt_focus)
 
     def _handle_model_catalog_success(self, providers: list[object]) -> None:
         self._append_line(f"模型目录已刷新：{len(providers)} 个 provider")
@@ -1247,14 +1295,14 @@ class HaAgentTuiApp(App[None]):
     def _show_initial_configuration_state(self) -> None:
         status = self.service.get_workspace_status()
         if status.profile_error is not None:
-            self._append_block("Config", "未找到默认模型配置\n输入 /model 打开模型中心完成配置。")
+            self._append_block("Config", "未找到默认模型配置\n输入 /connect 配置供应商连接。")
         elif status.credential_store_available is False:
             reason = status.credential_store_error or "unknown"
-            self._append_block("Config", f"系统凭据库不可用：{reason}\n输入 /model 重新选择凭据来源。")
+            self._append_block("Config", f"系统凭据库不可用：{reason}\n输入 /connect 重新配置供应商连接。")
         elif status.api_key_env and not status.api_key_available:
             self._append_block(
                 "Config",
-                f"API key 缺失：{status.api_key_env}\n输入 /model 可以配置或测试模型；HaAgent 不会显示真实 API key。",
+                f"API key 缺失：{status.api_key_env}\n输入 /connect 可以配置或测试供应商连接；HaAgent 不会显示真实 API key。",
             )
 
     def _refresh(self) -> None:

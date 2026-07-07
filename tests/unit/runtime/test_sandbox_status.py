@@ -35,7 +35,11 @@ def test_sandbox_user_status_defaults_to_local(tmp_path: Path) -> None:
 
 def test_enable_docker_sandbox_preserves_existing_settings(tmp_path: Path) -> None:
     config_path = tmp_path / "settings.json"
-    config_path.write_text(json.dumps({"interactive_max_turns": 80, "active_profile": "local"}), encoding="utf-8")
+    active_model = {"connection_id": "local", "model": "deepseek-chat"}
+    config_path.write_text(
+        json.dumps({"interactive_max_turns": 80, "active_model": active_model}),
+        encoding="utf-8",
+    )
 
     status = enable_docker_sandbox(config_path=config_path, fail_if_unavailable=True)
     settings = load_runtime_settings(config_path=config_path)
@@ -47,7 +51,7 @@ def test_enable_docker_sandbox_preserves_existing_settings(tmp_path: Path) -> No
     assert settings.sandbox.enabled is True
     assert settings.sandbox.backend == "docker"
     assert settings.sandbox.fail_if_unavailable is True
-    assert raw["active_profile"] == "local"
+    assert raw["active_model"] == active_model
     assert raw["sandbox"]["docker"]["image"] == "haagent-sandbox:py311"
 
 
@@ -66,7 +70,8 @@ def test_disable_sandbox_preserves_unrelated_settings(tmp_path: Path) -> None:
     config_path = tmp_path / "settings.json"
     enable_docker_sandbox(config_path=config_path, fail_if_unavailable=True)
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["active_profile"] = "local"
+    active_model = {"connection_id": "local", "model": "deepseek-chat"}
+    raw["active_model"] = active_model
     config_path.write_text(json.dumps(raw), encoding="utf-8")
 
     status = disable_sandbox(config_path=config_path)
@@ -76,7 +81,7 @@ def test_disable_sandbox_preserves_unrelated_settings(tmp_path: Path) -> None:
     assert status.backend == "local_subprocess"
     assert settings.sandbox.enabled is False
     assert settings.sandbox.backend == "local_subprocess"
-    assert saved["active_profile"] == "local"
+    assert saved["active_model"] == active_model
 
 
 def test_sandbox_doctor_reports_missing_docker_cli(tmp_path: Path, monkeypatch) -> None:

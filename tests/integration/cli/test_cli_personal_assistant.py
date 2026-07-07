@@ -58,7 +58,7 @@ class SmartCompactGateway(RecordingGateway):
         return ModelResponse("done", [])
 
 
-class FakeProfileGateway:
+class FakeConnectionGateway:
     provider_name = "openai-chat"
 
     def __init__(self, api_key: str, model: str, base_url: str) -> None:
@@ -74,28 +74,32 @@ def _set_home(monkeypatch, home: Path) -> None:
     monkeypatch.setattr(Path, "home", lambda: home)
 
 
-def _write_user_profile(home: Path, *, api_key_env: str = "CHAT_SECRET") -> None:
+def _write_user_connection(home: Path, *, api_key_env: str = "CHAT_SECRET") -> None:
     config_dir = home / ".haagent"
     config_dir.mkdir(parents=True)
     (config_dir / "providers.json").write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "local",
                         "name": "local",
-                        "provider": "openai-chat",
+                        "provider_id": "local",
+                        "provider_name": "Local",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.example/v1",
-                        "model": "chat-test",
                         "api_key_env": api_key_env,
                         "credential_source": "keyring",
                     },
                 ],
+                "custom_models": [],
             },
         ),
         encoding="utf-8",
     )
     (config_dir / "settings.json").write_text(
-        json.dumps({"active_profile": "local"}),
+        json.dumps({"active_model": {"connection_id": "local", "model": "chat-test"}}),
         encoding="utf-8",
     )
 
@@ -404,19 +408,19 @@ def test_haagent_tui_resume_and_continue_conflict(capsys) -> None:
     assert "--resume cannot be combined with --continue" in output
 
 
-def test_profile_api_key_is_not_written_to_config_session_or_episode(
+def test_connection_api_key_is_not_written_to_config_session_or_episode(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     secret = "sk-secret-value-that-must-not-leak"
     _set_home(monkeypatch, tmp_path / "home")
-    _write_user_profile(Path.home())
+    _write_user_connection(Path.home())
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(workspace)
     monkeypatch.setenv("CHAT_SECRET", secret)
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FakeProfileGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FakeConnectionGateway)
 
     exit_code = cli.main(["chat", "Check secret handling"])
 

@@ -1,95 +1,85 @@
 """
-haagent/app/model_profile_usecases.py - 模型配置类应用用例
+haagent/app/model_connection_usecases.py - 模型连接与选择用例
 
-集中封装 AssistantService 的 profile、catalog 和当前会话模型切换逻辑。
+集中封装模型目录、供应商连接、默认模型选择和当前会话模型切换逻辑。
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from haagent.models import provider_profile as provider_profile_module
+from haagent.models import model_connections as model_connections_module
 from haagent.models.catalog import DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE, fetch_model_catalog
 from haagent.models.credentials import CredentialError
 from haagent.models.gateway import ModelCallError
-from haagent.models.provider_profile import (
+from haagent.models.model_connections import (
+    ModelSelection,
+    ProviderConnectionRecord,
     ProviderProfileError,
-    ProviderProfileRecord,
-    delete_provider_profile,
-    list_provider_profile_records,
-    load_active_profile_name,
-    load_provider_profile,
-    load_provider_profile_record,
-    provider_profile_credential_status,
-    save_active_profile,
-    save_provider_profile_with_key,
+    delete_provider_connection,
+    list_provider_connection_records,
+    load_active_model_selection,
+    load_model_selection_profile,
+    provider_connection_credential_status,
+    save_active_model_selection,
+    save_provider_connection_with_key,
     user_config_dir,
 )
 
 if TYPE_CHECKING:
     from haagent.app.assistant_service import (
-        AssistantModelProfile,
         AssistantModelTestResult,
         AssistantService,
         AssistantSessionStatus,
-        ModelProfileConfigureRequest,
+        ModelConnectionConfigureRequest,
+        ModelSelectionRequest,
     )
 
 
-def list_model_profiles(service: "AssistantService") -> list["AssistantModelProfile"]:
-    try:
-        active_profile_name = load_active_profile_name()
-    except ProviderProfileError:
-        active_profile_name = None
-    session_status = service.current_session()
-    current_profile_name = session_status.model_profile_name if session_status is not None else None
-    profiles: list["AssistantModelProfile"] = []
-    for record in list_provider_profile_records():
-        credential = provider_profile_credential_status(
-            record.name,
+def list_model_connections(service: "AssistantService"):
+    connections = []
+    for record in list_provider_connection_records(config_path=user_config_dir() / "providers.json"):
+        credential = provider_connection_credential_status(
+            record.id,
             environ=service.environ,
             config_dir=user_config_dir(),
         )
-        profiles.append(
-            service.model_profile_cls(
+        connections.append(
+            service.model_connection_cls(
+                id=record.id,
                 name=record.name,
-                provider=record.provider,
+                provider_id=record.provider_id,
+                provider_name=record.provider_name,
+                gateway_provider=record.gateway_provider,
                 base_url=record.base_url,
-                model=record.model,
                 api_key_env=record.api_key_env,
                 credential_source=record.credential_source,
-                active=record.name == active_profile_name,
                 credential_available=credential.api_key_available,
                 credential_source_used=credential.credential_source_used,
-                capability=service.gateway_capability_for_profile(record),
-                current_session=record.name == current_profile_name,
             )
         )
-    return profiles
+    return connections
 
 
-def set_default_model_profile(service: "AssistantService", profile_name: str) -> None:
-    load_provider_profile_record(profile_name)
-    save_active_profile(profile_name, config_dir=user_config_dir())
-
-
-def configure_model_profile(
+def configure_model_connection(
     service: "AssistantService",
-    request: "ModelProfileConfigureRequest",
-) -> ProviderProfileRecord:
-    record = ProviderProfileRecord(
+    request: "ModelConnectionConfigureRequest",
+) -> ProviderConnectionRecord:
+    record = ProviderConnectionRecord(
+        id=request.id,
         name=request.name,
-        provider=request.provider,
+        provider_id=request.provider_id,
+        provider_name=request.provider_name,
+        gateway_provider=request.gateway_provider,
         base_url=request.base_url,
-        model=request.model,
         api_key_env=request.api_key_env,
         credential_source=request.credential_source,
     )
     try:
-        save_provider_profile_with_key(
+        save_provider_connection_with_key(
             record,
             request.api_key,
-            credential_store=provider_profile_module.DEFAULT_CREDENTIAL_STORE,
+            credential_store=model_connections_module.DEFAULT_CREDENTIAL_STORE,
             config_dir=user_config_dir(),
         )
     except (ProviderProfileError, CredentialError) as error:
@@ -97,9 +87,22 @@ def configure_model_profile(
     return record
 
 
-def delete_model_profile_for_user(service: "AssistantService", profile_name: str) -> None:
+def set_default_model_selection(service: "AssistantService", request: "ModelSelectionRequest") -> None:
+    selection = ModelSelection(connection_id=request.connection_id, model=request.model)
     try:
-        delete_provider_profile(profile_name, config_dir=user_config_dir())
+        load_model_selection_profile(
+            selection,
+            environ=service.environ,
+            config_dir=user_config_dir(),
+        )
+        save_active_model_selection(selection, config_dir=user_config_dir())
+    except (ProviderProfileError, CredentialError) as error:
+        raise service.error_cls(str(error)) from error
+
+
+def delete_model_connection_for_user(service: "AssistantService", connection_id: str) -> None:
+    try:
+        delete_provider_connection(connection_id, config_dir=user_config_dir())
     except ProviderProfileError as error:
         raise service.error_cls(str(error)) from error
 
@@ -121,10 +124,19 @@ def get_model_catalog(service: "AssistantService", *, transport=None):
         raise service.error_cls(str(error)) from error
 
 
-def test_model_profile(service: "AssistantService", profile_name: str) -> "AssistantModelTestResult":
+def test_model_connection(
+    service: "AssistantService",
+    connection_id: str,
+    *,
+    model: str | None = None,
+) -> "AssistantModelTestResult":
     try:
-        profile = load_provider_profile(
-            profile_name,
+        if model is None:
+            active_selection = load_active_model_selection(config_dir=user_config_dir())
+            model = active_selection.model
+        selection = ModelSelection(connection_id=connection_id, model=model)
+        profile = load_model_selection_profile(
+            selection,
             environ=service.environ,
             config_dir=user_config_dir(),
         )
@@ -141,25 +153,29 @@ def test_model_profile(service: "AssistantService", profile_name: str) -> "Assis
             message=service.redact_secret_text(response.content, [profile.api_key]),
         )
     except (ProviderProfileError, CredentialError, ModelCallError) as error:
-        record = service.load_profile_record_for_result(profile_name)
         return service.model_test_result_cls(
             ok=False,
-            profile_name=profile_name,
-            provider=record.provider if record is not None else "",
-            model=record.model if record is not None else "",
+            profile_name=connection_id,
+            provider="",
+            model="",
             message=service.redact_secret_text(str(error), service.secret_candidates(service.environ)),
         )
 
 
-def switch_current_session_model(service: "AssistantService", profile_name: str) -> "AssistantSessionStatus":
+def switch_current_session_model_selection(
+    service: "AssistantService",
+    request: "ModelSelectionRequest",
+) -> "AssistantSessionStatus":
+    selection = ModelSelection(connection_id=request.connection_id, model=request.model)
     try:
-        profile = load_provider_profile(
-            profile_name,
+        profile = load_model_selection_profile(
+            selection,
             environ=service.environ,
             config_dir=user_config_dir(),
         )
+        _save_default_selection_if_missing(selection)
         if service._session is None:
-            service._pending_model_profile_name = profile.name
+            service._pending_model_selection = selection
             return service.session_status_cls(
                 session_id="pending",
                 workspace_root=service.workspace_root,
@@ -169,6 +185,7 @@ def switch_current_session_model(service: "AssistantService", profile_name: str)
                 max_turns=service.max_turns,
                 provider=profile.provider,
                 model_profile_name=profile.name,
+                model_connection_id=selection.connection_id,
                 model=profile.model,
                 base_url=profile.base_url,
                 web_enabled=service.enable_web,
@@ -177,6 +194,7 @@ def switch_current_session_model(service: "AssistantService", profile_name: str)
         gateway = service.gateway_factory(profile)
         service._session.switch_model_gateway(
             profile_name=profile.name,
+            model_connection_id=selection.connection_id,
             provider=profile.provider,
             model=profile.model,
             base_url=profile.base_url,
@@ -185,3 +203,10 @@ def switch_current_session_model(service: "AssistantService", profile_name: str)
     except (ProviderProfileError, service.chat_session_error_cls) as error:
         raise service.error_cls(str(error)) from error
     return service._session_status(service._session)
+
+
+def _save_default_selection_if_missing(selection: ModelSelection) -> None:
+    try:
+        load_active_model_selection(config_dir=user_config_dir())
+    except ProviderProfileError:
+        save_active_model_selection(selection, config_dir=user_config_dir())

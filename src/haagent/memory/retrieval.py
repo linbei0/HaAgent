@@ -21,7 +21,7 @@ from haagent.memory.schema import (
     MemoryTombstone,
 )
 from haagent.memory.store import FILE_BY_SCOPE_CATEGORY
-from haagent.models.provider_profile import user_config_dir
+from haagent.models.model_connections import user_config_dir
 
 
 DEFAULT_CATEGORY_PRIORITY = {

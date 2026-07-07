@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from haagent.models.provider_profile import user_settings_path
+from haagent.models.model_connections import user_settings_path
 from haagent.runtime.sandbox.settings import (
     SandboxSettings,
     SandboxSettingsError,

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.memory.schema import USER_SCOPE, WORKSPACE_SCOPE
-from haagent.models.provider_profile import user_config_dir
+from haagent.models.model_connections import user_config_dir
 
 
 @dataclass(frozen=True)

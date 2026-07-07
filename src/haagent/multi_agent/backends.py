@@ -103,7 +103,7 @@ def _gateway_config(gateway: Any) -> dict[str, Any]:
             ],
         }
     return {
-        "type": "provider_profile" if getattr(gateway, "provider_name", "") else "unsupported",
+        "type": "provider_connection" if getattr(gateway, "provider_name", "") else "unsupported",
         "provider_name": getattr(gateway, "provider_name", ""),
     }
 

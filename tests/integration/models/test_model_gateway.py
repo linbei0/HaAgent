@@ -25,21 +25,22 @@ from haagent.models.gateway import (
     OpenAIResponsesGateway,
     ToolCall,
 )
-from haagent.models.credentials import FakeCredentialStore, save_insecure_api_key
+from haagent.models.credentials import FakeCredentialStore
 from haagent.models.gateway_registry import (
     catalog_provider_capability,
-    gateway_capability_for_profile,
     gateway_from_profile,
     GatewayRegistryError,
 )
-from haagent.models.provider_profile import (
+from haagent.models.model_connections import (
+    ModelSelection,
+    ProviderConnectionRecord,
     ProviderProfile,
     ProviderProfileError,
-    ProviderProfileRecord,
-    list_provider_profile_records,
-    load_provider_profile,
-    provider_profile_credential_status,
-    save_provider_profile,
+    list_provider_connection_records,
+    load_model_selection_profile,
+    provider_connection_credential_status,
+    save_provider_connection,
+    save_provider_connection_with_key,
 )
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec
@@ -111,21 +112,6 @@ def _image_user_message(tmp_path: Path) -> dict[str, object]:
             },
         ],
     }
-
-
-def test_gateway_registry_maps_openai_chat_profile_to_runnable_gateway() -> None:
-    record = ProviderProfileRecord(
-        name="router",
-        provider="openai-chat",
-        base_url="https://openrouter.ai/api/v1",
-        model="openai/gpt-5.2-chat",
-        api_key_env="OPENROUTER_API_KEY",
-    )
-
-    capability = gateway_capability_for_profile(record)
-
-    assert capability.status == "runnable"
-    assert capability.gateway_provider == "openai-chat"
 
 
 def test_gateway_registry_maps_anthropic_catalog_provider_to_native_gateway() -> None:
@@ -937,33 +923,37 @@ def test_fake_model_gateway_records_current_inputs() -> None:
     assert any(m.get("name") == "fake_tool" for m in tool_msgs)
 
 
-def test_provider_profile_loads_named_profile_and_api_key_env(tmp_path: Path) -> None:
+def test_model_selection_loads_connection_and_api_key_env(tmp_path: Path) -> None:
     config_path = tmp_path / ".haagent" / "providers.json"
     config_path.parent.mkdir()
     config_path.write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "deepseek",
                         "name": "deepseek",
-                        "provider": "openai-chat",
+                        "provider_id": "deepseek",
+                        "provider_name": "DeepSeek",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
+                "custom_models": [],
             },
         ),
         encoding="utf-8",
     )
 
-    profile = load_provider_profile(
-        "deepseek",
+    profile = load_model_selection_profile(
+        ModelSelection("deepseek", "deepseek-v4-pro"),
         config_path=config_path,
         environ={"DEEPSEEK_API_KEY": "secret-key"},
     )
 
-    assert profile.name == "deepseek"
+    assert profile.name == "deepseek:deepseek-v4-pro"
     assert profile.provider == "openai-chat"
     assert profile.base_url == "https://api.deepseek.com"
     assert profile.model == "deepseek-v4-pro"
@@ -971,32 +961,36 @@ def test_provider_profile_loads_named_profile_and_api_key_env(tmp_path: Path) ->
     assert profile.api_key == "secret-key"
 
 
-def test_provider_profile_loads_api_key_from_keyring_when_env_missing(tmp_path: Path) -> None:
+def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: Path) -> None:
     config_path = tmp_path / ".haagent" / "providers.json"
     config_path.parent.mkdir()
     config_path.write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "deepseek",
                         "name": "deepseek",
-                        "provider": "openai-chat",
+                        "provider_id": "deepseek",
+                        "provider_name": "DeepSeek",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
                         "api_key_env": "DEEPSEEK_API_KEY",
                         "credential_source": "keyring",
                     },
                 ],
+                "custom_models": [],
             },
         ),
         encoding="utf-8",
     )
 
-    profile = load_provider_profile(
-        "deepseek",
+    profile = load_model_selection_profile(
+        ModelSelection("deepseek", "deepseek-v4-pro"),
         config_path=config_path,
         environ={},
-        credential_store=FakeCredentialStore({"profile:deepseek": "keyring-secret"}),
+        credential_store=FakeCredentialStore({"connection:deepseek": "keyring-secret"}),
     )
 
     assert profile.api_key == "keyring-secret"
@@ -1004,43 +998,47 @@ def test_provider_profile_loads_api_key_from_keyring_when_env_missing(tmp_path: 
     assert profile.credential_source_used == "keyring"
 
 
-def test_provider_profiles_can_be_listed_without_secrets(tmp_path: Path) -> None:
-    save_provider_profile(
-        ProviderProfileRecord(
+def test_provider_connections_can_be_listed_without_secrets(tmp_path: Path) -> None:
+    save_provider_connection(
+        ProviderConnectionRecord(
+            id="router",
             name="router",
-            provider="openai-chat",
+            provider_id="openrouter",
+            provider_name="OpenRouter",
+            gateway_provider="openai-chat",
             base_url="https://openrouter.ai/api/v1",
-            model="openai/gpt-5.2-chat",
             api_key_env="OPENROUTER_API_KEY",
             credential_source="keyring",
         ),
         config_dir=tmp_path,
     )
 
-    records = list_provider_profile_records(config_path=tmp_path / "providers.json")
+    records = list_provider_connection_records(config_path=tmp_path / "providers.json")
 
     assert [record.name for record in records] == ["router"]
-    assert records[0].model == "openai/gpt-5.2-chat"
+    assert records[0].provider_id == "openrouter"
     assert "secret" not in records[0].to_dict()
 
 
-def test_provider_profile_credential_status_for_named_profile(tmp_path: Path) -> None:
-    save_provider_profile(
-        ProviderProfileRecord(
+def test_provider_connection_credential_status_for_named_connection(tmp_path: Path) -> None:
+    save_provider_connection(
+        ProviderConnectionRecord(
+            id="router",
             name="router",
-            provider="openai-chat",
+            provider_id="openrouter",
+            provider_name="OpenRouter",
+            gateway_provider="openai-chat",
             base_url="https://openrouter.ai/api/v1",
-            model="openai/gpt-5.2-chat",
             api_key_env="OPENROUTER_API_KEY",
             credential_source="keyring",
         ),
         config_dir=tmp_path,
     )
 
-    status = provider_profile_credential_status(
+    status = provider_connection_credential_status(
         "router",
         config_dir=tmp_path,
-        credential_store=FakeCredentialStore({"profile:router": "sk-test-secret"}),
+        credential_store=FakeCredentialStore({"connection:router": "sk-test-secret"}),
     )
 
     assert status.api_key_available is True
@@ -1048,31 +1046,26 @@ def test_provider_profile_credential_status_for_named_profile(tmp_path: Path) ->
     assert "sk-test-secret" not in repr(status)
 
 
-def test_provider_profile_loads_api_key_from_explicit_insecure_file(tmp_path: Path) -> None:
+def test_model_selection_loads_api_key_from_explicit_insecure_file(tmp_path: Path) -> None:
     config_dir = tmp_path / ".haagent"
     config_path = config_dir / "providers.json"
-    config_dir.mkdir()
-    config_path.write_text(
-        json.dumps(
-            {
-                "profiles": [
-                    {
-                        "name": "deepseek",
-                        "provider": "openai-chat",
-                        "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
-                        "api_key_env": "DEEPSEEK_API_KEY",
-                        "credential_source": "insecure_file",
-                    },
-                ],
-            },
+    save_provider_connection_with_key(
+        ProviderConnectionRecord(
+            id="deepseek",
+            name="deepseek",
+            provider_id="deepseek",
+            provider_name="DeepSeek",
+            gateway_provider="openai-chat",
+            base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            credential_source="insecure_file",
         ),
-        encoding="utf-8",
+        "plain-secret",
+        config_dir=config_dir,
     )
-    save_insecure_api_key("deepseek", "plain-secret", config_dir=config_dir)
 
-    profile = load_provider_profile(
-        "deepseek",
+    profile = load_model_selection_profile(
+        ModelSelection("deepseek", "deepseek-v4-pro"),
         config_path=config_path,
         environ={},
         credential_store=FakeCredentialStore({}),
@@ -1084,53 +1077,65 @@ def test_provider_profile_loads_api_key_from_explicit_insecure_file(tmp_path: Pa
     assert profile.credential_source_used == "insecure_file"
 
 
-def test_provider_profile_missing_name_fails_explicitly(tmp_path: Path) -> None:
+def test_model_selection_missing_connection_fails_explicitly(tmp_path: Path) -> None:
     config_path = tmp_path / ".haagent" / "providers.json"
     config_path.parent.mkdir()
     config_path.write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "openai-main",
                         "name": "openai-main",
-                        "provider": "openai",
+                        "provider_id": "openai",
+                        "provider_name": "OpenAI",
+                        "gateway_provider": "openai",
                         "base_url": "https://api.openai.com",
-                        "model": "gpt-4.1-mini",
                         "api_key_env": "OPENAI_API_KEY",
                     },
                 ],
+                "custom_models": [],
             },
         ),
         encoding="utf-8",
     )
 
-    with pytest.raises(ProviderProfileError, match="provider profile not found: deepseek"):
-        load_provider_profile("deepseek", config_path=config_path, environ={"OPENAI_API_KEY": "key"})
+    with pytest.raises(ProviderProfileError, match="provider connection not found: deepseek"):
+        load_model_selection_profile(
+            ModelSelection("deepseek", "deepseek-v4-pro"),
+            config_path=config_path,
+            environ={"OPENAI_API_KEY": "key"},
+        )
 
 
-def test_provider_profile_missing_api_key_fails_explicitly(tmp_path: Path) -> None:
+def test_model_selection_missing_api_key_fails_explicitly(tmp_path: Path) -> None:
     config_path = tmp_path / ".haagent" / "providers.json"
     config_path.parent.mkdir()
     config_path.write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "deepseek",
                         "name": "deepseek",
-                        "provider": "openai-chat",
+                        "provider_id": "deepseek",
+                        "provider_name": "DeepSeek",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
+                "custom_models": [],
             },
         ),
         encoding="utf-8",
     )
 
     with pytest.raises(ProviderProfileError, match="API key is not available"):
-        load_provider_profile(
-            "deepseek",
+        load_model_selection_profile(
+            ModelSelection("deepseek", "deepseek-v4-pro"),
             config_path=config_path,
             environ={},
             credential_store=FakeCredentialStore({}),

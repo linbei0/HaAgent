@@ -16,10 +16,12 @@ from typing import Any
 
 from haagent.models.gateway import ModelGateway
 from haagent.models.gateway_registry import gateway_from_profile
-from haagent.models.provider_profile import (
+from haagent.models.model_connections import (
+    ModelSelection,
     ProviderProfile,
     ProviderProfileError,
-    load_provider_profile,
+    load_active_model_selection,
+    load_model_selection_profile,
     user_config_dir,
 )
 from haagent.multi_agent.backends import BACKEND_REGISTRY, WorkerBackend
@@ -767,8 +769,9 @@ class MultiAgentRuntime:
         if model_profile is None:
             return self.model_gateway
         try:
-            profile = load_provider_profile(
-                model_profile,
+            active_selection = load_active_model_selection(config_dir=user_config_dir())
+            profile = load_model_selection_profile(
+                ModelSelection(connection_id=model_profile, model=active_selection.model),
                 environ=self.environ,
                 config_dir=user_config_dir(),
             )

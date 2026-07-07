@@ -15,7 +15,12 @@ from typing import Any
 from haagent.models.fake import FakeModelGateway
 from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.models.gateway_registry import gateway_from_profile
-from haagent.models.provider_profile import load_provider_profile, user_config_dir
+from haagent.models.model_connections import (
+    ModelSelection,
+    load_active_model_selection,
+    load_model_selection_profile,
+    user_config_dir,
+)
 from haagent.runtime.session.agent import AgentSession
 
 
@@ -113,7 +118,9 @@ def _build_gateway(payload: dict[str, Any]):
     model_profile = _optional_str(payload.get("model_profile"))
     if model_profile is None:
         raise ValueError("subprocess worker requires a serializable gateway or model_profile")
-    return gateway_from_profile(load_provider_profile(model_profile, config_dir=user_config_dir()))
+    active_selection = load_active_model_selection(config_dir=user_config_dir())
+    selection = ModelSelection(connection_id=model_profile, model=active_selection.model)
+    return gateway_from_profile(load_model_selection_profile(selection, config_dir=user_config_dir()))
 
 
 def _write_result(path: Path, payload: dict[str, Any]) -> None:

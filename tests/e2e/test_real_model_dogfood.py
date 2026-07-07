@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
-from haagent.models.provider_profile import ProviderProfileError, load_provider_profile
+from haagent.models.model_connections import (
+    ModelSelection,
+    ProviderProfileError,
+    load_active_model_selection,
+    load_model_selection_profile,
+)
 from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks
 
 
@@ -36,10 +41,11 @@ def test_real_model_dogfood(pytestconfig: pytest.Config, tmp_path: Path) -> None
 
 
 def _real_gateway_or_skip():
-    profile_name = os.environ.get("HAAGENT_DOGFOOD_PROFILE")
-    if profile_name:
+    connection_id = os.environ.get("HAAGENT_DOGFOOD_CONNECTION")
+    if connection_id:
         try:
-            profile = load_provider_profile(profile_name)
+            model = os.environ.get("HAAGENT_DOGFOOD_MODEL") or load_active_model_selection().model
+            profile = load_model_selection_profile(ModelSelection(connection_id, model))
         except ProviderProfileError as error:
             pytest.skip(f"real model dogfood skipped: {error}")
         gateway_kwargs = {

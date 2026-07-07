@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from haagent.models import provider_profile as provider_profile_module
+from haagent.models import model_connections as model_connections_module
 from haagent.mcp.settings import load_mcp_settings
 from haagent.models.catalog import (
     DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE,
@@ -23,23 +23,19 @@ from haagent.models.catalog import (
 from haagent.models.credentials import CredentialError
 from haagent.models.gateway import ModelGateway
 from haagent.models.gateway import ModelCallError
-from haagent.models.gateway_registry import GatewayCapability, gateway_capability_for_profile, gateway_from_profile
+from haagent.models.gateway_registry import GatewayCapability, gateway_from_profile
 from haagent.multi_agent.team_store import TeamStore
-from haagent.models.provider_profile import (
+from haagent.models.model_connections import (
+    ModelSelection,
     ProviderProfile,
+    ProviderConnectionRecord,
     ProviderProfileError,
-    ProviderProfileRecord,
-    active_provider_credential_status,
-    list_provider_profile_records,
-    load_active_profile_name,
-    load_active_provider_profile,
-    load_active_provider_profile_record,
-    load_provider_profile,
-    load_provider_profile_record,
-    provider_profile_credential_status,
-    delete_provider_profile,
-    save_active_profile,
-    save_provider_profile_with_key,
+    load_active_model_selection,
+    load_model_selection_profile,
+    load_provider_connection_record,
+    provider_connection_credential_status,
+    save_provider_connection_with_key,
+    USER_PROVIDERS_FILE,
     user_config_dir,
 )
 from haagent.runtime.session.agent import (
@@ -77,7 +73,7 @@ from haagent.memory import (
     MemoryRecord,
     MemoryStore,
 )
-from haagent.app import memory_usecases, model_profile_usecases, session_usecases, skill_usecases
+from haagent.app import memory_usecases, model_connection_usecases, session_usecases, skill_usecases
 
 
 GatewayFactory = Callable[[ProviderProfile], ModelGateway]
@@ -142,6 +138,7 @@ class AssistantSessionStatus:
     max_turns: int | None
     provider: str
     model_profile_name: str | None = None
+    model_connection_id: str | None = None
     model: str | None = None
     base_url: str | None = None
     web_enabled: bool = False
@@ -208,6 +205,20 @@ class AssistantModelProfile:
 
 
 @dataclass(frozen=True)
+class AssistantModelConnection:
+    id: str
+    name: str
+    provider_id: str
+    provider_name: str
+    gateway_provider: str
+    base_url: str
+    api_key_env: str
+    credential_source: str
+    credential_available: bool
+    credential_source_used: str | None
+
+
+@dataclass(frozen=True)
 class AssistantModelTestResult:
     ok: bool
     profile_name: str
@@ -259,14 +270,22 @@ class AssistantMarketplaceInstall:
 
 
 @dataclass(frozen=True)
-class ModelProfileConfigureRequest:
+class ModelConnectionConfigureRequest:
+    id: str
     name: str
-    provider: str
+    provider_id: str
+    provider_name: str
+    gateway_provider: str
     base_url: str
-    model: str
     api_key_env: str
     credential_source: str
     api_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ModelSelectionRequest:
+    connection_id: str
+    model: str
 
 
 class AssistantService:
@@ -291,7 +310,8 @@ class AssistantService:
         self.max_turns = max_turns
         self.enable_web = enable_web
         self._session: AgentSession | None = None
-        self._pending_model_profile_name: str | None = None
+        self._pending_model_selection: ModelSelection | None = None
+        self._last_model_selection: ModelSelection | None = None
         self._marketplace_results: dict[str, MarketplaceSkillCard] = {}
         self.initial_resume = initial_resume
         self.initial_continue = initial_continue
@@ -300,18 +320,17 @@ class AssistantService:
         self.session_compact_result_cls = AssistantSessionCompactResult
         self.session_status_cls = AssistantSessionStatus
         self.model_profile_cls = AssistantModelProfile
+        self.model_connection_cls = AssistantModelConnection
         self.model_test_result_cls = AssistantModelTestResult
         self.skill_list_cls = AssistantSkillList
         self.skill_content_cls = AssistantSkillContent
         self.marketplace_search_cls = AssistantMarketplaceSearch
         self.marketplace_install_cls = AssistantMarketplaceInstall
         self.chat_session_error_cls = ChatSessionError
-        self.gateway_capability_for_profile = gateway_capability_for_profile
         self.marketplace_skill_mapper = _marketplace_skill
         self._session_status = _session_status
         self._session_summary = _session_summary
         self._session_turn = _session_turn
-        self.load_profile_record_for_result = _load_profile_record_for_result
         self.secret_candidates = _secret_candidates
         self.redact_secret_text = _redact_secret_text
         self.skill_list_fn = lambda args, workspace_root, skill_settings=None: skill_list(
@@ -336,7 +355,14 @@ class AssistantService:
 
     def get_workspace_status(self) -> AssistantWorkspaceStatus:
         session_status = self.current_session()
-        profile_name_override = session_status.model_profile_name if session_status is not None else None
+        selection_override = (
+            ModelSelection(
+                connection_id=session_status.model_connection_id,
+                model=session_status.model or "",
+            )
+            if session_status is not None and session_status.model_connection_id is not None
+            else None
+        )
         profile_name: str | None = None
         provider: str | None = None
         base_url: str | None = None
@@ -349,24 +375,20 @@ class AssistantService:
         credential_store_error: str | None = None
         profile_error: str | None = None
         try:
-            record = (
-                load_provider_profile_record(profile_name_override)
-                if profile_name_override is not None
-                else load_active_provider_profile_record()
+            selection = selection_override or load_active_model_selection(config_dir=user_config_dir())
+            connection = load_provider_connection_record(
+                selection.connection_id,
+                config_path=user_config_dir() / USER_PROVIDERS_FILE,
             )
-            profile_name = record.name
-            provider = record.provider
-            base_url = record.base_url
-            model = record.model
-            api_key_env = record.api_key_env
-            credential = (
-                provider_profile_credential_status(
-                    record.name,
-                    environ=self.environ,
-                    config_dir=user_config_dir(),
-                )
-                if profile_name_override is not None
-                else active_provider_credential_status(environ=self.environ)
+            profile_name = connection.id
+            provider = connection.gateway_provider
+            base_url = connection.base_url
+            model = selection.model
+            api_key_env = connection.api_key_env
+            credential = provider_connection_credential_status(
+                connection.id,
+                environ=self.environ,
+                config_dir=user_config_dir(),
             )
             api_key_available = credential.api_key_available
             credential_source_configured = credential.credential_source_configured
@@ -515,29 +537,29 @@ class AssistantService:
     def compact_current_session(self) -> AssistantSessionCompactResult:
         return session_usecases.compact_current_session(self)
 
-    def list_model_profiles(self) -> list[AssistantModelProfile]:
-        return model_profile_usecases.list_model_profiles(self)
+    def configure_model_connection(self, request: ModelConnectionConfigureRequest) -> ProviderConnectionRecord:
+        return model_connection_usecases.configure_model_connection(self, request)
 
-    def set_default_model_profile(self, profile_name: str) -> None:
-        model_profile_usecases.set_default_model_profile(self, profile_name)
+    def list_model_connections(self) -> list[AssistantModelConnection]:
+        return model_connection_usecases.list_model_connections(self)
 
-    def configure_model_profile(self, request: ModelProfileConfigureRequest) -> ProviderProfileRecord:
-        return model_profile_usecases.configure_model_profile(self, request)
+    def set_default_model_selection(self, request: ModelSelectionRequest) -> None:
+        model_connection_usecases.set_default_model_selection(self, request)
 
-    def delete_model_profile(self, profile_name: str) -> None:
-        model_profile_usecases.delete_model_profile_for_user(self, profile_name)
+    def delete_model_connection(self, connection_id: str) -> None:
+        model_connection_usecases.delete_model_connection_for_user(self, connection_id)
 
     def refresh_model_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
-        return model_profile_usecases.refresh_model_catalog(self, transport=transport)
+        return model_connection_usecases.refresh_model_catalog(self, transport=transport)
 
     def get_model_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
-        return model_profile_usecases.get_model_catalog(self, transport=transport)
+        return model_connection_usecases.get_model_catalog(self, transport=transport)
 
-    def test_model_profile(self, profile_name: str) -> AssistantModelTestResult:
-        return model_profile_usecases.test_model_profile(self, profile_name)
+    def test_model_connection(self, connection_id: str, model: str | None = None) -> AssistantModelTestResult:
+        return model_connection_usecases.test_model_connection(self, connection_id, model=model)
 
-    def switch_current_session_model(self, profile_name: str) -> AssistantSessionStatus:
-        return model_profile_usecases.switch_current_session_model(self, profile_name)
+    def switch_current_session_model_selection(self, request: ModelSelectionRequest) -> AssistantSessionStatus:
+        return model_connection_usecases.switch_current_session_model_selection(self, request)
 
     def set_permission_mode(self, mode: PermissionMode) -> AssistantSessionStatus:
         return session_usecases.set_permission_mode(self, mode)
@@ -626,23 +648,37 @@ class AssistantService:
         return memory_usecases.reject_memory_candidate(self, candidate_id, reason)
 
     def _load_session_profile(self) -> ProviderProfile:
-        if self._pending_model_profile_name is not None:
-            return load_provider_profile(
-                self._pending_model_profile_name,
+        if self._pending_model_selection is not None:
+            self._last_model_selection = self._pending_model_selection
+            return load_model_selection_profile(
+                self._pending_model_selection,
                 environ=self.environ,
                 config_dir=user_config_dir(),
             )
-        return load_active_provider_profile(environ=self.environ)
+        selection = load_active_model_selection(config_dir=user_config_dir())
+        self._last_model_selection = selection
+        return load_model_selection_profile(
+            selection,
+            environ=self.environ,
+            config_dir=user_config_dir(),
+        )
 
     def _load_resume_profile(self, session: str | Path) -> ProviderProfile:
-        profile_name = _session_model_profile_name(session, self.runs_root)
-        if profile_name is not None:
-            return load_provider_profile(
-                profile_name,
+        selection = _session_model_selection(session, self.runs_root)
+        if selection is not None:
+            self._last_model_selection = selection
+            return load_model_selection_profile(
+                selection,
                 environ=self.environ,
                 config_dir=user_config_dir(),
             )
-        return load_active_provider_profile(environ=self.environ)
+        selection = load_active_model_selection(config_dir=user_config_dir())
+        self._last_model_selection = selection
+        return load_model_selection_profile(
+            selection,
+            environ=self.environ,
+            config_dir=user_config_dir(),
+        )
 
     def _memory_queue(self) -> CandidateQueue:
         if self._session is None:
@@ -682,6 +718,7 @@ def _session_status(session: AgentSession) -> AssistantSessionStatus:
         max_turns=getattr(session, "max_turns", None),
         provider=session.provider_name,
         model_profile_name=getattr(session, "model_profile_name", None),
+        model_connection_id=getattr(session, "model_connection_id", None),
         model=getattr(session, "model_name", None),
         base_url=getattr(session, "model_base_url", None),
         web_enabled=getattr(session, "enable_web", False),
@@ -746,7 +783,7 @@ def _session_permission_mode(session: AgentSession) -> PermissionMode:
     return "request_approval"
 
 
-def _session_model_profile_name(session: str | Path, runs_root: Path) -> str | None:
+def _session_model_selection(session: str | Path, runs_root: Path) -> ModelSelection | None:
     raw = Path(session)
     if raw.is_absolute() or raw.exists() or raw.name != str(session):
         session_path = raw.resolve()
@@ -761,17 +798,11 @@ def _session_model_profile_name(session: str | Path, runs_root: Path) -> str | N
         return None
     if not isinstance(metadata, dict):
         return None
-    profile_name = metadata.get("model_profile_name")
-    if isinstance(profile_name, str) and profile_name:
-        return profile_name
+    connection_id = metadata.get("model_connection_id")
+    model = metadata.get("model")
+    if isinstance(connection_id, str) and connection_id and isinstance(model, str) and model:
+        return ModelSelection(connection_id=connection_id, model=model)
     return None
-
-
-def _load_profile_record_for_result(profile_name: str):
-    try:
-        return load_provider_profile_record(profile_name)
-    except ProviderProfileError:
-        return None
 
 
 def _image_input_supported(provider: str | None, base_url: str | None, model: str | None) -> bool | None:

@@ -1,14 +1,14 @@
 """
 tests/integration/multi_agent/test_agent_profiles.py - worker profile 集成测试
 
-验证 agent 工具可以通过 profile 派出 worker。
+验证 agent 工具可以通过 worker profile 派出 worker。
 """
 
 from pathlib import Path
 
 from haagent.models.fake import FakeModelGateway
 from haagent.models.gateway import ModelResponse
-from haagent.models.provider_profile import ProviderProfile
+from haagent.models.model_connections import ModelSelection, ProviderProfile, ProviderProfileError
 import haagent.multi_agent.runtime as runtime_module
 from haagent.multi_agent.profiles import WorkerProfileRuntime
 from haagent.multi_agent.runtime import MultiAgentRuntime
@@ -49,7 +49,7 @@ def test_spawn_worker_accepts_profile_name(tmp_path: Path) -> None:
     assert record["task"]["profile"] == "explorer"
 
 
-def test_spawn_worker_rejects_unknown_model_profile(tmp_path: Path) -> None:
+def test_spawn_worker_rejects_unknown_model_profile(tmp_path: Path, monkeypatch) -> None:
     runtime = MultiAgentRuntime(
         runs_root=tmp_path / ".runs",
         workspace_root=tmp_path,
@@ -66,6 +66,18 @@ def test_spawn_worker_rejects_unknown_model_profile(tmp_path: Path) -> None:
         tool_registry=None,
         mcp_runtime=None,
         team_root=tmp_path / ".haagent" / "teams",
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "load_active_model_selection",
+        lambda *args, **kwargs: ModelSelection("local", "gpt-test"),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "load_model_selection_profile",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ProviderProfileError("provider connection not found: missing-profile")
+        ),
     )
 
     result = runtime.spawn_worker(
@@ -116,7 +128,12 @@ def test_spawn_worker_profile_overrides_session_settings_and_model_input(tmp_pat
     )
     monkeypatch.setattr(
         runtime_module,
-        "load_provider_profile",
+        "load_active_model_selection",
+        lambda *args, **kwargs: ModelSelection("writer-model", "gpt-test"),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "load_model_selection_profile",
         lambda *args, **kwargs: ProviderProfile(
             name="writer-model",
             provider="openai",

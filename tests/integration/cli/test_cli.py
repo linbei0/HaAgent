@@ -27,7 +27,11 @@ def test_cli_sandbox_enable_and_disable_write_settings(tmp_path: Path, monkeypat
     config_dir = home / ".haagent"
     config_dir.mkdir(parents=True)
     settings_path = config_dir / "settings.json"
-    settings_path.write_text(json.dumps({"interactive_max_turns": 80, "active_profile": "local"}), encoding="utf-8")
+    active_model = {"connection_id": "local", "model": "deepseek-chat"}
+    settings_path.write_text(
+        json.dumps({"interactive_max_turns": 80, "active_model": active_model}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(Path, "home", lambda: home)
 
     enable_code = cli.main(["sandbox", "enable", "docker"])
@@ -39,13 +43,13 @@ def test_cli_sandbox_enable_and_disable_write_settings(tmp_path: Path, monkeypat
 
     assert enable_code == 0
     assert "backend=docker" in enable_output
-    assert enabled["active_profile"] == "local"
+    assert enabled["active_model"] == active_model
     assert enabled["interactive_max_turns"] == 80
     assert enabled["sandbox"]["enabled"] is True
     assert enabled["sandbox"]["fail_if_unavailable"] is True
     assert disable_code == 0
     assert "backend=local_subprocess" in disable_output
-    assert disabled["active_profile"] == "local"
+    assert disabled["active_model"] == active_model
     assert disabled["sandbox"]["enabled"] is False
 
 

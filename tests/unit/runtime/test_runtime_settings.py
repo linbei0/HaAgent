@@ -24,10 +24,11 @@ def test_missing_runtime_settings_uses_interactive_default(tmp_path) -> None:
     assert settings.interactive_max_turns == DEFAULT_INTERACTIVE_MAX_TURNS
 
 
-def test_setting_interactive_max_turns_preserves_active_profile(tmp_path) -> None:
+def test_setting_interactive_max_turns_preserves_active_model(tmp_path) -> None:
     settings_path = tmp_path / "settings.json"
+    active_model = {"connection_id": "local", "model": "deepseek-chat"}
     settings_path.write_text(
-        json.dumps({"active_profile": "local"}, ensure_ascii=False),
+        json.dumps({"active_model": active_model}, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -35,7 +36,7 @@ def test_setting_interactive_max_turns_preserves_active_profile(tmp_path) -> Non
 
     assert settings.interactive_max_turns == 80
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert saved == {"active_profile": "local", "interactive_max_turns": 80}
+    assert saved == {"active_model": active_model, "interactive_max_turns": 80}
 
 
 @pytest.mark.parametrize("raw_value", [0, -1, "80", "0", "abc", None])

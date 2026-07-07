@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from haagent.mcp.types import McpHttpServerConfig, McpRiskLevel, McpSettings, McpStdioServerConfig
-from haagent.models.provider_profile import user_config_dir
+from haagent.models.model_connections import user_config_dir
 
 
 class McpSettingsError(Exception):

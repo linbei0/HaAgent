@@ -16,7 +16,7 @@ from haagent.models.gateway import (
     OpenAIChatCompletionsGateway,
     OpenAIResponsesGateway,
 )
-from haagent.models.provider_profile import ProviderProfile, ProviderProfileError, ProviderProfileRecord
+from haagent.models.model_connections import ProviderProfile, ProviderProfileError
 
 
 @dataclass(frozen=True)
@@ -37,16 +37,6 @@ _OPENAI_COMPATIBLE_PACKAGES = {
 _OPENAI_COMPATIBLE_PROVIDER_IDS = {
     "openrouter",
 }
-
-
-def gateway_capability_for_profile(record: ProviderProfileRecord) -> GatewayCapability:
-    if record.provider in {"openai", "openai-chat", "anthropic", "google"}:
-        return GatewayCapability(status="runnable", gateway_provider=record.provider)
-    return GatewayCapability(
-        status="adapter_required",
-        gateway_provider=None,
-        reason="native provider adapter is not available",
-    )
 
 
 def catalog_provider_capability(provider: ModelCatalogProvider) -> GatewayCapability:

@@ -25,6 +25,29 @@ def test_turns_command_is_registered_and_parsed() -> None:
     assert result.argument == "set 80"
 
 
+def test_connect_and_model_commands_are_separate_entries() -> None:
+    registry = command_registry()
+
+    connect = parse_slash_command("/connect", registry)
+    model = parse_slash_command("/model", registry)
+    models = parse_slash_command("/models", registry)
+    commands = {command.name: command for command in registry.commands()}
+
+    assert connect is not None
+    assert connect.command is not None
+    assert connect.command.action == "open_connections"
+    assert model is not None
+    assert model.command is not None
+    assert model.command.action == "open_models"
+    assert models is not None
+    assert models.command is not None
+    assert models.command.name == "model"
+    assert models.command.action == "open_models"
+    assert "connect" in commands
+    assert "供应商" in commands["connect"].description
+    assert "切换模型" in commands["model"].description
+
+
 def test_paste_command_is_not_registered() -> None:
     registry = command_registry()
 

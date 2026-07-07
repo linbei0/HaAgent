@@ -5,7 +5,8 @@ src/haagent/tui/overlays/__init__.py - TUI overlay 和 modal 包
 """
 
 from haagent.tui.overlays.modals import ConfirmModal, EditDiffModal, ExternalDirectoryDecisionModal, HelpModal, PermissionsModal, ToolApprovalModal
-from haagent.tui.overlays.models import ManualModelSetupWizard, ModelCatalogLoadingOverlay, ModelCenterOverlay, ModelCenterResult, ModelSetupWizard
+from haagent.tui.overlays.connections import ConnectionCenterOverlay, ConnectionCenterResult, ConnectionSetupResult, ConnectionSetupWizard
+from haagent.tui.overlays.models import ModelCatalogLoadingOverlay, ModelSwitchOverlay, ModelSwitchResult, ModelSwitchState
 from haagent.tui.overlays.search import SearchOverlay
 from haagent.tui.overlays.sessions import SessionOverlay, SessionOverlayResult, SessionOverlayState
 from haagent.tui.overlays.skill_picker import SkillPickerOverlay
@@ -15,11 +16,14 @@ __all__ = [
     "EditDiffModal",
     "ExternalDirectoryDecisionModal",
     "HelpModal",
-    "ManualModelSetupWizard",
+    "ConnectionCenterOverlay",
+    "ConnectionCenterResult",
+    "ConnectionSetupResult",
+    "ConnectionSetupWizard",
     "ModelCatalogLoadingOverlay",
-    "ModelCenterOverlay",
-    "ModelCenterResult",
-    "ModelSetupWizard",
+    "ModelSwitchOverlay",
+    "ModelSwitchResult",
+    "ModelSwitchState",
     "PermissionsModal",
     "SearchOverlay",
     "SessionOverlay",
@@ -28,4 +32,3 @@ __all__ = [
     "SkillPickerOverlay",
     "ToolApprovalModal",
 ]
-

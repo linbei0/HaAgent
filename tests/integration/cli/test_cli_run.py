@@ -776,28 +776,36 @@ def test_cli_run_openai_chat_provider_passes_custom_max_turns(
     assert isinstance(calls["model_gateway"], FakeOpenAIChatGateway)
 
 
-def test_cli_run_profile_creates_gateway_from_local_config(
+def test_cli_run_connection_creates_gateway_from_local_config(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "profile-secret")
-    (tmp_path / ".haagent").mkdir()
-    (tmp_path / ".haagent" / "providers.json").write_text(
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "connection-secret")
+    (tmp_path / "home" / ".haagent").mkdir(parents=True)
+    (tmp_path / "home" / ".haagent" / "providers.json").write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "deepseek",
                         "name": "deepseek",
-                        "provider": "openai-chat",
+                        "provider_id": "deepseek",
+                        "provider_name": "DeepSeek",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
+                "custom_models": [],
             },
         ),
+        encoding="utf-8",
+    )
+    (tmp_path / "home" / ".haagent" / "settings.json").write_text(
+        json.dumps({"active_model": {"connection_id": "deepseek", "model": "deepseek-v4-pro"}}),
         encoding="utf-8",
     )
     task_path = tmp_path / "task.yaml"
@@ -847,23 +855,27 @@ def test_cli_run_profile_creates_gateway_from_local_config(
     )
 
     assert exit_code == 0
-    assert calls["api_key"] == "profile-secret"
+    assert calls["api_key"] == "connection-secret"
     assert calls["model"] == "deepseek-v4-pro"
     assert calls["base_url"] == "https://api.deepseek.com"
     assert calls["max_turns"] == 12
     assert isinstance(calls["model_gateway"], FakeOpenAIChatGateway)
 
 
-def test_cli_run_profile_missing_name_fails_explicitly(
+def test_cli_run_connection_missing_name_fails_explicitly(
     tmp_path: Path,
     capsys,
     monkeypatch,
 ) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".haagent").mkdir()
-    (tmp_path / ".haagent" / "providers.json").write_text(
-        json.dumps({"profiles": []}),
+    (tmp_path / "home" / ".haagent").mkdir(parents=True)
+    (tmp_path / "home" / ".haagent" / "providers.json").write_text(
+        json.dumps({"version": 2, "connections": [], "custom_models": []}),
+        encoding="utf-8",
+    )
+    (tmp_path / "home" / ".haagent" / "settings.json").write_text(
+        json.dumps({"active_model": {"connection_id": "deepseek", "model": "deepseek-v4-pro"}}),
         encoding="utf-8",
     )
     task_path = tmp_path / "task.yaml"
@@ -873,11 +885,11 @@ def test_cli_run_profile_missing_name_fails_explicitly(
 
     output = capsys.readouterr().out
     assert exit_code == 1
-    assert "error: provider profile not found: deepseek" in output
+    assert "error: provider connection not found: deepseek" in output
     assert not (tmp_path / ".runs").exists()
 
 
-def test_cli_run_profile_missing_api_key_env_fails_explicitly(
+def test_cli_run_connection_missing_api_key_env_fails_explicitly(
     tmp_path: Path,
     capsys,
     monkeypatch,
@@ -885,21 +897,29 @@ def test_cli_run_profile_missing_api_key_env_fails_explicitly(
     _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    (tmp_path / ".haagent").mkdir()
-    (tmp_path / ".haagent" / "providers.json").write_text(
+    (tmp_path / "home" / ".haagent").mkdir(parents=True)
+    (tmp_path / "home" / ".haagent" / "providers.json").write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "deepseek",
                         "name": "deepseek",
-                        "provider": "openai-chat",
+                        "provider_id": "deepseek",
+                        "provider_name": "DeepSeek",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
+                "custom_models": [],
             },
         ),
+        encoding="utf-8",
+    )
+    (tmp_path / "home" / ".haagent" / "settings.json").write_text(
+        json.dumps({"active_model": {"connection_id": "deepseek", "model": "deepseek-v4-pro"}}),
         encoding="utf-8",
     )
     task_path = tmp_path / "task.yaml"
@@ -909,35 +929,43 @@ def test_cli_run_profile_missing_api_key_env_fails_explicitly(
 
     output = capsys.readouterr().out
     assert exit_code == 1
-    assert "error: API key is not available for profile deepseek" in output
+    assert "error: API key is not available for connection deepseek" in output
     assert "api_key_env=DEEPSEEK_API_KEY" in output
     assert not (tmp_path / ".runs").exists()
 
 
-def test_cli_run_profile_secret_stays_out_of_episode_inspect_eval_and_model_input(
+def test_cli_run_connection_secret_stays_out_of_episode_inspect_eval_and_model_input(
     tmp_path: Path,
     capsys,
     monkeypatch,
 ) -> None:
-    secret = "profile-secret-value"
+    secret = "connection-secret-value"
     _set_home(monkeypatch, tmp_path / "home")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
-    (tmp_path / ".haagent").mkdir()
-    (tmp_path / ".haagent" / "providers.json").write_text(
+    (tmp_path / "home" / ".haagent").mkdir(parents=True)
+    (tmp_path / "home" / ".haagent" / "providers.json").write_text(
         json.dumps(
             {
-                "profiles": [
+                "version": 2,
+                "connections": [
                     {
+                        "id": "deepseek",
                         "name": "deepseek",
-                        "provider": "openai-chat",
+                        "provider_id": "deepseek",
+                        "provider_name": "DeepSeek",
+                        "gateway_provider": "openai-chat",
                         "base_url": "https://api.deepseek.com",
-                        "model": "deepseek-v4-pro",
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
+                "custom_models": [],
             },
         ),
+        encoding="utf-8",
+    )
+    (tmp_path / "home" / ".haagent" / "settings.json").write_text(
+        json.dumps({"active_model": {"connection_id": "deepseek", "model": "deepseek-v4-pro"}}),
         encoding="utf-8",
     )
     task_path = tmp_path / "task.yaml"

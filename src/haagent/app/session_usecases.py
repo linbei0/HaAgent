@@ -36,6 +36,9 @@ def create_session(service: "AssistantService") -> "AssistantSessionStatus":
             runs_root=service.runs_root,
             model_gateway=service.gateway_factory(profile),
             model_profile_name=profile.name,
+            model_connection_id=getattr(service, "_last_model_selection", None).connection_id
+            if getattr(service, "_last_model_selection", None) is not None
+            else None,
             model_name=profile.model,
             model_base_url=profile.base_url,
             max_turns=service.max_turns,
@@ -55,6 +58,9 @@ def resume_session(service: "AssistantService", session: str | Path) -> "Assista
             runs_root=service.runs_root,
             model_gateway=service.gateway_factory(profile),
             model_profile_name=profile.name,
+            model_connection_id=getattr(service, "_last_model_selection", None).connection_id
+            if getattr(service, "_last_model_selection", None) is not None
+            else None,
             model_name=profile.model,
             model_base_url=profile.base_url,
             max_turns=service.max_turns,
