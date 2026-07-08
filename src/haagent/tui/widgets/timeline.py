@@ -21,8 +21,7 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Log, Markdown, Static, TextArea
 
-from haagent.runtime.events.types import TaskProgressEvent
-from haagent.tui.widgets.task_progress_visibility import meaningful_task_progress_value, should_show_task_progress
+from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem
 
 
 class PromptInput(TextArea):
@@ -126,7 +125,23 @@ class StatusBar(Static):
         self.update(text)
 
 
-TimelineRole = Literal["user", "assistant", "system", "failure"]
+class ProgressStatusLine(Static):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.display = False
+
+    def update_status(self, text: str, *, severity: str = "info") -> None:
+        self.display = bool(text)
+        self.set_class(severity == "warning", "progress-warning")
+        self.set_class(severity == "error", "progress-error")
+        self.update(text)
+
+    def clear(self) -> None:
+        self.display = False
+        self.update("")
+
+
+TimelineRole = Literal["user", "assistant", "system", "failure", "notice", "effect"]
 TimelineStatus = Literal["streaming", "done", "failed"]
 ToolStatus = Literal["running", "approval", "done", "failed"]
 TOOL_DETAIL_VISIBLE_LIMIT = 8
@@ -135,6 +150,7 @@ TOOL_ACTIVITY_FLUSH_INTERVAL_MS = 50
 MARKDOWN_DELTA_FLUSH_INTERVAL_MS = 33
 SELECTION_RESUME_DELAY_MS = 120
 DETAILS_REFRESH_RECENT_TURNS = 3
+PRESENTATION_DETAIL_LINE_LIMIT = 240
 
 
 @dataclass
@@ -155,6 +171,9 @@ class TimelineItem:
     status: TimelineStatus = "done"
     title: str | None = None
     tools: list[ToolActivity] = field(default_factory=list)
+    detail_id: str | None = None
+    detail_lines: list[str] = field(default_factory=list)
+    expanded: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +187,11 @@ class TimelineRenderMetrics:
 
 class ConversationTimeline(VerticalScroll):
     _ids = count(1)
+    can_focus = True
+    BINDINGS = [
+        Binding("enter", "toggle_current_detail", "展开详情"),
+        Binding("space", "toggle_current_detail", "展开详情"),
+    ]
 
     def __init__(self, *args, **kwargs) -> None:
         kwargs.pop("wrap", None)
@@ -188,6 +212,7 @@ class ConversationTimeline(VerticalScroll):
         self._interactive_updates_paused = False
         self._mouse_down_location: tuple[float, float] | None = None
         self._selection_dragging = False
+        self._focused_item_id: int | None = None
 
     def set_stick_to_bottom(self, enabled: bool) -> None:
         self._stick_to_bottom = enabled
@@ -236,6 +261,7 @@ class ConversationTimeline(VerticalScroll):
         self._interactive_updates_paused = False
         self._mouse_down_location = None
         self._selection_dragging = False
+        self._focused_item_id = None
         self._remove_singletons()
         for block in list(self._blocks.values()):
             block.remove()
@@ -261,26 +287,101 @@ class ConversationTimeline(VerticalScroll):
         self._items.append(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
         self._render_timeline()
 
-    def add_task_progress(self, event: TaskProgressEvent) -> None:
-        if not should_show_task_progress(event):
-            return
-        self._items.append(
-            TimelineItem(
-                item_id=next(self._ids),
-                role="system",
-                turn_index=event.turn_index,
-                content=_task_progress_text(event),
-                title="任务进度",
-            )
+    def add_notice(
+        self,
+        title: str,
+        content: str,
+        *,
+        turn_index: int,
+        detail_id: str | None = None,
+        detail_lines: list[str] | None = None,
+    ) -> None:
+        item = TimelineItem(
+            item_id=next(self._ids),
+            role="notice",
+            turn_index=turn_index,
+            title=title,
+            content=content,
+            detail_id=detail_id,
+            detail_lines=detail_lines or [],
         )
-        if self.is_attached:
-            self._render_timeline()
+        self._items.append(item)
+        if item.detail_lines:
+            self._focused_item_id = item.item_id
+        self._render_or_mark_dirty()
+
+    def add_effect_summary(
+        self,
+        title: str,
+        content: str,
+        *,
+        turn_index: int,
+        detail_id: str | None = None,
+        detail_lines: list[str] | None = None,
+    ) -> None:
+        item = TimelineItem(
+            item_id=next(self._ids),
+            role="effect",
+            turn_index=turn_index,
+            title=title,
+            content=content,
+            detail_id=detail_id,
+            detail_lines=detail_lines or [],
+        )
+        self._items.append(item)
+        if item.detail_lines:
+            self._focused_item_id = item.item_id
+        self._render_or_mark_dirty()
+
+    def add_presentation_item(
+        self,
+        item: TimelinePresentationItem,
+        details: ExpandableDetail | None,
+    ) -> None:
+        if item.kind == "effect":
+            self.add_effect_summary(
+                item.title,
+                item.summary,
+                turn_index=item.turn_index,
+                detail_id=item.detail_id,
+                detail_lines=details.lines if details else [],
+            )
             return
-        self._mark_plain_text_dirty()
+        self.add_notice(
+            item.title,
+            item.summary,
+            turn_index=item.turn_index,
+            detail_id=item.detail_id,
+            detail_lines=details.lines if details else [],
+        )
 
     def add_failure(self, content: str, *, turn_index: int) -> None:
         self._items.append(TimelineItem(item_id=next(self._ids), role="failure", turn_index=turn_index, content=content, status="failed", title="失败"))
         self._render_timeline()
+
+    def toggle_detail(self, item_id: int) -> bool:
+        for item in self._items:
+            if item.item_id != item_id:
+                continue
+            if not item.detail_lines:
+                return False
+            item.expanded = not item.expanded
+            self._focused_item_id = item.item_id
+            self._sync_block_or_mark_dirty(item)
+            return True
+        return False
+
+    def toggle_current_detail(self) -> bool:
+        item_id = self._focused_item_id
+        if item_id is not None and self.toggle_detail(item_id):
+            return True
+        for item in reversed(self._items):
+            if item.detail_lines:
+                return self.toggle_detail(item.item_id)
+        return False
+
+    def action_toggle_current_detail(self) -> None:
+        self.toggle_current_detail()
 
     def add_assistant_message(self, content: str, *, turn_index: int) -> None:
         self._items.append(TimelineItem(item_id=next(self._ids), role="assistant", turn_index=turn_index, content=content, status="done", title="HaAgent"))
@@ -342,6 +443,12 @@ class ConversationTimeline(VerticalScroll):
         self._sync_blocks()
         self._mark_plain_text_dirty()
 
+    def _render_or_mark_dirty(self) -> None:
+        if self.is_attached:
+            self._render_timeline()
+            return
+        self._mark_plain_text_dirty()
+
     def _sync_block(self, item: TimelineItem) -> None:
         block = self._blocks.get(item.item_id)
         if block is None:
@@ -351,6 +458,12 @@ class ConversationTimeline(VerticalScroll):
         self.set_class(bool(self._items), "timeline-ready")
         if self._stick_to_bottom:
             self.call_after_refresh(self.scroll_end_if_sticky)
+
+    def _sync_block_or_mark_dirty(self, item: TimelineItem) -> None:
+        if self.is_attached:
+            self._sync_block(item)
+            return
+        self._mark_plain_text_dirty()
 
     def _queue_tool_activity_sync(self, item: TimelineItem) -> None:
         self._pending_tool_item_ids.add(item.item_id)
@@ -565,39 +678,31 @@ def _render_timeline_item(item: TimelineItem, *, show_tool_details: bool) -> str
     lines = [f"{marker} [{label}]"]
     if item.tools:
         lines.extend(_render_tool_summary(item.tools, show_details=show_tool_details))
-    if item.content:
-        lines.extend(item.content.splitlines())
+    body = _timeline_item_body(item)
+    if body:
+        lines.extend(body.splitlines())
     if item.role == "assistant" and item.status == "streaming":
         lines.append("  生成中 · HaAgent")
     return "\n".join(lines)
 
 
-def _task_progress_text(event: TaskProgressEvent) -> str:
-    parts = [f"{event.step_id} [{event.status}/{event.owner}]", event.title]
-    lines = [" ".join(part for part in parts if part).strip()]
-    details: list[str] = []
-    if event.event_name:
-        details.append(f"event={event.event_name}")
-    category = meaningful_task_progress_value(event.category)
-    suggested_action = meaningful_task_progress_value(event.suggested_action)
-    if category:
-        details.append(f"category={category}")
-    if suggested_action:
-        details.append(f"suggested_action={suggested_action}")
-    if event.evidence_count:
-        details.append(f"evidence={event.evidence_count}")
-    if event.checkpoint_count:
-        details.append(f"checkpoints={event.checkpoint_count}")
-    if event.reason_chars:
-        details.append(f"reason={event.reason_chars} chars")
-    if details:
-        lines.append("  " + " · ".join(details))
-    summary = event.summary.strip()
-    if summary:
-        if len(summary) > 240:
-            summary = summary[:237].rstrip() + "..."
-        lines.append("  " + summary)
+def _timeline_item_body(item: TimelineItem) -> str:
+    content = item.content or ""
+    if not item.detail_lines:
+        return content
+    if not item.expanded:
+        return content.replace("详情：按 Enter 收起", "详情：按 Enter 展开")
+    lines = content.replace("详情：按 Enter 展开", "详情：按 Enter 收起").splitlines()
+    lines.append("")
+    lines.extend(_bounded_detail_line(line) for line in item.detail_lines)
     return "\n".join(lines)
+
+
+def _bounded_detail_line(line: str) -> str:
+    value = line.strip()
+    if len(value) <= PRESENTATION_DETAIL_LINE_LIMIT:
+        return value
+    return value[: PRESENTATION_DETAIL_LINE_LIMIT - 3].rstrip() + "..."
 
 
 def timeline_render_metrics(items: list[TimelineItem], *, show_tool_details: bool) -> TimelineRenderMetrics:
@@ -667,8 +772,8 @@ class TimelineBlock(Vertical):
         if isinstance(body, Markdown):
             self._update_markdown_body(body, item)
         else:
-            body.update(item.content or "")
-        body.display = bool(item.content)
+            body.update(_timeline_item_body(item))
+        body.display = bool(_timeline_item_body(item))
         if item.role == "assistant" and item.status == "streaming":
             self._start_streaming_indicator()
             active_text = self._streaming_indicator_text()
@@ -684,6 +789,8 @@ class TimelineBlock(Vertical):
         self.set_class(item.role == "user", "timeline-user")
         self.set_class(item.role == "assistant", "timeline-assistant")
         self.set_class(item.role == "system", "timeline-system")
+        self.set_class(item.role == "notice", "timeline-notice")
+        self.set_class(item.role == "effect", "timeline-effect")
         self.set_class(item.role == "failure" or item.status == "failed", "timeline-failed")
 
     def _update_markdown_body(self, body: Markdown, item: TimelineItem) -> None:
@@ -857,6 +964,8 @@ def _role_label(role: TimelineRole) -> str:
         "assistant": "HaAgent",
         "system": "系统",
         "failure": "失败",
+        "notice": "提示",
+        "effect": "操作",
     }[role]
 
 
@@ -865,6 +974,10 @@ def _role_marker(role: TimelineRole, status: TimelineStatus) -> str:
         return ">"
     if role == "failure" or status == "failed":
         return "!"
+    if role == "notice":
+        return "!"
+    if role == "effect":
+        return "+"
     if role == "assistant" and status == "streaming":
         return ">>"
     return "|"

@@ -23,7 +23,13 @@ from haagent.runtime.events import (
     WarningNoticeEvent,
 )
 from haagent.tui.design.failures import failure_from_payload
-from haagent.tui.widgets.task_progress_visibility import should_show_task_progress
+from haagent.tui.presentation.progress import (
+    ProgressPresentation,
+    present_approval_state,
+    present_task_progress,
+    present_tool_activity,
+    present_user_input_state,
+)
 from haagent.tui.widgets.timeline import ConversationTimeline
 
 
@@ -46,43 +52,35 @@ def _handle_assistant_delta(app, event: RuntimeUiEvent) -> None:
 def _handle_assistant_message(app, event: RuntimeUiEvent) -> None:
     typed = _as_event(event, AssistantMessageEvent)
     app._finalize_assistant_message(typed.turn_index, typed.content)
+    app.clear_progress_status()
 
 
 def _handle_tool_activity(app, event: ToolActivityEvent) -> None:
-    status = "running"
-    if event.status == "finished":
-        status = "done"
-    elif event.status == "failed":
-        status = "failed"
-    app._record_tool_activity(event.turn_index, event.tool_name, status, event.summary or status)
+    presentation = present_tool_activity(event)
+    _apply_progress_presentation(app, presentation)
 
 
 def _handle_approval_state(app, event: ApprovalStateEvent) -> None:
-    label = "文件改动" if event.approval_kind == "edit_diff" else "审批"
     if event.state == "requested":
+        app.clear_progress_status()
         app._state = "waiting approval"
-        summary = "文件改动等待审批" if event.approval_kind == "edit_diff" else "等待审批"
-        app._record_tool_activity(event.turn_index, event.tool_name, "approval", summary)
+        _apply_progress_presentation(app, present_approval_state(event))
         return
     if event.state == "granted":
         app._state = "running"
-        app._record_tool_activity(event.turn_index, event.tool_name, "running", f"{label}已允许")
         return
-    app._record_tool_activity(event.turn_index, event.tool_name, "failed", f"{label}已拒绝")
-    app._append_line(f"{label}已拒绝：{event.tool_name}")
+    _apply_progress_presentation(app, present_approval_state(event))
 
 
 def _handle_user_input_state(app, event: UserInputStateEvent) -> None:
     if event.state == "requested":
+        app.clear_progress_status()
         app._state = "waiting input"
         app._set_answer_required(event.question)
-        app._append_block("Answer required", event.question)
+        _apply_progress_presentation(app, present_user_input_state(event))
         return
     app._state = "running"
-    if event.approved is False:
-        app._append_line(f"回答已取消：{event.tool_name}")
-    else:
-        app._append_line(f"回答已提交：{event.tool_name}")
+    _apply_progress_presentation(app, present_user_input_state(event))
 
 
 def _handle_memory_notice(app, event: MemoryNoticeEvent) -> None:
@@ -95,6 +93,7 @@ def _handle_memory_notice(app, event: MemoryNoticeEvent) -> None:
 
 
 def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
+    app.clear_progress_status()
     app._state = "failed"
     app._last_failure = failure_from_payload(
         {
@@ -111,9 +110,8 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
 
 
 def _handle_task_progress(app, event: TaskProgressEvent) -> None:
-    if not should_show_task_progress(event):
-        return
-    app.query_one("#conversation", ConversationTimeline).add_task_progress(event)
+    presentation = present_task_progress(event)
+    _apply_progress_presentation(app, presentation)
 
 
 def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
@@ -126,6 +124,8 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
 
 
 def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:
+    if event.state in {"turn_finished", "session_finished"}:
+        app.clear_progress_status()
     sandbox = event.details.get("sandbox")
     if not isinstance(sandbox, dict):
         return
@@ -162,6 +162,18 @@ def _warning_detail_message(event: WarningNoticeEvent) -> str:
     if event.notice_kind == "compression_diagnostic":
         return event.message
     return event.message
+
+
+def _apply_progress_presentation(app, presentation: ProgressPresentation) -> None:
+    if presentation.status_line is not None:
+        app.set_progress_status(presentation.status_line)
+    if presentation.timeline_item is None:
+        return
+    app.clear_progress_status()
+    app.query_one("#conversation", ConversationTimeline).add_presentation_item(
+        presentation.timeline_item,
+        presentation.details,
+    )
 
 
 RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {

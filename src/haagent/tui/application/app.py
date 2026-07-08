@@ -47,6 +47,7 @@ from haagent.tui.overlays.models import (
 from haagent.tui.design.renderers import status_line
 from haagent.tui.application.runtime_events import handle_runtime_ui_event
 from haagent.tui.state import MIN_HEIGHT, MIN_WIDTH, PendingInteraction, layout_for_size
+from haagent.tui.presentation.progress import ProgressStatusState
 from haagent.tui.design.theme import (
     next_theme,
     no_color_enabled,
@@ -64,6 +65,7 @@ from haagent.tui.widgets import (
     ConversationTimeline,
     ConversationView,
     FooterBar,
+    ProgressStatusLine,
     PromptInput,
     ResizeMessage,
     StatusBar,
@@ -143,6 +145,7 @@ class HaAgentTuiApp(App[None]):
         with Horizontal(id="main"):
             yield ConversationTimeline(id="conversation", wrap=True, auto_scroll=True)
         with Vertical(id="input-panel"):
+            yield ProgressStatusLine("", id="progress-status")
             yield PromptInput(placeholder=self._default_prompt_placeholder, id="prompt-input", show_line_numbers=False)
         yield FooterBar(footer_text("chat"), id="footer-bar")
 
@@ -1125,6 +1128,15 @@ class HaAgentTuiApp(App[None]):
     def _record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         conversation = self.query_one("#conversation", ConversationTimeline)
         conversation.add_tool_diagnostic(turn_index, tool_name, safe_summary(message, 120))
+
+    def set_progress_status(self, status: ProgressStatusState) -> None:
+        self.query_one("#progress-status", ProgressStatusLine).update_status(
+            status.text,
+            severity=status.severity,
+        )
+
+    def clear_progress_status(self) -> None:
+        self.query_one("#progress-status", ProgressStatusLine).clear()
 
     def _handle_interaction(self, request: HumanInteractionRequest) -> HumanInteractionResponse:
         pending = PendingInteraction(request)

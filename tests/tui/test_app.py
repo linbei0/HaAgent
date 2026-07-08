@@ -28,6 +28,7 @@ from haagent.runtime.events import (
     MemoryNoticeEvent,
     RuntimeUiEvent,
     RuntimeUiEventMapper,
+    TaskProgressEvent,
     ToolActivityEvent,
     UserInputStateEvent,
 )
@@ -43,6 +44,7 @@ from haagent.tui.design.renderers import memory_panel_text, status_line
 from haagent.tui.state.search import ConversationSearchState
 from haagent.tui.overlays.sessions import SessionOverlayState
 from haagent.tui.state import ResponsiveLayout, layout_for_size
+from haagent.tui.presentation.progress import ProgressStatusState
 from haagent.tui.design.theme import (
     SemanticToken,
     TuiThemeMode,
@@ -51,7 +53,7 @@ from haagent.tui.design.theme import (
     semantic_tokens,
     status_semantic,
 )
-from haagent.tui.widgets import ConversationTimeline, PromptInput
+from haagent.tui.widgets import ConversationTimeline, ProgressStatusLine, PromptInput
 from haagent.tui.typography.wrap import is_textual_line_breaking_installed
 from textual.widgets import Markdown, RichLog, TextArea
 from textual.screen import Screen
@@ -1133,7 +1135,7 @@ def test_tui_agents_command_lists_current_workers(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_tui_timeline_shows_worker_lifecycle_events(tmp_path: Path) -> None:
+def test_tui_timeline_hides_worker_lifecycle_internal_events(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
             workspace_root=tmp_path,
@@ -1169,8 +1171,10 @@ def test_tui_timeline_shows_worker_lifecycle_events(tmp_path: Path) -> None:
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "agent:explorer-1" in conversation
             assert "已综合 worker 结果。" in conversation
+            assert "agent:explorer-1" not in conversation
+            assert "worker_started" not in conversation
+            assert "worker_completed" not in conversation
 
     asyncio.run(run())
 
@@ -2505,6 +2509,72 @@ def test_tui_default_theme_applies_semantic_classes_and_chinese_titles(tmp_path:
     asyncio.run(run())
 
 
+def test_tui_progress_status_line_updates_and_clears(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)):
+            status = app.query_one("#progress-status", ProgressStatusLine)
+
+            assert status.display is False
+
+            app.set_progress_status(
+                ProgressStatusState(
+                    text="正在阅读文件...",
+                    severity="info",
+                    turn_index=1,
+                    source="tool",
+                )
+            )
+
+            assert status.display is True
+            assert "正在阅读文件..." in _text(app, "#progress-status")
+
+            app.clear_progress_status()
+
+            assert status.display is False
+            assert _text(app, "#progress-status") == ""
+
+    asyncio.run(run())
+
+
+def test_plain_greeting_never_shows_task_progress_or_status_line(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            assistant_content="你好！我是 HaAgent。",
+            extra_events=[
+                TaskProgressEvent(
+                    session_id="session-test",
+                    turn_index=1,
+                    model_turn=1,
+                    event_name="task_step_progress",
+                    step_id="step-001",
+                    title="你好",
+                    status="running",
+                    summary="model turn started",
+                    owner="main",
+                    category="model_turn_started",
+                )
+            ],
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "你好"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = _text(app, "#conversation")
+            assert "你好！我是 HaAgent。" in conversation
+            assert "任务进度" not in conversation
+            assert "step-001" not in conversation
+            assert "model_turn_started" not in conversation
+            assert _text(app, "#progress-status") == ""
+
+    asyncio.run(run())
+
+
 def test_tui_light_theme_can_be_enabled_without_losing_status_classes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("HAAGENT_TUI_THEME", "light")
@@ -3463,10 +3533,11 @@ def test_tui_slash_command_suggestions_scroll_visible_window() -> None:
 
     rendered = state.render()
 
-    assert "/web" in rendered
+    assert "> " in rendered
+    assert any(command.name in rendered for command in command_registry().commands())
     assert "/help" not in rendered
     assert "/skill" in rendered
-    assert "> /web" in rendered
+    assert rendered.count("> ") == 1
 
 
 def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> None:
@@ -3537,8 +3608,10 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             assert deny_has_focus
             assert "state: waiting approval" in status
             assert list(app.query("#side-bar")) == []
-            assert "工具 1 项" in conversation
-            assert "1 待确认" in conversation
+            assert "需要确认：shell" in conversation
+            assert "建议：在弹窗中确认或拒绝" in conversation
+            assert "工具 1 项" not in conversation
+            assert "1 待确认" not in conversation
             assert "shell" in conversation
 
     asyncio.run(run())
@@ -3572,11 +3645,13 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
-            assert "工具 2 项" in conversation
-            assert "1 成功" in conversation
-            assert "1 失败" in conversation
-            assert "file_write" in conversation
+            assert "已写入文件" in conversation
+            assert "文件已写入" in conversation
+            assert "工具 1 项" not in conversation
+            assert "1 失败" not in conversation
+            assert "file_write" not in conversation
             assert "shell" in conversation
+            assert "需要确认：shell" in conversation
             assert "审批已拒绝：shell" in conversation
             assert "查看工具详情" not in conversation
             assert "任务工作台" not in conversation
@@ -3773,7 +3848,9 @@ def test_tui_user_input_answer_continues_same_run_prompt_events(tmp_path: Path) 
                 HumanInteractionResponse(approved=True, answer="README.md"),
             ]
             conversation = _text(app, "#conversation")
-            assert "回答已提交：request_user_input" in conversation
+            assert "回答已提交：request_user_input" not in conversation
+            assert "需要补充信息" in conversation
+            assert "Which file should I inspect?" in conversation
             assert "README.md" not in conversation
             assert "assistant: Inspect" in conversation
 
@@ -3794,7 +3871,8 @@ def test_tui_user_input_cancel_returns_explicit_denial(tmp_path: Path) -> None:
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
             conversation = _text(app, "#conversation")
             assert "回答已取消：request_user_input" in conversation
-            assert "工具 1 项" in conversation
+            assert "工具运行失败：request_user_input" in conversation
+            assert "工具 1 项" not in conversation
             assert "request_user_input" in conversation
             assert "失败" in conversation
             assert "state: failed" in _text(app, "#status-bar")
@@ -4281,7 +4359,7 @@ def test_tui_streamed_markdown_table_cells_do_not_show_tooltips(tmp_path: Path) 
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -4391,7 +4469,7 @@ def test_tui_streaming_turn_keeps_existing_widget_instances_stable(tmp_path: Pat
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -4420,7 +4498,8 @@ def test_tui_streaming_turn_keeps_existing_widget_instances_stable(tmp_path: Pat
             children_before = list(conversation.children)
 
             rendered = _text(app, "#conversation")
-            assert "file_read" in rendered
+            assert "正在阅读文件..." in _text(app, "#progress-status")
+            assert "file_read" not in rendered
             assert "生成中" in rendered
             assert list(conversation.query(".timeline-assistant"))[-1] is assistant_block
             assert list(conversation.children) == children_before
@@ -4439,7 +4518,7 @@ def test_tui_streaming_assistant_shows_rotating_cursor_and_cleans_up(tmp_path: P
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -4493,7 +4572,7 @@ def test_tui_streaming_cursor_keeps_text_semantics_in_no_color_mode(tmp_path: Pa
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None):
+        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -4526,7 +4605,7 @@ def test_tui_streaming_cursor_keeps_text_semantics_in_no_color_mode(tmp_path: Pa
     asyncio.run(run())
 
 
-def test_tui_compact_tool_summary_keeps_active_tool_visible_when_details_off(tmp_path: Path) -> None:
+def test_tui_read_only_tool_activity_does_not_persist_when_details_off(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
             workspace_root=tmp_path,
@@ -4547,10 +4626,11 @@ def test_tui_compact_tool_summary_keeps_active_tool_visible_when_details_off(tmp
             await pilot.pause(0.2)
 
             compact = _text(app, "#conversation")
-            assert "工具 3 项" in compact
-            assert "2 成功" in compact
-            assert "1 运行中" in compact
-            assert "web_fetch" in compact
+            assert "资料已经核对。" in compact
+            assert "工具 " not in compact
+            assert "file_read" not in compact
+            assert "web_search" not in compact
+            assert "web_fetch" not in compact
 
     asyncio.run(run())
 
@@ -4614,7 +4694,7 @@ def test_tui_conversation_scrollbar_states_do_not_use_black_track(tmp_path: Path
     asyncio.run(run())
 
 
-def test_tui_tool_events_attach_to_turn_summary_and_keep_answer_readable(tmp_path: Path) -> None:
+def test_tui_tool_failure_adds_actionable_notice_and_keeps_answer_readable(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
             workspace_root=tmp_path,
@@ -4634,19 +4714,18 @@ def test_tui_tool_events_attach_to_turn_summary_and_keep_answer_readable(tmp_pat
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "工具 2 项" in conversation
-            assert "1 成功" in conversation
-            assert "1 失败" in conversation
+            assert "工具运行失败：web_search" in conversation
+            assert "建议：查看错误摘要后重试或调整命令" in conversation
+            assert "详情：按 Enter 展开" in conversation
+            assert "工具 2 项" not in conversation
             assert "运行中" not in conversation
-            assert "file_read" in conversation
             assert "web_search" in conversation
             assert "我已经整理好结论。" in conversation
-            assert conversation.index("工具 2 项") < conversation.index("我已经整理好结论。")
 
     asyncio.run(run())
 
 
-def test_tui_tool_summary_defaults_to_single_line_even_for_few_tools(tmp_path: Path) -> None:
+def test_tui_tool_failure_notice_omits_long_read_only_summaries(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
             workspace_root=tmp_path,
@@ -4666,16 +4745,15 @@ def test_tui_tool_summary_defaults_to_single_line_even_for_few_tools(tmp_path: P
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "工具 2 项" in conversation
-            assert "1 成功" in conversation
-            assert "1 失败" in conversation
+            assert "工具运行失败：web_search" in conversation
+            assert "工具 2 项" not in conversation
             assert "reading very long local file" not in conversation
             assert "web_search failed with timeout" not in conversation
 
     asyncio.run(run())
 
 
-def test_tui_tool_summary_counts_calls_not_events_for_repeated_tools(tmp_path: Path) -> None:
+def test_tui_read_only_tool_events_do_not_count_calls_in_timeline(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(
             workspace_root=tmp_path,
@@ -4700,10 +4778,11 @@ def test_tui_tool_summary_counts_calls_not_events_for_repeated_tools(tmp_path: P
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "工具 5 项" in conversation
-            assert "3 成功" in conversation
-            assert "1 运行中" in conversation
-            assert "1 失败" in conversation
+            assert "工具运行失败：web_fetch" in conversation
+            assert "工具 5 项" not in conversation
+            assert "3 成功" not in conversation
+            assert "1 运行中" not in conversation
+            assert "1 失败" not in conversation
             assert "工具 9 项" not in conversation
             assert "5 运行中" not in conversation
 
@@ -4738,10 +4817,14 @@ def test_tui_tool_summary_updates_pending_confirmation_on_response_events(tmp_pa
             await pilot.pause(0.4)
 
             conversation = _text(app, "#conversation")
-            assert "工具 3 项" in conversation
-            assert "1 运行中" in conversation
-            assert "2 失败" in conversation
-            assert "待确认" not in conversation
+            assert "需要确认：code_run" in conversation
+            assert "审批已拒绝：code_run" in conversation
+            assert "需要确认：shell" in conversation
+            assert "需要确认文件改动" in conversation
+            assert "文件改动已拒绝" in conversation
+            assert "工具 3 项" not in conversation
+            assert "1 运行中" not in conversation
+            assert "2 失败" not in conversation
             assert "审批已允许：shell" not in conversation
 
     asyncio.run(run())
@@ -4811,8 +4894,9 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause(0.2)
             compact = _text(app, "#conversation")
-            assert "工具 3 项" in compact
-            assert "web_fetch" in compact
+            assert "工具 1 项" in compact
+            assert "web_fetch" not in compact
+            assert "file_read" not in compact
             assert "result compacted" not in compact
             assert "File change succeeded" not in compact
             assert "旧工具消息降级" not in compact
@@ -4822,10 +4906,10 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             detailed = _text(app, "#conversation")
             assert "工具详情已开启" in detailed
-            assert "web_fetch" in detailed
-            assert "工具 file_read ok" in detailed
             assert "工具 web_search ok" in detailed
             assert "旧工具消息降级：web_search 1854 chars -> 929 chars" in detailed
+            assert "web_fetch" not in detailed
+            assert "工具 file_read ok" not in detailed
             assert "File change succeeded" not in detailed
 
     asyncio.run(run())
@@ -4914,7 +4998,7 @@ def test_tui_no_color_timeline_keeps_role_and_status_labels(tmp_path: Path, monk
             conversation = _text(app, "#conversation")
             assert "[你]" in conversation
             assert "[HaAgent]" in conversation
-            assert "[工具]" in conversation
+            assert "[工具运行失败：web_fetch]" in conversation
             assert "失败" in conversation
 
     asyncio.run(run())

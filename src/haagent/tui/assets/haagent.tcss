@@ -170,6 +170,20 @@ ConversationTimeline {
     padding: 0 1;
 }
 
+#progress-status {
+    width: 1fr;
+    height: 1;
+    color: $foreground-muted;
+}
+
+.progress-warning {
+    color: $warning;
+}
+
+.progress-error {
+    color: $error;
+}
+
 #file-ref-dialog {
     width: 1fr;
     height: 9;

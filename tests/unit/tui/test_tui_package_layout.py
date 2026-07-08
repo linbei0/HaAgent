@@ -33,6 +33,7 @@ def test_tui_top_level_packages_are_named_by_responsibility() -> None:
         "flows",
         "memory",
         "overlays",
+        "presentation",
         "state",
         "typography",
         "widgets",
