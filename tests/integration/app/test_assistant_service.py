@@ -32,7 +32,7 @@ from haagent.models.model_connections import (
     save_active_model_selection,
     save_provider_connection,
 )
-from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent
+from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent, TaskProgressEvent
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills.marketplace import MarketplaceProvider, MarketplaceSearchResult, MarketplaceSkillCard
 
@@ -1313,17 +1313,17 @@ def test_run_prompt_events_forwards_chat_events(tmp_path: Path, monkeypatch) -> 
     result = service.run_prompt_events("send events", event_sink=events.append)
 
     assert result.status == "completed"
-    assert [
-        event.state if isinstance(event, SessionLifecycleEvent) else type(event).__name__
-        for event in events
-    ] == [
+    assert [event.state for event in events if isinstance(event, SessionLifecycleEvent)] == [
         "session_started",
         "turn_started",
-        "AssistantMessageEvent",
         "turn_finished",
         "session_finished",
     ]
     assert any(isinstance(event, AssistantMessageEvent) for event in events)
+    assert [event.event_name for event in events if isinstance(event, TaskProgressEvent)] == [
+        "task_step_started",
+        "task_step_finished",
+    ]
 
 
 def test_service_reuses_last_sent_image_attachments_for_followup_turn(

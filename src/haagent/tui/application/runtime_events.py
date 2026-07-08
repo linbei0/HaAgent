@@ -23,6 +23,8 @@ from haagent.runtime.events import (
     WarningNoticeEvent,
 )
 from haagent.tui.design.failures import failure_from_payload
+from haagent.tui.task_progress_visibility import should_show_task_progress
+from haagent.tui.widgets.timeline import ConversationTimeline
 
 
 RuntimeUiEventHandler = Callable[[object, RuntimeUiEvent], None]
@@ -109,7 +111,9 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
 
 
 def _handle_task_progress(app, event: TaskProgressEvent) -> None:
-    app._timeline.add_task_progress(event)
+    if not should_show_task_progress(event):
+        return
+    app.query_one("#conversation", ConversationTimeline).add_task_progress(event)
 
 
 def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:

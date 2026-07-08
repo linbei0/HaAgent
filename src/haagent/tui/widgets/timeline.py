@@ -22,6 +22,7 @@ from textual.timer import Timer
 from textual.widgets import Log, Markdown, Static, TextArea
 
 from haagent.runtime.events.types import TaskProgressEvent
+from haagent.tui.task_progress_visibility import meaningful_task_progress_value, should_show_task_progress
 
 
 class PromptInput(TextArea):
@@ -261,6 +262,8 @@ class ConversationTimeline(VerticalScroll):
         self._render_timeline()
 
     def add_task_progress(self, event: TaskProgressEvent) -> None:
+        if not should_show_task_progress(event):
+            return
         self._items.append(
             TimelineItem(
                 item_id=next(self._ids),
@@ -575,10 +578,12 @@ def _task_progress_text(event: TaskProgressEvent) -> str:
     details: list[str] = []
     if event.event_name:
         details.append(f"event={event.event_name}")
-    if event.category:
-        details.append(f"category={event.category}")
-    if event.suggested_action:
-        details.append(f"suggested_action={event.suggested_action}")
+    category = meaningful_task_progress_value(event.category)
+    suggested_action = meaningful_task_progress_value(event.suggested_action)
+    if category:
+        details.append(f"category={category}")
+    if suggested_action:
+        details.append(f"suggested_action={suggested_action}")
     if event.evidence_count:
         details.append(f"evidence={event.evidence_count}")
     if event.checkpoint_count:

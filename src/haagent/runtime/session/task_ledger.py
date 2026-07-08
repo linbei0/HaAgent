@@ -22,6 +22,7 @@ LEDGER_STATUSES = {"planning", "running", "blocked", "failed", "completed", "can
 STEP_STATUSES = {"pending", "running", "completed", "blocked", "failed", "skipped"}
 STEP_KINDS = {"plan", "research", "read", "edit", "verify", "summarize", "ask_user", "delegate", "recover"}
 STEP_OWNERS = {"main", "worker"}
+TERMINAL_LEDGER_STATUSES = {"completed", "failed", "cancelled"}
 
 
 class TaskLedgerError(Exception):
@@ -163,6 +164,37 @@ def write_task_ledger(path: Path, ledger: TaskLedger) -> None:
     )
 
 
+def begin_task_ledger_turn(ledger: TaskLedger, *, prompt: str, turn_index: int) -> TaskLedger:
+    should_start_new = (
+        ledger.is_empty()
+        or ledger.status in TERMINAL_LEDGER_STATUSES
+        or (ledger.status == "planning" and not ledger.steps)
+    )
+    source = empty_task_ledger(prompt) if should_start_new else ledger
+    steps = [task_step_from_dict(step.to_dict()) for step in source.steps]
+    checkpoints = [task_checkpoint_from_dict(checkpoint.to_dict()) for checkpoint in source.checkpoints]
+    current_step_id = source.current_step_id
+    if not steps:
+        steps.append(_new_turn_step(prompt, turn_index))
+        current_step_id = "step-001"
+    elif current_step_id is None:
+        current_step_id = steps[-1].id
+    active = _find_or_default_step(steps, current_step_id)
+    if active is not None and active.status in {"pending", "blocked", "failed", "skipped"}:
+        active.status = "running"
+        active.blocker = None
+        active.updated_turn = turn_index
+    return TaskLedger(
+        goal=source.goal or _bounded_text(prompt, TASK_LEDGER_TEXT_FIELD_LIMIT),
+        status="running",
+        current_step_id=current_step_id,
+        steps=steps,
+        checkpoints=checkpoints,
+        budgets={**source.budgets, "turns_used": turn_index},
+        updated_turn=turn_index,
+    )
+
+
 def update_task_ledger(
     ledger: TaskLedger,
     *,
@@ -172,23 +204,12 @@ def update_task_ledger(
     episode_path: Path,
     runtime_events: list[dict[str, object]],
 ) -> TaskLedger:
-    steps = [task_step_from_dict(step.to_dict()) for step in ledger.steps]
-    checkpoints = [task_checkpoint_from_dict(checkpoint.to_dict()) for checkpoint in ledger.checkpoints]
-    goal = ledger.goal or _bounded_text(prompt, TASK_LEDGER_TEXT_FIELD_LIMIT)
-    status = ledger.status if not ledger.is_empty() else "running"
-    current_step_id = ledger.current_step_id
-    if not steps:
-        steps.append(
-            TaskStep(
-                id="step-001",
-                title=_bounded_text(prompt or "Process task"),
-                kind="plan",
-                owner="main",
-                status="running",
-                updated_turn=turn_index,
-            ),
-        )
-        current_step_id = "step-001"
+    current = begin_task_ledger_turn(ledger, prompt=prompt, turn_index=turn_index)
+    steps = [task_step_from_dict(step.to_dict()) for step in current.steps]
+    checkpoints = [task_checkpoint_from_dict(checkpoint.to_dict()) for checkpoint in current.checkpoints]
+    goal = current.goal
+    status = current.status
+    current_step_id = current.current_step_id
 
     for event in runtime_events:
         event_type = str(event.get("event_type", ""))
@@ -264,16 +285,22 @@ def update_task_ledger(
             if not parent_step_id:
                 current_step_id = step.id
 
+    _apply_result_status_to_active_step(
+        steps,
+        current_step_id=current_step_id,
+        result_status=result_status,
+        episode_path=episode_path,
+    )
     checkpoints.append(_checkpoint_for_turn(checkpoints, steps, current_step_id, turn_index, episode_path))
-    if status != "blocked" and result_status == "failed":
-        status = "failed"
+    if status != "blocked" and result_status in TERMINAL_LEDGER_STATUSES:
+        status = result_status
     return TaskLedger(
         goal=goal,
         status=status,
         current_step_id=current_step_id,
         steps=steps,
         checkpoints=checkpoints,
-        budgets={**ledger.budgets, "turns_used": turn_index},
+        budgets={**current.budgets, "turns_used": turn_index},
         updated_turn=turn_index,
     )
 
@@ -461,6 +488,17 @@ def _find_or_default_step(steps: list[TaskStep], step_id: str | None) -> TaskSte
     return steps[-1] if steps else None
 
 
+def _new_turn_step(prompt: str, turn_index: int) -> TaskStep:
+    return TaskStep(
+        id="step-001",
+        title=_bounded_text(prompt or "Process task"),
+        kind="plan",
+        owner="main",
+        status="running",
+        updated_turn=turn_index,
+    )
+
+
 def _ensure_step(steps: list[TaskStep], step_id: str, title: str, owner: str) -> TaskStep:
     for step in steps:
         if step.id == step_id:
@@ -474,6 +512,32 @@ def _ensure_step(steps: list[TaskStep], step_id: str, title: str, owner: str) ->
     )
     steps.append(step)
     return step
+
+
+def _apply_result_status_to_active_step(
+    steps: list[TaskStep],
+    *,
+    current_step_id: str | None,
+    result_status: str,
+    episode_path: Path,
+) -> None:
+    if result_status not in TERMINAL_LEDGER_STATUSES:
+        return
+    step = _find_or_default_step(steps, current_step_id)
+    if step is None or step.status == "blocked":
+        return
+    if result_status == "completed":
+        step.status = "completed"
+    elif result_status == "failed":
+        step.status = "failed"
+        step.blocker = {"category": "turn_failed", "reason": "episode failed"}
+    elif result_status == "cancelled":
+        step.status = "skipped"
+        step.blocker = {"category": "turn_cancelled", "reason": "user cancelled current run"}
+    step.evidence_refs = _bounded_string_list([
+        *step.evidence_refs,
+        f"episode={episode_path}",
+    ])
 
 
 def _tool_evidence(event: dict[str, object]) -> str:

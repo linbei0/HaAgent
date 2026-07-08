@@ -35,3 +35,39 @@ def test_timeline_adds_task_progress_without_full_reason() -> None:
     assert "retry_worker_or_take_over" in timeline.plain_text
     assert "2000 chars" in timeline.plain_text
 
+
+def test_timeline_suppresses_plain_turn_lifecycle_task_progress() -> None:
+    timeline = ConversationTimeline()
+    started = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_step_started",
+        step_id="step-001",
+        title="你好",
+        status="running",
+        summary="started task step step-001: 你好",
+        category="none",
+        suggested_action="none",
+    )
+    finished = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_step_finished",
+        step_id="step-001",
+        title="你好",
+        status="completed",
+        summary="completed task step step-001: 你好",
+        category="none",
+        suggested_action="none",
+        evidence_count=1,
+        checkpoint_count=1,
+    )
+
+    timeline.add_task_progress(started)
+    timeline.add_task_progress(finished)
+
+    assert "任务进度" not in timeline.plain_text
+    assert "task_step_started" not in timeline.plain_text
+    assert "task_step_finished" not in timeline.plain_text

@@ -184,3 +184,56 @@ def test_update_task_ledger_tracks_progress_and_worker_failure(tmp_path) -> None
     assert worker_step.blocker["category"] == "worker_failure"
     assert updated.checkpoints
     assert updated.checkpoints[-1].episode_path.endswith("episode-1")
+
+
+def test_completed_turn_closes_running_task_ledger_step(tmp_path) -> None:
+    ledger = update_task_ledger(
+        empty_task_ledger(),
+        prompt="修复长任务状态同步",
+        turn_index=1,
+        result_status="completed",
+        episode_path=tmp_path / ".runs" / "episode-completed",
+        runtime_events=[
+            {
+                "event_type": "tool_finished",
+                "tool_name": "shell",
+                "args": {"command": "uv run pytest tests/unit/runtime/test_task_ledger.py -q"},
+                "result": {"status": "success", "exit_code": 0},
+            },
+        ],
+    )
+
+    assert ledger.goal == "修复长任务状态同步"
+    assert ledger.status == "completed"
+    assert ledger.current_step_id == "step-001"
+    assert ledger.steps[0].status == "completed"
+    assert ledger.steps[0].title == "修复长任务状态同步"
+    assert ledger.steps[0].evidence_refs[-1].endswith("episode-completed")
+
+
+def test_terminal_ledger_starts_new_goal_on_next_turn(tmp_path) -> None:
+    previous = update_task_ledger(
+        empty_task_ledger(),
+        prompt="yy",
+        turn_index=1,
+        result_status="cancelled",
+        episode_path=tmp_path / ".runs" / "episode-cancelled",
+        runtime_events=[],
+    )
+
+    next_turn = update_task_ledger(
+        previous,
+        prompt="正式修复 inspect warning",
+        turn_index=2,
+        result_status="completed",
+        episode_path=tmp_path / ".runs" / "episode-2",
+        runtime_events=[],
+    )
+
+    assert previous.status == "cancelled"
+    assert next_turn.goal == "正式修复 inspect warning"
+    assert next_turn.status == "completed"
+    assert next_turn.current_step_id == "step-001"
+    assert len(next_turn.steps) == 1
+    assert next_turn.steps[0].title == "正式修复 inspect warning"
+    assert next_turn.steps[0].status == "completed"

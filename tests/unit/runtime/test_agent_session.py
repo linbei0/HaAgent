@@ -181,9 +181,112 @@ def test_agent_session_passes_task_ledger_to_turn_request(
 
     session.run_prompt_events("完成一个需要多步骤恢复的长任务")
 
-    assert captured["task_ledger"]["status"] == "planning"
-    assert captured["task_ledger"]["goal"] == ""
+    assert captured["task_ledger"]["status"] == "running"
+    assert captured["task_ledger"]["goal"] == "完成一个需要多步骤恢复的长任务"
     persisted = load_task_ledger(session.session_path / "task-ledger.json")
     assert persisted.goal == "完成一个需要多步骤恢复的长任务"
+    assert persisted.status == "completed"
     assert persisted.updated_turn == 1
     assert persisted.checkpoints
+
+
+def test_agent_session_records_in_band_shell_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(self, request):
+        request.event_sink(
+            {
+                "event_type": "tool_finished",
+                "turn": 1,
+                "tool_name": "shell",
+                "args": {"command": "uv run pytest tests/extended/test_cli_inspect.py -q --run-extended"},
+                "result": {"status": "success", "exit_code": 0},
+            },
+        )
+        return RunResult(
+            status=RunStatus.COMPLETED,
+            state_history=[RunStatus.EXECUTING, RunStatus.COMPLETED],
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-verify",
+        )
+
+    def _build_result(self, prompt, result):
+        del prompt, result
+        return ChatTurnResult(
+            session_id=self.session_id,
+            turn_index=1,
+            status="completed",
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-verify",
+            provider="fake",
+            final_response="ok",
+            verification_status="not_run",
+        )
+
+    monkeypatch.setattr(ChatTurnRunner, "run", _run)
+    monkeypatch.setattr(AgentSession, "_build_turn_result", _build_result)
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+
+    result = session.run_prompt_events("修复并验证 inspect 状态同步")
+
+    assert result.verification_status == "success"
+    turns = (session.session_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(turns[-1])["verification_status"] == "success"
+
+
+def test_agent_session_emits_task_progress_for_turn_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(self, request):
+        request.event_sink(
+            {
+                "event_type": "tool_finished",
+                "turn": 1,
+                "tool_name": "shell",
+                "args": {"command": "uv run pytest tests/unit/runtime/test_agent_session.py -q"},
+                "result": {"status": "success", "exit_code": 0},
+            },
+        )
+        return RunResult(
+            status=RunStatus.COMPLETED,
+            state_history=[RunStatus.EXECUTING, RunStatus.COMPLETED],
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-progress",
+        )
+
+    def _build_result(self, prompt, result):
+        del prompt, result
+        return ChatTurnResult(
+            session_id=self.session_id,
+            turn_index=1,
+            status="completed",
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-progress",
+            provider="fake",
+            final_response="ok",
+            verification_status="not_run",
+        )
+
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(ChatTurnRunner, "run", _run)
+    monkeypatch.setattr(AgentSession, "_build_turn_result", _build_result)
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+
+    session.run_prompt_events("修复并展示任务进度", event_sink=events.append)
+
+    progress_names = [
+        event.event_name
+        for event in events
+        if hasattr(event, "event_name")
+    ]
+    assert progress_names == [
+        "task_step_started",
+        "task_checkpoint_saved",
+        "task_step_finished",
+    ]

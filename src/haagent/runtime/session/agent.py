@@ -68,6 +68,7 @@ from haagent.runtime.session.working_state import (
 )
 from haagent.runtime.session.task_ledger import (
     TaskLedgerError,
+    begin_task_ledger_turn,
     empty_task_ledger,
     load_task_ledger,
     update_task_ledger,
@@ -364,6 +365,15 @@ class AgentSession:
         session_memory = self._session_memory()
         new_attachments = list(attachments or [])
         prompt_attachments = new_attachments if new_attachments else list(self._last_user_image_attachments)
+        self._task_ledger = begin_task_ledger_turn(
+            self._task_ledger,
+            prompt=clean_prompt,
+            turn_index=turn_index,
+        )
+        self._write_task_ledger()
+        started_event = _task_step_started_event(self._task_ledger)
+        if started_event is not None:
+            on_runtime_event(started_event)
         try:
             result = ChatTurnRunner().run(
                 ChatTurnRequest(
@@ -402,6 +412,7 @@ class AgentSession:
             raise
 
         turn_result = self._build_turn_result(clean_prompt, result)
+        turn_result = _with_in_band_verification(turn_result, runtime_events)
         self.turn_count += 1
         if new_attachments:
             self._last_user_image_attachments = list(new_attachments)
@@ -425,6 +436,8 @@ class AgentSession:
             runtime_events=runtime_events,
         )
         self._write_task_ledger()
+        for progress_event in _task_turn_closed_events(self._task_ledger, turn_result):
+            on_runtime_event(progress_event)
         self._historical_tool_compression_count += _count_historical_tool_compression_events(runtime_events)
         turn_summary = _turn_summary(clean_prompt, turn_result)
         self._summaries.append(turn_summary)
@@ -930,6 +943,124 @@ def _verification_status(commands: list[dict[str, Any]], verification_reached: b
     if any(command.get("status") != "success" for command in commands):
         return "failed"
     return "success"
+
+
+def _with_in_band_verification(
+    result: ChatTurnResult,
+    runtime_events: list[dict[str, object]],
+) -> ChatTurnResult:
+    if result.verification_status != "not_run":
+        return result
+    status = _in_band_verification_status(runtime_events)
+    if status == "not_run":
+        return result
+    return replace(result, verification_status=status)
+
+
+def _task_step_started_event(ledger) -> dict[str, object] | None:
+    step = ledger.active_step()
+    if step is None:
+        return None
+    return {
+        "event_type": "task_step_started",
+        "step_id": step.id,
+        "title": step.title,
+        "owner": step.owner,
+        "status": step.status,
+        "summary": f"started task step {step.id}: {_summary_value(step.title, 120)}",
+        "evidence_count": len(step.evidence_refs),
+        "checkpoint_count": len(ledger.checkpoints),
+    }
+
+
+def _task_turn_closed_events(ledger, result: ChatTurnResult) -> list[dict[str, object]]:
+    step = ledger.active_step()
+    if step is None:
+        return []
+    events: list[dict[str, object]] = []
+    if result.verification_status in {"success", "failed"}:
+        events.append(
+            {
+                "event_type": "task_checkpoint_saved",
+                "step_id": step.id,
+                "title": step.title,
+                "owner": step.owner,
+                "status": result.verification_status,
+                "summary": f"verification {result.verification_status}",
+                "evidence_count": len(step.evidence_refs),
+                "checkpoint_count": len(ledger.checkpoints),
+            },
+        )
+    if ledger.status == "completed" and step.status == "completed":
+        events.append(
+            {
+                "event_type": "task_step_finished",
+                "step_id": step.id,
+                "title": step.title,
+                "owner": step.owner,
+                "status": "completed",
+                "summary": f"completed task step {step.id}: {_summary_value(step.title, 120)}",
+                "evidence_count": len(step.evidence_refs),
+                "checkpoint_count": len(ledger.checkpoints),
+            },
+        )
+    elif ledger.status in {"blocked", "failed", "cancelled"}:
+        events.append(
+            {
+                "event_type": "task_step_blocked",
+                "step_id": step.id,
+                "title": step.title,
+                "owner": step.owner,
+                "status": ledger.status,
+                "category": ledger.status,
+                "summary": f"task step {step.id} ended as {ledger.status}",
+                "suggested_action": "resume_or_replan",
+                "evidence_count": len(step.evidence_refs),
+                "checkpoint_count": len(ledger.checkpoints),
+            },
+        )
+    return events
+
+
+def _in_band_verification_status(runtime_events: list[dict[str, object]]) -> str:
+    saw_failed_verification = False
+    for event in runtime_events:
+        event_type = str(event.get("event_type", ""))
+        if event_type not in {"tool_finished", "tool_failed"}:
+            continue
+        tool_name = str(event.get("tool_name", ""))
+        if tool_name not in {"shell", "code_run"}:
+            continue
+        args = event.get("args") if isinstance(event.get("args"), dict) else {}
+        if not _looks_like_verification_command(args):
+            continue
+        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+        if event_type == "tool_finished" and result.get("status") == "success" and result.get("exit_code") == 0:
+            return "success"
+        saw_failed_verification = True
+    return "failed" if saw_failed_verification else "not_run"
+
+
+def _looks_like_verification_command(args: dict[str, object]) -> bool:
+    text_parts = [
+        str(args.get("command", "")),
+        str(args.get("code", "")),
+    ]
+    command_text = " ".join(text_parts).lower()
+    markers = (
+        "pytest",
+        "haagent check",
+        "ruff",
+        "mypy",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "vitest",
+        "tox",
+        "cargo test",
+        "go test",
+    )
+    return any(marker in command_text for marker in markers)
 
 
 def _memory_update_requested(runtime_events: list[dict[str, object]]) -> bool:

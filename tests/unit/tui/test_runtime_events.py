@@ -14,6 +14,7 @@ from haagent.runtime.events import (
     MemoryNoticeEvent,
     RUNTIME_UI_EVENT_TYPES,
     SessionLifecycleEvent,
+    TaskProgressEvent,
     ToolActivityEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
@@ -40,6 +41,7 @@ class FakeRuntimeEventApp:
         self.blocks: list[tuple[str, str]] = []
         self.lines: list[str] = []
         self.answer_questions: list[str] = []
+        self.task_progress_events: list[TaskProgressEvent] = []
         self.memory_loads = 0
         self.finalized_streams = 0
         self.refreshes = 0
@@ -74,6 +76,13 @@ class FakeRuntimeEventApp:
 
     def _refresh(self) -> None:
         self.refreshes += 1
+
+    def query_one(self, selector: str, widget_type):
+        assert selector == "#conversation"
+        return self
+
+    def add_task_progress(self, event: TaskProgressEvent) -> None:
+        self.task_progress_events.append(event)
 
 
 def test_runtime_ui_event_handler_updates_assistant_stream() -> None:
@@ -249,6 +258,88 @@ def test_runtime_ui_event_handler_shows_failure_notice() -> None:
     assert app.blocks[0][0] == "Failure"
     assert "HTTP 404" in app.blocks[0][1]
     assert app.finalized_streams == 1
+
+
+def test_runtime_ui_event_handler_suppresses_plain_turn_lifecycle_task_progress() -> None:
+    app = FakeRuntimeEventApp()
+    started = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_step_started",
+        step_id="step-001",
+        title="你好",
+        status="running",
+        summary="started task step step-001: 你好",
+        category="none",
+        suggested_action="none",
+    )
+    finished = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_step_finished",
+        step_id="step-001",
+        title="你好",
+        status="completed",
+        summary="completed task step step-001: 你好",
+        category="none",
+        suggested_action="none",
+        evidence_count=1,
+        checkpoint_count=1,
+    )
+
+    handle_runtime_ui_event(app, started)
+    handle_runtime_ui_event(app, finished)
+
+    assert app.task_progress_events == []
+
+
+def test_runtime_ui_event_handler_routes_significant_task_progress_to_conversation_timeline() -> None:
+    app = FakeRuntimeEventApp()
+    blocked = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_step_blocked",
+        step_id="step-001",
+        title="修复长任务状态同步",
+        status="blocked",
+        summary="worker failed",
+        category="worker_failure",
+        suggested_action="resume_or_replan",
+        reason_chars=1200,
+    )
+    verified = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_checkpoint_saved",
+        step_id="step-001",
+        title="运行测试",
+        status="success",
+        summary="verification success",
+        evidence_count=2,
+        checkpoint_count=1,
+    )
+    tool_backed_finished = TaskProgressEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=None,
+        event_name="task_step_finished",
+        step_id="step-001",
+        title="读取并修改文件",
+        status="completed",
+        summary="completed task step",
+        evidence_count=2,
+        checkpoint_count=1,
+    )
+
+    handle_runtime_ui_event(app, blocked)
+    handle_runtime_ui_event(app, verified)
+    handle_runtime_ui_event(app, tool_backed_finished)
+
+    assert app.task_progress_events == [blocked, verified, tool_backed_finished]
 
 
 def test_runtime_ui_event_handler_opens_memory_notice() -> None:
