@@ -34,6 +34,13 @@ from haagent.runtime.orchestration.loop_guidance import (
 )
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
+from haagent.runtime.orchestration.task_progress import (
+    map_failure_to_recovery,
+    task_budget_warning_event,
+    task_checkpoint_saved_event,
+    task_recovery_suggested_event,
+    task_step_progress_event,
+)
 from haagent.tools.base import tool_error
 from haagent.tools.registry import ToolRuntimeRegistry, export_tool_schemas
 from haagent.tools.router import ToolRouter
@@ -81,6 +88,8 @@ class TurnLoopDependencies:
     verification_observation: Callable[[object], dict[str, object]]
     verification_evidence: Callable[[object], str]
     verification_loop_limit_evidence: Callable[[int, object], str]
+    task_step_id: str = "step-001"
+    task_step_title: str = ""
 
 
 def run_turn_loop(
@@ -115,6 +124,14 @@ def run_turn_loop(
                 "turn": turn,
                 "goal": deps.task_goal,
             },
+        )
+        deps.emit_event(
+            task_step_progress_event(
+                step_id=deps.task_step_id,
+                title=_task_step_title(deps),
+                phase="model_turn_started",
+                summary=f"model turn {turn} started",
+            ),
         )
         def emit_assistant_delta(delta: str) -> None:
             deps.raise_if_cancelled()
@@ -285,6 +302,31 @@ def _handle_no_tool_response(
         return deps.recorder.finish(RunStatus.COMPLETED)
 
     verification_obs = deps.verification_observation(verification_result)
+    deps.emit_event(
+        task_checkpoint_saved_event(
+            step_id=deps.task_step_id,
+            title=_task_step_title(deps),
+            status="failed",
+            evidence_count=0,
+            checkpoint_count=0,
+        ),
+    )
+    recovery = map_failure_to_recovery(
+        {
+            "event_type": "verification_failed",
+            "reason": deps.verification_evidence(verification_result),
+        },
+    )
+    if recovery is not None:
+        deps.emit_event(
+            task_recovery_suggested_event(
+                step_id=deps.task_step_id,
+                title=_task_step_title(deps),
+                category=recovery.category,
+                reason=recovery.reason,
+                suggested_action=recovery.suggested_action,
+            ),
+        )
     ver_msg = build_suggestion_message(
         f"Verification failed: {deps.verification_evidence(verification_result)}. "
         "Use the failure details to repair the workspace, then try again."
@@ -292,6 +334,15 @@ def _handle_no_tool_response(
     state.messages.append(ver_msg)
     state.final_response_requested = False
     if deps.max_turns is not None and turn == deps.max_turns:
+        deps.emit_event(
+            task_budget_warning_event(
+                step_id=deps.task_step_id,
+                title=_task_step_title(deps),
+                category="turn_budget",
+                reason=f"verification failed on final turn {turn}/{deps.max_turns}",
+                suggested_action="checkpoint_and_resume",
+            ),
+        )
         deps.recorder.transition(RunStatus.FAILED)
         deps.writer.write_failure_attribution(
             {
@@ -332,6 +383,17 @@ def _run_tool_calls(
                 "error": error,
             }
             deps.emit_event(failed_event)
+            recovery = map_failure_to_recovery(failed_event)
+            if recovery is not None:
+                deps.emit_event(
+                    task_recovery_suggested_event(
+                        step_id=deps.task_step_id,
+                        title=_task_step_title(deps),
+                        category=recovery.category,
+                        reason=recovery.reason,
+                        suggested_action=recovery.suggested_action,
+                    ),
+                )
         observation = {
             "tool_name": tool_call.name,
             "args": tool_call.args,
@@ -436,6 +498,18 @@ def _run_tool_calls(
     for suggestion_message in pending_suggestion_messages:
         if suggestion_message:
             state.messages.append(build_suggestion_message(suggestion_message))
+
+    success_count = sum(1 for result in tool_results if result.get("status") != "error")
+    if success_count:
+        deps.emit_event(
+            task_step_progress_event(
+                step_id=deps.task_step_id,
+                title=_task_step_title(deps),
+                phase="tool_batch_finished",
+                summary=f"completed {success_count} tool call(s)",
+                evidence_count=success_count,
+            ),
+        )
 
     if terminal_error is not None:
         deps.router.raise_for_error(terminal_error)
@@ -630,6 +704,10 @@ def _supports_event_sink(model_gateway: ModelGateway) -> bool:
     except (TypeError, ValueError):
         return False
     return "event_sink" in signature.parameters
+
+
+def _task_step_title(deps: TurnLoopDependencies) -> str:
+    return deps.task_step_title or deps.task_goal
 
 
 def _usage_record(usage: ModelUsage | None) -> dict[str, object] | None:

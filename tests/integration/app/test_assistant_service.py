@@ -1322,6 +1322,8 @@ def test_run_prompt_events_forwards_chat_events(tmp_path: Path, monkeypatch) -> 
     assert any(isinstance(event, AssistantMessageEvent) for event in events)
     assert [event.event_name for event in events if isinstance(event, TaskProgressEvent)] == [
         "task_step_started",
+        "task_plan_created",
+        "task_step_progress",
         "task_step_finished",
     ]
 

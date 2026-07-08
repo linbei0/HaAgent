@@ -114,6 +114,65 @@ def test_same_turn_multiple_tool_calls_execute_concurrently() -> None:
     assert sorted(router.calls) == ["file_read", "grep"]
 
 
+def test_turn_loop_emits_key_step_progress_events() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {"status": "success", "content": "notes"},
+        },
+    )
+    emitted_events: list[dict[str, object]] = []
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(router=router, emit_event=emitted_events.append)
+
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[ToolCall(name="file_read", args={"path": "notes.txt"}, id="call_1")],
+        state=state,
+        deps=deps,
+    )
+
+    progress_events = [
+        event for event in emitted_events if event["event_type"] == "task_step_progress"
+    ]
+    assert [event["category"] for event in progress_events] == ["tool_batch_finished"]
+    assert progress_events[0]["step_id"] == "step-001"
+    assert progress_events[0]["evidence_count"] == 1
+
+
+def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
+    emitted_events: list[dict[str, object]] = []
+    finish_statuses: list[object] = []
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas):
+            del messages, tool_schemas
+            return ModelResponse(content="done", tool_calls=[])
+
+    deps = _deps(
+        router=_FakeRouter({}),
+        writer=_FakeWriter(tmp_path / "episode"),
+        emit_event=emitted_events.append,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.PLANNING],
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+
+    result = run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+
+    assert result is not None
+    progress_events = [
+        event for event in emitted_events if event["event_type"] == "task_step_progress"
+    ]
+    assert progress_events[0]["category"] == "model_turn_started"
+    assert progress_events[0]["step_id"] == "step-001"
+
+
 def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
     router = _PerToolRouter(
         {
@@ -144,6 +203,80 @@ def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
     assert "tool_argument_invalid" in state.messages[0]["content"]
     assert "grep result" in state.messages[1]["content"]
     assert state.messages[2]["role"] == "user"
+
+
+def test_tool_failure_emits_recovery_suggestion_event() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {
+                "status": "error",
+                "error": {"type": "tool_argument_invalid", "message": "missing path"},
+            },
+        }
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    emitted_events: list[dict[str, object]] = []
+    deps = _deps(router=router, emit_event=emitted_events.append)
+
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[ToolCall(name="file_read", args={}, id="call_error")],
+        state=state,
+        deps=deps,
+    )
+
+    assert [event["event_type"] for event in emitted_events] == [
+        "tool_started",
+        "tool_failed",
+        "task_recovery_suggested",
+    ]
+    recovery = emitted_events[-1]
+    assert recovery["step_id"] == "step-001"
+    assert recovery["category"] == "model_format_error"
+    assert recovery["suggested_action"] == "correct_tool_arguments"
+
+
+def test_verification_failure_emits_checkpoint_recovery_and_budget_warning() -> None:
+    emitted_events: list[dict[str, object]] = []
+    transitions: list[object] = []
+    state = TurnLoopState(messages=[], context_id="ctx")
+    verification_result = SimpleNamespace(
+        status="failed",
+        failed_command="uv run pytest -q",
+        timeout=False,
+        failure_reason="exit_code",
+        exit_code=1,
+        stdout_excerpt="failure details",
+        stderr_excerpt="",
+    )
+    deps = _deps(
+        router=_FakeRouter({}),
+        emit_event=emitted_events.append,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.EXECUTING],
+            transition=transitions.append,
+            finish=lambda status: SimpleNamespace(status=status),
+        ),
+    )
+    deps = _replace_dep(deps, "verification_commands", ["uv run pytest -q"])
+    deps = _replace_dep(deps, "max_turns", 2)
+    state.verification_engine = SimpleNamespace(run=lambda commands: verification_result)
+
+    result = _handle_no_tool_response(
+        turn=2,
+        model_response=ModelResponse(content="done", tool_calls=[]),
+        state=state,
+        deps=deps,
+    )
+
+    assert result is not None
+    event_types = [event["event_type"] for event in emitted_events]
+    assert "task_checkpoint_saved" in event_types
+    assert "task_recovery_suggested" in event_types
+    assert "task_budget_warning" in event_types
+    recovery = next(event for event in emitted_events if event["event_type"] == "task_recovery_suggested")
+    assert recovery["category"] == "verification_failed"
+    assert recovery["suggested_action"] == "repair_and_rerun_verification"
 
 
 def test_parallel_tool_results_keep_original_tool_call_order() -> None:

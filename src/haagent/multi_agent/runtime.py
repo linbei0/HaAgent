@@ -35,6 +35,8 @@ from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.human_interaction import interaction_args_summary
 from haagent.runtime.execution.policy import PolicyDecision
 from haagent.runtime.execution.path_policy import PathPolicy
+from haagent.runtime.orchestration.task_progress import map_failure_to_recovery
+from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
 
@@ -800,19 +802,38 @@ class MultiAgentRuntime:
     ) -> None:
         if self.event_sink is None:
             return
-        self.event_sink(
+        event = {
+            "event_type": event_type,
+            "agent_id": worker.agent_id,
+            "task_id": worker.task_id,
+            "team_id": worker.team_id,
+            "subagent_type": subagent_type,
+            "description": description,
+            "status": status,
+            "parent_step_id": worker.parent_step_id,
+            "evidence_refs": _worker_evidence_refs(worker, episode_path=episode_path),
+            "episode_path": episode_path,
+        }
+        self.event_sink(event)
+        if event_type != "worker_failed":
+            return
+        recovery = map_failure_to_recovery(
             {
-                "event_type": event_type,
-                "agent_id": worker.agent_id,
-                "task_id": worker.task_id,
-                "team_id": worker.team_id,
-                "subagent_type": subagent_type,
-                "description": description,
-                "status": status,
-                "parent_step_id": worker.parent_step_id,
-                "evidence_refs": _worker_evidence_refs(worker, episode_path=episode_path),
-                "episode_path": episode_path,
+                "event_type": "worker_failed",
+                "reason": f"{description} {status}".strip(),
             },
+        )
+        if recovery is None:
+            return
+        self.event_sink(
+            task_recovery_suggested_event(
+                step_id=worker.parent_step_id or worker.agent_id,
+                title=description or f"Worker {worker.agent_id}",
+                category=recovery.category,
+                reason=recovery.reason,
+                suggested_action=recovery.suggested_action,
+                owner="worker",
+            ),
         )
 
 

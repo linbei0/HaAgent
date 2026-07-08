@@ -9,11 +9,28 @@ from pathlib import Path
 
 import pytest
 
+from haagent.models.gateway import ModelCallError, ModelResponse
 from haagent.runtime.session.agent import AgentSession, ChatTurnResult
 from haagent.runtime.session.task_ledger import load_task_ledger
 from haagent.runtime.session.turn import ChatTurnRunner
 from haagent.runtime.orchestration.recorder import RunResult
 from haagent.runtime.orchestration.state import RunStatus
+
+
+class _FinalAnswerGateway:
+    provider_name = "fake"
+
+    def generate(self, *, messages, tool_schemas):
+        del messages, tool_schemas
+        return ModelResponse(content="done", tool_calls=[])
+
+
+class _FailingGateway:
+    provider_name = "fake"
+
+    def generate(self, *, messages, tool_schemas):
+        del messages, tool_schemas
+        raise ModelCallError("rate limit")
 
 
 def test_agent_session_clears_cancellation_token_after_run_exception(
@@ -290,3 +307,42 @@ def test_agent_session_emits_task_progress_for_turn_lifecycle(
         "task_checkpoint_saved",
         "task_step_finished",
     ]
+
+
+def test_agent_session_emits_task_plan_created_from_runtime(tmp_path: Path) -> None:
+    events: list[object] = []
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=_FinalAnswerGateway(),
+        memory_extraction_enabled=False,
+    )
+
+    session.run_prompt_events("整理一个长任务并记录进度", event_sink=events.append)
+
+    progress_names = [
+        event.event_name
+        for event in events
+        if hasattr(event, "event_name")
+    ]
+    assert "task_plan_created" in progress_names
+
+
+def test_agent_session_emits_recovery_for_model_failure(tmp_path: Path) -> None:
+    events: list[object] = []
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=_FailingGateway(),
+        memory_extraction_enabled=False,
+    )
+
+    result = session.run_prompt_events("执行一个会遇到模型错误的长任务", event_sink=events.append)
+
+    assert result.status == "failed"
+    recovery_events = [
+        event for event in events if getattr(event, "event_name", "") == "task_recovery_suggested"
+    ]
+    assert recovery_events
+    assert recovery_events[-1].category == "model_error"
+    assert recovery_events[-1].suggested_action == "retry_or_switch_model"

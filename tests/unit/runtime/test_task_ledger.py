@@ -104,7 +104,11 @@ def test_task_ledger_model_text_is_bounded_and_omits_full_evidence() -> None:
                 owner="main",
                 status="completed" if i < 9 else "blocked",
                 evidence_refs=[secret, "episode=.runs/episodes/very-long"],
-                blocker={"category": "tool_timeout", "reason": secret},
+                blocker={
+                    "category": "tool_timeout",
+                    "reason": secret,
+                    "suggested_action": "retry_with_narrower_command",
+                },
                 updated_turn=i,
             )
             for i in range(10)
@@ -124,6 +128,83 @@ def test_task_ledger_model_text_is_bounded_and_omits_full_evidence() -> None:
     assert "active_step:" in model_text
     assert "completed_steps:" in model_text
     assert "blocker:" in model_text
+    assert "suggested_action=retry_with_narrower_command" in model_text
+
+
+def test_recovery_and_checkpoint_events_update_active_step(tmp_path) -> None:
+    ledger = update_task_ledger(
+        empty_task_ledger(),
+        prompt="修复长任务失败恢复",
+        turn_index=1,
+        result_status="failed",
+        episode_path=tmp_path / ".runs" / "episode-failed",
+        runtime_events=[
+            {
+                "event_type": "task_checkpoint_saved",
+                "step_id": "step-001",
+                "title": "修复长任务失败恢复",
+                "status": "failed",
+                "evidence_count": 1,
+                "checkpoint_count": 0,
+            },
+            {
+                "event_type": "task_recovery_suggested",
+                "step_id": "step-001",
+                "title": "修复长任务失败恢复",
+                "category": "verification_failed",
+                "summary": "verification_failed: reason_chars=4000",
+                "suggested_action": "repair_and_rerun_verification",
+                "reason_chars": 4000,
+            },
+        ],
+    )
+
+    step = ledger.steps[0]
+    assert ledger.status == "blocked"
+    assert ledger.current_step_id == "step-001"
+    assert step.status == "blocked"
+    assert step.blocker == {
+        "category": "verification_failed",
+        "reason": "reason_chars=4000",
+        "suggested_action": "repair_and_rerun_verification",
+    }
+    assert step.checkpoint_ids
+    assert step.checkpoint_ids[-1] == ledger.checkpoints[-1].id
+    assert any(ref.startswith("checkpoint=") for ref in step.evidence_refs)
+
+
+def test_blocked_ledger_resumes_same_active_step(tmp_path) -> None:
+    blocked = update_task_ledger(
+        empty_task_ledger(),
+        prompt="继续实现长任务恢复",
+        turn_index=1,
+        result_status="failed",
+        episode_path=tmp_path / ".runs" / "episode-failed",
+        runtime_events=[
+            {
+                "event_type": "task_recovery_suggested",
+                "step_id": "step-001",
+                "title": "继续实现长任务恢复",
+                "category": "tool_failure",
+                "suggested_action": "inspect_failure_and_replan",
+                "reason_chars": 80,
+            },
+        ],
+    )
+
+    resumed = update_task_ledger(
+        blocked,
+        prompt="按恢复建议继续",
+        turn_index=2,
+        result_status="completed",
+        episode_path=tmp_path / ".runs" / "episode-completed",
+        runtime_events=[],
+    )
+
+    assert len(resumed.steps) == 1
+    assert resumed.current_step_id == "step-001"
+    assert resumed.steps[0].title == "继续实现长任务恢复"
+    assert resumed.steps[0].status == "completed"
 
 
 @pytest.mark.parametrize(

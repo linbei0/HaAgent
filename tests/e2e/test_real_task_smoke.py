@@ -13,6 +13,7 @@ from typing import Any
 from haagent.cli_inspect import render_episode_summary
 from haagent.models.gateway import ModelResponse, ToolCall
 from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.session.task_ledger import load_task_ledger
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 
 
@@ -373,6 +374,45 @@ def test_real_task_smoke_recovers_from_missing_directory_list(tmp_path: Path) ->
     assert calls[0]["result"] is None
     assert calls[1]["result"]["path"] == "."
     assert "loop_suggestion_added" in _transcript_events(result.episode_path)
+
+
+def test_real_task_smoke_persists_blocked_ledger_and_resumes_same_step(tmp_path: Path) -> None:
+    workspace = _make_project_workspace(tmp_path)
+    first_gateway = ScriptedGateway(
+        [
+            ModelResponse("read wrong path", [ToolCall("file_read", {"path": "missing.py"})]),
+        ],
+    )
+    session = AgentSession(
+        workspace_root=workspace,
+        runs_root=workspace / ".runs",
+        model_gateway=first_gateway,
+        max_turns=1,
+    )
+
+    first_result = session.run_prompt_events("检查项目并修复长任务恢复")
+    blocked = load_task_ledger(session.session_path / "task-ledger.json")
+
+    assert first_result.status == "failed"
+    assert blocked.status == "blocked"
+    assert blocked.current_step_id == "step-001"
+    assert blocked.steps[0].blocker["suggested_action"] in {
+        "inspect_failure_and_replan",
+        "correct_tool_arguments",
+    }
+
+    resumed_gateway = ScriptedGateway([ModelResponse("恢复完成", [])])
+    resumed = AgentSession.resume(session.session_path, model_gateway=resumed_gateway, max_turns=3)
+    second_result = resumed.run_prompt_events("按恢复建议继续")
+    completed = load_task_ledger(resumed.session_path / "task-ledger.json")
+
+    assert second_result.status == "completed"
+    assert completed.status == "completed"
+    assert completed.current_step_id == "step-001"
+    assert len(completed.steps) == 1
+    assert completed.steps[0].title == "检查项目并修复长任务恢复"
+    assert "Task Ledger:" in resumed_gateway.calls[0]["model_input"]
+    assert "active_step: id=step-001" in resumed_gateway.calls[0]["model_input"]
 
 
 def test_real_task_smoke_keeps_multi_tool_messages_contiguous_before_suggestion(tmp_path: Path) -> None:

@@ -124,11 +124,18 @@ def _format_task_ledger_for_episode(episode_path: Path) -> list[str]:
         f"- checkpoints: {len(ledger.checkpoints)}",
     ]
     if active is not None:
-        lines.append(f"- active_step: {active.id} [{active.status}/{active.owner}] {active.title}")
+        lines.append(
+            f"- active_step: {active.id} evidence={len(active.evidence_refs)} "
+            f"checkpoints={len(active.checkpoint_ids)} [{active.status}/{active.owner}] {active.title}"
+        )
         if active.blocker:
             category = active.blocker.get("category", "blocked")
             reason = active.blocker.get("reason", "")
-            lines.append(f"- recovery: {category} {reason}".strip())
+            suggested_action = active.blocker.get("suggested_action", "")
+            recovery = f"- recovery: {category} {reason}".strip()
+            if suggested_action:
+                recovery = f"{recovery} suggested_action={suggested_action}"
+            lines.append(recovery)
     return lines
 
 

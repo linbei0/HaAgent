@@ -1,5 +1,5 @@
 """
-src/haagent/tui/task_progress_visibility.py - TUI 任务进度展示规则
+src/haagent/tui/widgets/task_progress_visibility.py - TUI 任务进度展示规则
 
 集中判断哪些长任务进度适合进入主对话时间线，避免普通对话生命周期事件污染界面。
 """

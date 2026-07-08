@@ -54,6 +54,9 @@ from haagent.runtime.execution.safety_guard import SafetyGuard
 from haagent.runtime.orchestration.preparation import prepare_initial_messages, prepare_run_setup
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
+from haagent.runtime.orchestration.task_progress import map_failure_to_recovery
+from haagent.runtime.orchestration.task_progress import task_plan_created_event
+from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
 from haagent.runtime.orchestration.turns import TurnLoopDependencies, TurnLoopState, run_turn_loop
 from haagent.runtime.sandbox import SandboxBackend, create_sandbox_backend
 from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS, load_runtime_settings
@@ -212,6 +215,16 @@ class RunOrchestrator:
                 )
             context_id = prepared_messages.context_id
             messages = prepared_messages.messages
+            task_step_id = _current_task_step_id(self._task_ledger) or "step-001"
+            self._emit_event(
+                task_plan_created_event(
+                    step_id=task_step_id,
+                    title=task.goal,
+                    owner="main",
+                    status="running",
+                    summary="task plan ready",
+                ),
+            )
             turn_result = run_turn_loop(
                 state=TurnLoopState(
                     messages=messages,
@@ -266,11 +279,20 @@ class RunOrchestrator:
                     verification_observation=_verification_observation,
                     verification_evidence=_verification_evidence,
                     verification_loop_limit_evidence=_verification_loop_limit_evidence,
+                    task_step_id=task_step_id,
+                    task_step_title=task.goal,
                 ),
             )
             if turn_result is not None:
                 return turn_result
         except RunCancelled as error:
+            _emit_task_recovery(
+                self._emit_event,
+                self._task_ledger,
+                event_type="run_cancelled",
+                reason=str(error),
+                title=_task_title_from_locals(locals()),
+            )
             transition(RunStatus.CANCELLED)
             writer.write_failure_attribution(
                 {
@@ -281,6 +303,14 @@ class RunOrchestrator:
             )
             return recorder.finish(RunStatus.CANCELLED)
         except ToolRoutingError as error:
+            _emit_task_recovery(
+                self._emit_event,
+                self._task_ledger,
+                event_type="tool_failed",
+                reason=str(error),
+                error_type=error.error_type,
+                title=_task_title_from_locals(locals()),
+            )
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
                 {
@@ -291,6 +321,13 @@ class RunOrchestrator:
             )
             return recorder.finish(RunStatus.FAILED)
         except ModelCallError as error:
+            _emit_task_recovery(
+                self._emit_event,
+                self._task_ledger,
+                event_type="model_failed",
+                reason=str(error),
+                title=_task_title_from_locals(locals()),
+            )
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
                 {
@@ -301,6 +338,13 @@ class RunOrchestrator:
             )
             return recorder.finish(RunStatus.FAILED)
         except ContextBuildError as error:
+            _emit_task_recovery(
+                self._emit_event,
+                self._task_ledger,
+                event_type="context_build_failed",
+                reason=str(error),
+                title=_task_title_from_locals(locals()),
+            )
             transition(RunStatus.FAILED)
             category = (
                 FailureCategory.TASK_SPEC
@@ -326,6 +370,13 @@ class RunOrchestrator:
             )
             return recorder.finish(RunStatus.FAILED)
         except Exception as error:
+            _emit_task_recovery(
+                self._emit_event,
+                self._task_ledger,
+                event_type="model_failed",
+                reason=str(error),
+                title=_task_title_from_locals(locals()),
+            )
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
                 {
@@ -651,6 +702,46 @@ def _current_task_step_id(task_ledger: dict[str, object] | None) -> str:
         return ""
     value = task_ledger.get("current_step_id")
     return value if isinstance(value, str) else ""
+
+
+def _emit_task_recovery(
+    emit_event: Callable[[dict[str, object]], None],
+    task_ledger: dict[str, object] | None,
+    *,
+    event_type: str,
+    reason: str,
+    title: str,
+    error_type: str | None = None,
+) -> None:
+    payload: dict[str, object] = {
+        "event_type": event_type,
+        "reason": reason,
+    }
+    if error_type:
+        payload["error"] = {
+            "type": error_type,
+            "message": reason,
+        }
+    suggestion = map_failure_to_recovery(payload)
+    if suggestion is None:
+        return
+    emit_event(
+        task_recovery_suggested_event(
+            step_id=_current_task_step_id(task_ledger) or suggestion.step_id or "step-001",
+            title=title or "Current task",
+            category=suggestion.category,
+            reason=suggestion.reason,
+            suggested_action=suggestion.suggested_action,
+        ),
+    )
+
+
+def _task_title_from_locals(values: dict[str, object]) -> str:
+    task = values.get("task")
+    goal = getattr(task, "goal", None)
+    if isinstance(goal, str) and goal.strip():
+        return goal
+    return "Current task"
 
 
 def _worker_notification_context(leader_session_id: str) -> str | None:

@@ -22,7 +22,7 @@ from textual.timer import Timer
 from textual.widgets import Log, Markdown, Static, TextArea
 
 from haagent.runtime.events.types import TaskProgressEvent
-from haagent.tui.task_progress_visibility import meaningful_task_progress_value, should_show_task_progress
+from haagent.tui.widgets.task_progress_visibility import meaningful_task_progress_value, should_show_task_progress
 
 
 class PromptInput(TextArea):

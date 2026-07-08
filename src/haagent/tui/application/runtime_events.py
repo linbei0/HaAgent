@@ -23,7 +23,7 @@ from haagent.runtime.events import (
     WarningNoticeEvent,
 )
 from haagent.tui.design.failures import failure_from_payload
-from haagent.tui.task_progress_visibility import should_show_task_progress
+from haagent.tui.widgets.task_progress_visibility import should_show_task_progress
 from haagent.tui.widgets.timeline import ConversationTimeline
 
 

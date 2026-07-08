@@ -210,6 +210,7 @@ def update_task_ledger(
     goal = current.goal
     status = current.status
     current_step_id = current.current_step_id
+    checkpoint_step_ids: list[str] = []
 
     for event in runtime_events:
         event_type = str(event.get("event_type", ""))
@@ -231,6 +232,27 @@ def update_task_ledger(
                 f"episode={episode_path}",
             ])
             current_step_id = step.id
+        elif event_type == "task_checkpoint_saved":
+            step_id = str(event.get("step_id", current_step_id or "step-001"))
+            step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
+            step.updated_turn = turn_index
+            current_step_id = step.id
+            checkpoint_step_ids.append(step.id)
+        elif event_type == "task_recovery_suggested":
+            step_id = str(event.get("step_id", current_step_id or "step-001"))
+            step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
+            category = _bounded_text(str(event.get("category", "recovery_suggested")), 80)
+            suggested_action = _bounded_text(str(event.get("suggested_action", "")), 120)
+            reason_chars = int(event.get("reason_chars", 0) or 0)
+            step.status = "blocked"
+            step.blocker = {
+                "category": category,
+                "reason": f"reason_chars={reason_chars}",
+                "suggested_action": suggested_action,
+            }
+            step.updated_turn = turn_index
+            status = "blocked"
+            current_step_id = step.id
         elif event_type == "task_step_blocked":
             step_id = str(event.get("step_id", current_step_id or "step-001"))
             step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
@@ -238,6 +260,7 @@ def update_task_ledger(
             step.blocker = {
                 "category": str(event.get("category", "blocked")),
                 "reason": f"reason_chars={event.get('reason_chars', 0)}",
+                "suggested_action": str(event.get("suggested_action", "")),
             }
             step.updated_turn = turn_index
             status = "blocked"
@@ -251,7 +274,11 @@ def update_task_ledger(
                 parent = _ensure_step(steps, parent_step_id, str(event.get("description", parent_step_id)), "main")
                 parent.kind = "delegate"
                 parent.status = "blocked"
-                parent.blocker = {"category": "worker_failure", "reason": reason}
+                parent.blocker = {
+                    "category": "worker_failure",
+                    "reason": reason,
+                    "suggested_action": "retry_worker_or_take_over",
+                }
                 parent.evidence_refs = _bounded_string_list([*parent.evidence_refs, *evidence_refs])
                 parent.updated_turn = turn_index
                 current_step_id = parent.id
@@ -259,7 +286,11 @@ def update_task_ledger(
             step.kind = "delegate"
             step.worker_id = worker_id
             step.status = "blocked"
-            step.blocker = {"category": "worker_failure", "reason": reason}
+            step.blocker = {
+                "category": "worker_failure",
+                "reason": reason,
+                "suggested_action": "retry_worker_or_take_over",
+            }
             step.evidence_refs = _bounded_string_list([*step.evidence_refs, *evidence_refs])
             step.updated_turn = turn_index
             status = "blocked"
@@ -291,7 +322,16 @@ def update_task_ledger(
         result_status=result_status,
         episode_path=episode_path,
     )
-    checkpoints.append(_checkpoint_for_turn(checkpoints, steps, current_step_id, turn_index, episode_path))
+    checkpoint = _checkpoint_for_turn(checkpoints, steps, current_step_id, turn_index, episode_path)
+    checkpoints.append(checkpoint)
+    for step_id in checkpoint_step_ids or [checkpoint.step_id]:
+        step = _find_or_default_step(steps, step_id)
+        if step is not None:
+            step.checkpoint_ids = _bounded_string_list([*step.checkpoint_ids, checkpoint.id])
+            step.evidence_refs = _bounded_string_list([
+                *step.evidence_refs,
+                f"checkpoint={checkpoint.id} episode={episode_path}",
+            ])
     if status != "blocked" and result_status in TERMINAL_LEDGER_STATUSES:
         status = result_status
     return TaskLedger(
@@ -352,7 +392,11 @@ def format_task_ledger_for_model(value: object) -> str:
         if active_step.blocker:
             category = _bounded_text(str(active_step.blocker.get("category", "unknown")), 80)
             reason = str(active_step.blocker.get("reason", ""))
-            lines.append(f"blocker: category={category} reason_chars={len(reason)}")
+            suggested_action = _bounded_text(str(active_step.blocker.get("suggested_action", "")), 120)
+            blocker_line = f"blocker: category={category} reason_chars={len(reason)}"
+            if suggested_action:
+                blocker_line += f" suggested_action={suggested_action}"
+            lines.append(blocker_line)
     completed = [step for step in ledger.steps if step.status == "completed"][-TASK_LEDGER_RECENT_STEP_LIMIT:]
     if completed:
         lines.append("completed_steps:")

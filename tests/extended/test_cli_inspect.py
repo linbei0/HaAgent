@@ -732,7 +732,13 @@ def test_cli_inspect_outputs_task_ledger_summary(tmp_path: Path) -> None:
                 kind="delegate",
                 owner="main",
                 status="blocked",
-                blocker={"category": "worker_failure", "reason": "reason_chars=2000"},
+                blocker={
+                    "category": "worker_failure",
+                    "reason": "reason_chars=2000",
+                    "suggested_action": "retry_worker_or_take_over",
+                },
+                evidence_refs=["checkpoint=ckpt-0001 episode=.runs/episodes/episode-ledger"],
+                checkpoint_ids=["ckpt-0001"],
                 updated_turn=1,
             ),
         ],
@@ -761,7 +767,8 @@ def test_cli_inspect_outputs_task_ledger_summary(tmp_path: Path) -> None:
     assert "- current_step_id: step-002" in output
     assert "- steps: total=2 completed=1 blocked=1" in output
     assert "- checkpoints: 1" in output
-    assert "- recovery: worker_failure reason_chars=2000" in output
+    assert "- active_step: step-002 evidence=1 checkpoints=1" in output
+    assert "- recovery: worker_failure reason_chars=2000 suggested_action=retry_worker_or_take_over" in output
 
 
 def test_cli_inspect_finds_task_ledger_for_direct_runs_episode(tmp_path: Path) -> None:
