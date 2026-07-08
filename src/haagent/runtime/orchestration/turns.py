@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import inspect
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import count
+from threading import Lock
 from typing import Any, Callable
 
 from haagent.context.messages import (
@@ -21,6 +23,7 @@ from haagent.context.messages import (
 )
 from haagent.models.gateway import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.execution.cancellation import RunCancelled
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import check_assistant_output, guardrail_evidence
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
@@ -315,25 +318,9 @@ def _run_tool_calls(
     loaded_image_attached_this_turn = False
     pending_suggestion_messages: list[str] = []
     visible_result_fingerprints: set[str] = set()
-    for tool_index, tool_call in enumerate(tool_calls_with_ids):
-        deps.raise_if_cancelled()
-        deps.emit_event(
-            {
-                "event_type": "tool_started",
-                "turn": turn,
-                "tool_name": tool_call.name,
-                "args": tool_call.args,
-            },
-        )
-        tool_result = deps.router.dispatch(
-            tool_call.name,
-            tool_call.args,
-            interaction_handler=(
-                deps.interaction_bridge_factory(turn, deps.interaction_resolver)
-                if deps.interaction_handler is not None
-                else None
-            ),
-        )
+    terminal_error: dict[str, object] | None = None
+    tool_results = _dispatch_tool_calls(turn=turn, tool_calls=tool_calls_with_ids, deps=deps)
+    for tool_call, tool_result in zip(tool_calls_with_ids, tool_results):
         deps.raise_if_cancelled()
         if tool_result.get("status") == "error":
             error = tool_result.get("error") or {}
@@ -405,7 +392,7 @@ def _run_tool_calls(
 
         if tool_result.get("status") == "error":
             if deps.tool_error_is_terminal(tool_result):
-                deps.router.raise_for_error(tool_result)
+                terminal_error = terminal_error or tool_result
             suggestion = suggestion_for_observation(observation)
             if violation is not None:
                 safety_obs = safety_violation_observation(violation.message, violation.recovery_suggestion)
@@ -415,43 +402,7 @@ def _run_tool_calls(
                 deps.record_suggestion(turn, suggestion)
                 pending_suggestion_messages.append(suggestion.message)
             turn_broke_early = True
-            for skipped_call in tool_calls_with_ids[tool_index + 1 :]:
-                skipped_result = tool_error(
-                    "tool_call_skipped",
-                    "tool call skipped because an earlier tool call in the same assistant message failed.",
-                )
-                deps.writer.append_tool_call(
-                    {
-                        "tool_name": skipped_call.name,
-                        "args": skipped_call.args,
-                        "status": "error",
-                        "result": None,
-                        "error": skipped_result["error"],
-                        "policy": None,
-                        "guardrail": None,
-                        "duration_seconds": 0.0,
-                    },
-                )
-                skipped_observation = {
-                    "tool_name": skipped_call.name,
-                    "args": skipped_call.args,
-                    "result": skipped_result,
-                }
-                deps.writer.append_transcript(
-                    {
-                        "event": "tool_observation",
-                        "turn": turn,
-                        **skipped_observation,
-                    },
-                )
-                state.messages.append(
-                    build_tool_result_message(
-                        skipped_call.id,
-                        skipped_call.name,
-                        skipped_result,
-                    ),
-                )
-            break
+            continue
 
         deps.emit_event(
             {
@@ -486,6 +437,9 @@ def _run_tool_calls(
         if suggestion_message:
             state.messages.append(build_suggestion_message(suggestion_message))
 
+    if terminal_error is not None:
+        deps.router.raise_for_error(terminal_error)
+
     if not turn_broke_early and not loaded_image_attached_this_turn and (
         deps.all_declared_verification_commands_passed(
             deps.verification_commands,
@@ -500,6 +454,81 @@ def _run_tool_calls(
         state.final_response_requested = True
         state.messages.append(build_final_response_request_message())
     return None
+
+
+def _dispatch_tool_calls(
+    *,
+    turn: int,
+    tool_calls: list[ToolCall],
+    deps: TurnLoopDependencies,
+) -> list[dict[str, Any]]:
+    if not tool_calls:
+        return []
+    if len(tool_calls) == 1:
+        tool_call = tool_calls[0]
+        deps.raise_if_cancelled()
+        deps.emit_event(_tool_started_event(turn, tool_call))
+        return [
+            _dispatch_tool_call(
+                tool_call,
+                deps,
+                _interaction_handler_for_turn(turn, deps),
+            )
+        ]
+
+    interaction_handler = _interaction_handler_for_turn(turn, deps)
+    for tool_call in tool_calls:
+        deps.raise_if_cancelled()
+        deps.emit_event(_tool_started_event(turn, tool_call))
+
+    with ThreadPoolExecutor(max_workers=len(tool_calls), thread_name_prefix="haagent-tool") as executor:
+        futures = [
+            executor.submit(_dispatch_tool_call, tool_call, deps, interaction_handler)
+            for tool_call in tool_calls
+        ]
+        return [future.result() for future in futures]
+
+
+def _dispatch_tool_call(
+    tool_call: ToolCall,
+    deps: TurnLoopDependencies,
+    interaction_handler: HumanInteractionHandler | None,
+) -> dict[str, Any]:
+    try:
+        return deps.router.dispatch(
+            tool_call.name,
+            tool_call.args,
+            interaction_handler=interaction_handler,
+        )
+    except RunCancelled:
+        raise
+    except Exception as error:
+        return tool_error(type(error).__name__, str(error))
+
+
+def _interaction_handler_for_turn(
+    turn: int,
+    deps: TurnLoopDependencies,
+) -> HumanInteractionHandler | None:
+    if deps.interaction_handler is None:
+        return None
+    handler = deps.interaction_bridge_factory(turn, deps.interaction_resolver)
+    interaction_lock = Lock()
+
+    def locked_handler(request):
+        with interaction_lock:
+            return handler(request)
+
+    return locked_handler
+
+
+def _tool_started_event(turn: int, tool_call: ToolCall) -> dict[str, object]:
+    return {
+        "event_type": "tool_started",
+        "turn": turn,
+        "tool_name": tool_call.name,
+        "args": tool_call.args,
+    }
 
 
 def _wait_for_pending_worker_tasks(

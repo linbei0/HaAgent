@@ -11,10 +11,11 @@ import platform
 import shutil
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import metadata as package_metadata
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -30,6 +31,7 @@ EPISODE_VERSION = "1.0"
 class EpisodeWriter:
     path: Path
     task_path: Path
+    _write_lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
 
     @classmethod
     def create(cls, runs_root: Path, task_path: Path) -> "EpisodeWriter":
@@ -221,8 +223,9 @@ class EpisodeWriter:
         (self.path / "failure-attribution.md").write_text(content, encoding="utf-8")
 
     def _append_jsonl(self, name: str, record: dict[str, Any]) -> None:
-        with (self.path / name).open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self._write_lock:
+            with (self.path / name).open("a", encoding="utf-8") as file:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _write_json(self, name: str, value: dict[str, Any]) -> None:
         (self.path / name).write_text(

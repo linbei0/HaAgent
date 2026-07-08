@@ -7,6 +7,7 @@ tests/unit/runtime/test_run_turns.py - 单轮工具执行循环测试
 from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
+import time
 
 from haagent.models.gateway import ToolCall
 from haagent.models.gateway import ModelResponse
@@ -64,6 +65,148 @@ class _FakeWriter:
 
     def write_failure_attribution(self, record: dict[str, Any] | None) -> None:
         self.failure_records.append(record)
+
+
+class _PerToolRouter:
+    def __init__(self, results: dict[str, dict[str, Any]], delays: dict[str, float] | None = None) -> None:
+        self.results = results
+        self.delays = delays or {}
+        self.calls: list[str] = []
+
+    def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None) -> dict[str, Any]:
+        self.calls.append(tool_name)
+        if interaction_handler is not None and args.get("interact"):
+            interaction_handler(SimpleNamespace(tool_name=tool_name))
+        time.sleep(self.delays.get(tool_name, 0.0))
+        return dict(self.results[tool_name])
+
+    def raise_for_error(self, result: dict[str, Any]) -> None:
+        raise AssertionError(f"unexpected terminal error: {result}")
+
+    def wait_for_agent_task(self, task_id: str, timeout: float | None = None) -> dict[str, Any]:
+        raise AssertionError(f"unexpected worker wait: {task_id}, timeout={timeout}")
+
+
+def test_same_turn_multiple_tool_calls_execute_concurrently() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {"status": "success", "content": "first"},
+            "grep": {"status": "success", "content": "second"},
+        },
+        delays={"file_read": 0.25, "grep": 0.25},
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(router=router)
+
+    started = time.perf_counter()
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_read", args={"path": "a.txt"}, id="call_1"),
+            ToolCall(name="grep", args={"pattern": "needle", "root": "."}, id="call_2"),
+        ],
+        state=state,
+        deps=deps,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.40
+    assert sorted(router.calls) == ["file_read", "grep"]
+
+
+def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {
+                "status": "error",
+                "error": {"type": "tool_argument_invalid", "message": "missing path"},
+            },
+            "grep": {"status": "success", "content": "grep result"},
+        }
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(router=router)
+
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_read", args={}, id="call_error"),
+            ToolCall(name="grep", args={"pattern": "needle", "root": "."}, id="call_success"),
+        ],
+        state=state,
+        deps=deps,
+    )
+
+    assert sorted(router.calls) == ["file_read", "grep"]
+    assert len(state.messages) == 3
+    assert state.messages[0]["tool_call_id"] == "call_error"
+    assert state.messages[1]["tool_call_id"] == "call_success"
+    assert "tool_argument_invalid" in state.messages[0]["content"]
+    assert "grep result" in state.messages[1]["content"]
+    assert state.messages[2]["role"] == "user"
+
+
+def test_parallel_tool_results_keep_original_tool_call_order() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {"status": "success", "content": "slow first"},
+            "grep": {"status": "success", "content": "fast second"},
+        },
+        delays={"file_read": 0.20, "grep": 0.01},
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(router=router)
+
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_read", args={"path": "a.txt"}, id="call_slow"),
+            ToolCall(name="grep", args={"pattern": "needle", "root": "."}, id="call_fast"),
+        ],
+        state=state,
+        deps=deps,
+    )
+
+    tool_result_messages = [message for message in state.messages if "tool_call_id" in message]
+    assert [message["tool_call_id"] for message in tool_result_messages] == ["call_slow", "call_fast"]
+
+
+def test_parallel_tool_calls_share_one_interaction_bridge() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {"status": "success", "content": "first"},
+            "grep": {"status": "success", "content": "second"},
+        }
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    bridge_calls: list[int] = []
+    interaction_calls: list[str] = []
+
+    def bridge_factory(turn: int, resolver):
+        del resolver
+        bridge_calls.append(turn)
+
+        def handle(request):
+            interaction_calls.append(request.tool_name)
+            return SimpleNamespace(approved=True)
+
+        return handle
+
+    deps = _replace_dep(_deps(router=router), "interaction_handler", object())
+    deps = _replace_dep(deps, "interaction_bridge_factory", bridge_factory)
+
+    _run_tool_calls(
+        turn=3,
+        tool_calls_with_ids=[
+            ToolCall(name="file_read", args={"path": "a.txt", "interact": True}, id="call_1"),
+            ToolCall(name="grep", args={"pattern": "needle", "root": ".", "interact": True}, id="call_2"),
+        ],
+        state=state,
+        deps=deps,
+    )
+
+    assert bridge_calls == [3]
+    assert sorted(interaction_calls) == ["file_read", "grep"]
 
 
 def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> None:

@@ -1393,6 +1393,7 @@ def test_openai_chat_gateway_normalizes_tool_calls_and_tools_payload() -> None:
     assert captured["payload"] == {
         "model": "chat-test",
         "messages": [{"role": "user", "content": "context with tools"}],
+        "parallel_tool_calls": True,
         "tools": [
             {
                 "type": "function",
@@ -1514,6 +1515,7 @@ def test_openai_gateway_payload_uses_model_input_and_tools() -> None:
     assert captured["payload"] == {
         "model": "gpt-test",
         "input": [{"role": "user", "content": "standardized context"}],
+        "parallel_tool_calls": True,
         "tools": [{"name": "fake_tool", "description": "test", "parameters": {}}],
     }
 

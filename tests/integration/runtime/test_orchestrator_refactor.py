@@ -50,6 +50,25 @@ class UnexpectedArgumentGateway:
         return ModelResponse("done after unexpected argument feedback", [])
 
 
+class ParallelToolCallsGateway:
+    provider_name = "parallel-tool-calls"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def generate(self, messages, tool_schemas):
+        self.call_count += 1
+        if self.call_count == 1:
+            return ModelResponse(
+                "",
+                [
+                    ToolCall("grep", {"pattern": "needle", "root": ".", "path": "src"}, id="call_error"),
+                    ToolCall("file_read", {"path": "alpha.txt"}, id="call_success"),
+                ],
+            )
+        return ModelResponse("done after parallel tool feedback", [])
+
+
 def test_tool_observation_is_written_before_terminal_tool_routing_failure(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -152,6 +171,48 @@ verification_commands: []
     assert tool_call["status"] == "error"
     assert tool_call["error"]["type"] == "tool_argument_invalid"
     assert tool_call["error"]["message"] == "unexpected argument: path"
+
+
+def test_parallel_tool_calls_do_not_skip_siblings_after_tool_error(tmp_path: Path) -> None:
+    (tmp_path / "alpha.txt").write_text("needle appears here\n", encoding="utf-8")
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Execute sibling tool calls after one tool error
+constraints: []
+allowed_tools:
+  - grep
+  - file_read
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+    gateway = ParallelToolCallsGateway()
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+    ).run(task_path)
+
+    tool_calls = [
+        json.loads(line)
+        for line in (result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    observations = [
+        json.loads(line)
+        for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event") == "tool_observation"
+    ]
+
+    assert result.status is RunStatus.COMPLETED
+    assert gateway.call_count == 2
+    calls_by_name = {call["tool_name"]: call for call in tool_calls[:2]}
+    assert calls_by_name["grep"]["status"] == "error"
+    assert calls_by_name["file_read"]["status"] == "success"
+    assert [record["tool_name"] for record in observations[:2]] == ["grep", "file_read"]
+    assert calls_by_name["file_read"]["result"]["status"] == "success"
+    assert "needle appears here" in json.dumps(calls_by_name["file_read"]["result"], ensure_ascii=False)
 
 
 def test_microcompact_preserves_artifact_backed_tool_result_messages(tmp_path: Path) -> None:

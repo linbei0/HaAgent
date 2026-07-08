@@ -5,6 +5,7 @@ tests/unit/runtime/test_episode_writer.py - EpisodeWriter 文件产物测试
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from haagent.models.gateway import ModelGatewayMetadata, ModelUsage
@@ -181,6 +182,40 @@ def test_episode_writer_keeps_usage_unavailable_when_usage_is_none(tmp_path: Pat
         "output_tokens": None,
         "total_tokens": None,
     }
+
+
+def test_episode_writer_appends_tool_calls_with_instance_write_lock(tmp_path: Path) -> None:
+    episode_path = tmp_path / "episode"
+    episode_path.mkdir()
+    (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: test\n", encoding="utf-8")
+    writer = EpisodeWriter(path=episode_path, task_path=task_path)
+
+    assert hasattr(writer, "_write_lock")
+
+    def append(index: int) -> None:
+        writer.append_tool_call(
+            {
+                "tool_name": "fake_tool",
+                "args": {"index": index},
+                "status": "success",
+                "result": {"index": index},
+                "error": None,
+                "policy": None,
+                "guardrail": None,
+                "duration_seconds": 0.0,
+            }
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(append, range(80)))
+
+    records = [
+        json.loads(line)
+        for line in (episode_path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert sorted(record["args"]["index"] for record in records) == list(range(80))
 
 
 def create_writer(tmp_path: Path) -> EpisodeWriter:

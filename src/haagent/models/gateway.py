@@ -143,6 +143,7 @@ class OpenAIResponsesGateway:
         }
         if tool_schemas:
             payload["tools"] = tool_schemas
+            payload["parallel_tool_calls"] = True
         if event_sink is not None:
             payload["stream"] = True
         try:
@@ -225,6 +226,7 @@ class OpenAIChatCompletionsGateway:
         }
         if tool_schemas:
             payload["tools"] = _chat_tool_schemas(tool_schemas)
+            payload["parallel_tool_calls"] = True
         if event_sink is not None:
             payload["stream"] = True
         try:
