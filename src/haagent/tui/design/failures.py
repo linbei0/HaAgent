@@ -81,11 +81,15 @@ def failure_from_payload(payload: dict[str, object], fallback_message: str = "")
         failure_category = failure_category or "Runtime Failure"
         reason = reason or fallback or "user cancelled current run"
     return FailureView(
-        failed_stage=failed_stage or "unknown",
-        failure_category=failure_category or "unknown",
-        reason=reason or fallback or "unknown",
-        episode_path=str(payload.get("episode_path", "unknown")),
+        failed_stage=failed_stage or _missing_field("failed_stage"),
+        failure_category=failure_category or _missing_field("failure_category"),
+        reason=reason or fallback or _missing_field("reason"),
+        episode_path=_payload_text(payload.get("episode_path")) or _missing_field("episode_path"),
     )
+
+
+def _missing_field(field_name: str) -> str:
+    return f"缺少字段: {field_name}"
 
 
 def _payload_text(value: object) -> str:

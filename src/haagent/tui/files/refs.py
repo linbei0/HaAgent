@@ -92,6 +92,9 @@ def _fuzzy_contains(haystack: str, needle: str) -> bool:
 
 
 def _iter_file_reference_candidates(root: Path):
+    # ripgrep 优先：尊重 .gitignore、速度快。rg 缺失时回退到纯 Python 遍历，
+    # 这是刻意保留的环境兼容路径（未装 ripgrep 的机器仍能用 @ 文件引用），
+    # 不属于兜底屎山；两条路径都由 test_file_reference_index_* 覆盖。
     rg_path = shutil.which("rg")
     if rg_path is not None:
         yield from _iter_rg_file_candidates(root, rg_path)

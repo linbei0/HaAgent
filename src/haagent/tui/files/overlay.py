@@ -9,7 +9,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual import events, work
-from textual.widgets import Static
+from textual.app import ComposeResult
+from textual.containers import Vertical
+from textual.css.query import NoMatches
+from textual.message import Message
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from haagent.tui.design.copy import EMPTY_LABELS, MODAL_TITLES
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, path_reference_token
@@ -18,9 +23,14 @@ from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build
 VISIBLE_MATCH_COUNT = 4
 
 
-class FileReferenceOverlay(Static):
+class FileReferenceOverlay(Vertical):
+    class Selected(Message):
+        def __init__(self, token: str) -> None:
+            super().__init__()
+            self.token = token
+
     def __init__(self, workspace_root: Path, query: str, index: FileReferenceIndex | None = None) -> None:
-        super().__init__("", id="file-ref-dialog")
+        super().__init__(id="file-ref-dialog")
         self.workspace_root = workspace_root
         self.filter_text = query
         self.selected_index = 0
@@ -30,18 +40,32 @@ class FileReferenceOverlay(Static):
         self.loading = index is None
         self._mounted = False
 
+    def compose(self) -> ComposeResult:
+        yield Static("", id="file-ref-summary")
+        yield OptionList(id="file-ref-list")
+
     def on_mount(self) -> None:
         self._mounted = True
         if self.index is None:
-            self.update(self._body())
+            self._refresh()
             self._build_index()
         else:
             self._reload()
+        try:
+            self.query_one(OptionList).focus()
+        except NoMatches:
+            return
 
     def on_unmount(self) -> None:
         self._mounted = False
 
-    def handle_key(self, event: events.Key) -> str | None:
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        token = self.selected_token()
+        if token is not None:
+            event.stop()
+            self.post_message(self.Selected(token))
+
+    def handle_navigation_key(self, event: events.Key) -> str | None:
         key = event.key
         if key == "escape":
             event.stop()
@@ -72,6 +96,10 @@ class FileReferenceOverlay(Static):
     def _selected(self) -> FileReferenceMatch | None:
         if not self.matches:
             return None
+        if self.is_mounted:
+            index = self.query_one(OptionList).highlighted
+            if index is not None:
+                self.selected_index = min(max(index, 0), len(self.matches) - 1)
         return self.matches[min(self.selected_index, len(self.matches) - 1)]
 
     def _move(self, delta: int) -> None:
@@ -87,8 +115,21 @@ class FileReferenceOverlay(Static):
         self._refresh()
 
     def _refresh(self) -> None:
-        if self.is_mounted:
-            self.update(self._body())
+        try:
+            summary = self.query_one("#file-ref-summary", Static)
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            return
+        summary.update(self._body())
+        if self.loading:
+            option_list.set_options([Option("正在搜索文件...", id="loading", disabled=True)])
+            option_list.highlighted = None
+            return
+        options = [Option(match.display_path, id=match.display_path) for match in self.matches]
+        if not options:
+            options = [Option(EMPTY_LABELS["no_matching_files"], id="empty", disabled=True)]
+        option_list.set_options(options)
+        option_list.highlighted = self.selected_index if self.matches else None
 
     def _ensure_selection_visible(self) -> None:
         if self.selected_index < self._match_scroll_offset:

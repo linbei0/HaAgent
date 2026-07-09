@@ -11,8 +11,10 @@ from typing import Literal
 
 from textual import events
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Input, OptionList, Static
+from textual.widgets.option_list import Option
 
 from haagent.app.assistant_service import AssistantModelConnection, ModelConnectionConfigureRequest
 from haagent.models.gateway_registry import catalog_provider_capability
@@ -92,13 +94,27 @@ class ConnectionCenterState:
         return "\n".join(lines)
 
 
+def _connection_option(connection: AssistantModelConnection) -> Option:
+    credential = "key:ok" if connection.credential_available else "key:missing"
+    provider = safe_summary(connection.provider_name, 24)
+    return Option(
+        f"{connection.name:<16} {provider:<24} {connection.gateway_provider:<12} {credential}",
+        id=connection.id,
+    )
+
+
 class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
     def __init__(self, connections: list[AssistantModelConnection]) -> None:
         super().__init__()
         self.state = ConnectionCenterState(connections=connections)
 
     def compose(self) -> ComposeResult:
-        yield Static(self.state.render(), id="connection-center-dialog")
+        yield Static("", id="connection-center-dialog")
+        yield OptionList(id="connection-center-list")
+
+    def on_mount(self) -> None:
+        self._set_state(self.state)
+        self.query_one(OptionList).focus()
 
     def on_key(self, event: events.Key) -> None:
         key = event.key
@@ -120,6 +136,7 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
             return
         if key == "d":
             event.stop()
+            self._sync_selected_from_option_list()
             selected = self.state.selected_connection
             if selected is not None:
                 self.dismiss(ConnectionCenterResult(action="delete_connection", connection_id=selected.id))
@@ -134,6 +151,7 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
             return
         if key == "t":
             event.stop()
+            self._sync_selected_from_option_list()
             selected = self.state.selected_connection
             if selected is not None:
                 self.dismiss(ConnectionCenterResult(action="test_connection", connection_id=selected.id))
@@ -144,7 +162,25 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
 
     def _set_state(self, state: ConnectionCenterState) -> None:
         self.state = state
-        self.query_one("#connection-center-dialog", Static).update(state.render())
+        try:
+            body = self.query_one("#connection-center-dialog", Static)
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            return
+        body.update("\n".join(["供应商连接", f"搜索: {state.query or '-'}", ""]))
+        options = [_connection_option(connection) for connection in state.visible_connections]
+        if not options:
+            options = [Option("无匹配连接", id="empty", disabled=True)]
+        option_list.set_options(options)
+        option_list.highlighted = state.selected_index if state.visible_connections else None
+
+    def _sync_selected_from_option_list(self) -> None:
+        if not self.is_mounted:
+            return
+        index = self.query_one(OptionList).highlighted
+        if index is None:
+            return
+        self.state = replace(self.state, selected_index=index)
 
 
 class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
@@ -197,11 +233,14 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
         ]
 
     def compose(self) -> ComposeResult:
-        yield Static(self._body_text(), id="connection-setup-dialog")
+        # provider/model 选择用 OptionList；secret 单独用 password Input，
+        # 真实 API key 只进安全输入，绝不进入 OptionList 或状态文本。
+        yield Static("", id="connection-setup-dialog")
+        yield OptionList(id="connection-setup-list")
         yield Input(password=True, id="connection-secret", placeholder="API key")
 
     def on_mount(self) -> None:
-        self._sync_input_state()
+        self._set_step_ui()
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
@@ -210,60 +249,126 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
                 self.step = "provider"
                 self.model_query = ""
                 self.model_index = 0
-                self._set_body()
-                self._sync_input_state()
+                self._set_step_ui()
             else:
                 self.dismiss(None)
             return
-        if event.key in {"up", "down"} and self.step in {"provider", "model"}:
-            event.stop()
-            delta = -1 if event.key == "up" else 1
-            if self.step == "provider":
-                self._move_provider(delta)
-            else:
-                self._move_model(delta)
-            self._set_body()
+        if self.step not in {"provider", "model"}:
             return
-        if event.key == "backspace" and self.step in {"provider", "model"}:
+        if event.key in {"up", "down"}:
             event.stop()
-            if self.step == "provider":
-                self.provider_query = self.provider_query[:-1]
-                self.provider_index = 0
-            else:
-                self.model_query = self.model_query[:-1]
-                self.model_index = 0
-            self._set_body()
+            self._move_selection(-1 if event.key == "up" else 1)
             return
-        if event.key == "enter" and self.step in {"provider", "model"}:
+        if event.key == "backspace":
             event.stop()
-            if self.step == "provider" and self.selected_provider is not None:
-                self.step = "model"
-                self.model_index = 0
-            elif self.step == "model" and self.selected_model is not None:
-                self.step = "connection_name"
-            self._set_body()
-            self._sync_input_state()
+            self._trim_query()
             return
-        if event.character and event.character.isprintable() and self.step in {"provider", "model"}:
+        if event.key == "enter":
             event.stop()
-            if self.step == "provider":
-                self.provider_query += event.character
-                self.provider_index = 0
-            else:
-                self.model_query += event.character
-                self.model_index = 0
-            self._set_body()
+            self._advance_from_list()
+            return
+        if event.character and event.character.isprintable():
+            event.stop()
+            self._extend_query(event.character)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        # 鼠标点击选项等价于回车确认当前 step。
+        if self.step not in {"provider", "model"}:
+            return
+        event.stop()
+        self._sync_index_from_list()
+        self._advance_from_list()
+
+    def _move_selection(self, delta: int) -> None:
+        if self.step == "provider":
+            self._move_provider(delta)
+        else:
+            self._move_model(delta)
+        self._set_step_ui()
+
+    def _trim_query(self) -> None:
+        if self.step == "provider":
+            self.provider_query = self.provider_query[:-1]
+            self.provider_index = 0
+        else:
+            self.model_query = self.model_query[:-1]
+            self.model_index = 0
+        self._set_step_ui()
+
+    def _extend_query(self, character: str) -> None:
+        if self.step == "provider":
+            self.provider_query += character
+            self.provider_index = 0
+        else:
+            self.model_query += character
+            self.model_index = 0
+        self._set_step_ui()
+
+    def _advance_from_list(self) -> None:
+        if self.step == "provider" and self.selected_provider is not None:
+            self.step = "model"
+            self.model_index = 0
+            self.model_query = ""
+        elif self.step == "model" and self.selected_model is not None:
+            self.step = "connection_name"
+        self._set_step_ui()
+
+    def _sync_index_from_list(self) -> None:
+        try:
+            index = self.query_one("#connection-setup-list", OptionList).highlighted
+        except NoMatches:
+            return
+        if index is None:
+            return
+        if self.step == "provider":
+            self.provider_index = index
+        else:
+            self.model_index = index
+
+    def _set_step_ui(self) -> None:
+        try:
+            body = self.query_one("#connection-setup-dialog", Static)
+            option_list = self.query_one("#connection-setup-list", OptionList)
+            secret_input = self.query_one("#connection-secret", Input)
+        except NoMatches:
+            return
+        body.update(self._header_text())
+        list_active = self.step in {"provider", "model"}
+        option_list.display = list_active
+        secret_input.display = not list_active
+        secret_input.disabled = list_active
+        if list_active:
+            self._populate_option_list(option_list)
+            option_list.focus()
+            return
+        secret_input.password = self.step == "api_key"
+        secret_input.placeholder = "连接名" if self.step == "connection_name" else "API key"
+        secret_input.value = ""
+        secret_input.focus()
+
+    def _populate_option_list(self, option_list: OptionList) -> None:
+        if self.step == "provider":
+            items = self.visible_providers
+            selected_index = self.provider_index
+            options = [_provider_option(provider) for provider in items]
+        else:
+            items = self.visible_models
+            selected_index = self.model_index
+            options = [_model_option(model) for model in items]
+        if not options:
+            empty = "无匹配 provider" if self.step == "provider" else "无匹配 model"
+            option_list.set_options([Option(empty, id="empty", disabled=True)])
+            option_list.highlighted = None
+            return
+        option_list.set_options(options)
+        option_list.highlighted = min(max(selected_index, 0), len(items) - 1)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
         if self.step == "connection_name":
             if self._accept_connection_name(event.value):
                 self.step = "api_key"
-                self._set_body()
-                self._sync_input_state()
-            elif self.input_error:
-                self._set_body()
-                self._sync_input_state()
+            self._set_step_ui()
             return
         if self.step != "api_key":
             return
@@ -272,16 +377,42 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
             self.dismiss(result)
             return
         self.input_error = "API key 不能为空"
-        self._set_body()
-        self._sync_input_state()
+        self._set_step_ui()
 
-    def _body_text(self) -> str:
+    def _header_text(self) -> str:
+        if self.step == "provider":
+            visible = self.visible_providers
+            selected_provider = self.selected_provider
+            selected_name = _entity_name(selected_provider)
+            return "\n".join(
+                [
+                    "连接配置",
+                    "",
+                    f"provider: {selected_name}",
+                    f"provider 搜索: {self.provider_query or '-'}",
+                    f"Provider {min(self.provider_index + 1, len(visible)) if visible else 0}/{len(visible)}  total:{len(self.providers)}",
+                    "",
+                    "输入搜索  ↑/↓ 移动  Enter 选择 provider  Backspace 删除  Esc 关闭",
+                ]
+            )
+        if self.step == "model":
+            provider = self.selected_provider
+            models = self.visible_models
+            all_models = list(getattr(provider, "models", []) or []) if provider is not None else []
+            return "\n".join(
+                [
+                    "连接配置",
+                    "",
+                    f"provider: {_entity_name(provider)}",
+                    f"test_model: {_entity_name(self.selected_model)}",
+                    f"model 搜索: {self.model_query or '-'}",
+                    f"模型 {min(self.model_index + 1, len(models)) if models else 0}/{len(models)}  total:{len(all_models)}",
+                    "",
+                    "输入搜索  ↑/↓ 移动  Enter 选择测试模型  Backspace 删除  Esc 返回",
+                ]
+            )
         provider = self.selected_provider
         model = self.selected_model
-        if self.step == "provider":
-            return self._provider_list_text()
-        if self.step == "model":
-            return self._model_list_text()
         if provider is None or model is None:
             return "连接配置\n\n没有可配置的目录模型\n\nEsc 关闭"
         env_names = list(getattr(provider, "env_names", []) or [])
@@ -290,8 +421,8 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
         lines = [
             "连接配置",
             "",
-            f"provider: {getattr(provider, 'name', getattr(provider, 'id', '-'))}",
-            f"test_model: {getattr(model, 'name', getattr(model, 'id', '-'))}",
+            f"provider: {_entity_name(provider)}",
+            f"test_model: {_entity_name(model)}",
             f"connection: {self.connection_name or '-'}",
             f"api_key_env: {env_name}",
             "",
@@ -300,83 +431,6 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
             lines.extend([self.input_error, ""])
         lines.append(f"{action}；Esc 关闭")
         return "\n".join(lines)
-
-    def _provider_list_text(self) -> str:
-        visible = self.visible_providers
-        selected_provider = self.selected_provider
-        selected_name = (
-            str(getattr(selected_provider, "name", getattr(selected_provider, "id", "-")))
-            if selected_provider is not None
-            else "-"
-        )
-        lines = [
-            "连接配置",
-            "",
-            f"provider: {selected_name}",
-            f"provider 搜索: {self.provider_query or '-'}",
-            f"Provider {min(self.provider_index + 1, len(visible)) if visible else 0}/{len(visible)}  total:{len(self.providers)}",
-            "",
-        ]
-        if not visible:
-            lines.append("无匹配 provider")
-        start, shown = _visible_window(visible, self.provider_index)
-        for offset, provider in enumerate(shown):
-            index = start + offset
-            selected = ">" if index == self.provider_index else " "
-            name = safe_summary(str(getattr(provider, "name", getattr(provider, "id", "-"))), 24)
-            provider_id = safe_summary(str(getattr(provider, "id", "-")), 22)
-            model_count = len(list(getattr(provider, "models", []) or []))
-            capability = getattr(catalog_provider_capability(provider), "gateway_provider", "-")
-            lines.append(f"{selected} {name:<24} {provider_id:<22} models:{model_count:<4} {capability}")
-        lines.extend(["", "输入搜索  ↑/↓ 移动  Enter 选择 provider  Backspace 删除  Esc 关闭"])
-        return "\n".join(lines)
-
-    def _model_list_text(self) -> str:
-        provider = self.selected_provider
-        if provider is None:
-            return "连接配置\n\n无匹配 provider\n\nEsc 返回"
-        models = self.visible_models
-        all_models = list(getattr(provider, "models", []) or [])
-        provider_name = str(getattr(provider, "name", getattr(provider, "id", "-")))
-        selected_model = self.selected_model
-        selected_model_name = (
-            str(getattr(selected_model, "name", getattr(selected_model, "id", "-")))
-            if selected_model is not None
-            else "-"
-        )
-        lines = [
-            "连接配置",
-            "",
-            f"provider: {provider_name}",
-            f"test_model: {selected_model_name}",
-            f"model 搜索: {self.model_query or '-'}",
-            f"模型 {min(self.model_index + 1, len(models)) if models else 0}/{len(models)}  total:{len(all_models)}",
-            "",
-        ]
-        if not models:
-            lines.append("无匹配 model")
-        start, shown = _visible_window(models, self.model_index)
-        for offset, model in enumerate(shown):
-            index = start + offset
-            selected = ">" if index == self.model_index else " "
-            name = safe_summary(str(getattr(model, "name", getattr(model, "id", "-"))), 32)
-            model_id = safe_summary(str(getattr(model, "id", "-")), 40)
-            lines.append(f"{selected} {name:<32} {model_id}")
-        lines.extend(["", "输入搜索  ↑/↓ 移动  Enter 选择测试模型  Backspace 删除  Esc 返回"])
-        return "\n".join(lines)
-
-    def _set_body(self) -> None:
-        self.query_one("#connection-setup-dialog", Static).update(self._body_text())
-
-    def _sync_input_state(self) -> None:
-        secret_input = self.query_one("#connection-secret", Input)
-        secret_input.display = self.step in {"connection_name", "api_key"}
-        secret_input.disabled = self.step not in {"connection_name", "api_key"}
-        secret_input.password = self.step == "api_key"
-        secret_input.placeholder = "连接名" if self.step == "connection_name" else "API key"
-        secret_input.value = ""
-        if self.step in {"connection_name", "api_key"}:
-            secret_input.focus()
 
     def _new_connection_result(self, api_key: str) -> ConnectionSetupResult | None:
         provider = self.selected_provider
@@ -452,11 +506,27 @@ def _connection_id(provider_id: str, connection_name: str) -> str:
     return "".join(result).strip("-") or "provider-connection"
 
 
-def _visible_window(items: list[object], selected_index: int, *, page_size: int = 12) -> tuple[int, list[object]]:
-    if not items:
-        return 0, []
-    start = max(0, min(selected_index - page_size + 1, len(items) - page_size))
-    return start, items[start : start + page_size]
+def _entity_name(entity: object) -> str:
+    if entity is None:
+        return "-"
+    return str(getattr(entity, "name", getattr(entity, "id", "-")))
+
+
+def _provider_option(provider: object) -> Option:
+    name = safe_summary(_entity_name(provider), 24)
+    provider_id = safe_summary(str(getattr(provider, "id", "-")), 22)
+    model_count = len(list(getattr(provider, "models", []) or []))
+    capability = getattr(catalog_provider_capability(provider), "gateway_provider", "-")
+    return Option(
+        f"{name:<24} {provider_id:<22} models:{model_count:<4} {capability}",
+        id=str(getattr(provider, "id", "-")),
+    )
+
+
+def _model_option(model: object) -> Option:
+    name = safe_summary(_entity_name(model), 32)
+    model_id = safe_summary(str(getattr(model, "id", "-")), 40)
+    return Option(f"{name:<32} {model_id}", id=str(getattr(model, "id", "-")))
 
 
 def _default_env_name(provider_id: str) -> str:

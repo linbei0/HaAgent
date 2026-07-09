@@ -10,9 +10,10 @@ import asyncio
 from types import SimpleNamespace
 
 from haagent.app.assistant_service import AssistantModelConnection
-from haagent.tui.overlays.connections import ConnectionSetupWizard
+from haagent.tui.overlays.connections import ConnectionCenterOverlay, ConnectionSetupWizard
 from haagent.tui.overlays.models import ModelSwitchOverlay, ModelSwitchState
 from textual.app import App
+from textual.widgets import OptionList
 
 
 def test_connection_setup_builds_connection_and_test_model_without_model_selection() -> None:
@@ -69,6 +70,22 @@ def test_connection_setup_rejects_secret_like_connection_name() -> None:
     assert wizard._accept_connection_name("sk-test-secret") is False
     assert wizard.step == "provider"
     assert wizard.connection_name == ""
+
+
+def test_connection_center_overlay_uses_option_list_for_connections() -> None:
+    async def run() -> None:
+        overlay = ConnectionCenterOverlay([_connection("requesty-personal", "personal", "requesty")])
+        app = App()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.push_screen(overlay)
+
+            assert overlay.query_one(OptionList).option_count == 1
+            await pilot.press("t")
+            await pilot.pause(0.1)
+
+            assert overlay.state.selected_connection.id == "requesty-personal"
+
+    asyncio.run(run())
 
 
 def test_model_switch_state_expands_catalog_models_for_each_connection() -> None:

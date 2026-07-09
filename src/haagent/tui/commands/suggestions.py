@@ -9,7 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from textual import events
-from textual.widgets import Static
+from textual.app import ComposeResult
+from textual.containers import Vertical
+from textual.css.query import NoMatches
+from textual.message import Message
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from haagent.tui.commands import SlashCommand
 from haagent.tui.design.copy import EMPTY_LABELS, MODAL_TITLES
@@ -73,15 +78,32 @@ class CommandSuggestionState:
         return "\n".join(lines)
 
 
-class CommandSuggestionOverlay(Static):
+class CommandSuggestionOverlay(Vertical):
+    class Selected(Message):
+        def __init__(self, command: SlashCommand) -> None:
+            super().__init__()
+            self.command = command
+
     def __init__(self, commands: list[SlashCommand]) -> None:
-        super().__init__("", id="command-suggestions-dialog")
+        super().__init__(id="command-suggestions-dialog")
         self.state = CommandSuggestionState(commands=commands)
+        self._visible_commands: list[SlashCommand] = []
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="command-suggestions-summary")
+        yield OptionList(id="command-suggestions-list")
 
     def on_mount(self) -> None:
-        self.update(self.state.render())
+        self._set_state(self.state)
+        self.query_one(OptionList).focus()
 
-    def handle_key(self, event: events.Key) -> SlashCommand | str | None:
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        command = self.selected_command()
+        if command is not None:
+            event.stop()
+            self.post_message(self.Selected(command))
+
+    def handle_navigation_key(self, event: events.Key) -> SlashCommand | str | None:
         key = event.key
         if key == "escape":
             event.stop()
@@ -96,7 +118,7 @@ class CommandSuggestionOverlay(Static):
             return None
         if key == "enter":
             event.stop()
-            command = self.state.selected_command
+            command = self.selected_command()
             if command is not None:
                 return command
             return ""
@@ -105,7 +127,29 @@ class CommandSuggestionOverlay(Static):
     def update_query(self, query: str) -> None:
         self._set_state(self.state.with_query(query))
 
+    def selected_command(self) -> SlashCommand | None:
+        if not self.is_mounted:
+            return self.state.selected_command
+        option_list = self.query_one(OptionList)
+        index = option_list.highlighted
+        if index is None or index < 0 or index >= len(self._visible_commands):
+            return None
+        return self._visible_commands[index]
+
     def _set_state(self, state: CommandSuggestionState) -> None:
         self.state = state
-        if self.is_mounted:
-            self.update(state.render())
+        self._visible_commands = state.visible_commands
+        try:
+            summary = self.query_one("#command-suggestions-summary", Static)
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            return
+        summary.update(state.render())
+        options = [
+            Option(f"{command.token}  {command.description}", id=command.name)
+            for command in self._visible_commands
+        ]
+        if not options:
+            options = [Option(EMPTY_LABELS["no_matching_commands"], id="empty", disabled=True)]
+        option_list.set_options(options)
+        option_list.highlighted = state.selected_index if self._visible_commands else None

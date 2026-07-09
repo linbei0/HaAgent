@@ -35,7 +35,7 @@ from haagent.runtime.events import (
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.application.app import HaAgentTuiApp, find_untrusted_absolute_paths
 from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
-from haagent.tui.design.failures import failure_next_steps
+from haagent.tui.design.failures import failure_from_payload, failure_next_steps
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
 from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
 from haagent.tui.overlays.models import ModelCatalogLoadingOverlay
@@ -55,7 +55,7 @@ from haagent.tui.design.theme import (
 )
 from haagent.tui.widgets import ConversationTimeline, ProgressStatusLine, PromptInput
 from haagent.tui.typography.wrap import is_textual_line_breaking_installed
-from textual.widgets import Markdown, RichLog, TextArea
+from textual.widgets import Markdown, OptionList, RichLog, TextArea
 from textual.screen import Screen
 
 
@@ -2108,10 +2108,9 @@ def test_tui_connect_wizard_scrolls_provider_window_with_selection(tmp_path: Pat
                 await pilot.press("down")
             await pilot.pause(0.1)
 
-            text = _all_text(app)
-            assert "Provider 14/15" in text
-            assert "> Provider 13" in text
-            assert "Provider 00" not in text
+            option_list = app.screen.query_one("#connection-setup-list", OptionList)
+            assert option_list.highlighted == 13
+            assert "Provider 14/15" in _all_text(app)
 
     asyncio.run(run())
 
@@ -2146,10 +2145,9 @@ def test_tui_connect_wizard_scrolls_test_model_window_with_selection(tmp_path: P
                 await pilot.press("down")
             await pilot.pause(0.1)
 
-            text = _all_text(app)
-            assert "模型 18/20" in text
-            assert "> Model 17" in text
-            assert "Model 00" not in text
+            option_list = app.screen.query_one("#connection-setup-list", OptionList)
+            assert option_list.highlighted == 17
+            assert "模型 18/20" in _all_text(app)
 
     asyncio.run(run())
 
@@ -2337,6 +2335,23 @@ def test_tui_file_reference_fuzzy_search_stays_inside_workspace(tmp_path: Path) 
     assert token == '@file("docs/Project Plan.md")'
 
 
+def test_tui_file_reference_python_fallback_when_rg_missing(tmp_path: Path, monkeypatch) -> None:
+    # rg 缺失时的纯 Python 扫描是有意保留的环境兼容路径（见 refs.py 注释），
+    # 这里显式覆盖 shutil.which -> None 强制走 fallback，确认仍能在 workspace 内找到文件。
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "Project Plan.md").write_text("plan", encoding="utf-8")
+    (tmp_path / "README.md").write_text("readme", encoding="utf-8")
+    monkeypatch.setattr("haagent.tui.files.refs.shutil.which", lambda name: None)
+
+    index = build_file_reference_index(tmp_path)
+
+    display_paths = {item.display_path for item in index.files}
+    assert "docs/Project Plan.md" in display_paths
+    assert "README.md" in display_paths
+    assert [item.display_path for item in index.matches("plan")] == ["docs/Project Plan.md"]
+
+
 def test_tui_file_reference_index_uses_fast_file_walker(tmp_path: Path, monkeypatch) -> None:
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -2450,6 +2465,16 @@ def test_tui_failure_next_steps_are_conservative() -> None:
     assert "工具时间线" not in joined
     assert "修复完成" not in joined
     assert "一定是" not in joined
+
+
+def test_tui_failure_payload_reports_missing_fields_explicitly() -> None:
+    view = failure_from_payload({"status": "failed"}, fallback_message="")
+
+    assert view.failed_stage == "缺少字段: failed_stage"
+    assert view.failure_category == "缺少字段: failure_category"
+    assert view.reason == "缺少字段: reason"
+    assert view.episode_path == "缺少字段: episode_path"
+    assert "unknown" not in view.block_text()
 
 
 def test_tui_parser_accepts_explicit_command() -> None:

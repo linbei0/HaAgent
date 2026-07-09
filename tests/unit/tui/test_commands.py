@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from haagent.app.assistant_service import AssistantServiceError
 from haagent.prompts.packs import iter_prompt_modes
 from haagent.tui.application.app import HaAgentTuiApp
+from haagent.tui.application.command_handlers import ChatCommandHandlers
 from haagent.tui.commands import command_registry, parse_slash_command
 
 
@@ -73,7 +74,7 @@ def test_turns_command_show_reports_current_and_configured_limits() -> None:
         status=SimpleNamespace(current_max_turns=None, configured_interactive_max_turns=200),
     )
 
-    HaAgentTuiApp._handle_turns_command(app, "")
+    ChatCommandHandlers(app).turns("")
 
     assert app.blocks == [
         (
@@ -89,7 +90,7 @@ def test_turns_command_count_saves_and_applies_interactive_limit() -> None:
         status=SimpleNamespace(current_max_turns=80, configured_interactive_max_turns=80),
     )
 
-    HaAgentTuiApp._handle_turns_command(app, "set 80")
+    ChatCommandHandlers(app).turns("set 80")
 
     assert app.service.saved_limits == [80]
     assert app.blocks == [("Command", "已保存交互默认 turn 限制：80；当前 session 已同步。")]
@@ -100,7 +101,7 @@ def test_turns_command_unlimited_is_current_session_only() -> None:
         status=SimpleNamespace(current_max_turns=None, configured_interactive_max_turns=200),
     )
 
-    HaAgentTuiApp._handle_turns_command(app, "unlimited")
+    ChatCommandHandlers(app).turns("unlimited")
 
     assert app.service.unlimited_calls == 1
     assert app.blocks == [("Command", "当前 session turn 限制已设为 unlimited；不会写入全局配置。")]
@@ -112,7 +113,7 @@ def test_turns_command_reports_missing_session_for_unlimited() -> None:
         unlimited_error=AssistantServiceError("当前没有 session；先发送一条消息再使用 /turns unlimited。"),
     )
 
-    HaAgentTuiApp._handle_turns_command(app, "unlimited")
+    ChatCommandHandlers(app).turns("unlimited")
 
     assert app.blocks == [("Command", "当前没有 session；先发送一条消息再使用 /turns unlimited。")]
 
@@ -122,7 +123,7 @@ def test_turns_command_rejects_invalid_arguments() -> None:
         status=SimpleNamespace(current_max_turns=200, configured_interactive_max_turns=200),
     )
 
-    HaAgentTuiApp._handle_turns_command(app, "0")
+    ChatCommandHandlers(app).turns("0")
 
     assert app.blocks == [("Command", "用法：/turns [show|unlimited|COUNT]")]
 

@@ -118,7 +118,13 @@ uv run haagent check
   """
   ```
 
-- 只为复杂流程、失败边界、provider/tool 行为或安全敏感检查添加简洁注释。
+- 以下场景必须写简洁注释，不能只靠代码自解释：
+  - 失败边界、拒绝执行、显式抛错、取消静默 fallback、或保留 fallback 的地方。
+  - secret、凭据、workspace/path 边界、权限审批、工具执行、模型调用等安全敏感逻辑。
+  - Textual TUI 的焦点恢复、键盘事件拦截、modal/overlay 生命周期、worker/thread 与 `call_from_thread` 边界。
+  - 性能相关逻辑，如批处理刷新、避免全量重绘、缓存/索引复用、长输出截断或摘要预算。
+  - runtime event 到 UI 展示、context selection、memory 候选、episode/session 状态等跨层契约映射。
+  - 为了产品规则保留或删除兼容路径时，必须说明原因和适用边界。
 - 不注释显而易见的赋值或一行样板。
 - 改动行为时保持注释同步。
 
