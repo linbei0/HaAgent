@@ -24,7 +24,6 @@ from haagent.context.messages import (
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelCallError, ModelGateway, ToolCall
 from haagent.models.model_connections import user_config_dir
-from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter
@@ -164,21 +163,18 @@ class RunOrchestrator:
                 cancellation_token=self._cancellation_token,
                 tool_registry=self._tool_registry,
                 mcp_runtime=self._mcp_runtime,
-                agent_runtime=MultiAgentRuntime(
+                # 仅当本 run 允许 agent/task 工具时才装配 MultiAgentRuntime，避免普通对话热路径耦合。
+                agent_runtime=_maybe_multi_agent_runtime(
+                    allowed_tools=task.allowed_tools,
                     runs_root=self._runs_root,
                     workspace_root=workspace_root,
                     leader_session_id=self._leader_session_id,
                     model_gateway=self._model_gateway,
                     path_policy=path_policy,
-                    inherited_allowed_tools=task.allowed_tools,
-                    inherited_approval_allowed_tools=task.policy["approval_allowed_tools"],
-                    inherited_approved_tools=task.policy["approved_tools"],
+                    approval_allowed_tools=task.policy["approval_allowed_tools"],
+                    approved_tools=task.policy["approved_tools"],
                     event_sink=self._emit_event,
                     interaction_handler=self._interaction_handler,
-                    enable_web=bool({"web_search", "web_fetch"} & set(task.allowed_tools)),
-                    mcp_tool_names=[
-                        tool for tool in task.allowed_tools if tool.startswith("mcp__")
-                    ],
                     tool_registry=self._tool_registry,
                     mcp_runtime=self._mcp_runtime,
                     worker_max_turns=self._max_turns,
@@ -744,6 +740,65 @@ def _task_title_from_locals(values: dict[str, object]) -> str:
     if isinstance(goal, str) and goal.strip():
         return goal
     return "Current task"
+
+
+# leader 侧多 agent 控制面工具；任一出现在 allowed_tools 才需要 MultiAgentRuntime。
+_MULTI_AGENT_CONTROL_TOOLS = frozenset(
+    {
+        "agent",
+        "send_message",
+        "task_stop",
+        "task_get",
+        "task_list",
+        "task_output",
+    },
+)
+
+
+def _needs_multi_agent_runtime(allowed_tools: list[str]) -> bool:
+    return bool(_MULTI_AGENT_CONTROL_TOOLS.intersection(allowed_tools))
+
+
+def _maybe_multi_agent_runtime(
+    *,
+    allowed_tools: list[str],
+    runs_root: Path,
+    workspace_root: Path,
+    leader_session_id: str,
+    model_gateway: ModelGateway,
+    path_policy: Any,
+    approval_allowed_tools: list[str],
+    approved_tools: list[str],
+    event_sink: Callable[[RuntimeBusEvent], None] | None,
+    interaction_handler: HumanInteractionHandler | None,
+    tool_registry: ToolRuntimeRegistry,
+    mcp_runtime: Any,
+    worker_max_turns: int | None,
+    parent_task_step_id: str,
+) -> Any | None:
+    if not _needs_multi_agent_runtime(allowed_tools):
+        return None
+    # 局部 import：普通 run 不加载 multi_agent.runtime 重模块。
+    from haagent.multi_agent.runtime import MultiAgentRuntime
+
+    return MultiAgentRuntime(
+        runs_root=runs_root,
+        workspace_root=workspace_root,
+        leader_session_id=leader_session_id,
+        model_gateway=model_gateway,
+        path_policy=path_policy,
+        inherited_allowed_tools=allowed_tools,
+        inherited_approval_allowed_tools=approval_allowed_tools,
+        inherited_approved_tools=approved_tools,
+        event_sink=event_sink,
+        interaction_handler=interaction_handler,
+        enable_web=bool({"web_search", "web_fetch"} & set(allowed_tools)),
+        mcp_tool_names=[tool for tool in allowed_tools if tool.startswith("mcp__")],
+        tool_registry=tool_registry,
+        mcp_runtime=mcp_runtime,
+        worker_max_turns=worker_max_turns,
+        parent_task_step_id=parent_task_step_id,
+    )
 
 
 def _worker_notification_context(leader_session_id: str) -> str | None:
