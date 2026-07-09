@@ -5,7 +5,7 @@ tests/unit/runtime/test_session_ui_events.py - Session UI 事件发射测试
 """
 
 from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent
-from haagent.runtime.session.agent import _count_historical_tool_compression_events
+from haagent.runtime.session.turn_completion import count_historical_tool_compression_events as _count_historical_tool_compression_events
 from haagent.runtime.session.ui_events import emit_runtime_ui_event, emit_ui_event, session_started_event
 
 

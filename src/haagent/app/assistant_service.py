@@ -38,16 +38,16 @@ from haagent.models.model_connections import (
     USER_PROVIDERS_FILE,
     user_config_dir,
 )
-from haagent.runtime.session.agent import (
-    AgentSession,
+from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.session.attachments import ImageAttachment
+from haagent.runtime.session.package import (
     ChatSessionError,
-    ChatTurnResult,
     SessionSummary,
     SessionTurnSummary,
     find_latest_session,
     list_sessions,
 )
-from haagent.runtime.session.attachments import ImageAttachment
+from haagent.runtime.session.turn_completion import ChatTurnResult
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathAccess, PermissionMode

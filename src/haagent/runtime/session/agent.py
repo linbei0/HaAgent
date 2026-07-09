@@ -2,29 +2,66 @@
 src/haagent/runtime/session/agent.py - 自然语言 Agent 会话
 
 管理 chat 会话状态，并把每条用户请求转成可审计的临时 task contract。
+会话 package IO、turn 收尾、路径策略变更与生命周期装配已拆到同级模块。
 """
 
 from __future__ import annotations
 
-import io
-import json
-import sys
-import uuid
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from haagent.mcp.runtime import SyncMcpRuntime
-from haagent.mcp.settings import load_mcp_settings
-from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.types import ModelGateway
 from haagent.models.model_connections import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken
-from haagent.runtime.session.attachments import ImageAttachment, save_clipboard_image
+from haagent.runtime.session.attachments import (
+    AttachmentError,
+    ImageAttachment,
+    read_clipboard_image_bytes,
+    save_clipboard_image,
+)
+from haagent.runtime.session.lifecycle import (
+    SessionRuntimeState,
+    apply_state,
+    build_create_state,
+    build_new_package_state,
+    build_resume_state,
+)
+from haagent.runtime.session.package import (
+    ChatSessionError,
+    SessionSummary,
+    SessionTurnSummary,
+    append_turn_record,
+    find_latest_session,
+    list_sessions,
+    manual_compaction_summary_text,
+    merge_image_attachment_history,
+    read_session_turns,
+    session_turn_summary,
+    write_manual_compaction_state,
+    write_session_metadata,
+)
+from haagent.runtime.session.path_mutators import (
+    with_external_root_access,
+    with_external_root_added,
+    with_external_root_removed,
+    with_external_roots_cleared,
+    with_permission_mode,
+    with_project_root,
+)
 from haagent.runtime.session.turn import ChatTurnRequest, ChatTurnRunner, summary_value as _summary_value
+from haagent.runtime.session.turn_completion import (
+    ChatTurnResult,
+    build_turn_result,
+    count_historical_tool_compression_events,
+    memory_update_requested,
+    task_step_started_event,
+    task_turn_closed_events,
+    turn_summary,
+    with_in_band_verification,
+)
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.session.ui_events import (
     RuntimeUiEventSink,
@@ -38,20 +75,12 @@ from haagent.runtime.session.ui_events import (
     turn_finished_event as build_turn_finished_event,
     turn_started_event as build_turn_started_event,
 )
-from haagent.runtime.episodes.validator import (
-    EpisodeValidationError,
-    load_inspect_episode_package,
-)
 from haagent.context.compression.full import FullCompactEligibility, maybe_full_compact_messages
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.execution.path_policy import (
-    ExternalRoot,
     PathAccess,
-    PathPolicy,
     PermissionMode,
-    default_path_policy,
-    load_path_policy,
     serialize_path_policy,
 )
 from haagent.context.compression.session_memory import (
@@ -60,91 +89,30 @@ from haagent.context.compression.session_memory import (
     compact_session_memory,
 )
 from haagent.runtime.session.working_state import (
-    WorkingStateError,
-    empty_working_state,
-    load_working_state,
     update_working_state,
     write_working_state,
 )
 from haagent.runtime.session.task_ledger import (
-    TaskLedgerError,
     begin_task_ledger_turn,
-    empty_task_ledger,
-    load_task_ledger,
     update_task_ledger,
     write_task_ledger,
 )
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
-from haagent.tools.registry import default_tool_runtime_registry
 
 CHAT_MAX_TURNS = DEFAULT_INTERACTIVE_MAX_TURNS
-ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT = 4000
 
-
-class ChatSessionError(RuntimeError):
-    """Chat session package 损坏或无法恢复时抛出。"""
-
-
-@dataclass(frozen=True)
-class ChatTurnResult:
-    session_id: str
-    turn_index: int
-    status: str
-    episode_path: Path
-    provider: str
-    final_response: str
-    verification_status: str
-    failed_stage: str = "none"
-    failure_category: str = "none"
-    reason: str = "none"
-    summary_error: str | None = None
-    memory_candidates_created: int = 0
-    memory_extraction_status: str = "skipped"
-    memory_extraction_reason: str = ""
-
-    def output_lines(self) -> list[str]:
-        lines = [
-            f"status={self.status}",
-            f"episode_path={self.episode_path}",
-            f"provider={self.provider}",
-            f"final_response={_summary_value(self.final_response)}",
-            f"verification={self.verification_status}",
-        ]
-        if self.summary_error is not None:
-            lines.append(f"summary_error={_summary_value(self.summary_error)}")
-        if self.memory_candidates_created:
-            lines.append(f"memory_candidates={self.memory_candidates_created}")
-        if self.status != "completed":
-            lines.extend(
-                [
-                    f"failed_stage={_summary_value(self.failed_stage)}",
-                    f"failure_category={_summary_value(self.failure_category)}",
-                    f"reason={_summary_value(self.reason)}",
-                ],
-            )
-        return lines
-
-
-@dataclass(frozen=True)
-class SessionSummary:
-    session_id: str
-    created_at: str
-    updated_at: str
-    workspace_root: Path
-    turn_count: int
-    first_request: str
-    session_path: Path
-
-
-@dataclass(frozen=True)
-class SessionTurnSummary:
-    turn_index: int
-    request: str
-    summary: str
-    status: str
-    episode_path: Path
-    verification_status: str
-    assistant_display_text: str | None = None
+# 对外 re-export 已移至 package / turn_completion；调用方应直接从目标模块 import。
+__all__ = [
+    "AgentSession",
+    "CHAT_MAX_TURNS",
+    "ChatSessionError",
+    "ChatTurnResult",
+    "SessionCompactResult",
+    "SessionSummary",
+    "SessionTurnSummary",
+    "find_latest_session",
+    "list_sessions",
+]
 
 
 @dataclass(frozen=True)
@@ -179,55 +147,26 @@ class AgentSession:
         worker_context: dict[str, object] | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
     ) -> None:
-        self.workspace_root = workspace_root.resolve()
-        self.path_policy = default_path_policy(self.workspace_root)
-        self.runs_root = runs_root
-        self.model_gateway = model_gateway
-        self.model_profile_name = model_profile_name
-        self.model_connection_id = model_connection_id
-        self.model_name = model_name
-        self.model_base_url = model_base_url
-        self.max_turns = max_turns
-        self.memory_extraction_enabled = memory_extraction_enabled
-        self.enable_web = enable_web
-        self._allowed_tools_override = list(allowed_tools_override) if allowed_tools_override is not None else None
-        self._approval_allowed_tools_override = (
-            list(approval_allowed_tools_override)
-            if approval_allowed_tools_override is not None
-            else None
+        state = build_create_state(
+            workspace_root=workspace_root,
+            runs_root=runs_root,
+            model_gateway=model_gateway,
+            model_profile_name=model_profile_name,
+            model_connection_id=model_connection_id,
+            model_name=model_name,
+            model_base_url=model_base_url,
+            max_turns=max_turns,
+            session_id=session_id,
+            memory_extraction_enabled=memory_extraction_enabled,
+            enable_web=enable_web,
+            allowed_tools_override=allowed_tools_override,
+            approval_allowed_tools_override=approval_allowed_tools_override,
+            approved_tools_override=approved_tools_override,
+            mcp_runtime=mcp_runtime,
+            worker_context=worker_context,
+            worker_permission_requester=worker_permission_requester,
         )
-        self._approved_tools_override = list(approved_tools_override) if approved_tools_override is not None else None
-        self._worker_context = dict(worker_context) if worker_context is not None else None
-        self._worker_permission_requester = worker_permission_requester
-        self.session_id = session_id or _new_session_id()
-        self.turn_count = 0
-        self._summaries: list[str] = []
-        self._manual_compaction_summary: str | None = None
-        self._manual_compaction_turn_count = 0
-        self._next_turn_target_paths: list[str] = []
-        self._last_user_image_attachments: list[ImageAttachment] = []
-        self._image_attachment_history: list[ImageAttachment] = []
-        self._historical_tool_compression_count = 0
-        self._working_state = empty_working_state()
-        self._task_ledger = empty_task_ledger()
-        self._current_cancellation_token: CancellationToken | None = None
-        self._mcp_settings = load_mcp_settings()
-        if mcp_runtime is None:
-            self._mcp_runtime = SyncMcpRuntime(self._mcp_settings)
-            self._mcp_runtime.start()
-            self._owns_mcp_runtime = True
-        else:
-            self._mcp_runtime = mcp_runtime
-            self._owns_mcp_runtime = False
-        self._mcp_tool_names = [
-            mcp_tool_alias(tool.server_name, tool.name)
-            for tool in self._mcp_runtime.list_tools()
-        ]
-        self._tool_registry = default_tool_runtime_registry(
-            mcp_tool_definitions(self._mcp_runtime.list_tools()),
-        )
-        self.session_path = self.runs_root / "sessions" / self.session_id
-        self._created_at = datetime.now(UTC).isoformat()
+        apply_state(self, state)
         self._write_session_metadata()
         self._write_working_state()
         self._write_task_ledger()
@@ -246,64 +185,19 @@ class AgentSession:
         max_turns: int | None = CHAT_MAX_TURNS,
         enable_web: bool = False,
     ) -> "AgentSession":
-        session_path = _resolve_session_path(session, runs_root or Path(".runs"))
-        metadata = _read_session_metadata(session_path)
-        turns = _read_session_turns(session_path)
-
+        state = build_resume_state(
+            session,
+            runs_root=runs_root,
+            model_gateway=model_gateway,
+            model_profile_name=model_profile_name,
+            model_connection_id=model_connection_id,
+            model_name=model_name,
+            model_base_url=model_base_url,
+            max_turns=max_turns,
+            enable_web=enable_web,
+        )
         instance = cls.__new__(cls)
-        instance.workspace_root = Path(str(metadata["workspace_root"])).resolve()
-        raw_policy = metadata.get("path_policy")
-        instance.path_policy = (
-            load_path_policy(raw_policy)
-            if isinstance(raw_policy, dict)
-            else default_path_policy(instance.workspace_root)
-        )
-        instance.runs_root = session_path.parent.parent
-        instance.model_gateway = model_gateway
-        instance.model_profile_name = model_profile_name or _optional_string(metadata.get("model_profile_name"))
-        instance.model_connection_id = model_connection_id or _optional_string(metadata.get("model_connection_id"))
-        instance.model_name = model_name or _optional_string(metadata.get("model"))
-        instance.model_base_url = model_base_url or _optional_string(metadata.get("base_url"))
-        instance.max_turns = max_turns
-        instance.memory_extraction_enabled = True
-        instance.enable_web = enable_web
-        instance.session_id = str(metadata["session_id"])
-        instance.turn_count = int(metadata["turn_count"])
-        instance._summaries = [str(turn["summary"]) for turn in turns]
-        compaction_summary, compacted_turn_count = _read_manual_compaction_state(session_path)
-        instance._manual_compaction_summary = compaction_summary
-        instance._manual_compaction_turn_count = compacted_turn_count
-        instance._next_turn_target_paths = []
-        instance._last_user_image_attachments = _read_session_image_attachments(metadata, session_path)
-        instance._image_attachment_history = _read_image_attachment_history(metadata, session_path)
-        instance._historical_tool_compression_count = 0
-        try:
-            instance._working_state = load_working_state(session_path / "working_state.json")
-        except WorkingStateError as error:
-            raise ChatSessionError(str(error)) from error
-        try:
-            instance._task_ledger = load_task_ledger(session_path / "task-ledger.json")
-        except TaskLedgerError as error:
-            raise ChatSessionError(str(error)) from error
-        instance._mcp_settings = load_mcp_settings()
-        instance._mcp_runtime = SyncMcpRuntime(instance._mcp_settings)
-        instance._mcp_runtime.start()
-        instance._owns_mcp_runtime = True
-        instance._mcp_tool_names = [
-            mcp_tool_alias(tool.server_name, tool.name)
-            for tool in instance._mcp_runtime.list_tools()
-        ]
-        instance._tool_registry = default_tool_runtime_registry(
-            mcp_tool_definitions(instance._mcp_runtime.list_tools()),
-        )
-        instance.session_path = session_path
-        instance._current_cancellation_token = None
-        instance._allowed_tools_override = None
-        instance._approval_allowed_tools_override = None
-        instance._approved_tools_override = None
-        instance._worker_context = None
-        instance._worker_permission_requester = None
-        instance._created_at = str(metadata["created_at"])
+        apply_state(instance, state)
         return instance
 
     def set_max_turns(self, max_turns: int | None) -> None:
@@ -374,7 +268,7 @@ class AgentSession:
             turn_index=turn_index,
         )
         self._write_task_ledger()
-        started_event = _task_step_started_event(self._task_ledger)
+        started_event = task_step_started_event(self._task_ledger)
         if started_event is not None:
             on_runtime_event(started_event)
         try:
@@ -415,11 +309,11 @@ class AgentSession:
             raise
 
         turn_result = self._build_turn_result(clean_prompt, result)
-        turn_result = _with_in_band_verification(turn_result, runtime_events)
+        turn_result = with_in_band_verification(turn_result, runtime_events)
         self.turn_count += 1
         if new_attachments:
             self._last_user_image_attachments = list(new_attachments)
-            self._image_attachment_history = _merge_image_attachment_history(
+            self._image_attachment_history = merge_image_attachment_history(
                 self._image_attachment_history,
                 new_attachments,
             )
@@ -439,14 +333,14 @@ class AgentSession:
             runtime_events=runtime_events,
         )
         self._write_task_ledger()
-        for progress_event in _task_turn_closed_events(self._task_ledger, turn_result):
+        for progress_event in task_turn_closed_events(self._task_ledger, turn_result):
             on_runtime_event(progress_event)
-        self._historical_tool_compression_count += _count_historical_tool_compression_events(runtime_events)
-        turn_summary = _turn_summary(clean_prompt, turn_result)
-        self._summaries.append(turn_summary)
-        self._record_turn(clean_prompt, turn_result, turn_summary)
+        self._historical_tool_compression_count += count_historical_tool_compression_events(runtime_events)
+        summary = turn_summary(clean_prompt, turn_result)
+        self._summaries.append(summary)
+        self._record_turn(clean_prompt, turn_result, summary)
         extraction_result = None
-        if self.memory_extraction_enabled and _memory_update_requested(runtime_events):
+        if self.memory_extraction_enabled and memory_update_requested(runtime_events):
             extraction_result = self._run_memory_extraction(clean_prompt, turn_result, runtime_events)
         if extraction_result is not None and extraction_result.created_count:
             turn_result = replace(
@@ -526,11 +420,15 @@ class AgentSession:
     def paste_clipboard_image(self, existing: list[ImageAttachment] | None = None) -> ImageAttachment:
         if self._current_cancellation_token is not None:
             raise ChatSessionError("current task is running")
-        return save_clipboard_image(
-            _read_clipboard_image_bytes(),
-            session_path=self.session_path,
-            existing=list(existing or []),
-        )
+        try:
+            return save_clipboard_image(
+                read_clipboard_image_bytes(),
+                session_path=self.session_path,
+                existing=list(existing or []),
+            )
+        except AttachmentError as error:
+            # 会话层对外统一为 ChatSessionError，避免 UI 区分两种错误类型。
+            raise ChatSessionError(str(error)) from error
 
     def switch_model_gateway(
         self,
@@ -552,83 +450,27 @@ class AgentSession:
         self._write_session_metadata()
 
     def add_external_root(self, path: Path, access: PathAccess) -> None:
-        resolved_path = path.resolve()
-        roots = [root for root in self.path_policy.external_roots if root.path.resolve() != resolved_path]
-        roots.append(
-            ExternalRoot(
-                path=resolved_path,
-                access=access,
-                source="user",
-                created_at=datetime.now(UTC).isoformat(),
-            ),
-        )
-        self.path_policy = PathPolicy(
-            project_root=self.workspace_root,
-            external_roots=roots,
-            permission_mode=self.path_policy.permission_mode,
-        ).resolved()
+        self.path_policy = with_external_root_added(self.path_policy, self.workspace_root, path, access)
         self._write_session_metadata()
 
     def remove_external_root(self, path: Path) -> None:
-        resolved_path = path.resolve()
-        roots = [root for root in self.path_policy.external_roots if root.path.resolve() != resolved_path]
-        self.path_policy = PathPolicy(
-            project_root=self.workspace_root,
-            external_roots=roots,
-            permission_mode=self.path_policy.permission_mode,
-        ).resolved()
+        self.path_policy = with_external_root_removed(self.path_policy, self.workspace_root, path)
         self._write_session_metadata()
 
     def set_external_root_access(self, path: Path, access: PathAccess) -> None:
-        resolved_path = path.resolve()
-        roots: list[ExternalRoot] = []
-        found = False
-        for root in self.path_policy.external_roots:
-            if root.path.resolve() == resolved_path:
-                roots.append(ExternalRoot(path=resolved_path, access=access, source=root.source, created_at=root.created_at))
-                found = True
-            else:
-                roots.append(root)
-        if not found:
-            roots.append(
-                ExternalRoot(
-                    path=resolved_path,
-                    access=access,
-                    source="user",
-                    created_at=datetime.now(UTC).isoformat(),
-                ),
-            )
-        self.path_policy = PathPolicy(
-            project_root=self.workspace_root,
-            external_roots=roots,
-            permission_mode=self.path_policy.permission_mode,
-        ).resolved()
+        self.path_policy = with_external_root_access(self.path_policy, self.workspace_root, path, access)
         self._write_session_metadata()
 
     def clear_external_roots(self) -> None:
-        self.path_policy = PathPolicy(
-            project_root=self.workspace_root,
-            permission_mode=self.path_policy.permission_mode,
-        ).resolved()
+        self.path_policy = with_external_roots_cleared(self.path_policy, self.workspace_root)
         self._write_session_metadata()
 
     def switch_project_root(self, path: Path) -> None:
-        permission_mode = self.path_policy.permission_mode
-        self.workspace_root = path.resolve()
-        self.path_policy = PathPolicy(
-            project_root=self.workspace_root,
-            permission_mode=permission_mode,
-        ).resolved()
+        self.workspace_root, self.path_policy = with_project_root(self.path_policy, path)
         self._write_session_metadata()
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
-        if mode not in {"request_approval", "auto_approve", "full_access"}:
-            raise ChatSessionError("permission mode must be request_approval, auto_approve, or full_access")
-        self.path_policy = PathPolicy(
-            project_root=self.workspace_root,
-            external_roots=self.path_policy.external_roots,
-            permission_mode=mode,
-        ).resolved()
+        self.path_policy = with_permission_mode(self.path_policy, self.workspace_root, mode)
         self._write_session_metadata()
 
     def set_next_turn_target_paths(self, paths: list[Path]) -> None:
@@ -692,21 +534,50 @@ class AgentSession:
         }
 
     def new(self) -> None:
-        self.session_id = _new_session_id()
-        self.turn_count = 0
-        self._summaries = []
-        self._manual_compaction_summary = None
-        self._manual_compaction_turn_count = 0
-        self._last_user_image_attachments = []
-        self._image_attachment_history = []
-        self._working_state = empty_working_state()
-        self._task_ledger = empty_task_ledger()
-        self.path_policy = default_path_policy(self.workspace_root)
-        self.session_path = self.runs_root / "sessions" / self.session_id
-        self._created_at = datetime.now(UTC).isoformat()
+        state = build_new_package_state(self._snapshot_state())
+        apply_state(self, state)
         self._write_session_metadata()
         self._write_working_state()
         self._write_task_ledger()
+
+    def _snapshot_state(self) -> SessionRuntimeState:
+        return SessionRuntimeState(
+            workspace_root=self.workspace_root,
+            path_policy=self.path_policy,
+            runs_root=self.runs_root,
+            model_gateway=self.model_gateway,
+            model_profile_name=self.model_profile_name,
+            model_connection_id=self.model_connection_id,
+            model_name=self.model_name,
+            model_base_url=self.model_base_url,
+            max_turns=self.max_turns,
+            memory_extraction_enabled=self.memory_extraction_enabled,
+            enable_web=self.enable_web,
+            allowed_tools_override=self._allowed_tools_override,
+            approval_allowed_tools_override=self._approval_allowed_tools_override,
+            approved_tools_override=self._approved_tools_override,
+            worker_context=self._worker_context,
+            worker_permission_requester=self._worker_permission_requester,
+            session_id=self.session_id,
+            turn_count=self.turn_count,
+            summaries=list(self._summaries),
+            manual_compaction_summary=self._manual_compaction_summary,
+            manual_compaction_turn_count=self._manual_compaction_turn_count,
+            next_turn_target_paths=list(self._next_turn_target_paths),
+            last_user_image_attachments=list(self._last_user_image_attachments),
+            image_attachment_history=list(self._image_attachment_history),
+            historical_tool_compression_count=self._historical_tool_compression_count,
+            working_state=self._working_state,
+            task_ledger=self._task_ledger,
+            current_cancellation_token=self._current_cancellation_token,
+            mcp_settings=self._mcp_settings,
+            mcp_runtime=self._mcp_runtime,
+            owns_mcp_runtime=self._owns_mcp_runtime,
+            mcp_tool_names=list(self._mcp_tool_names),
+            tool_registry=self._tool_registry,
+            session_path=self.session_path,
+            created_at=self._created_at,
+        )
 
     def _write_task_ledger(self) -> None:
         write_task_ledger(self.session_path / "task-ledger.json", self._task_ledger)
@@ -725,7 +596,7 @@ class AgentSession:
 
     def turn_summaries(self) -> list[SessionTurnSummary]:
         """读取当前 session 已记录轮次，供 UI 展示可恢复上下文。"""
-        return [_session_turn_summary(turn) for turn in _read_session_turns(self.session_path)]
+        return [session_turn_summary(turn) for turn in read_session_turns(self.session_path)]
 
     def compact_current_session(self) -> SessionCompactResult:
         if self.model_gateway is None:
@@ -761,8 +632,8 @@ class AgentSession:
                 preserved_recent_count=compact_result.preserved_recent_count,
                 saved_chars=0,
             )
-        summary_text = _manual_compaction_summary_text(compact_result.messages)
-        if summary_text is None:
+        summary_text_value = manual_compaction_summary_text(compact_result.messages)
+        if summary_text_value is None:
             return SessionCompactResult(
                 applied=False,
                 reason="summary_message_missing",
@@ -771,7 +642,7 @@ class AgentSession:
                 preserved_recent_count=compact_result.preserved_recent_count,
                 saved_chars=0,
             )
-        self._manual_compaction_summary = summary_text
+        self._manual_compaction_summary = summary_text_value
         self._manual_compaction_turn_count = max(0, len(self._summaries) - compact_result.preserved_recent_count)
         self._write_manual_compaction_state()
         self._write_session_metadata()
@@ -817,52 +688,25 @@ class AgentSession:
         )
 
     def _build_turn_result(self, prompt: str, result) -> ChatTurnResult:
-        try:
-            package_view = load_inspect_episode_package(result.episode_path)
-        except EpisodeValidationError as error:
-            return ChatTurnResult(
-                session_id=self.session_id,
-                turn_index=self.turn_count + 1,
-                status=result.status.value,
-                episode_path=result.episode_path,
-                provider=self.provider_name,
-                final_response="none",
-                verification_status="not_run",
-                summary_error=str(error),
-            )
-
-        failure = package_view.failure_record.get("failure")
-        if not isinstance(failure, dict):
-            failure = {}
-        return ChatTurnResult(
+        del prompt
+        return build_turn_result(
             session_id=self.session_id,
             turn_index=self.turn_count + 1,
-            status=result.status.value,
-            episode_path=result.episode_path,
-            provider=str(package_view.episode_metadata.get("provider", self.provider_name)),
-            final_response=_run_final_response(package_view.transcript),
-            verification_status=_verification_status(
-                package_view.verification_commands,
-                package_view.verification_reached,
-            ),
-            failed_stage=str(failure.get("stage", "none")),
-            failure_category=str(failure.get("category", "none")),
-            reason=str(failure.get("evidence", "none")),
+            provider_name=self.provider_name,
+            result=result,
         )
 
     def _record_turn(self, prompt: str, result: ChatTurnResult, summary: str) -> None:
-        self.session_path.mkdir(parents=True, exist_ok=True)
-        record = {
-            "turn_index": result.turn_index,
-            "request": _summary_value(prompt, 300),
-            "summary": summary,
-            "status": result.status,
-            "episode_path": str(result.episode_path),
-            "verification_status": result.verification_status,
-            "assistant_display_text": _assistant_display_text(result.final_response),
-        }
-        with (self.session_path / "turns.jsonl").open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        append_turn_record(
+            self.session_path,
+            turn_index=result.turn_index,
+            request=prompt,
+            summary=summary,
+            status=result.status,
+            episode_path=result.episode_path,
+            verification_status=result.verification_status,
+            final_response=result.final_response,
+        )
         self._write_session_metadata()
 
     def _write_working_state(self) -> None:
@@ -870,490 +714,26 @@ class AgentSession:
         write_working_state(self.session_path / "working_state.json", self._working_state)
 
     def _write_session_metadata(self) -> None:
-        self.session_path.mkdir(parents=True, exist_ok=True)
-        metadata_path = self.session_path / "session.json"
-        created_at = self._created_at
-        if metadata_path.exists():
-            try:
-                existing = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                existing = {}
-            if isinstance(existing, dict) and isinstance(existing.get("created_at"), str):
-                created_at = str(existing["created_at"])
-        metadata = {
-            "session_id": self.session_id,
-            "workspace_root": str(self.workspace_root),
-            "path_policy": serialize_path_policy(self.path_policy),
-            "provider": self.provider_name,
-            "model_profile_name": self.model_profile_name,
-            "model_connection_id": self.model_connection_id,
-            "model": self.model_name,
-            "base_url": self.model_base_url,
-            "enable_web": self.enable_web,
-            "last_user_image_attachments": [
-                attachment.to_dict()
-                for attachment in self._last_user_image_attachments
-            ],
-            "image_attachment_history": [
-                attachment.to_dict()
-                for attachment in self._image_attachment_history
-            ],
-            "created_at": created_at,
-            "updated_at": datetime.now(UTC).isoformat(),
-            "turn_count": self.turn_count,
-        }
-        metadata_path.write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        write_session_metadata(
+            self.session_path,
+            session_id=self.session_id,
+            workspace_root=self.workspace_root,
+            path_policy=self.path_policy,
+            provider=self.provider_name,
+            model_profile_name=self.model_profile_name,
+            model_connection_id=self.model_connection_id,
+            model_name=self.model_name,
+            model_base_url=self.model_base_url,
+            enable_web=self.enable_web,
+            last_user_image_attachments=self._last_user_image_attachments,
+            image_attachment_history=self._image_attachment_history,
+            created_at=self._created_at,
+            turn_count=self.turn_count,
         )
 
     def _write_manual_compaction_state(self) -> None:
-        state_path = self.session_path / "session_memory.json"
-        if self._manual_compaction_summary is None:
-            if state_path.exists():
-                state_path.unlink()
-            return
-        self.session_path.mkdir(parents=True, exist_ok=True)
-        state = {
-            "summary": self._manual_compaction_summary,
-            "compacted_turn_count": self._manual_compaction_turn_count,
-            "updated_at": datetime.now(UTC).isoformat(),
-        }
-        state_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        write_manual_compaction_state(
+            self.session_path,
+            summary=self._manual_compaction_summary,
+            compacted_turn_count=self._manual_compaction_turn_count,
         )
-
-
-def _turn_summary(prompt: str, result: ChatTurnResult) -> str:
-    return "\n".join(
-        [
-            f"- user_request: {_summary_value(prompt, 160)}",
-            f"  status: {result.status}",
-            f"  episode_path: {result.episode_path}",
-            f"  assistant_final_response: {_summary_value(result.final_response, 220)}",
-            f"  verification: {result.verification_status}",
-        ],
-    )
-
-
-def _run_final_response(transcript: list[dict[str, Any]]) -> str:
-    for record in reversed(transcript):
-        if record.get("event") == "model_response":
-            return str(record.get("content", ""))
-    return "none"
-
-
-def _verification_status(commands: list[dict[str, Any]], verification_reached: bool) -> str:
-    if not verification_reached or not commands:
-        return "not_run"
-    if any(command.get("status") != "success" for command in commands):
-        return "failed"
-    return "success"
-
-
-def _with_in_band_verification(
-    result: ChatTurnResult,
-    runtime_events: list[dict[str, object]],
-) -> ChatTurnResult:
-    if result.verification_status != "not_run":
-        return result
-    status = _in_band_verification_status(runtime_events)
-    if status == "not_run":
-        return result
-    return replace(result, verification_status=status)
-
-
-def _task_step_started_event(ledger) -> dict[str, object] | None:
-    step = ledger.active_step()
-    if step is None:
-        return None
-    return {
-        "event_type": "task_step_started",
-        "step_id": step.id,
-        "title": step.title,
-        "owner": step.owner,
-        "status": step.status,
-        "summary": f"started task step {step.id}: {_summary_value(step.title, 120)}",
-        "evidence_count": len(step.evidence_refs),
-        "checkpoint_count": len(ledger.checkpoints),
-    }
-
-
-def _task_turn_closed_events(ledger, result: ChatTurnResult) -> list[dict[str, object]]:
-    step = ledger.active_step()
-    if step is None:
-        return []
-    events: list[dict[str, object]] = []
-    if result.verification_status in {"success", "failed"}:
-        events.append(
-            {
-                "event_type": "task_checkpoint_saved",
-                "step_id": step.id,
-                "title": step.title,
-                "owner": step.owner,
-                "status": result.verification_status,
-                "summary": f"verification {result.verification_status}",
-                "evidence_count": len(step.evidence_refs),
-                "checkpoint_count": len(ledger.checkpoints),
-            },
-        )
-    if ledger.status == "completed" and step.status == "completed":
-        events.append(
-            {
-                "event_type": "task_step_finished",
-                "step_id": step.id,
-                "title": step.title,
-                "owner": step.owner,
-                "status": "completed",
-                "summary": f"completed task step {step.id}: {_summary_value(step.title, 120)}",
-                "evidence_count": len(step.evidence_refs),
-                "checkpoint_count": len(ledger.checkpoints),
-            },
-        )
-    elif ledger.status in {"blocked", "failed", "cancelled"}:
-        events.append(
-            {
-                "event_type": "task_step_blocked",
-                "step_id": step.id,
-                "title": step.title,
-                "owner": step.owner,
-                "status": ledger.status,
-                "category": ledger.status,
-                "summary": f"task step {step.id} ended as {ledger.status}",
-                "suggested_action": "resume_or_replan",
-                "evidence_count": len(step.evidence_refs),
-                "checkpoint_count": len(ledger.checkpoints),
-            },
-        )
-    return events
-
-
-def _in_band_verification_status(runtime_events: list[object]) -> str:
-    from haagent.runtime.events.bus import ToolFailedBusEvent, ToolFinishedBusEvent, bus_event_to_dict, coerce_bus_event
-
-    saw_failed_verification = False
-    for raw_event in runtime_events:
-        event = coerce_bus_event(raw_event)
-        if isinstance(event, (ToolFinishedBusEvent, ToolFailedBusEvent)):
-            tool_name = event.tool_name
-            args = event.args
-            result = event.result if isinstance(event, ToolFinishedBusEvent) else {}
-            event_type = event.event_type
-        else:
-            payload = bus_event_to_dict(event)
-            event_type = str(payload.get("event_type", ""))
-            if event_type not in {"tool_finished", "tool_failed"}:
-                continue
-            tool_name = str(payload.get("tool_name", ""))
-            args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        if tool_name not in {"shell", "code_run"}:
-            continue
-        if not _looks_like_verification_command(args):
-            continue
-        if event_type == "tool_finished" and result.get("status") == "success" and result.get("exit_code") == 0:
-            return "success"
-        saw_failed_verification = True
-    return "failed" if saw_failed_verification else "not_run"
-
-
-def _looks_like_verification_command(args: dict[str, object]) -> bool:
-    text_parts = [
-        str(args.get("command", "")),
-        str(args.get("code", "")),
-    ]
-    command_text = " ".join(text_parts).lower()
-    markers = (
-        "pytest",
-        "haagent check",
-        "ruff",
-        "mypy",
-        "npm test",
-        "pnpm test",
-        "yarn test",
-        "vitest",
-        "tox",
-        "cargo test",
-        "go test",
-    )
-    return any(marker in command_text for marker in markers)
-
-
-def _memory_update_requested(runtime_events: list[object]) -> bool:
-    from haagent.runtime.events.bus import ToolFinishedBusEvent, bus_event_to_dict, coerce_bus_event
-
-    for raw_event in runtime_events:
-        event = coerce_bus_event(raw_event)
-        if isinstance(event, ToolFinishedBusEvent):
-            if event.tool_name != "start_memory_update":
-                continue
-            result = event.result
-        else:
-            payload = bus_event_to_dict(event)
-            if payload.get("event_type") != "tool_finished" or payload.get("tool_name") != "start_memory_update":
-                continue
-            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-        if result.get("status") == "success" and result.get("memory_update_requested") is True:
-            return True
-    return False
-
-
-def _count_historical_tool_compression_events(runtime_events: list[object]) -> int:
-    from haagent.runtime.events.bus import bus_event_to_dict, coerce_bus_event
-
-    total = 0
-    for raw_event in runtime_events:
-        payload = bus_event_to_dict(coerce_bus_event(raw_event))
-        if (
-            payload.get("event_type") == "compression_diagnostic" or payload.get("event") == "compression_diagnostic"
-        ) and payload.get("stage") == "historical_tool_message":
-            total += 1
-    return total
-
-
-def _read_clipboard_image_bytes() -> bytes:
-    if sys.platform != "win32":
-        raise ChatSessionError("当前仅支持 Windows 剪贴板图片粘贴。")
-    try:
-        from PIL import ImageGrab
-    except ImportError as error:
-        raise ChatSessionError("Pillow is required for image paste support") from error
-    image = ImageGrab.grabclipboard()
-    if isinstance(image, list):
-        image_bytes = _read_first_clipboard_image_file(image)
-        if image_bytes is not None:
-            return image_bytes
-    if image is None or not hasattr(image, "save"):
-        raise ChatSessionError("剪贴板中没有图片。")
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def _read_first_clipboard_image_file(paths: list[object]) -> bytes | None:
-    for raw_path in paths:
-        if not isinstance(raw_path, str):
-            continue
-        path = Path(raw_path)
-        if not path.is_file():
-            continue
-        try:
-            data = path.read_bytes()
-            from haagent.runtime.session.attachments import _inspect_image
-
-            _inspect_image(data)
-        except Exception:
-            continue
-        return data
-    return None
-
-
-def _resolve_session_path(session: str | Path, runs_root: Path) -> Path:
-    raw = Path(session)
-    if raw.is_absolute() or raw.exists() or raw.name != str(session):
-        return raw.resolve()
-    return (runs_root / "sessions" / str(session)).resolve()
-
-
-def list_sessions(runs_root: Path, workspace_root: Path) -> list[SessionSummary]:
-    """列出当前 workspace 下的 chat 会话摘要。"""
-    sessions_root = runs_root / "sessions"
-    if not sessions_root.exists():
-        return []
-    resolved_workspace = workspace_root.resolve()
-    summaries: list[SessionSummary] = []
-    for session_path in sessions_root.iterdir():
-        if not session_path.is_dir():
-            continue
-        metadata = _read_session_metadata(session_path)
-        if Path(str(metadata["workspace_root"])).resolve() != resolved_workspace:
-            continue
-        turns = _read_session_turns(session_path)
-        first_request = str(turns[0]["request"]) if turns else "none"
-        summaries.append(
-            SessionSummary(
-                session_id=str(metadata["session_id"]),
-                created_at=str(metadata["created_at"]),
-                updated_at=str(metadata["updated_at"]),
-                workspace_root=resolved_workspace,
-                turn_count=int(metadata["turn_count"]),
-                first_request=first_request,
-                session_path=session_path.resolve(),
-            ),
-        )
-    return sorted(summaries, key=lambda item: item.updated_at, reverse=True)
-
-
-def find_latest_session(runs_root: Path, workspace_root: Path) -> SessionSummary | None:
-    sessions = list_sessions(runs_root, workspace_root)
-    return sessions[0] if sessions else None
-
-
-def _read_session_metadata(session_path: Path) -> dict[str, object]:
-    metadata_path = session_path / "session.json"
-    if not metadata_path.exists():
-        raise ChatSessionError(f"session package missing required file: {metadata_path}")
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ChatSessionError(f"invalid session.json: {metadata_path}") from error
-    if not isinstance(metadata, dict):
-        raise ChatSessionError(f"invalid session.json: {metadata_path} must contain an object")
-    required_fields = ["session_id", "workspace_root", "provider", "created_at", "updated_at", "turn_count"]
-    for field_name in required_fields:
-        if field_name not in metadata:
-            raise ChatSessionError(f"invalid session.json: missing {field_name}")
-    for field_name in ["session_id", "workspace_root", "provider", "created_at", "updated_at"]:
-        if not isinstance(metadata[field_name], str):
-            raise ChatSessionError(f"invalid session.json: {field_name} must be a string")
-    if not isinstance(metadata["turn_count"], int) or isinstance(metadata["turn_count"], bool):
-        raise ChatSessionError("invalid session.json: turn_count must be an integer")
-    if str(metadata["session_id"]) != session_path.name:
-        raise ChatSessionError("invalid session.json: session_id does not match session path")
-    return metadata
-
-
-def _read_session_image_attachments(
-    metadata: dict[str, object],
-    session_path: Path,
-) -> list[ImageAttachment]:
-    raw_attachments = metadata.get("last_user_image_attachments")
-    if raw_attachments is None:
-        return []
-    if not isinstance(raw_attachments, list):
-        raise ChatSessionError("invalid session.json: last_user_image_attachments must be a list")
-    attachments: list[ImageAttachment] = []
-    for index, raw_attachment in enumerate(raw_attachments, start=1):
-        if not isinstance(raw_attachment, dict):
-            raise ChatSessionError(
-                f"invalid session.json: last_user_image_attachments[{index}] must be an object"
-            )
-        try:
-            attachment = ImageAttachment.from_dict(raw_attachment).with_base_path(session_path)
-        except ValueError as error:
-            raise ChatSessionError(
-                f"invalid session.json: last_user_image_attachments[{index}]: {error}"
-            ) from error
-        attachments.append(attachment)
-    return attachments
-
-
-def _read_image_attachment_history(
-    metadata: dict[str, object],
-    session_path: Path,
-) -> list[ImageAttachment]:
-    raw_attachments = metadata.get("image_attachment_history")
-    if raw_attachments is None:
-        return list(_read_session_image_attachments(metadata, session_path))
-    if not isinstance(raw_attachments, list):
-        raise ChatSessionError("invalid session.json: image_attachment_history must be a list")
-    attachments: list[ImageAttachment] = []
-    for index, raw_attachment in enumerate(raw_attachments, start=1):
-        if not isinstance(raw_attachment, dict):
-            raise ChatSessionError(
-                f"invalid session.json: image_attachment_history[{index}] must be an object"
-            )
-        try:
-            attachment = ImageAttachment.from_dict(raw_attachment).with_base_path(session_path)
-        except ValueError as error:
-            raise ChatSessionError(
-                f"invalid session.json: image_attachment_history[{index}]: {error}"
-            ) from error
-        attachments.append(attachment)
-    return attachments
-
-
-def _merge_image_attachment_history(
-    existing: list[ImageAttachment],
-    new_attachments: list[ImageAttachment],
-) -> list[ImageAttachment]:
-    by_id = {attachment.id: attachment for attachment in existing}
-    for attachment in new_attachments:
-        by_id[attachment.id] = attachment
-    return list(by_id.values())
-
-
-def _read_session_turns(session_path: Path) -> list[dict[str, object]]:
-    turns_path = session_path / "turns.jsonl"
-    if not turns_path.exists():
-        return []
-    turns: list[dict[str, object]] = []
-    for index, line in enumerate(turns_path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ChatSessionError(f"invalid turns.jsonl line {index}") from error
-        if not isinstance(record, dict):
-            raise ChatSessionError(f"invalid turns.jsonl line {index}: must contain an object")
-        for field_name in ["turn_index", "request", "summary", "status", "episode_path", "verification_status"]:
-            if field_name not in record:
-                raise ChatSessionError(f"invalid turns.jsonl line {index}: missing {field_name}")
-        if not isinstance(record["turn_index"], int) or isinstance(record["turn_index"], bool):
-            raise ChatSessionError(f"invalid turns.jsonl line {index}: turn_index must be an integer")
-        for field_name in ["request", "summary", "status", "episode_path", "verification_status"]:
-            if not isinstance(record[field_name], str):
-                raise ChatSessionError(f"invalid turns.jsonl line {index}: {field_name} must be a string")
-        if "assistant_display_text" in record and not isinstance(record["assistant_display_text"], str):
-            raise ChatSessionError(f"invalid turns.jsonl line {index}: assistant_display_text must be a string")
-        turns.append(record)
-    return turns
-
-
-def _read_manual_compaction_state(session_path: Path) -> tuple[str | None, int]:
-    state_path = session_path / "session_memory.json"
-    if not state_path.exists():
-        return None, 0
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ChatSessionError("invalid session_memory.json") from error
-    if not isinstance(state, dict):
-        raise ChatSessionError("invalid session_memory.json: must contain an object")
-    summary = state.get("summary")
-    compacted_turn_count = state.get("compacted_turn_count")
-    if not isinstance(summary, str):
-        raise ChatSessionError("invalid session_memory.json: summary must be a string")
-    if not isinstance(compacted_turn_count, int) or isinstance(compacted_turn_count, bool):
-        raise ChatSessionError("invalid session_memory.json: compacted_turn_count must be an integer")
-    return summary, max(0, compacted_turn_count)
-
-
-def _manual_compaction_summary_text(messages: list[dict[str, Any]]) -> str | None:
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str) and content.startswith("Full Compact Summary:"):
-            return content
-    return None
-
-
-def _session_turn_summary(record: dict[str, object]) -> SessionTurnSummary:
-    assistant_display_text = record.get("assistant_display_text")
-    return SessionTurnSummary(
-        turn_index=int(record["turn_index"]),
-        request=str(record["request"]),
-        summary=str(record["summary"]),
-        status=str(record["status"]),
-        episode_path=Path(str(record["episode_path"])),
-        verification_status=str(record["verification_status"]),
-        assistant_display_text=assistant_display_text if isinstance(assistant_display_text, str) else None,
-    )
-
-
-def _optional_string(value: object) -> str | None:
-    if isinstance(value, str) and value:
-        return value
-    return None
-
-
-def _assistant_display_text(value: str) -> str:
-    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if len(normalized) <= ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT:
-        return normalized
-    return normalized[:ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT] + "... [truncated]"
-
-
-def _new_session_id() -> str:
-    return "session-" + uuid.uuid4().hex[:8]

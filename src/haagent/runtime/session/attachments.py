@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -125,6 +126,43 @@ def save_clipboard_image(
     path = attachments_dir / f"{attachment_id}{suffix}"
     path.write_bytes(image_bytes)
     return ImageAttachment.from_file(path, session_root=session_path, attachment_id=attachment_id)
+
+
+def read_clipboard_image_bytes() -> bytes:
+    """从系统剪贴板读取图片字节；当前仅支持 Windows。"""
+    if sys.platform != "win32":
+        raise AttachmentError("当前仅支持 Windows 剪贴板图片粘贴。")
+    try:
+        from PIL import ImageGrab
+    except ImportError as error:
+        raise AttachmentError("Pillow is required for image paste support") from error
+    image = ImageGrab.grabclipboard()
+    if isinstance(image, list):
+        image_bytes = read_first_clipboard_image_file(image)
+        if image_bytes is not None:
+            return image_bytes
+    if image is None or not hasattr(image, "save"):
+        raise AttachmentError("剪贴板中没有图片。")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def read_first_clipboard_image_file(paths: list[object]) -> bytes | None:
+    for raw_path in paths:
+        if not isinstance(raw_path, str):
+            continue
+        path = Path(raw_path)
+        if not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+            _inspect_image(data)
+        except Exception:
+            # 跳过非图片或损坏文件，继续尝试列表中的其它路径。
+            continue
+        return data
+    return None
 
 
 def image_attachments_from_raw(raw: object) -> list[ImageAttachment]:

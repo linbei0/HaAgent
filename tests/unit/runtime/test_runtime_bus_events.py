@@ -128,7 +128,7 @@ def test_assistant_bus_events_project_to_ui() -> None:
 
 
 def test_working_state_consumes_typed_bus_events(tmp_path) -> None:
-    from haagent.runtime.session.agent import ChatTurnResult
+    from haagent.runtime.session.turn_completion import ChatTurnResult
     from haagent.runtime.session.working_state import empty_working_state, format_working_state_for_model, update_working_state
 
     result = ChatTurnResult(

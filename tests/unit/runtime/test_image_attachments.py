@@ -15,11 +15,12 @@ import yaml
 from haagent.context.builder import ContextBuilder
 from haagent.runtime.contracts.task import TaskLoadError, TaskSpec, load_task
 from haagent.runtime.episodes.writer import EpisodeWriter
-from haagent.runtime.session import agent as agent_module
-from haagent.runtime.session.agent import ChatSessionError
+from haagent.runtime.session import attachments as attachments_module
 from haagent.runtime.session.attachments import (
+    AttachmentError,
     AttachmentLimitError,
     ImageAttachment,
+    read_clipboard_image_bytes,
     save_clipboard_image,
 )
 from haagent.runtime.session.turn import write_chat_task_yaml
@@ -82,10 +83,10 @@ def test_read_clipboard_image_bytes_accepts_copied_image_file(tmp_path: Path, mo
         def grabclipboard():
             return [str(image_path)]
 
-    monkeypatch.setattr(agent_module.sys, "platform", "win32")
-    monkeypatch.setitem(agent_module.sys.modules, "PIL.ImageGrab", FakeImageGrab)
+    monkeypatch.setattr(attachments_module.sys, "platform", "win32")
+    monkeypatch.setitem(attachments_module.sys.modules, "PIL.ImageGrab", FakeImageGrab)
 
-    assert agent_module._read_clipboard_image_bytes() == _png_bytes()
+    assert read_clipboard_image_bytes() == _png_bytes()
 
 
 def test_read_clipboard_image_bytes_rejects_copied_non_image_file(tmp_path: Path, monkeypatch) -> None:
@@ -97,11 +98,11 @@ def test_read_clipboard_image_bytes_rejects_copied_non_image_file(tmp_path: Path
         def grabclipboard():
             return [str(text_path)]
 
-    monkeypatch.setattr(agent_module.sys, "platform", "win32")
-    monkeypatch.setitem(agent_module.sys.modules, "PIL.ImageGrab", FakeImageGrab)
+    monkeypatch.setattr(attachments_module.sys, "platform", "win32")
+    monkeypatch.setitem(attachments_module.sys.modules, "PIL.ImageGrab", FakeImageGrab)
 
-    with pytest.raises(ChatSessionError, match="剪贴板中没有图片"):
-        agent_module._read_clipboard_image_bytes()
+    with pytest.raises(AttachmentError, match="剪贴板中没有图片"):
+        read_clipboard_image_bytes()
 
 
 def test_write_and_load_chat_task_yaml_preserves_attachment_metadata(tmp_path: Path) -> None:
