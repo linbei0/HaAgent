@@ -13,7 +13,7 @@ from haagent.context.compression.full import (
     assess_full_compact_need,
     maybe_full_compact_messages,
 )
-from haagent.models.gateway import ModelCallError, ModelResponse
+from haagent.models.types import ModelCallError, ModelResponse
 
 
 class RecordingGateway:

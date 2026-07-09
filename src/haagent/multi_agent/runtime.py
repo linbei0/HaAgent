@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from haagent.models.gateway import ModelGateway
+from haagent.models.types import ModelGateway
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (
     ModelSelection,

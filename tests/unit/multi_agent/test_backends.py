@@ -6,7 +6,7 @@ tests/unit/multi_agent/test_backends.py - worker backend 接口测试
 
 from haagent.multi_agent.backends import InProcessWorkerBackend
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelResponse
+from haagent.models.types import ModelResponse
 from haagent.multi_agent.profiles import WorkerProfileRuntime
 from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.runtime.execution.path_policy import default_path_policy

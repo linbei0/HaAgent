@@ -8,15 +8,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from haagent.models.anthropic import AnthropicMessagesGateway
 from haagent.models.catalog import ModelCatalogProvider
-from haagent.models.gateway import (
-    AnthropicMessagesGateway,
-    GoogleGeminiGateway,
-    ModelGateway,
-    OpenAIChatCompletionsGateway,
-    OpenAIResponsesGateway,
-)
+from haagent.models.google import GoogleGeminiGateway
 from haagent.models.model_connections import ProviderProfile, ProviderProfileError
+from haagent.models.openai_chat import OpenAIChatCompletionsGateway
+from haagent.models.openai_responses import OpenAIResponsesGateway
+from haagent.models.types import ModelGateway
 
 
 @dataclass(frozen=True)
@@ -59,10 +57,11 @@ def catalog_provider_capability(provider: ModelCatalogProvider) -> GatewayCapabi
 
 
 def gateway_from_profile(profile: ProviderProfile) -> ModelGateway:
+    # 空字符串与未配置等价，便于 CLI 临时 profile 回落到环境变量默认值。
     gateway_kwargs = {
-        "api_key": profile.api_key,
+        "api_key": profile.api_key or None,
         "model": profile.model,
-        "base_url": profile.base_url,
+        "base_url": profile.base_url or None,
     }
     if profile.provider == "openai":
         return OpenAIResponsesGateway(**gateway_kwargs)

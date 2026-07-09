@@ -6,13 +6,27 @@ tests/integration/cli/test_cli_personal_assistant.py - 个人助手启动体验�
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
 from haagent import cli
-from haagent.models.gateway import ModelResponse
+from haagent.models.types import ModelResponse
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.contracts.task import load_task
+
+
+def _cli_gateway_from_profile(profile, gateway_cls):
+    """测试用：按 Gateway 构造函数签名转发临时 profile 字段。"""
+    params = inspect.signature(gateway_cls.__init__).parameters
+    kwargs = {}
+    if "model" in params:
+        kwargs["model"] = profile.model
+    if "base_url" in params:
+        kwargs["base_url"] = profile.base_url or None
+    if "api_key" in params:
+        kwargs["api_key"] = profile.api_key or None
+    return gateway_cls(**kwargs)
 
 
 class RecordingGateway:
@@ -420,7 +434,7 @@ def test_connection_api_key_is_not_written_to_config_session_or_episode(
     workspace.mkdir()
     monkeypatch.chdir(workspace)
     monkeypatch.setenv("CHAT_SECRET", secret)
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FakeConnectionGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeConnectionGateway: _cli_gateway_from_profile(profile, _cls))
 
     exit_code = cli.main(["chat", "Check secret handling"])
 

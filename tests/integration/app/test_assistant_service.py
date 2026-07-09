@@ -21,7 +21,8 @@ from haagent.app.assistant_service import (
 )
 from haagent.models.catalog import ModelCatalogProvider
 from haagent.models.credentials import FakeCredentialStore
-from haagent.models.gateway import ModelResponse, OpenAIChatCompletionsGateway
+from haagent.models.types import ModelResponse
+from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models import model_connections
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (

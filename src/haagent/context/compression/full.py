@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from haagent.context.compression.budget import CompressionBudget, estimate_message_tokens
-from haagent.models.gateway import ModelCallError, ModelGateway
+from haagent.models.types import ModelCallError, ModelGateway
 
 DEFAULT_FULL_COMPACT_PRESERVE_RECENT = 6
 REQUIRED_FULL_COMPACT_SUMMARY_FIELDS = (

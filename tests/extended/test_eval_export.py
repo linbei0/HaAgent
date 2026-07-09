@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.evaluation import export as eval_export
 from haagent.runtime.episodes.validator import EpisodePackageView, EpisodeValidationError
 from haagent.runtime.evaluation.export import EVAL_CASE_VERSION, export_eval_case

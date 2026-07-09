@@ -8,7 +8,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from haagent.models.gateway import ModelGatewayMetadata, ModelUsage
+from haagent.models.types import ModelGatewayMetadata, ModelUsage
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 

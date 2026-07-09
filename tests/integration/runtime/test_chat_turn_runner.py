@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from haagent.models.gateway import ModelResponse
+from haagent.models.types import ModelResponse
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.session.turn import ChatTurnRequest, ChatTurnRunner
 from haagent.runtime.execution.path_policy import default_path_policy

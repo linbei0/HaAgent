@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
+from haagent.models.openai_chat import OpenAIChatCompletionsGateway
+from haagent.models.openai_responses import OpenAIResponsesGateway
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderProfileError,

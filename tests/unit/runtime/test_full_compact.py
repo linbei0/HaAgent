@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import json
 
-from haagent.models.gateway import ModelCallError, ModelResponse, ToolCall
+from haagent.models.types import ModelCallError, ModelResponse, ToolCall
 from haagent.context.compression.full import FullCompactEligibility, maybe_full_compact_messages
 
 

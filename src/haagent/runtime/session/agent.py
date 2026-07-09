@@ -18,7 +18,7 @@ from typing import Any, Callable
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.settings import load_mcp_settings
 from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
-from haagent.models.gateway import ModelGateway
+from haagent.models.types import ModelGateway
 from haagent.models.model_connections import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.multi_agent.team_store import TeamStore

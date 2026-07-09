@@ -8,14 +8,29 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import inspect
+
 import pytest
 
 from haagent import cli
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.episodes.validator import EpisodePackageView
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.contracts.task import load_task
+
+
+def _cli_gateway_from_profile(profile, gateway_cls):
+    """测试用：按 Gateway 构造函数签名转发临时 profile 字段。"""
+    params = inspect.signature(gateway_cls.__init__).parameters
+    kwargs = {}
+    if "model" in params:
+        kwargs["model"] = profile.model
+    if "base_url" in params:
+        kwargs["base_url"] = profile.base_url or None
+    if "api_key" in params:
+        kwargs["api_key"] = profile.api_key or None
+    return gateway_cls(**kwargs)
 
 
 def _set_home(monkeypatch, home: Path) -> None:
@@ -550,7 +565,7 @@ def test_cli_run_openai_provider_passes_gateway_to_orchestrator(
             calls["task_path"] = received_task_path
             return FakeResult(tmp_path / ".runs" / "episode-1")
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "responses_gateway_cls", FakeOpenAIGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeOpenAIGateway: _cli_gateway_from_profile(profile, _cls))
     monkeypatch.setattr(cli.DEFAULT_RUNTIME, "orchestrator_cls", FakeOrchestrator)
 
     exit_code = cli.main(
@@ -597,7 +612,7 @@ def test_cli_run_openai_provider_passes_base_url_to_gateway(
             calls["task_path"] = received_task_path
             return FakeResult(tmp_path / ".runs" / "episode-1")
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "responses_gateway_cls", FakeOpenAIGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeOpenAIGateway: _cli_gateway_from_profile(profile, _cls))
     monkeypatch.setattr(cli.DEFAULT_RUNTIME, "orchestrator_cls", FakeOrchestrator)
 
     exit_code = cli.main(
@@ -650,7 +665,7 @@ def test_cli_run_base_url_argument_takes_priority_over_environment(
         def run(self, received_task_path: Path) -> FakeResult:
             return FakeResult(tmp_path / ".runs" / "episode-1")
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "responses_gateway_cls", FakeOpenAIGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeOpenAIGateway: _cli_gateway_from_profile(profile, _cls))
     monkeypatch.setattr(cli.DEFAULT_RUNTIME, "orchestrator_cls", FakeOrchestrator)
 
     exit_code = cli.main(
@@ -701,7 +716,7 @@ def test_cli_run_openai_chat_provider_passes_gateway_to_orchestrator(
             calls["task_path"] = received_task_path
             return FakeResult(tmp_path / ".runs" / "episode-1")
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FakeOpenAIChatGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeOpenAIChatGateway: _cli_gateway_from_profile(profile, _cls))
     monkeypatch.setattr(cli.DEFAULT_RUNTIME, "orchestrator_cls", FakeOrchestrator)
 
     exit_code = cli.main(
@@ -754,7 +769,7 @@ def test_cli_run_openai_chat_provider_passes_custom_max_turns(
             calls["task_path"] = received_task_path
             return FakeResult(tmp_path / ".runs" / "episode-1")
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FakeOpenAIChatGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeOpenAIChatGateway: _cli_gateway_from_profile(profile, _cls))
     monkeypatch.setattr(cli.DEFAULT_RUNTIME, "orchestrator_cls", FakeOrchestrator)
 
     exit_code = cli.main(
@@ -840,7 +855,7 @@ def test_cli_run_connection_creates_gateway_from_local_config(
             calls["task_path"] = received_task_path
             return FakeResult(tmp_path / ".runs" / "episode-1")
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FakeOpenAIChatGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeOpenAIChatGateway: _cli_gateway_from_profile(profile, _cls))
     monkeypatch.setattr(cli.DEFAULT_RUNTIME, "orchestrator_cls", FakeOrchestrator)
 
     exit_code = cli.main(
@@ -999,7 +1014,7 @@ verification_commands: []
             assert secret not in model_input
             return ModelResponse("done", [])
 
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "chat_gateway_cls", FinalGateway)
+    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FinalGateway: _cli_gateway_from_profile(profile, _cls))
 
     run_exit = cli.main(
         [

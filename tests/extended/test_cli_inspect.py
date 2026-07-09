@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from haagent import cli, cli_inspect
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.episodes.validator import EpisodePackageView
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator

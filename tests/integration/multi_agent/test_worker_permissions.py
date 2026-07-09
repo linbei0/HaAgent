@@ -6,7 +6,7 @@ tests/integration/multi_agent/test_worker_permissions.py - worker 权限请求�
 
 from pathlib import Path
 
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.runtime.execution.path_policy import default_path_policy
 

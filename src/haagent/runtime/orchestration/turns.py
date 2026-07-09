@@ -21,7 +21,7 @@ from haagent.context.messages import (
     build_tool_result_message,
     generate_tool_call_id,
 )
-from haagent.models.gateway import ModelGateway, ModelUsage, ToolCall
+from haagent.models.types import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.cancellation import RunCancelled
 from haagent.runtime.orchestration.failure import FailureCategory

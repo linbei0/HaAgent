@@ -21,8 +21,8 @@ from haagent.models.catalog import (
     fetch_model_catalog,
 )
 from haagent.models.credentials import CredentialError
-from haagent.models.gateway import ModelGateway
-from haagent.models.gateway import ModelCallError
+from haagent.models.types import ModelGateway
+from haagent.models.types import ModelCallError
 from haagent.models.gateway_registry import GatewayCapability, gateway_from_profile
 from haagent.multi_agent.team_store import TeamStore
 from haagent.models.model_connections import (

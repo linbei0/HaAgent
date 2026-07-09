@@ -9,8 +9,8 @@ from typing import Any
 from pathlib import Path
 import time
 
-from haagent.models.gateway import ToolCall
-from haagent.models.gateway import ModelResponse
+from haagent.models.types import ToolCall
+from haagent.models.types import ModelResponse
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.turns import (
     TurnLoopDependencies,

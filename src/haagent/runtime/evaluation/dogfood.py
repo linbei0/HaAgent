@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from haagent.models.gateway import ModelGateway
+from haagent.models.types import ModelGateway
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.runtime.settings import DEFAULT_DOGFOOD_MAX_TURNS

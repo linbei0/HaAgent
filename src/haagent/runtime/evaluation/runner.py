@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from haagent.models.gateway import ModelGateway, ModelResponse, ToolCall
+from haagent.models.types import ModelGateway, ModelResponse, ToolCall
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.episodes.validator import load_inspect_episode_package
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator

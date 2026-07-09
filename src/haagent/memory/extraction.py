@@ -32,7 +32,7 @@ from haagent.memory.schema import (
 )
 from haagent.memory.prompts import build_memory_extraction_prompt
 from haagent.memory.store import MemoryStore
-from haagent.models.gateway import ModelCallError, ModelGateway
+from haagent.models.types import ModelCallError, ModelGateway
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,7 @@ from typing import Any, Callable, Protocol
 
 import yaml
 
-from haagent.models.gateway import ModelGateway
+from haagent.models.types import ModelGateway
 from haagent.prompts.commands import parse_prompt_command
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler

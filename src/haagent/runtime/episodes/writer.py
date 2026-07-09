@@ -19,7 +19,7 @@ from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from haagent.models.gateway import ModelGatewayMetadata, ModelUsage
+from haagent.models.types import ModelGatewayMetadata, ModelUsage
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.sandbox.base import SandboxMetadata
 

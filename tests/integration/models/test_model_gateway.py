@@ -13,18 +13,12 @@ import pytest
 
 from haagent.models.catalog import ModelCatalogProvider
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import (
-    AnthropicMessagesGateway,
-    DEFAULT_CHAT_COMPLETIONS_ENDPOINT,
-    DEFAULT_RESPONSES_ENDPOINT,
-    GoogleGeminiGateway,
-    ModelCallError,
-    ModelResponse,
-    ModelUsage,
-    OpenAIChatCompletionsGateway,
-    OpenAIResponsesGateway,
-    ToolCall,
-)
+from haagent.models.anthropic import AnthropicMessagesGateway
+from haagent.models.transport import DEFAULT_CHAT_COMPLETIONS_ENDPOINT, DEFAULT_RESPONSES_ENDPOINT
+from haagent.models.google import GoogleGeminiGateway
+from haagent.models.types import ModelCallError, ModelResponse, ModelUsage, ToolCall
+from haagent.models.openai_chat import OpenAIChatCompletionsGateway
+from haagent.models.openai_responses import OpenAIResponsesGateway
 from haagent.models.credentials import FakeCredentialStore
 from haagent.models.gateway_registry import (
     catalog_provider_capability,
@@ -1808,7 +1802,7 @@ verification_commands: []
 def test_full_compact_success_is_written_to_transcript_by_orchestrator(tmp_path: Path, monkeypatch) -> None:
     from haagent.context.builder import BuiltContext
     from haagent.context.manifest import ContextManifest
-    from haagent.models.gateway import ModelResponse
+    from haagent.models.types import ModelResponse
     from haagent.context.compression.full import FullCompactEligibility
     from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
@@ -1898,7 +1892,7 @@ def test_full_compact_failure_is_written_to_transcript_and_original_messages_con
 ) -> None:
     from haagent.context.builder import BuiltContext
     from haagent.context.manifest import ContextManifest
-    from haagent.models.gateway import ModelResponse
+    from haagent.models.types import ModelResponse
     from haagent.context.compression.full import FullCompactEligibility
     from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 

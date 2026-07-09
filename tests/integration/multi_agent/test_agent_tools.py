@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.multi_agent.runtime import MultiAgentRuntime, _failure_summary_from_episode
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import default_path_policy

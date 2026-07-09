@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.multi_agent.profiles import WorkerProfileRuntime
 from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.runtime.execution.path_policy import default_path_policy

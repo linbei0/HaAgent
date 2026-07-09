@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from haagent.models.gateway import ModelCallError, ModelResponse
+from haagent.models.types import ModelCallError, ModelResponse
 from haagent.runtime.session.agent import AgentSession, ChatTurnResult
 from haagent.runtime.session.task_ledger import load_task_ledger
 from haagent.runtime.session.turn import ChatTurnRunner

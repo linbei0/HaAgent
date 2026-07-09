@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     EpisodePackageView,

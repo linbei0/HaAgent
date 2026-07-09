@@ -1,5 +1,5 @@
 """
-haagent/cli_runtime.py - CLI 运行期依赖集合
+src/haagent/cli_runtime.py - CLI 运行期依赖集合
 
 集中保存 CLI 入口需要替换的 runtime adapter，并提供 provider 与 smoke 配置构建。
 """
@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from haagent.models.gateway import OpenAIChatCompletionsGateway, OpenAIResponsesGateway
+from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderProfile,
@@ -20,8 +21,12 @@ from haagent.models.model_connections import (
     load_active_model_selection,
     load_model_selection_profile,
 )
+from haagent.models.types import ModelGateway
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+
+
+GatewayFactory = Callable[[ProviderProfile], ModelGateway]
 
 
 @dataclass(frozen=True)
@@ -36,8 +41,8 @@ class CliRuntime:
     project_root: Path
     orchestrator_cls: type = RunOrchestrator
     session_cls: type = AgentSession
-    responses_gateway_cls: type = OpenAIResponsesGateway
-    chat_gateway_cls: type = OpenAIChatCompletionsGateway
+    # 测试可注入；默认与 TUI/multi_agent 共用 registry 工厂。
+    gateway_factory: GatewayFactory = field(default=gateway_from_profile)
 
     def smoke_definitions(self) -> list[SmokeDefinition]:
         return [
@@ -69,25 +74,15 @@ class CliRuntime:
                 connection_id=args.profile,
                 model=args.model or active_selection.model,
             )
-            return self.gateway_from_profile(load_model_selection_profile(selection))
+            return self.gateway_factory(load_model_selection_profile(selection))
 
         if args.provider is None:
             if args.model is not None or args.base_url is not None:
                 raise ProviderProfileError("--model and --base-url require --provider or --profile")
-            return self.gateway_from_profile(load_model_selection_profile(load_active_model_selection()))
+            return self.gateway_factory(load_model_selection_profile(load_active_model_selection()))
 
-        if args.provider in {"openai", "openai-chat"}:
-            gateway_kwargs = {}
-            if args.model is not None:
-                gateway_kwargs["model"] = args.model
-            if args.base_url is not None:
-                gateway_kwargs["base_url"] = args.base_url
-            gateway_class = (
-                self.responses_gateway_cls
-                if args.provider == "openai"
-                else self.chat_gateway_cls
-            )
-            return gateway_class(**gateway_kwargs)
+        if args.provider in {"openai", "openai-chat", "anthropic", "google"}:
+            return self.gateway_factory(self._cli_provider_profile(args))
         return None
 
     def build_dogfood_model_gateway(self, args: argparse.Namespace) -> Any:
@@ -101,21 +96,40 @@ class CliRuntime:
                 connection_id=args.profile,
                 model=args.model or active_selection.model,
             )
-            return self.gateway_from_profile(load_model_selection_profile(selection))
+            return self.gateway_factory(load_model_selection_profile(selection))
         if args.provider is None:
             return None
         if not os.environ.get("OPENAI_API_KEY"):
             raise ProviderProfileError("OPENAI_API_KEY is not set; dogfood skipped")
         return self.build_run_model_gateway(args)
 
-    def gateway_from_profile(self, profile: ProviderProfile) -> Any:
-        gateway_kwargs = {
-            "api_key": profile.api_key,
-            "model": profile.model,
-            "base_url": profile.base_url,
+    def _cli_provider_profile(self, args: argparse.Namespace) -> ProviderProfile:
+        """把 --provider/--model/--base-url 合成临时 profile，统一走 gateway_factory。"""
+        provider = str(args.provider)
+        default_models = {
+            "openai": "gpt-4.1-mini",
+            "openai-chat": "gpt-4.1-mini",
+            "anthropic": "claude-sonnet-4-5",
+            "google": "gemini-2.5-pro",
         }
-        if profile.provider == "openai":
-            return self.responses_gateway_cls(**gateway_kwargs)
-        if profile.provider == "openai-chat":
-            return self.chat_gateway_cls(**gateway_kwargs)
-        raise ProviderProfileError(f"unsupported provider in profile: {profile.provider}")
+        api_key_env = {
+            "openai": "OPENAI_API_KEY",
+            "openai-chat": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "google": "GEMINI_API_KEY",
+        }[provider]
+        api_key = os.environ.get(api_key_env) or ""
+        if provider == "google" and not api_key:
+            api_key = os.environ.get("GOOGLE_API_KEY") or ""
+        model = args.model if args.model is not None else default_models[provider]
+        base_url = args.base_url if args.base_url is not None else ""
+        return ProviderProfile(
+            name=f"cli-{provider}",
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key_env=api_key_env,
+            credential_source="env",
+            credential_source_used="env",
+            api_key=api_key,
+        )

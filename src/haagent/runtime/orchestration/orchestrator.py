@@ -22,7 +22,7 @@ from haagent.context.messages import (
     generate_tool_call_id,
 )
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelCallError, ModelGateway, ToolCall
+from haagent.models.types import ModelCallError, ModelGateway, ToolCall
 from haagent.models.model_connections import user_config_dir
 from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.multi_agent.team_store import TeamStore

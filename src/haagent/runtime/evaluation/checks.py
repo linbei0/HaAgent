@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from haagent.models.gateway import ModelGateway
+from haagent.models.types import ModelGateway
 from haagent.runtime.evaluation.runner import run_eval_path
 from haagent.runtime.settings import DEFAULT_CHECK_EVAL_MAX_TURNS
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from haagent.models.gateway import ModelGatewayMetadata, ModelResponse, ToolCall
+from haagent.models.types import ModelGatewayMetadata, ModelResponse, ToolCall
 
 
 class FakeModelGateway:

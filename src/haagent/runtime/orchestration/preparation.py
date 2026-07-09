@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.sections import context_budget_from_compression_budget
-from haagent.models.gateway import ModelGateway
+from haagent.models.types import ModelGateway
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.context.compression.full import FullCompactEligibility, FullCompactResult, maybe_full_compact_messages
 from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
@@ -169,7 +169,7 @@ def _gateway_metadata(model_gateway: ModelGateway, provider_name: str):
     metadata_getter = getattr(model_gateway, "metadata", None)
     if callable(metadata_getter):
         return metadata_getter()
-    from haagent.models.gateway import ModelGatewayMetadata
+    from haagent.models.types import ModelGatewayMetadata
 
     return ModelGatewayMetadata(
         provider=provider_name,

@@ -609,7 +609,7 @@ class _GatewayWithContextWindow:
         self._context_window_tokens = context_window_tokens
 
     def metadata(self):
-        from haagent.models.gateway import ModelGatewayMetadata
+        from haagent.models.types import ModelGatewayMetadata
 
         metadata = ModelGatewayMetadata(
             provider="test-provider",

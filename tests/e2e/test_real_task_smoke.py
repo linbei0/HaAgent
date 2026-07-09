@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.cli_inspect import render_episode_summary
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.session.task_ledger import load_task_ledger
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse

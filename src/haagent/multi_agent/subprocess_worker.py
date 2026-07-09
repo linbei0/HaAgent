@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (
     ModelSelection,

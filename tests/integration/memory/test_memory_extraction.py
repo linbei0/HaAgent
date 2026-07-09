@@ -19,7 +19,7 @@ from haagent.memory.extraction import (
     MemoryExtractor,
 )
 from haagent.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.events import MemoryNoticeEvent, ToolActivityEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse

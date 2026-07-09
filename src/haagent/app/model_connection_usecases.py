@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from haagent.models import model_connections as model_connections_module
 from haagent.models.catalog import DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE, fetch_model_catalog
 from haagent.models.credentials import CredentialError
-from haagent.models.gateway import ModelCallError
+from haagent.models.types import ModelCallError
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderConnectionRecord,

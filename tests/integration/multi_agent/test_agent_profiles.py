@@ -7,7 +7,7 @@ tests/integration/multi_agent/test_agent_profiles.py - worker profile 集成测�
 from pathlib import Path
 
 from haagent.models.fake import FakeModelGateway
-from haagent.models.gateway import ModelResponse
+from haagent.models.types import ModelResponse
 from haagent.models.model_connections import ModelSelection, ProviderProfile, ProviderProfileError
 import haagent.multi_agent.runtime as runtime_module
 from haagent.multi_agent.profiles import WorkerProfileRuntime

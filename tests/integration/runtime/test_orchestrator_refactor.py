@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from haagent.models.gateway import ModelResponse, ToolCall
+from haagent.models.types import ModelResponse, ToolCall
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.messages import compress_historical_tool_messages
 from haagent.runtime.episodes.writer import EpisodeWriter
