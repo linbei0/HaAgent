@@ -20,7 +20,7 @@ from haagent.runtime.events import (
     WarningNoticeEvent,
 )
 from haagent.tui.application.runtime_events import RUNTIME_UI_EVENT_HANDLERS, handle_runtime_ui_event
-from haagent.tui.widgets.timeline import ConversationTimeline
+from haagent.tui.widgets.timeline import ConversationTimeline, TimelineItem
 
 
 def test_runtime_ui_event_handler_registry_covers_protocol_types() -> None:
@@ -44,6 +44,7 @@ class FakeRuntimeEventApp:
         self.answer_questions: list[str] = []
         self.task_progress_events: list[TaskProgressEvent] = []
         self.presentation_texts: list[str] = []
+        self.presentation_detail_ids: list[str | None] = []
         self.progress_status_text = ""
         self.progress_status_severity = ""
         self.memory_loads = 0
@@ -55,6 +56,7 @@ class FakeRuntimeEventApp:
 
     def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
         self.assistant_messages.append((turn_index, content))
+        self.presentation_texts.append(f"助手\n{content}")
 
     def _record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
         self.tool_activities.append((turn_index, tool_name, status, summary))
@@ -99,6 +101,44 @@ class FakeRuntimeEventApp:
 
     def add_presentation_item(self, item, details) -> None:
         self.presentation_texts.append(f"{item.title}\n{item.summary}")
+        self.presentation_detail_ids.append(item.detail_id)
+
+    def replace_presentation_item(self, item, details) -> bool:
+        if item.detail_id is None:
+            return False
+        try:
+            index = self.presentation_detail_ids.index(item.detail_id)
+        except ValueError:
+            return False
+        self.presentation_texts[index] = f"{item.title}\n{item.summary}"
+        return True
+
+    def count_presentations_containing(self, text: str) -> int:
+        return sum(1 for item in self.presentation_texts if text in item)
+
+
+class TimelineRuntimeEventApp(FakeRuntimeEventApp):
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeline = ConversationTimeline()
+
+    def query_one(self, selector: str, widget_type):
+        assert selector == "#conversation"
+        return self.timeline
+
+    @property
+    def plain_text(self) -> str:
+        return self.timeline.plain_text
+
+    def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
+        self.assistant_messages.append((turn_index, content))
+        self.timeline._items.append(
+            TimelineItem(item_id=next(self.timeline._ids), role="assistant", turn_index=turn_index, content=content)
+        )
+        self.timeline._mark_plain_text_dirty()
+
+    def count_presentations_containing(self, text: str) -> int:
+        return self.plain_text.count(text)
 
 
 def test_runtime_ui_event_handler_updates_assistant_stream() -> None:
@@ -184,6 +224,145 @@ def test_runtime_ui_event_handler_routes_apply_patch_to_effect_summary() -> None
     assert "已修改文件" in app.plain_text
     assert "2 个文件有变更" in app.plain_text
     assert "apply_patch" not in app.plain_text
+
+
+def test_runtime_ui_event_handler_groups_tool_failures_before_assistant_final() -> None:
+    app = FakeRuntimeEventApp()
+    first_error = "stderr: " + ("x" * 500)
+
+    handle_runtime_ui_event(
+        app,
+        ToolActivityEvent(
+            session_id="session-1",
+            turn_index=1,
+            model_turn=2,
+            tool_name="web_fetch",
+            status="failed",
+            summary="fetch failed",
+            args_summary={"url": "https://example.com/one"},
+            error_type="network",
+            error_message=first_error,
+        ),
+    )
+    handle_runtime_ui_event(
+        app,
+        ToolActivityEvent(
+            session_id="session-1",
+            turn_index=1,
+            model_turn=2,
+            tool_name="web_fetch",
+            status="failed",
+            summary="fetch failed again",
+            args_summary={"url": "https://example.com/two"},
+            error_type="network",
+            error_message="second failure",
+        ),
+    )
+    handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 1, 2, "最终回答"))
+
+    text = app.plain_text
+    assert "web_fetch 失败 2 次，已使用已有上下文继续" in text
+    assert app.count_presentations_containing("web_fetch 失败") == 1
+    assert text.index("web_fetch 失败 2 次") < text.index("最终回答")
+    assert "example.com" not in text
+    assert first_error not in text
+    assert "step-001" not in text
+    assert "model_turn_started" not in text
+    assert "task_step_progress" not in text
+
+
+def test_runtime_ui_event_handler_inserts_late_tool_failures_before_assistant_final() -> None:
+    app = TimelineRuntimeEventApp()
+
+    handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 1, 2, "最终回答"))
+    handle_runtime_ui_event(
+        app,
+        ToolActivityEvent(
+            session_id="session-1",
+            turn_index=1,
+            model_turn=2,
+            tool_name="web_fetch",
+            status="failed",
+            summary="fetch failed",
+            error_type="network",
+            error_message="first failure",
+        ),
+    )
+    handle_runtime_ui_event(
+        app,
+        ToolActivityEvent(
+            session_id="session-1",
+            turn_index=1,
+            model_turn=2,
+            tool_name="web_fetch",
+            status="failed",
+            summary="fetch failed again",
+            error_type="network",
+            error_message="second failure",
+        ),
+    )
+
+    text = app.plain_text
+    assert "已处理 1 项 >" in text
+    assert "web_fetch 失败 2 次，已使用已有上下文继续" not in text
+    assert text.index("已处理 1 项") < text.index("最终回答")
+
+    app.timeline.toggle_process_group(1)
+    text = app.plain_text
+    assert "web_fetch 失败 2 次，已使用已有上下文继续" in text
+    assert text.count("web_fetch") == 1
+    assert text.index("web_fetch 失败 2 次") < text.index("最终回答")
+
+
+def test_runtime_ui_event_handler_groups_late_task_problems_before_assistant_final() -> None:
+    app = TimelineRuntimeEventApp()
+
+    handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 1, 2, "最终回答"))
+    handle_runtime_ui_event(
+        app,
+        TaskProgressEvent(
+            session_id="session-1",
+            turn_index=1,
+            model_turn=2,
+            event_name="task_step_blocked",
+            step_id="step-timeout",
+            title="工具超时",
+            status="blocked",
+            summary="tool timed out",
+            category="tool_timeout",
+            suggested_action="retry_with_narrower_command",
+        ),
+    )
+    handle_runtime_ui_event(
+        app,
+        TaskProgressEvent(
+            session_id="session-1",
+            turn_index=1,
+            model_turn=2,
+            event_name="task_step_blocked",
+            step_id="step-blocked",
+            title="任务受阻",
+            status="blocked",
+            summary="task blocked",
+            category="tool_failed",
+            suggested_action="resume_or_replan",
+        ),
+    )
+
+    text = app.plain_text
+    assert "已处理 1 项 >" in text
+    assert "任务遇到问题 2 项：工具超时、工具失败" not in text
+    assert text.index("已处理 1 项") < text.index("最终回答")
+    assert "step-timeout" not in text
+    assert "step-blocked" not in text
+
+    app.timeline.toggle_process_group(1)
+    text = app.plain_text
+    assert "任务遇到问题 2 项：工具超时、工具失败" in text
+    assert text.count("任务遇到问题") == 1
+    assert text.index("任务遇到问题 2 项") < text.index("最终回答")
+    assert "step-timeout" not in text
+    assert "step-blocked" not in text
 
 
 def test_runtime_ui_event_handler_tracks_approval_state() -> None:
@@ -458,7 +637,8 @@ def test_runtime_ui_event_handler_routes_recovery_to_notice() -> None:
     assert app.task_progress_events == []
     assert "任务遇到问题：验证失败" in app.plain_text
     assert "建议：修复后重新运行测试" in app.plain_text
-    assert "详情：按 Enter 展开" in app.plain_text
+    assert "详情：" not in app.plain_text
+    assert app.presentation_detail_ids == ["task:1:problems"]
     assert "reason_chars" not in app.plain_text
 
 

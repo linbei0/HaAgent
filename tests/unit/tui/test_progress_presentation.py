@@ -77,7 +77,7 @@ def test_recovery_suggestion_becomes_actionable_notice() -> None:
     )
 
     assert presentation.timeline_item is not None
-    assert presentation.timeline_item.kind == "notice"
+    assert presentation.timeline_item.kind == "activity"
     assert presentation.timeline_item.title == "任务遇到问题：验证失败"
     assert "修复后重新运行测试" in presentation.timeline_item.summary
     assert presentation.details is not None
@@ -131,7 +131,7 @@ def test_apply_patch_success_becomes_effect_summary() -> None:
     assert presentation.timeline_item.title == "已修改文件"
     assert "2 个文件有变更" in presentation.timeline_item.summary
     assert "modified 2 files" not in presentation.timeline_item.summary
-    assert "详情：按 Enter 展开" in presentation.timeline_item.summary
+    assert "详情：" not in presentation.timeline_item.summary
 
 
 def test_file_write_success_becomes_effect_summary() -> None:
@@ -208,6 +208,6 @@ def test_tool_failure_becomes_actionable_notice_without_full_error() -> None:
     )
 
     assert presentation.timeline_item is not None
-    assert presentation.timeline_item.kind == "notice"
+    assert presentation.timeline_item.kind == "activity"
     assert presentation.details is not None
     assert long_error not in "\n".join(presentation.details.lines)

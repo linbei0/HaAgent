@@ -3645,6 +3645,12 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
+            assert "已处理 2 项 >" in conversation
+            assert "已写入文件" not in conversation
+            assert "file_write" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
             assert "已写入文件" in conversation
             assert "文件已写入" in conversation
             assert "工具 1 项" not in conversation
@@ -3871,6 +3877,11 @@ def test_tui_user_input_cancel_returns_explicit_denial(tmp_path: Path) -> None:
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
             conversation = _text(app, "#conversation")
             assert "回答已取消：request_user_input" in conversation
+            assert "已处理 1 项 >" in conversation
+            assert "工具运行失败：request_user_input" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
             assert "工具运行失败：request_user_input" in conversation
             assert "工具 1 项" not in conversation
             assert "request_user_input" in conversation
@@ -4714,9 +4725,14 @@ def test_tui_tool_failure_adds_actionable_notice_and_keeps_answer_readable(tmp_p
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
+            assert "已处理 1 项 >" in conversation
+            assert "工具运行失败：web_search" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
             assert "工具运行失败：web_search" in conversation
             assert "建议：查看错误摘要后重试或调整命令" in conversation
-            assert "详情：按 Enter 展开" in conversation
+            assert "详情：点击展开" in conversation
             assert "工具 2 项" not in conversation
             assert "运行中" not in conversation
             assert "web_search" in conversation
@@ -4744,6 +4760,11 @@ def test_tui_tool_failure_notice_omits_long_read_only_summaries(tmp_path: Path) 
             await pilot.press("enter")
             await pilot.pause(0.2)
 
+            conversation = _text(app, "#conversation")
+            assert "已处理 1 项 >" in conversation
+            assert "工具运行失败：web_search" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
             assert "工具运行失败：web_search" in conversation
             assert "工具 2 项" not in conversation
@@ -4777,6 +4798,11 @@ def test_tui_read_only_tool_events_do_not_count_calls_in_timeline(tmp_path: Path
             await pilot.press("enter")
             await pilot.pause(0.2)
 
+            conversation = _text(app, "#conversation")
+            assert "已处理 1 项 >" in conversation
+            assert "工具运行失败：web_fetch" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
             assert "工具运行失败：web_fetch" in conversation
             assert "工具 5 项" not in conversation
@@ -4998,6 +5024,11 @@ def test_tui_no_color_timeline_keeps_role_and_status_labels(tmp_path: Path, monk
             conversation = _text(app, "#conversation")
             assert "[你]" in conversation
             assert "[HaAgent]" in conversation
+            assert "[已处理 1 项 >]" in conversation
+            assert "[工具运行失败：web_fetch]" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
             assert "[工具运行失败：web_fetch]" in conversation
             assert "失败" in conversation
 

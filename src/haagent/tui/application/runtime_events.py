@@ -26,6 +26,8 @@ from haagent.tui.design.failures import failure_from_payload
 from haagent.tui.presentation.progress import (
     ProgressPresentation,
     present_approval_state,
+    present_grouped_task_problem,
+    present_grouped_tool_failure,
     present_task_progress,
     present_tool_activity,
     present_user_input_state,
@@ -57,6 +59,8 @@ def _handle_assistant_message(app, event: RuntimeUiEvent) -> None:
 
 def _handle_tool_activity(app, event: ToolActivityEvent) -> None:
     presentation = present_tool_activity(event)
+    if event.status == "failed":
+        presentation = _aggregate_tool_failure(app, event, presentation)
     _apply_progress_presentation(app, presentation)
 
 
@@ -111,6 +115,8 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
 
 def _handle_task_progress(app, event: TaskProgressEvent) -> None:
     presentation = present_task_progress(event)
+    if presentation.timeline_item is not None and event.event_name in {"task_recovery_suggested", "task_step_blocked"}:
+        presentation = _aggregate_task_problem(app, event, presentation)
     _apply_progress_presentation(app, presentation)
 
 
@@ -170,10 +176,77 @@ def _apply_progress_presentation(app, presentation: ProgressPresentation) -> Non
     if presentation.timeline_item is None:
         return
     app.clear_progress_status()
-    app.query_one("#conversation", ConversationTimeline).add_presentation_item(
-        presentation.timeline_item,
-        presentation.details,
+    timeline = app.query_one("#conversation", ConversationTimeline)
+    if timeline.replace_presentation_item(presentation.timeline_item, presentation.details):
+        return
+    timeline.add_presentation_item(presentation.timeline_item, presentation.details)
+
+
+def _aggregate_tool_failure(
+    app,
+    event: ToolActivityEvent,
+    presentation: ProgressPresentation,
+) -> ProgressPresentation:
+    if presentation.timeline_item is None:
+        return presentation
+    groups = getattr(app, "_tui_tool_failure_groups", None)
+    if groups is None:
+        groups = {}
+        setattr(app, "_tui_tool_failure_groups", groups)
+    key = (
+        event.turn_index,
+        event.tool_name,
+        event.error_type or event.result_status or event.status,
     )
+    count = groups.get(key, 0) + 1
+    groups[key] = count
+    if count <= 1:
+        return presentation
+    return present_grouped_tool_failure(event, count=count)
+
+
+def _aggregate_task_problem(
+    app,
+    event: TaskProgressEvent,
+    presentation: ProgressPresentation,
+) -> ProgressPresentation:
+    if presentation.timeline_item is None:
+        return presentation
+    groups = getattr(app, "_tui_task_problem_groups", None)
+    if groups is None:
+        groups = {}
+        setattr(app, "_tui_task_problem_groups", groups)
+    group = groups.setdefault(
+        event.turn_index,
+        {"count": 0, "labels": [], "actions": []},
+    )
+    group["count"] += 1
+    label = _task_problem_label(presentation.timeline_item.title)
+    if label and label not in group["labels"]:
+        group["labels"].append(label)
+    action = _task_problem_action(event.suggested_action)
+    if action and action not in group["actions"]:
+        group["actions"].append(action)
+    return present_grouped_task_problem(
+        event,
+        count=group["count"],
+        labels=group["labels"] or [label or "任务受阻"],
+        actions=group["actions"],
+    )
+
+
+def _task_problem_label(title: str) -> str:
+    prefix = "任务遇到问题："
+    if title.startswith(prefix):
+        return title[len(prefix) :].strip()
+    return title.strip()
+
+
+def _task_problem_action(value: str) -> str:
+    stripped = value.strip()
+    if not stripped or stripped.lower() in {"none", "null", "n/a"}:
+        return ""
+    return stripped
 
 
 RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {

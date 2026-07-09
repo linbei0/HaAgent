@@ -13,7 +13,7 @@ from typing import Literal
 from haagent.runtime.events.types import ApprovalStateEvent, TaskProgressEvent, ToolActivityEvent, UserInputStateEvent
 
 Severity = Literal["info", "warning", "error"]
-TimelineKind = Literal["notice", "effect"]
+TimelineKind = Literal["activity", "notice", "effect"]
 
 TEXT_LIMIT = 160
 DETAIL_LIMIT = 240
@@ -100,6 +100,63 @@ def present_tool_activity(event: ToolActivityEvent) -> ProgressPresentation:
     return ProgressPresentation()
 
 
+def present_grouped_tool_failure(event: ToolActivityEvent, *, count: int) -> ProgressPresentation:
+    detail = ExpandableDetail(
+        detail_id=_tool_detail_id(event),
+        lines=[
+            f"工具：{_bounded(event.tool_name, 80)}",
+            "状态：failed",
+            f"失败次数：{count}",
+            f"错误类型：{_bounded(_meaningful(event.error_type) or 'unknown', 80)}",
+        ],
+    )
+    return ProgressPresentation(
+        timeline_item=TimelinePresentationItem(
+            kind="activity",
+            title=f"{_bounded(event.tool_name, 48)} 失败 {count} 次，已使用已有上下文继续",
+            summary="",
+            severity="warning",
+            turn_index=event.turn_index,
+            detail_id=detail.detail_id,
+        ),
+        details=detail,
+    )
+
+
+def present_grouped_task_problem(
+    event: TaskProgressEvent,
+    *,
+    count: int,
+    labels: list[str],
+    actions: list[str],
+) -> ProgressPresentation:
+    visible_labels = labels[:3]
+    label_text = "、".join(visible_labels)
+    if len(labels) > len(visible_labels):
+        label_text = f"{label_text}等"
+    title = f"任务遇到问题 {count} 项：{label_text}" if count > 1 else f"任务遇到问题：{label_text}"
+    action = actions[-1] if actions else "查看详情后继续处理"
+    detail = ExpandableDetail(
+        detail_id=f"task:{event.turn_index}:problems",
+        lines=[
+            f"问题数：{count}",
+            f"类型：{'、'.join(labels)}",
+            f"建议：{_bounded(action)}",
+        ],
+    )
+    return ProgressPresentation(
+        timeline_item=TimelinePresentationItem(
+            kind="activity",
+            title=title,
+            summary=f"建议：{_bounded(action)}",
+            severity="warning" if count > 1 else "error",
+            turn_index=event.turn_index,
+            detail_id=detail.detail_id,
+        ),
+        details=detail,
+    )
+
+
 def present_approval_state(event: ApprovalStateEvent) -> ProgressPresentation:
     if event.state == "requested":
         return _approval_requested_notice(event)
@@ -123,9 +180,9 @@ def _task_recovery_notice(event: TaskProgressEvent) -> ProgressPresentation:
     action = _meaningful(event.suggested_action) or "查看详情后继续处理"
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
-            kind="notice",
+            kind="activity",
             title=f"任务遇到问题：{label}",
-            summary=f"建议：{_bounded(action)}\n详情：按 Enter 展开",
+            summary=f"建议：{_bounded(action)}",
             severity="error",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -141,7 +198,7 @@ def _task_budget_notice(event: TaskProgressEvent) -> ProgressPresentation:
         timeline_item=TimelinePresentationItem(
             kind="notice",
             title="任务快到本轮上限",
-            summary=f"建议：{_bounded(action)}\n详情：按 Enter 展开",
+            summary=f"建议：{_bounded(action)}",
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -170,7 +227,7 @@ def _tool_effect_summary(event: ToolActivityEvent) -> ProgressPresentation:
         timeline_item=TimelinePresentationItem(
             kind="effect",
             title=_SIDE_EFFECT_TOOL_TITLES.get(event.tool_name, "已执行操作"),
-            summary=f"{_effect_summary_text(event)}\n详情：按 Enter 展开",
+            summary=_effect_summary_text(event),
             severity="info",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -183,9 +240,9 @@ def _tool_failure_notice(event: ToolActivityEvent) -> ProgressPresentation:
     detail = _tool_detail(event)
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
-            kind="notice",
+            kind="activity",
             title=f"工具运行失败：{_bounded(event.tool_name, 48)}",
-            summary="建议：查看错误摘要后重试或调整命令\n详情：按 Enter 展开",
+            summary="建议：查看错误摘要后重试或调整命令",
             severity="error",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -201,7 +258,7 @@ def _approval_requested_notice(event: ApprovalStateEvent) -> ProgressPresentatio
         timeline_item=TimelinePresentationItem(
             kind="notice",
             title=title,
-            summary="建议：在弹窗中确认或拒绝\n详情：按 Enter 展开",
+            summary="建议：在弹窗中确认或拒绝",
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -217,7 +274,7 @@ def _approval_denied_notice(event: ApprovalStateEvent) -> ProgressPresentation:
         timeline_item=TimelinePresentationItem(
             kind="notice",
             title=label,
-            summary="建议：调整请求或选择其他方案\n详情：按 Enter 展开",
+            summary="建议：调整请求或选择其他方案",
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -233,7 +290,7 @@ def _user_input_requested_notice(event: UserInputStateEvent) -> ProgressPresenta
         timeline_item=TimelinePresentationItem(
             kind="notice",
             title="需要补充信息",
-            summary=f"{question}\n建议：请在输入框回答\n详情：按 Enter 展开",
+            summary=f"{question}\n建议：请在输入框回答",
             severity="info",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
@@ -248,7 +305,7 @@ def _user_input_cancelled_notice(event: UserInputStateEvent) -> ProgressPresenta
         timeline_item=TimelinePresentationItem(
             kind="notice",
             title=f"回答已取消：{_bounded(event.tool_name, 48)}",
-            summary="建议：补充信息后重试或调整任务\n详情：按 Enter 展开",
+            summary="建议：补充信息后重试或调整任务",
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,

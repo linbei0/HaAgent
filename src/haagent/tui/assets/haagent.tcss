@@ -94,6 +94,28 @@ ConversationTimeline {
     color: $text-muted;
 }
 
+.timeline-activity {
+    width: 84%;
+    margin-bottom: 0;
+    padding: 0 2;
+    background: $background;
+    border-left: solid $primary;
+    color: $text-muted;
+}
+
+.timeline-process {
+    width: 84%;
+    margin-bottom: 0;
+    padding: 0 2;
+    background: $background;
+    border-left: solid $secondary;
+    color: $text-muted;
+}
+
+.timeline-process:hover {
+    background: $surface;
+}
+
 .timeline-failure,
 .timeline-failed {
     background: $surface;
@@ -114,6 +136,16 @@ ConversationTimeline {
 
 .timeline-system .timeline-header {
     color: $text-muted;
+}
+
+.timeline-activity .timeline-header {
+    color: $text-muted;
+    text-style: none;
+}
+
+.timeline-process .timeline-header {
+    color: $text-muted;
+    text-style: none;
 }
 
 .timeline-failure .timeline-header,
@@ -298,6 +330,8 @@ Screen.theme-monochrome .timeline-item,
 Screen.theme-monochrome .timeline-user,
 Screen.theme-monochrome .timeline-assistant,
 Screen.theme-monochrome .timeline-system,
+Screen.theme-monochrome .timeline-activity,
+Screen.theme-monochrome .timeline-process,
 Screen.theme-monochrome .timeline-failure,
 Screen.theme-monochrome .timeline-failed,
 Screen.theme-monochrome .timeline-tools,
