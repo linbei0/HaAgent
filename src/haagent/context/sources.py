@@ -1,7 +1,7 @@
 """
 haagent/context/sources.py - 上下文来源类型
 
-定义 ContextSelection 使用的候选、section 和决策数据结构。
+定义 ContextSelection 与压缩层共用的候选、section 和决策数据结构。
 """
 
 from __future__ import annotations
@@ -30,13 +30,24 @@ class ContextCandidate:
 
 @dataclass(frozen=True)
 class ContextSection:
-    source_type: str
-    source_id: str
-    placement: ContextPlacement
+    """选择层与压缩层共用的上下文段落。
+
+    key/source/kind/priority 供压缩预算与诊断使用；
+    source_type/source_id/placement/chars 供选择审计与 placement 分组使用。
+    """
+
+    key: str
     title: str
     content: str
-    chars: int
+    source: str
+    priority: int
+    kind: str
+    recent_rank: int | None = None
     hard_required: bool = False
+    source_type: str | None = None
+    source_id: str | None = None
+    placement: ContextPlacement | None = None
+    chars: int | None = None
 
 
 @dataclass(frozen=True)

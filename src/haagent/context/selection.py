@@ -9,9 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from haagent.context.compression.sections import ContextBudget, ContextSection as CompactionSection
-from haagent.context.compression.sections import collapse_text_head_tail
+from haagent.context.compression.sections import ContextBudget, collapse_text_head_tail
 from haagent.context.sources import ContextCandidate, ContextDecision, ContextSection
+
 
 
 @dataclass(frozen=True)
@@ -87,14 +87,19 @@ class ContextSelector:
             used[placement] += chars
             decision = _decision(candidate, chars=chars, selected=True, skip_reason=None)
             selected.append(decision)
+            # 直接产出压缩层可消费的统一 ContextSection，避免二次字段映射。
             section = ContextSection(
+                key=candidate.source_id,
+                title=candidate.title,
+                content=content,
+                source=_compaction_source(candidate.source_type),
+                priority=_compaction_priority(candidate.source_type),
+                kind=_compaction_kind(candidate.source_type),
+                hard_required=candidate.hard_required,
                 source_type=candidate.source_type,
                 source_id=candidate.source_id,
                 placement=placement,
-                title=candidate.title,
-                content=content,
                 chars=chars,
-                hard_required=candidate.hard_required,
             )
             if placement == "system":
                 system_sections.append(section)
@@ -236,21 +241,10 @@ def selection_budget_for_initial_audit(_budget: ContextBudget) -> ContextSelecti
     )
 
 
-def compaction_sections_from_selection(selection: ContextSelectionResult) -> list[CompactionSection]:
-    sections: list[CompactionSection] = []
-    for selected in [*selection.system_sections, *selection.task_sections]:
-        sections.append(
-            CompactionSection(
-                key=selected.source_id,
-                title=selected.title,
-                content=selected.content,
-                source=_compaction_source(selected.source_type),
-                priority=_compaction_priority(selected.source_type),
-                kind=_compaction_kind(selected.source_type),
-                hard_required=selected.hard_required,
-            ),
-        )
-    return sections
+def compaction_sections_from_selection(selection: ContextSelectionResult) -> list[ContextSection]:
+    """拼接已选 section；选择阶段已填齐压缩字段，不再复制改写。"""
+    return [*selection.system_sections, *selection.task_sections]
+
 
 
 def _prepare_candidate(candidate: ContextCandidate, budget: ContextSelectionBudget) -> ContextCandidate:

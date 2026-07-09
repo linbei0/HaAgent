@@ -7,12 +7,12 @@ from haagent.context.builder import ContextBuilder
 from haagent.context.compression.sections import (
     ContextBudget,
     ContextCompactionResult,
-    ContextSection,
     ContextSelectionRecord,
     assess_compact_readiness,
     assess_auto_compact_trigger,
     compact_context_sections,
 )
+from haagent.context.sources import ContextSection
 from haagent.context.compression.session_memory import compact_session_memory
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec

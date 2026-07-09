@@ -11,10 +11,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from haagent.context.compression.budget import CompressionBudget
+from haagent.context.sources import ContextSection
 from haagent.runtime.execution.command import redact_secret_like_text
 
 
-ContextDecision = Literal["selected", "skipped", "collapsed"]
+# 压缩诊断决策；勿与 sources.ContextDecision dataclass 混淆。
+CompactionDecision = Literal["selected", "skipped", "collapsed"]
 OBSERVATION_MICROCOMPACT_CHAR_LIMIT = 1200
 OBSERVATION_MICROCOMPACT_HEAD_CHARS = 600
 OBSERVATION_MICROCOMPACT_TAIL_CHARS = 300
@@ -32,23 +34,11 @@ class ContextBudget:
 
 
 @dataclass(frozen=True)
-class ContextSection:
-    key: str
-    title: str
-    content: str
-    source: str
-    priority: int
-    kind: str
-    recent_rank: int | None = None
-    hard_required: bool = False
-
-
-@dataclass(frozen=True)
 class ContextSelectionRecord:
     key: str
     source: str
     kind: str
-    decision: ContextDecision
+    decision: CompactionDecision
     reason: str
     original_chars: int
     final_chars: int
@@ -67,11 +57,10 @@ class ContextCompactionResult:
 class ObservationCompactionRecord:
     tool_name: str
     kind: str
-    decision: ContextDecision
+    decision: CompactionDecision
     reason: str
     original_chars: int
     final_chars: int
-
 
 def context_budget_from_compression_budget(budget: CompressionBudget) -> ContextBudget:
     max_total_chars = budget.context_builder_max_tokens * 4
@@ -297,7 +286,7 @@ def compact_observation_with_record(
             tail_chars=tail_chars,
         )
         field_collapsed = True
-    decision: ContextDecision = "collapsed" if field_collapsed or len(compacted) > max_chars else "selected"
+    decision: CompactionDecision = "collapsed" if field_collapsed or len(compacted) > max_chars else "selected"
     reason = "observation_over_budget" if decision == "collapsed" else "within_budget"
     original_chars = len(raw) if decision == "collapsed" else len(compacted)
     return compacted, ObservationCompactionRecord(
@@ -354,9 +343,9 @@ def _candidate(
     index: int,
     section: ContextSection,
     budget: ContextBudget,
-) -> tuple[int, ContextSection, str, ContextDecision, str]:
+) -> tuple[int, ContextSection, str, CompactionDecision, str]:
     content = section.content
-    decision: ContextDecision = "selected"
+    decision: CompactionDecision = "selected"
     reason = "within_budget"
 
     if not section.hard_required and _should_collapse_old_observation(section, budget):
@@ -393,11 +382,10 @@ def _should_collapse_old_observation(section: ContextSection, budget: ContextBud
     )
 
 
-def _selection_key(candidate: tuple[int, ContextSection, str, ContextDecision, str]) -> tuple[int, int, int]:
+def _selection_key(candidate: tuple[int, ContextSection, str, CompactionDecision, str]) -> tuple[int, int, int]:
     index, section, _content, _decision, _reason = candidate
     recent_rank = section.recent_rank if section.recent_rank is not None else 1_000_000
     return (-section.priority, recent_rank, index)
-
 
 def _ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:

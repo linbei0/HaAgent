@@ -14,7 +14,6 @@ from pathlib import Path
 from haagent.context.compression.sections import (
     ContextBudget,
     ContextCompactionResult,
-    ContextSection,
     ContextSelectionRecord,
     ObservationCompactionRecord,
     assess_auto_compact_trigger,
@@ -22,6 +21,7 @@ from haagent.context.compression.sections import (
     compact_context_sections,
     compact_observation_with_record,
 )
+from haagent.context.sources import ContextSection
 from haagent.context.manifest import (
     ContextIndex,
     ContextManifest,
