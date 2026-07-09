@@ -34,6 +34,16 @@ from haagent.runtime.orchestration.loop_guidance import (
 )
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
+from haagent.runtime.events.bus import (
+    AssistantDeltaBusEvent,
+    AssistantMessageBusEvent,
+    RuntimeBusEvent,
+    ToolFailedBusEvent,
+    ToolFinishedBusEvent,
+    ToolStartedBusEvent,
+    bus_event_to_dict,
+    coerce_bus_event,
+)
 from haagent.runtime.orchestration.task_progress import (
     map_failure_to_recovery,
     task_budget_warning_event,
@@ -73,8 +83,11 @@ class TurnLoopDependencies:
     workspace_root: object
     max_turns: int | None
     raise_if_cancelled: Callable[[], None]
-    emit_event: Callable[[dict[str, object]], None]
-    compress_historical_tool_messages: Callable[[list[dict[str, Any]], EpisodeWriter, int, Callable[[dict[str, object]]]], object]
+    emit_event: Callable[[RuntimeBusEvent], None]
+    compress_historical_tool_messages: Callable[
+        [list[dict[str, Any]], EpisodeWriter, int, Callable[[RuntimeBusEvent | dict[str, object]], None]],
+        object,
+    ]
     interaction_handler: HumanInteractionHandler | None
     interaction_resolver: HumanInteractionResolver
     safety_guard: object
@@ -126,22 +139,18 @@ def run_turn_loop(
             },
         )
         deps.emit_event(
-            task_step_progress_event(
-                step_id=deps.task_step_id,
-                title=_task_step_title(deps),
-                phase="model_turn_started",
-                summary=f"model turn {turn} started",
+            coerce_bus_event(
+                task_step_progress_event(
+                    step_id=deps.task_step_id,
+                    title=_task_step_title(deps),
+                    phase="model_turn_started",
+                    summary=f"model turn {turn} started",
+                ),
             ),
         )
         def emit_assistant_delta(delta: str) -> None:
             deps.raise_if_cancelled()
-            deps.emit_event(
-                {
-                    "event_type": "assistant_delta",
-                    "turn": turn,
-                    "delta": delta,
-                },
-            )
+            deps.emit_event(AssistantDeltaBusEvent(turn=turn, delta=delta))
 
         if _supports_event_sink(deps.model_gateway):
             model_response = deps.model_gateway.generate(
@@ -284,13 +293,7 @@ def _handle_no_tool_response(
             "trigger": None,
         },
     )
-    deps.emit_event(
-        {
-            "event_type": "assistant_message",
-            "turn": turn,
-            "content": model_response.content,
-        },
-    )
+    deps.emit_event(AssistantMessageBusEvent(turn=turn, content=model_response.content))
     deps.recorder.transition(RunStatus.VERIFYING)
     if state.verification_engine is None:
         state.verification_engine = VerificationEngine(deps.writer, deps.workspace_root)
@@ -303,12 +306,14 @@ def _handle_no_tool_response(
 
     verification_obs = deps.verification_observation(verification_result)
     deps.emit_event(
-        task_checkpoint_saved_event(
-            step_id=deps.task_step_id,
-            title=_task_step_title(deps),
-            status="failed",
-            evidence_count=0,
-            checkpoint_count=0,
+        coerce_bus_event(
+            task_checkpoint_saved_event(
+                step_id=deps.task_step_id,
+                title=_task_step_title(deps),
+                status="failed",
+                evidence_count=0,
+                checkpoint_count=0,
+            ),
         ),
     )
     recovery = map_failure_to_recovery(
@@ -319,12 +324,14 @@ def _handle_no_tool_response(
     )
     if recovery is not None:
         deps.emit_event(
-            task_recovery_suggested_event(
-                step_id=deps.task_step_id,
-                title=_task_step_title(deps),
-                category=recovery.category,
-                reason=recovery.reason,
-                suggested_action=recovery.suggested_action,
+            coerce_bus_event(
+                task_recovery_suggested_event(
+                    step_id=deps.task_step_id,
+                    title=_task_step_title(deps),
+                    category=recovery.category,
+                    reason=recovery.reason,
+                    suggested_action=recovery.suggested_action,
+                ),
             ),
         )
     ver_msg = build_suggestion_message(
@@ -335,12 +342,14 @@ def _handle_no_tool_response(
     state.final_response_requested = False
     if deps.max_turns is not None and turn == deps.max_turns:
         deps.emit_event(
-            task_budget_warning_event(
-                step_id=deps.task_step_id,
-                title=_task_step_title(deps),
-                category="turn_budget",
-                reason=f"verification failed on final turn {turn}/{deps.max_turns}",
-                suggested_action="checkpoint_and_resume",
+            coerce_bus_event(
+                task_budget_warning_event(
+                    step_id=deps.task_step_id,
+                    title=_task_step_title(deps),
+                    category="turn_budget",
+                    reason=f"verification failed on final turn {turn}/{deps.max_turns}",
+                    suggested_action="checkpoint_and_resume",
+                ),
             ),
         )
         deps.recorder.transition(RunStatus.FAILED)
@@ -375,23 +384,26 @@ def _run_tool_calls(
         deps.raise_if_cancelled()
         if tool_result.get("status") == "error":
             error = tool_result.get("error") or {}
-            failed_event = {
-                "event_type": "tool_failed",
-                "turn": turn,
-                "tool_name": tool_call.name,
-                "args": tool_call.args,
-                "error": error,
-            }
+            if not isinstance(error, dict):
+                error = {"type": "unknown", "message": str(error)}
+            failed_event = ToolFailedBusEvent(
+                turn=turn,
+                tool_name=tool_call.name,
+                args=dict(tool_call.args),
+                error=dict(error),
+            )
             deps.emit_event(failed_event)
-            recovery = map_failure_to_recovery(failed_event)
+            recovery = map_failure_to_recovery(bus_event_to_dict(failed_event))
             if recovery is not None:
                 deps.emit_event(
-                    task_recovery_suggested_event(
-                        step_id=deps.task_step_id,
-                        title=_task_step_title(deps),
-                        category=recovery.category,
-                        reason=recovery.reason,
-                        suggested_action=recovery.suggested_action,
+                    coerce_bus_event(
+                        task_recovery_suggested_event(
+                            step_id=deps.task_step_id,
+                            title=_task_step_title(deps),
+                            category=recovery.category,
+                            reason=recovery.reason,
+                            suggested_action=recovery.suggested_action,
+                        ),
                     ),
                 )
         observation = {
@@ -435,12 +447,14 @@ def _run_tool_calls(
             abort_obs = safety_violation_observation(violation.message, violation.recovery_suggestion)
             deps.writer.append_transcript({"event": "safety_abort", "turn": turn, **abort_obs})
             deps.emit_event(
-                {
-                    "event_type": "safety_abort",
-                    "turn": turn,
-                    "violation_type": violation.type,
-                    "message": violation.message,
-                }
+                coerce_bus_event(
+                    {
+                        "event_type": "safety_abort",
+                        "turn": turn,
+                        "violation_type": violation.type,
+                        "message": violation.message,
+                    },
+                ),
             )
             deps.recorder.transition(RunStatus.FAILED)
             deps.writer.write_failure_attribution(
@@ -467,13 +481,12 @@ def _run_tool_calls(
             continue
 
         deps.emit_event(
-            {
-                "event_type": "tool_finished",
-                "turn": turn,
-                "tool_name": tool_call.name,
-                "args": tool_call.args,
-                "result": tool_result,
-            },
+            ToolFinishedBusEvent(
+                turn=turn,
+                tool_name=tool_call.name,
+                args=dict(tool_call.args),
+                result=dict(tool_result),
+            ),
         )
         suggestion = suggestion_for_observation(observation)
         if suggestion is not None:
@@ -502,12 +515,14 @@ def _run_tool_calls(
     success_count = sum(1 for result in tool_results if result.get("status") != "error")
     if success_count:
         deps.emit_event(
-            task_step_progress_event(
-                step_id=deps.task_step_id,
-                title=_task_step_title(deps),
-                phase="tool_batch_finished",
-                summary=f"completed {success_count} tool call(s)",
-                evidence_count=success_count,
+            coerce_bus_event(
+                task_step_progress_event(
+                    step_id=deps.task_step_id,
+                    title=_task_step_title(deps),
+                    phase="tool_batch_finished",
+                    summary=f"completed {success_count} tool call(s)",
+                    evidence_count=success_count,
+                ),
             ),
         )
 
@@ -596,13 +611,12 @@ def _interaction_handler_for_turn(
     return locked_handler
 
 
-def _tool_started_event(turn: int, tool_call: ToolCall) -> dict[str, object]:
-    return {
-        "event_type": "tool_started",
-        "turn": turn,
-        "tool_name": tool_call.name,
-        "args": tool_call.args,
-    }
+def _tool_started_event(turn: int, tool_call: ToolCall) -> ToolStartedBusEvent:
+    return ToolStartedBusEvent(
+        turn=turn,
+        tool_name=tool_call.name,
+        args=dict(tool_call.args),
+    )
 
 
 def _wait_for_pending_worker_tasks(

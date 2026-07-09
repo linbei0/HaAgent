@@ -47,7 +47,9 @@ verification_commands: []
 """.strip(),
         encoding="utf-8",
     )
-    runtime_events: list[dict[str, object]] = []
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    runtime_events: list[object] = []
     gateway = LongFileGateway()
 
     result = RunOrchestrator(
@@ -59,7 +61,11 @@ verification_commands: []
 
     assert result.status is RunStatus.COMPLETED
     assert large_content not in gateway.model_inputs[1]
-    diagnostics = [event for event in runtime_events if event.get("event_type") == "compression_diagnostic"]
+    diagnostics = [
+        bus_event_to_dict(event)
+        for event in runtime_events
+        if bus_event_to_dict(event).get("event_type") == "compression_diagnostic"
+    ]
     assert diagnostics
     assert diagnostics[0]["stage"] == "historical_tool_message"
     transcript = [

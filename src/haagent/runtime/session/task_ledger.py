@@ -202,8 +202,10 @@ def update_task_ledger(
     turn_index: int,
     result_status: str,
     episode_path: Path,
-    runtime_events: list[dict[str, object]],
+    runtime_events: list[object],
 ) -> TaskLedger:
+    from haagent.runtime.events.bus import bus_event_to_dict, coerce_bus_event
+
     current = begin_task_ledger_turn(ledger, prompt=prompt, turn_index=turn_index)
     steps = [task_step_from_dict(step.to_dict()) for step in current.steps]
     checkpoints = [task_checkpoint_from_dict(checkpoint.to_dict()) for checkpoint in current.checkpoints]
@@ -212,7 +214,9 @@ def update_task_ledger(
     current_step_id = current.current_step_id
     checkpoint_step_ids: list[str] = []
 
-    for event in runtime_events:
+    for raw_event in runtime_events:
+        # ledger 仍按 dict 字段驱动；总线类型在边界 to_dict，episode schema 不变。
+        event = bus_event_to_dict(coerce_bus_event(raw_event))
         event_type = str(event.get("event_type", ""))
         if event_type == "tool_finished":
             step = _find_or_default_step(steps, current_step_id)

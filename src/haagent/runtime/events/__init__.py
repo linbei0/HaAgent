@@ -4,6 +4,18 @@ src/haagent/runtime/events/__init__.py - Runtime 事件协议包
 集中放置 runtime 对外输出的事件协议与事件适配器。
 """
 
+from haagent.runtime.events.bus import (
+    AssistantDeltaBusEvent,
+    AssistantMessageBusEvent,
+    LegacyRawBusEvent,
+    RuntimeBusEvent,
+    ToolFailedBusEvent,
+    ToolFinishedBusEvent,
+    ToolStartedBusEvent,
+    bus_event_from_dict,
+    bus_event_to_dict,
+    coerce_bus_event,
+)
 from haagent.runtime.events.factories import (
     failure_notice_event,
     memory_candidates_created_event,
@@ -29,6 +41,9 @@ from haagent.runtime.events.types import (
 from haagent.runtime.events.ui_mapper import RuntimeUiEventMapper
 
 __all__ = [
+    "AssistantDeltaBusEvent",
+    "AssistantMessageBusEvent",
+    "LegacyRawBusEvent",
     "RAW_RUNTIME_UI_EVENT_REGISTRY",
     "RUNTIME_UI_EVENT_TYPES",
     "ApprovalStateEvent",
@@ -37,14 +52,21 @@ __all__ = [
     "FailureNoticeEvent",
     "MemoryNoticeEvent",
     "RawRuntimeUiEventSpec",
+    "RuntimeBusEvent",
     "RuntimeUiEvent",
     "RuntimeUiEventMapper",
     "RuntimeUiEventType",
     "SessionLifecycleEvent",
     "TaskProgressEvent",
     "ToolActivityEvent",
+    "ToolFailedBusEvent",
+    "ToolFinishedBusEvent",
+    "ToolStartedBusEvent",
     "UserInputStateEvent",
     "WarningNoticeEvent",
+    "bus_event_from_dict",
+    "bus_event_to_dict",
+    "coerce_bus_event",
     "failure_notice_event",
     "memory_candidates_created_event",
     "memory_extraction_warning_event",

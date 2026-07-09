@@ -57,6 +57,7 @@ from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.task_progress import map_failure_to_recovery
 from haagent.runtime.orchestration.task_progress import task_plan_created_event
 from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
+from haagent.runtime.events.bus import RuntimeBusEvent, coerce_bus_event
 from haagent.runtime.orchestration.turns import TurnLoopDependencies, TurnLoopState, run_turn_loop
 from haagent.runtime.sandbox import SandboxBackend, create_sandbox_backend
 from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS, load_runtime_settings
@@ -78,7 +79,7 @@ class RunOrchestrator:
         historical_tool_compression_count: int = 0,
         working_state: dict[str, object] | None = None,
         task_ledger: dict[str, object] | None = None,
-        event_sink: Callable[[dict[str, object]], None] | None = None,
+        event_sink: Callable[[RuntimeBusEvent], None] | None = None,
         interaction_handler: HumanInteractionHandler | None = None,
         cancellation_token: CancellationToken | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
@@ -102,9 +103,10 @@ class RunOrchestrator:
         self._leader_session_id = leader_session_id or "leader"
         self._worker_permission_requester = worker_permission_requester
 
-    def _emit_event(self, event: dict[str, object]) -> None:
+    def _emit_event(self, event: RuntimeBusEvent | dict[str, object]) -> None:
+        # 兼容仍发 raw dict 的 multi_agent / compression / task_progress 路径。
         if self._event_sink is not None:
-            self._event_sink(event)
+            self._event_sink(coerce_bus_event(event))
 
     def _raise_if_cancelled(self) -> None:
         if self._cancellation_token is not None:
@@ -476,7 +478,7 @@ def _successful_file_change_without_declared_verification(
 
 def _record_suggestion(
     writer: EpisodeWriter,
-    emit_event: Callable[[dict[str, object]], None],
+    emit_event: Callable[[RuntimeBusEvent | dict[str, object]], None],
     turn: int,
     suggestion: ToolSuggestion,
 ) -> None:
@@ -493,7 +495,7 @@ def _record_suggestion(
 
 def _record_guardrail(
     writer: EpisodeWriter,
-    emit_event: Callable[[dict[str, object]], None],
+    emit_event: Callable[[RuntimeBusEvent | dict[str, object]], None],
     guardrail: GuardrailResult,
     turn: int | None = None,
 ) -> None:
@@ -705,7 +707,7 @@ def _current_task_step_id(task_ledger: dict[str, object] | None) -> str:
 
 
 def _emit_task_recovery(
-    emit_event: Callable[[dict[str, object]], None],
+    emit_event: Callable[[RuntimeBusEvent | dict[str, object]], None],
     task_ledger: dict[str, object] | None,
     *,
     event_type: str,

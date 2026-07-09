@@ -353,12 +353,15 @@ class AgentSession:
                 details={"prompt": _summary_value(clean_prompt, 160)},
             ),
         )
-        runtime_events: list[dict[str, object]] = []
+        from haagent.runtime.events.bus import RuntimeBusEvent, coerce_bus_event
+
+        runtime_events: list[RuntimeBusEvent] = []
         self._current_cancellation_token = CancellationToken()
 
-        def on_runtime_event(event: dict[str, object]) -> None:
-            runtime_events.append(event)
-            emit_runtime_ui_event(event_sink, event, session_id=self.session_id, turn_index=turn_index)
+        def on_runtime_event(event: RuntimeBusEvent | dict[str, object]) -> None:
+            bus_event = coerce_bus_event(event)
+            runtime_events.append(bus_event)
+            emit_runtime_ui_event(event_sink, bus_event, session_id=self.session_id, turn_index=turn_index)
 
         target_paths = list(self._next_turn_target_paths)
         self._next_turn_target_paths = []
@@ -635,8 +638,12 @@ class AgentSession:
         self,
         prompt: str,
         result: ChatTurnResult,
-        runtime_events: list[dict[str, object]],
+        runtime_events: list[object],
     ):
+        from haagent.runtime.events.bus import bus_event_to_dict, coerce_bus_event
+
+        # 记忆提取仍消费 dict 形态；总线事件在边界序列化，不改变提取 schema。
+        dict_events = [bus_event_to_dict(coerce_bus_event(event)) for event in runtime_events]
         return MemoryExtractor().extract(
             MemoryExtractionRequest(
                 session_id=self.session_id,
@@ -649,7 +656,7 @@ class AgentSession:
                 verification_status=result.verification_status,
                 episode_path=result.episode_path,
                 working_state=self._working_state.to_dict(),
-                runtime_events=runtime_events,
+                runtime_events=dict_events,
                 model_gateway=self.model_gateway,
             ),
         )
@@ -1022,19 +1029,29 @@ def _task_turn_closed_events(ledger, result: ChatTurnResult) -> list[dict[str, o
     return events
 
 
-def _in_band_verification_status(runtime_events: list[dict[str, object]]) -> str:
+def _in_band_verification_status(runtime_events: list[object]) -> str:
+    from haagent.runtime.events.bus import ToolFailedBusEvent, ToolFinishedBusEvent, bus_event_to_dict, coerce_bus_event
+
     saw_failed_verification = False
-    for event in runtime_events:
-        event_type = str(event.get("event_type", ""))
-        if event_type not in {"tool_finished", "tool_failed"}:
-            continue
-        tool_name = str(event.get("tool_name", ""))
+    for raw_event in runtime_events:
+        event = coerce_bus_event(raw_event)
+        if isinstance(event, (ToolFinishedBusEvent, ToolFailedBusEvent)):
+            tool_name = event.tool_name
+            args = event.args
+            result = event.result if isinstance(event, ToolFinishedBusEvent) else {}
+            event_type = event.event_type
+        else:
+            payload = bus_event_to_dict(event)
+            event_type = str(payload.get("event_type", ""))
+            if event_type not in {"tool_finished", "tool_failed"}:
+                continue
+            tool_name = str(payload.get("tool_name", ""))
+            args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         if tool_name not in {"shell", "code_run"}:
             continue
-        args = event.get("args") if isinstance(event.get("args"), dict) else {}
         if not _looks_like_verification_command(args):
             continue
-        result = event.get("result") if isinstance(event.get("result"), dict) else {}
         if event_type == "tool_finished" and result.get("status") == "success" and result.get("exit_code") == 0:
             return "success"
         saw_failed_verification = True
@@ -1063,23 +1080,36 @@ def _looks_like_verification_command(args: dict[str, object]) -> bool:
     return any(marker in command_text for marker in markers)
 
 
-def _memory_update_requested(runtime_events: list[dict[str, object]]) -> bool:
-    for event in runtime_events:
-        if event.get("event_type") != "tool_finished" or event.get("tool_name") != "start_memory_update":
-            continue
-        result = event.get("result") if isinstance(event.get("result"), dict) else {}
+def _memory_update_requested(runtime_events: list[object]) -> bool:
+    from haagent.runtime.events.bus import ToolFinishedBusEvent, bus_event_to_dict, coerce_bus_event
+
+    for raw_event in runtime_events:
+        event = coerce_bus_event(raw_event)
+        if isinstance(event, ToolFinishedBusEvent):
+            if event.tool_name != "start_memory_update":
+                continue
+            result = event.result
+        else:
+            payload = bus_event_to_dict(event)
+            if payload.get("event_type") != "tool_finished" or payload.get("tool_name") != "start_memory_update":
+                continue
+            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         if result.get("status") == "success" and result.get("memory_update_requested") is True:
             return True
     return False
 
 
-def _count_historical_tool_compression_events(runtime_events: list[dict[str, object]]) -> int:
-    return sum(
-        1
-        for event in runtime_events
-        if (event.get("event_type") == "compression_diagnostic" or event.get("event") == "compression_diagnostic")
-        and event.get("stage") == "historical_tool_message"
-    )
+def _count_historical_tool_compression_events(runtime_events: list[object]) -> int:
+    from haagent.runtime.events.bus import bus_event_to_dict, coerce_bus_event
+
+    total = 0
+    for raw_event in runtime_events:
+        payload = bus_event_to_dict(coerce_bus_event(raw_event))
+        if (
+            payload.get("event_type") == "compression_diagnostic" or payload.get("event") == "compression_diagnostic"
+        ) and payload.get("stage") == "historical_tool_message":
+            total += 1
+    return total
 
 
 def _read_clipboard_image_bytes() -> bytes:

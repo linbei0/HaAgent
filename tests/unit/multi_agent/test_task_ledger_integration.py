@@ -139,11 +139,14 @@ def test_worker_failed_event_emits_task_recovery_suggestion() -> None:
         episode_path=".runs/episodes/worker-episode",
     )
 
-    assert [event["event_type"] for event in events] == [
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    payloads = [bus_event_to_dict(event) for event in events]
+    assert [event["event_type"] for event in payloads] == [
         "worker_failed",
         "task_recovery_suggested",
     ]
-    recovery = events[-1]
+    recovery = payloads[-1]
     assert recovery["step_id"] == "step-002"
     assert recovery["category"] == "worker_failure"
     assert recovery["suggested_action"] == "retry_worker_or_take_over"

@@ -104,10 +104,13 @@ def test_agent_tool_starts_worker_and_records_trace(tmp_path: Path) -> None:
     assert result["team_id"] == "team-test"
     assert result["agent_id"].startswith("explorer-")
     notification = runtime.wait_for_task(result["task_id"], timeout=5)
+    from haagent.runtime.events.bus import bus_event_to_dict
+
     assert notification["status"] == "completed"
-    assert [event["event_type"] for event in events] == ["worker_started", "worker_completed"]
-    assert events[0]["agent_id"] == result["agent_id"]
-    assert events[1]["status"] == "completed"
+    payloads = [bus_event_to_dict(event) for event in events]
+    assert [event["event_type"] for event in payloads] == ["worker_started", "worker_completed"]
+    assert payloads[0]["agent_id"] == result["agent_id"]
+    assert payloads[1]["status"] == "completed"
 
     trace_lines = (router.episode_writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(trace_lines[0])["tool_name"] == "agent"

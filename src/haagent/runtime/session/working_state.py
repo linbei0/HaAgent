@@ -120,21 +120,41 @@ def update_working_state(
     *,
     prompt: str,
     result: Any,
-    runtime_events: list[dict[str, object]],
+    runtime_events: list[Any],
 ) -> WorkingState:
+    from haagent.runtime.events.bus import (
+        AssistantMessageBusEvent,
+        ToolFailedBusEvent,
+        ToolFinishedBusEvent,
+        bus_event_to_dict,
+        coerce_bus_event,
+    )
+
     key_findings = list(state.key_findings)
     completed_actions = list(state.completed_actions)
 
-    for event in runtime_events:
-        event_type = str(event.get("event_type", ""))
-        if event_type == "tool_finished":
-            completed_actions.append(_tool_action_summary(event))
-        elif event_type == "tool_failed":
-            completed_actions.append(_tool_failure_summary(event))
-        elif event_type == "assistant_message":
-            finding = _bounded_text(str(event.get("content", "")))
+    for raw_event in runtime_events:
+        event = coerce_bus_event(raw_event)
+        if isinstance(event, ToolFinishedBusEvent):
+            completed_actions.append(_tool_action_summary(bus_event_to_dict(event)))
+        elif isinstance(event, ToolFailedBusEvent):
+            completed_actions.append(_tool_failure_summary(bus_event_to_dict(event)))
+        elif isinstance(event, AssistantMessageBusEvent):
+            finding = _bounded_text(event.content)
             if finding and finding != "none":
                 key_findings.append(finding)
+        else:
+            # LegacyRawBusEvent 等未切片类型：仍按 dict 字段消费。
+            payload = bus_event_to_dict(event)
+            event_type = str(payload.get("event_type", ""))
+            if event_type == "tool_finished":
+                completed_actions.append(_tool_action_summary(payload))
+            elif event_type == "tool_failed":
+                completed_actions.append(_tool_failure_summary(payload))
+            elif event_type == "assistant_message":
+                finding = _bounded_text(str(payload.get("content", "")))
+                if finding and finding != "none":
+                    key_findings.append(finding)
 
     final_response = _bounded_text(str(getattr(result, "final_response", "")))
     if final_response and final_response != "none":

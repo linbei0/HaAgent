@@ -802,6 +802,8 @@ class MultiAgentRuntime:
     ) -> None:
         if self.event_sink is None:
             return
+        from haagent.runtime.events.bus import coerce_bus_event
+
         event = {
             "event_type": event_type,
             "agent_id": worker.agent_id,
@@ -814,7 +816,8 @@ class MultiAgentRuntime:
             "evidence_refs": _worker_evidence_refs(worker, episode_path=episode_path),
             "episode_path": episode_path,
         }
-        self.event_sink(event)
+        # orchestrator sink 已收 RuntimeBusEvent；worker 仍发 dict，在边界 coerce。
+        self.event_sink(coerce_bus_event(event))
         if event_type != "worker_failed":
             return
         recovery = map_failure_to_recovery(
@@ -826,13 +829,15 @@ class MultiAgentRuntime:
         if recovery is None:
             return
         self.event_sink(
-            task_recovery_suggested_event(
-                step_id=worker.parent_step_id or worker.agent_id,
-                title=description or f"Worker {worker.agent_id}",
-                category=recovery.category,
-                reason=recovery.reason,
-                suggested_action=recovery.suggested_action,
-                owner="worker",
+            coerce_bus_event(
+                task_recovery_suggested_event(
+                    step_id=worker.parent_step_id or worker.agent_id,
+                    title=description or f"Worker {worker.agent_id}",
+                    category=recovery.category,
+                    reason=recovery.reason,
+                    suggested_action=recovery.suggested_action,
+                    owner="worker",
+                ),
             ),
         )
 

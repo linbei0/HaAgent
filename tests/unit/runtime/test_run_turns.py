@@ -115,12 +115,14 @@ def test_same_turn_multiple_tool_calls_execute_concurrently() -> None:
 
 
 def test_turn_loop_emits_key_step_progress_events() -> None:
+    from haagent.runtime.events.bus import bus_event_to_dict
+
     router = _PerToolRouter(
         {
             "file_read": {"status": "success", "content": "notes"},
         },
     )
-    emitted_events: list[dict[str, object]] = []
+    emitted_events: list[object] = []
     state = TurnLoopState(messages=[], context_id="ctx")
     deps = _deps(router=router, emit_event=emitted_events.append)
 
@@ -132,7 +134,9 @@ def test_turn_loop_emits_key_step_progress_events() -> None:
     )
 
     progress_events = [
-        event for event in emitted_events if event["event_type"] == "task_step_progress"
+        bus_event_to_dict(event)
+        for event in emitted_events
+        if bus_event_to_dict(event).get("event_type") == "task_step_progress"
     ]
     assert [event["category"] for event in progress_events] == ["tool_batch_finished"]
     assert progress_events[0]["step_id"] == "step-001"
@@ -140,7 +144,9 @@ def test_turn_loop_emits_key_step_progress_events() -> None:
 
 
 def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
-    emitted_events: list[dict[str, object]] = []
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    emitted_events: list[object] = []
     finish_statuses: list[object] = []
 
     class _ModelGateway:
@@ -167,7 +173,9 @@ def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
 
     assert result is not None
     progress_events = [
-        event for event in emitted_events if event["event_type"] == "task_step_progress"
+        bus_event_to_dict(event)
+        for event in emitted_events
+        if bus_event_to_dict(event).get("event_type") == "task_step_progress"
     ]
     assert progress_events[0]["category"] == "model_turn_started"
     assert progress_events[0]["step_id"] == "step-001"
@@ -214,8 +222,10 @@ def test_tool_failure_emits_recovery_suggestion_event() -> None:
             },
         }
     )
+    from haagent.runtime.events.bus import bus_event_to_dict
+
     state = TurnLoopState(messages=[], context_id="ctx")
-    emitted_events: list[dict[str, object]] = []
+    emitted_events: list[object] = []
     deps = _deps(router=router, emit_event=emitted_events.append)
 
     _run_tool_calls(
@@ -225,19 +235,22 @@ def test_tool_failure_emits_recovery_suggestion_event() -> None:
         deps=deps,
     )
 
-    assert [event["event_type"] for event in emitted_events] == [
+    payloads = [bus_event_to_dict(event) for event in emitted_events]
+    assert [event["event_type"] for event in payloads] == [
         "tool_started",
         "tool_failed",
         "task_recovery_suggested",
     ]
-    recovery = emitted_events[-1]
+    recovery = payloads[-1]
     assert recovery["step_id"] == "step-001"
     assert recovery["category"] == "model_format_error"
     assert recovery["suggested_action"] == "correct_tool_arguments"
 
 
 def test_verification_failure_emits_checkpoint_recovery_and_budget_warning() -> None:
-    emitted_events: list[dict[str, object]] = []
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    emitted_events: list[object] = []
     transitions: list[object] = []
     state = TurnLoopState(messages=[], context_id="ctx")
     verification_result = SimpleNamespace(
@@ -270,11 +283,12 @@ def test_verification_failure_emits_checkpoint_recovery_and_budget_warning() -> 
     )
 
     assert result is not None
-    event_types = [event["event_type"] for event in emitted_events]
+    payloads = [bus_event_to_dict(event) for event in emitted_events]
+    event_types = [event["event_type"] for event in payloads]
     assert "task_checkpoint_saved" in event_types
     assert "task_recovery_suggested" in event_types
     assert "task_budget_warning" in event_types
-    recovery = next(event for event in emitted_events if event["event_type"] == "task_recovery_suggested")
+    recovery = next(event for event in payloads if event["event_type"] == "task_recovery_suggested")
     assert recovery["category"] == "verification_failed"
     assert recovery["suggested_action"] == "repair_and_rerun_verification"
 

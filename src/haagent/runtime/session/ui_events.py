@@ -16,6 +16,7 @@ from haagent.runtime.events import (
     memory_extraction_warning_event,
     session_lifecycle_event,
 )
+from haagent.runtime.events.bus import RuntimeBusEvent, bus_event_to_dict, coerce_bus_event
 from haagent.runtime.events.types import SessionLifecycleEvent
 
 
@@ -30,14 +31,16 @@ def emit_ui_event(event_sink: RuntimeUiEventSink, event: RuntimeUiEvent) -> None
 
 def emit_runtime_ui_event(
     event_sink: RuntimeUiEventSink,
-    event: dict[str, object],
+    event: RuntimeBusEvent | dict[str, object],
     *,
     session_id: str,
     turn_index: int,
 ) -> None:
+    # UI 投影仍走 dict 形态；总线类型在边界 to_dict，不把完整 result 塞进 UI 类型。
+    payload = bus_event_to_dict(coerce_bus_event(event))
     emit_ui_event(
         event_sink,
-        RuntimeUiEventMapper.to_ui_event(event, session_id=session_id, turn_index=turn_index),
+        RuntimeUiEventMapper.to_ui_event(payload, session_id=session_id, turn_index=turn_index),
     )
 
 

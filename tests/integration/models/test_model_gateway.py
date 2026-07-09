@@ -1996,8 +1996,10 @@ verification_commands: []
 """.strip(),
         encoding="utf-8",
     )
+    from haagent.runtime.events.bus import bus_event_to_dict
+
     gateway = LargeToolResultGateway()
-    runtime_events: list[dict[str, object]] = []
+    runtime_events: list[object] = []
 
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
@@ -2017,7 +2019,9 @@ verification_commands: []
     ]
     assert any(record.get("event") == "compression_diagnostic" for record in transcript)
     microcompact_events = [
-        event for event in runtime_events if event.get("event_type") == "compression_diagnostic"
+        bus_event_to_dict(event)
+        for event in runtime_events
+        if bus_event_to_dict(event).get("event_type") == "compression_diagnostic"
     ]
     assert len(microcompact_events) == 1
     assert "event" not in microcompact_events[0]
