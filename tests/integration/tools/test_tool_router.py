@@ -20,7 +20,7 @@ from haagent.skills import SkillSettings
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
-from haagent.tools import router as router_module
+from haagent.tools import handler_factory as handler_factory_module
 from haagent.tools import file_tools
 from haagent.tools.shell import shell
 
@@ -291,7 +291,7 @@ def test_skill_market_search_runs_through_router_and_writes_trace(tmp_path: Path
             "warnings": [],
         }
 
-    monkeypatch.setattr(router_module, "skill_market_search", fake_skill_market_search)
+    monkeypatch.setattr(handler_factory_module, "skill_market_search", fake_skill_market_search)
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["skill_market_search"], episode_writer=writer, workspace_root=tmp_path)
 

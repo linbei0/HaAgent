@@ -13,6 +13,7 @@ from haagent.tools.registry import (
     default_tool_runtime_registry,
     export_tool_schemas,
     get_tool_definition,
+    merge_tool_registry_fragments,
     validate_tool_registry,
 )
 
@@ -46,6 +47,38 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "task_output",
     }
     assert all(isinstance(definition, ToolDefinition) for definition in TOOL_REGISTRY.values())
+
+
+def test_merge_tool_registry_fragments_rejects_duplicate_tool_names() -> None:
+    definition = ToolDefinition(
+        name="duplicate",
+        description="test",
+        risk_level="low",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+
+    with pytest.raises(ValueError, match="duplicate tool definition: duplicate"):
+        merge_tool_registry_fragments({"duplicate": definition}, {"duplicate": definition})
+
+
+def test_tool_registry_is_the_deterministic_merge_of_domain_fragments() -> None:
+    from haagent.tools.registry_fragments.agent import AGENT_TOOL_REGISTRY
+    from haagent.tools.registry_fragments.core import CORE_TOOL_REGISTRY
+    from haagent.tools.registry_fragments.files import FILE_TOOL_REGISTRY
+    from haagent.tools.registry_fragments.mcp import MCP_TOOL_REGISTRY
+    from haagent.tools.registry_fragments.shell import SHELL_TOOL_REGISTRY
+    from haagent.tools.registry_fragments.skills import SKILL_TOOL_REGISTRY
+    from haagent.tools.registry_fragments.web import WEB_TOOL_REGISTRY
+
+    assert TOOL_REGISTRY == merge_tool_registry_fragments(
+        CORE_TOOL_REGISTRY,
+        AGENT_TOOL_REGISTRY,
+        FILE_TOOL_REGISTRY,
+        SKILL_TOOL_REGISTRY,
+        WEB_TOOL_REGISTRY,
+        MCP_TOOL_REGISTRY,
+        SHELL_TOOL_REGISTRY,
+    )
 
 
 def test_tool_registry_definitions_have_required_metadata() -> None:

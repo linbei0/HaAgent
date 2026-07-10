@@ -31,19 +31,15 @@ from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
-from haagent.tools.code_run import code_run
-from haagent.tools.file_tools import apply_patch, apply_patch_set, file_list, file_read, file_write, grep
-from haagent.tools.mcp_tools import list_mcp_resources, read_mcp_resource, run_mcp_tool
+from haagent.tools.file_tools import apply_patch, apply_patch_set, file_write
+from haagent.tools.handler_factory import build_static_tool_handlers
+from haagent.tools.mcp_tools import run_mcp_tool
 from haagent.tools.registry import (
     TOOL_REGISTRY,
     ToolRuntimeRegistry,
     default_tool_runtime_registry,
     validate_tool_registry,
 )
-from haagent.tools.shell import shell
-from haagent.tools.skill_market import skill_market_search
-from haagent.tools.skills import skill_list, skill_read
-from haagent.tools.web import web_fetch, web_search
 
 
 class ToolRouter:
@@ -81,45 +77,26 @@ class ToolRouter:
             for attachment in image_attachment_history or []
         }
         self._path_policy = path_policy.resolved() if path_policy is not None else default_path_policy(self._workspace_root)
-        self._handlers: dict[str, ToolHandler] = {
-            "fake_tool": self._fake_tool,
-            "load_image_attachment": self._load_image_attachment,
-            "agent": self._agent,
-            "send_message": self._send_message,
-            "task_stop": self._task_stop,
-            "task_get": self._task_get,
-            "task_list": self._task_list,
-            "task_output": self._task_output,
-            "file_list": lambda args: file_list(args, self._workspace_root, self._path_policy),
-            "grep": lambda args: grep(args, self._workspace_root, self._path_policy),
-            "file_read": lambda args: file_read(args, self._workspace_root, self._path_policy),
-            "request_user_input": self._request_user_input_without_handler,
-            "start_memory_update": self._start_memory_update,
-            "skill_list": lambda args: skill_list(args, self._workspace_root, self._skill_settings),
-            "skill_read": lambda args: skill_read(args, self._workspace_root, self._skill_settings),
-            "skill_market_search": skill_market_search,
-            "web_search": web_search,
-            "web_fetch": web_fetch,
-            "list_mcp_resources": lambda args: list_mcp_resources(args, self._mcp_runtime),
-            "read_mcp_resource": lambda args: read_mcp_resource(args, self._mcp_runtime),
-            "file_write": lambda args: file_write(args, self._workspace_root, self._path_policy),
-            "code_run": lambda args: code_run(
-                args,
-                self._workspace_root,
-                self._path_policy,
-                cancellation_token=self._cancellation_token,
-                sandbox_backend=self._sandbox_backend,
-            ),
-            "apply_patch": lambda args: apply_patch(args, self._workspace_root, self._path_policy),
-            "apply_patch_set": lambda args: apply_patch_set(args, self._workspace_root, self._path_policy),
-            "shell": lambda args: shell(
-                args,
-                self._workspace_root,
-                self._path_policy,
-                cancellation_token=self._cancellation_token,
-                sandbox_backend=self._sandbox_backend,
-            ),
-        }
+        self._handlers = build_static_tool_handlers(
+            workspace_root=self._workspace_root,
+            path_policy=self._path_policy,
+            skill_settings=self._skill_settings,
+            cancellation_token=self._cancellation_token,
+            mcp_runtime=self._mcp_runtime,
+            sandbox_backend=self._sandbox_backend,
+            router_handlers={
+                "fake_tool": self._fake_tool,
+                "load_image_attachment": self._load_image_attachment,
+                "agent": self._agent,
+                "send_message": self._send_message,
+                "task_stop": self._task_stop,
+                "task_get": self._task_get,
+                "task_list": self._task_list,
+                "task_output": self._task_output,
+                "request_user_input": self._request_user_input_without_handler,
+                "start_memory_update": self._start_memory_update,
+            },
+        )
         try:
             validate_tool_registry()
         except ValueError as error:
