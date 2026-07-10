@@ -377,6 +377,15 @@ def test_tui_tool_summary_updates_pending_confirmation_on_response_events(tmp_pa
             await pilot.pause(0.4)
 
             conversation = _text(app, "#conversation")
+            assert "已处理 5 项 >" in conversation
+            assert "需要确认：code_run" not in conversation
+            assert "审批已拒绝：code_run" not in conversation
+            assert "需要确认：shell" not in conversation
+            assert "需要确认文件改动" not in conversation
+            assert "文件改动已拒绝" not in conversation
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
             assert "需要确认：code_run" in conversation
             assert "审批已拒绝：code_run" in conversation
             assert "需要确认：shell" in conversation

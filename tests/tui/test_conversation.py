@@ -277,12 +277,20 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
-            assert "已处理 2 项 >" in conversation
+            assert "已处理 4 项 >" in conversation
             assert "已写入文件" not in conversation
+            assert "需要确认：shell" not in conversation
+            assert "审批已拒绝：shell" not in conversation
             assert "file_write" not in conversation
             app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
+            activity = next(iter(app.query(".timeline-activity")))
+            effect = app.query_one(".timeline-effect")
+            assert activity.styles.background == effect.styles.background
+            assert activity.styles.border_left == effect.styles.border_left
+            assert activity.styles.padding == effect.styles.padding
+            assert activity.styles.margin == effect.styles.margin
             assert "已写入文件" in conversation
             assert "文件已写入" in conversation
             assert "工具 1 项" not in conversation

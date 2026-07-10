@@ -256,7 +256,7 @@ def _approval_requested_notice(event: ApprovalStateEvent) -> ProgressPresentatio
     title = "需要确认文件改动" if event.approval_kind == "edit_diff" else f"需要确认：{_bounded(event.tool_name, 48)}"
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
-            kind="notice",
+            kind="activity",
             title=title,
             summary="建议：在弹窗中确认或拒绝",
             severity="warning",
@@ -272,7 +272,7 @@ def _approval_denied_notice(event: ApprovalStateEvent) -> ProgressPresentation:
     label = "文件改动已拒绝" if event.approval_kind == "edit_diff" else f"审批已拒绝：{_bounded(event.tool_name, 48)}"
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
-            kind="notice",
+            kind="activity",
             title=label,
             summary="建议：调整请求或选择其他方案",
             severity="warning",

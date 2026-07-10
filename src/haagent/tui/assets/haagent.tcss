@@ -94,7 +94,8 @@ ConversationTimeline {
     color: $text-muted;
 }
 
-.timeline-activity {
+.timeline-activity,
+.timeline-effect {
     width: 84%;
     margin-bottom: 0;
     padding: 0 2;
@@ -138,7 +139,8 @@ ConversationTimeline {
     color: $text-muted;
 }
 
-.timeline-activity .timeline-header {
+.timeline-activity .timeline-header,
+.timeline-effect .timeline-header {
     color: $text-muted;
     text-style: none;
 }

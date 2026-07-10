@@ -225,11 +225,12 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             assert deny_has_focus
             assert "state: waiting approval" in status
             assert list(app.query("#side-bar")) == []
-            assert "需要确认：shell" in conversation
-            assert "建议：在弹窗中确认或拒绝" in conversation
+            assert "已处理 1 项 >" in conversation
+            assert "需要确认：shell" not in conversation
+            assert "建议：在弹窗中确认或拒绝" not in conversation
             assert "工具 1 项" not in conversation
             assert "1 待确认" not in conversation
-            assert "shell" in conversation
+            assert "shell" not in conversation
 
     asyncio.run(run())
 
@@ -313,7 +314,10 @@ def test_tui_approval_deny_returns_approved_false_to_same_prompt(tmp_path: Path)
             await pilot.pause(0.2)
             assert service.prompts == ["Run checks"]
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
-            assert "审批已拒绝：shell" in _text(app, "#conversation")
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            assert "审批已拒绝：shell" not in conversation.plain_text
+            assert conversation.toggle_process_group(1) is True
+            assert "审批已拒绝：shell" in conversation.plain_text
             assert "state: failed" in _text(app, "#status-bar")
 
     asyncio.run(run())
