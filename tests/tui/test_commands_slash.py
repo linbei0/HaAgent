@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
@@ -78,7 +78,7 @@ from tests.tui.support import (
 )
 
 def test_tui_status_renderer_shows_sandbox_state(tmp_path: Path) -> None:
-    status = FakeAssistantService(workspace_root=tmp_path / "sandbox").get_workspace_status()
+    status = FakeAssistantService(workspace_root=tmp_path / "sandbox").workspace.status()
 
     line = status_line(status, ui_state="idle", width=140)
 

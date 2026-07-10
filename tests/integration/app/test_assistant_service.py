@@ -6,6 +6,7 @@ tests/integration/app/test_assistant_service.py - AssistantService 应用服务�
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import threading
 from collections.abc import Mapping
@@ -13,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from haagent.app.assistant_service import (
-    AssistantService,
+from haagent.app.assistant_service import AssistantService
+from haagent.app.assistant_types import (
     AssistantServiceError,
     ModelConnectionConfigureRequest,
     ModelSelectionRequest,
@@ -36,6 +37,28 @@ from haagent.models.model_connections import (
 from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent, TaskProgressEvent
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills.marketplace import MarketplaceProvider, MarketplaceSearchResult, MarketplaceSkillCard
+
+
+def test_assistant_application_types_live_outside_composition_root() -> None:
+    assert importlib.util.find_spec("haagent.app.assistant_types") is not None
+
+
+def test_assistant_service_composes_grouped_modules_over_one_context(tmp_path: Path) -> None:
+    service = AssistantService(workspace_root=tmp_path)
+
+    assert service.workspace._context is service.sessions._context
+    assert service.sessions._context is service.models._context
+    assert service.models._context is service.skills._context
+    assert service.skills._context is service.memory._context
+
+
+def test_assistant_service_does_not_expose_flat_usecase_methods(tmp_path: Path) -> None:
+    service = AssistantService(workspace_root=tmp_path)
+
+    assert not hasattr(service, "run_prompt_events")
+    assert not hasattr(service, "list_model_connections")
+    assert not hasattr(service, "list_skills")
+    assert not hasattr(service, "list_memory_candidates")
 
 
 class RecordingGateway:
@@ -278,7 +301,7 @@ def test_service_lists_model_connections_with_credential_status(
     )
     service = _service(tmp_path, config_dir=config_dir, environ={"OPENROUTER_API_KEY": "sk-router"})
 
-    connections = service.list_model_connections()
+    connections = service.models.list_connections()
 
     assert len(connections) == 1
     assert connections[0].id == "router"
@@ -301,7 +324,7 @@ def test_service_lists_no_connections_from_obsolete_provider_file(
     )
     service = _service(tmp_path, config_dir=config_dir)
 
-    assert service.list_model_connections() == []
+    assert service.models.list_connections() == []
 
 
 def test_service_configures_connection_over_obsolete_provider_file(
@@ -320,7 +343,7 @@ def test_service_configures_connection_over_obsolete_provider_file(
     monkeypatch.setattr(model_connections, "DEFAULT_CREDENTIAL_STORE", store)
     service = _service(tmp_path, config_dir=config_dir)
 
-    service.configure_model_connection(
+    service.models.configure_connection(
         ModelConnectionConfigureRequest(
             id="requesty-work",
             name="work",
@@ -375,9 +398,9 @@ def test_service_searches_skill_marketplace_and_caches_results(tmp_path: Path, m
             warnings=[],
         )
 
-    monkeypatch.setattr("haagent.app.assistant_service.search_marketplace", fake_search_marketplace)
+    monkeypatch.setattr("haagent.app.skill_usecases.search_marketplace", fake_search_marketplace)
 
-    result = service.search_skill_marketplace("csv", providers=["skills_sh"], limit=3)
+    result = service.skills.search_marketplace("csv", providers=["skills_sh"], limit=3)
 
     assert calls == [("csv", ["skills_sh"], 3)]
     assert result.status == "success"
@@ -391,7 +414,7 @@ def test_service_installs_cached_skills_sh_marketplace_result(tmp_path: Path, mo
     _set_home(monkeypatch, home)
     service = _service(tmp_path)
     monkeypatch.setattr(
-        "haagent.app.assistant_service.search_marketplace",
+        "haagent.app.skill_usecases.search_marketplace",
         lambda query, *, providers=None, limit=10: MarketplaceSearchResult(
             status="success",
             query=query,
@@ -410,14 +433,14 @@ def test_service_installs_cached_skills_sh_marketplace_result(tmp_path: Path, mo
             warnings=[],
         ),
     )
-    service.search_skill_marketplace("csv")
+    service.skills.search_marketplace("csv")
 
-    installed = service.install_marketplace_skill("skills_sh-1")
+    installed = service.skills.install_marketplace("skills_sh-1")
 
     assert installed.command_name == "analyze-csv"
     assert installed.skill_file.exists()
     assert "source: marketplace" in installed.skill_file.read_text(encoding="utf-8")
-    skill_names = [skill["name"] for skill in service.list_skills().skills]
+    skill_names = [skill["name"] for skill in service.skills.list().skills]
     assert "analyze-csv" in skill_names
 
 
@@ -425,13 +448,13 @@ def test_service_rejects_unknown_marketplace_result_id(tmp_path: Path) -> None:
     service = _service(tmp_path)
 
     with pytest.raises(AssistantServiceError, match="unknown marketplace result id"):
-        service.install_marketplace_skill("skills_sh-404")
+        service.skills.install_marketplace("skills_sh-404")
 
 
 def test_service_rejects_skillsmp_marketplace_install(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path)
     monkeypatch.setattr(
-        "haagent.app.assistant_service.search_marketplace",
+        "haagent.app.skill_usecases.search_marketplace",
         lambda query, *, providers=None, limit=10: MarketplaceSearchResult(
             status="success",
             query=query,
@@ -450,10 +473,10 @@ def test_service_rejects_skillsmp_marketplace_install(tmp_path: Path, monkeypatc
             warnings=[],
         ),
     )
-    service.search_skill_marketplace("csv")
+    service.skills.search_marketplace("csv")
 
     with pytest.raises(AssistantServiceError, match="only skills_sh results are installable"):
-        service.install_marketplace_skill("skillsmp-1")
+        service.skills.install_marketplace("skillsmp-1")
 
 
 def test_service_sets_default_model_selection_without_switching_current_session(
@@ -478,9 +501,9 @@ def test_service_sets_default_model_selection_without_switching_current_session(
     )
     service = _service(tmp_path, config_dir=config_dir, environ={"OPENROUTER_API_KEY": "sk-router"})
 
-    service.set_default_model_selection(ModelSelectionRequest("router", "openai/gpt-5.2-chat"))
+    service.models.set_default_selection(ModelSelectionRequest("router", "openai/gpt-5.2-chat"))
 
-    assert service.current_session() is None
+    assert service.workspace.current_session() is None
     assert load_active_model_selection(config_dir=config_dir) == ModelSelection("router", "openai/gpt-5.2-chat")
 
 
@@ -495,10 +518,10 @@ def test_service_compacts_current_session_through_session_boundary(tmp_path: Pat
         gateway_factory=lambda profile: RecordingGateway(profile.name),
         session_cls=RecordingSession,
     )
-    service.workspace_root.mkdir()
-    service.create_session()
+    service._context.workspace_root.mkdir()
+    service.sessions.create()
 
-    result = service.compact_current_session()
+    result = service.sessions.compact()
 
     assert result.applied is True
     assert result.reason == "applied"
@@ -518,7 +541,7 @@ def test_service_configures_model_connection_with_keyring_without_writing_secret
     monkeypatch.setattr(model_connections, "DEFAULT_CREDENTIAL_STORE", store)
     service = _service(tmp_path)
 
-    record = service.configure_model_connection(
+    record = service.models.configure_connection(
         ModelConnectionConfigureRequest(
             id="requesty-personal",
             name="personal",
@@ -548,7 +571,7 @@ def test_service_selects_models_from_named_connection_without_rewriting_key(
     monkeypatch.setattr(model_connections, "DEFAULT_CREDENTIAL_STORE", store)
     service = _service(tmp_path)
 
-    connection = service.configure_model_connection(
+    connection = service.models.configure_connection(
         ModelConnectionConfigureRequest(
             id="requesty-personal",
             name="personal",
@@ -561,14 +584,14 @@ def test_service_selects_models_from_named_connection_without_rewriting_key(
             api_key="sk-requesty",
         )
     )
-    service.set_default_model_selection(
+    service.models.set_default_selection(
         ModelSelectionRequest(
             connection_id="requesty-personal",
             model="openai/gpt-5.2-chat",
         )
     )
 
-    status = service.switch_current_session_model_selection(
+    status = service.models.switch_current_session_selection(
         ModelSelectionRequest(
             connection_id="requesty-personal",
             model="anthropic/claude-sonnet-4.5",
@@ -598,7 +621,7 @@ def test_service_deletes_model_connection_and_refreshes_default(
     _write_two_connections(config_dir)
     service = _service(tmp_path)
 
-    service.delete_model_connection("local")
+    service.models.delete_connection("local")
 
     assert [
         connection.id
@@ -620,7 +643,7 @@ def test_service_refreshes_model_catalog(tmp_path: Path, monkeypatch) -> None:
     )
     service = _service(tmp_path)
 
-    result = service.refresh_model_catalog(
+    result = service.models.refresh_catalog(
         transport=lambda: {
             "requesty": {
                 "id": "requesty",
@@ -650,7 +673,7 @@ def test_service_gets_model_catalog_from_fresh_cache_without_refreshing(tmp_path
         models=[],
     )
     service = _service(tmp_path)
-    service.refresh_model_catalog(
+    service.models.refresh_catalog(
         transport=lambda: {
             "requesty": {
                 "id": "requesty",
@@ -662,7 +685,7 @@ def test_service_gets_model_catalog_from_fresh_cache_without_refreshing(tmp_path
         }
     )
 
-    result = service.get_model_catalog(
+    result = service.models.get_catalog(
         transport=lambda: (_ for _ in ()).throw(AssertionError("fresh cache should be used"))
     )
 
@@ -673,7 +696,7 @@ def test_service_gets_model_catalog_from_fresh_cache_without_refreshing(tmp_path
 def test_service_refresh_model_catalog_forces_network_refresh(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     service = _service(tmp_path)
-    service.refresh_model_catalog(
+    service.models.refresh_catalog(
         transport=lambda: {
             "cached": {
                 "id": "cached",
@@ -685,7 +708,7 @@ def test_service_refresh_model_catalog_forces_network_refresh(tmp_path: Path, mo
         }
     )
 
-    result = service.refresh_model_catalog(
+    result = service.models.refresh_catalog(
         transport=lambda: {
             "fresh": {
                 "id": "fresh",
@@ -734,7 +757,7 @@ def test_service_connection_test_uses_gateway_factory_and_redacts_secret(
         environ={"OPENROUTER_API_KEY": "sk-test-secret"},
     )
 
-    result = service.test_model_connection("router", model="openai/gpt-5.2-chat")
+    result = service.models.test_connection("router", model="openai/gpt-5.2-chat")
 
     assert result.ok is True
     assert result.message == "OK"
@@ -747,7 +770,7 @@ def test_active_model_status_reports_api_key_available(tmp_path: Path, monkeypat
     _write_user_connection(Path.home())
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "sk-secret"})
 
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert status.workspace_root == (tmp_path / "workspace").resolve()
     assert status.runs_root == tmp_path / ".runs"
@@ -770,7 +793,7 @@ def test_workspace_status_reports_default_sandbox_status(tmp_path: Path, monkeyp
     _write_user_connection(Path.home())
     service = _service(tmp_path)
 
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert status.sandbox_status.backend == "local_subprocess"
     assert status.sandbox_status.degraded is True
@@ -783,7 +806,7 @@ def test_service_enables_docker_sandbox_and_preserves_settings(tmp_path: Path, m
     _write_user_connection(home)
     service = _service(tmp_path)
 
-    status = service.enable_docker_sandbox()
+    status = service.workspace.sandbox.enable_docker()
     saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
 
     assert status.backend == "docker"
@@ -799,9 +822,9 @@ def test_service_disables_sandbox(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, home)
     _write_user_connection(home)
     service = _service(tmp_path)
-    service.enable_docker_sandbox()
+    service.workspace.sandbox.enable_docker()
 
-    status = service.disable_sandbox()
+    status = service.workspace.sandbox.disable()
     saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
 
     assert status.backend == "local_subprocess"
@@ -817,7 +840,7 @@ def test_service_reports_sandbox_doctor(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path)
     monkeypatch.setattr("haagent.runtime.sandbox.status.shutil.which", lambda name: None)
 
-    report = service.get_sandbox_doctor_report()
+    report = service.workspace.sandbox.doctor_report()
 
     assert report.ready is False
     assert report.docker_cli == "missing"
@@ -830,7 +853,7 @@ def test_active_model_status_reports_missing_api_key_env(tmp_path: Path, monkeyp
     monkeypatch.setattr(model_connections, "DEFAULT_CREDENTIAL_STORE", FakeCredentialStore({}))
     service = _service(tmp_path)
 
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert status.profile_name == "local"
     assert status.api_key_env == "DEEPSEEK_API_KEY"
@@ -850,7 +873,7 @@ def test_active_model_status_reports_keyring_api_key_available(tmp_path: Path, m
     )
     service = _service(tmp_path)
 
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert status.api_key_available is True
     assert status.credential_source_used == "keyring"
@@ -868,7 +891,7 @@ def test_active_model_status_reports_keyring_unavailable(tmp_path: Path, monkeyp
     )
     service = _service(tmp_path)
 
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert status.api_key_available is False
     assert status.credential_store_available is False
@@ -881,7 +904,7 @@ def test_active_model_status_reports_missing_selection(tmp_path: Path, monkeypat
     Path.home().mkdir()
     service = _service(tmp_path)
 
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert status.profile_name is None
     assert status.api_key_available is False
@@ -894,13 +917,13 @@ def test_create_new_session_sets_current_session(tmp_path: Path, monkeypatch) ->
     _write_user_connection(Path.home())
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
 
-    session = service.create_session()
+    session = service.sessions.create()
 
     assert session.session_id
     assert session.turn_count == 0
     assert session.workspace_root == (tmp_path / "workspace").resolve()
     assert session.permission_mode == "request_approval"
-    assert service.current_session().session_id == session.session_id
+    assert service.workspace.current_session().session_id == session.session_id
 
 
 def test_create_new_session_uses_registry_as_default_gateway_factory(tmp_path: Path, monkeypatch) -> None:
@@ -915,10 +938,10 @@ def test_create_new_session_uses_registry_as_default_gateway_factory(tmp_path: P
         session_cls=RecordingSession,
     )
 
-    service.create_session()
+    service.sessions.create()
 
-    assert service.gateway_factory is gateway_from_profile
-    assert isinstance(service._session.model_gateway, OpenAIChatCompletionsGateway)
+    assert service._context.gateway_factory is gateway_from_profile
+    assert isinstance(service._context.session.model_gateway, OpenAIChatCompletionsGateway)
 
 
 def test_create_and_resume_session_inject_same_retry_policy_into_compatible_factory(
@@ -940,8 +963,8 @@ def test_create_and_resume_session_inject_same_retry_policy_into_compatible_fact
         return RecordingGateway("retry")
 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
-    created = service.create_session()
-    service.resume_session(created.session_path)
+    created = service.sessions.create()
+    service.sessions.resume(created.session_path)
 
     assert [controller.policy.max_attempts for controller in controllers] == [2, 2]
     assert controllers[0] is not controllers[1]
@@ -961,12 +984,12 @@ def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, 
         enable_web=True,
     )
 
-    status = service.get_workspace_status()
-    session = service.create_session()
+    status = service.workspace.status()
+    session = service.sessions.create()
 
     assert status.web_enabled is True
     assert session.web_enabled is True
-    assert service._session.enable_web is True
+    assert service._context.session.enable_web is True
 
 
 def test_assistant_service_mcp_status_without_session(tmp_path: Path, monkeypatch) -> None:
@@ -974,7 +997,7 @@ def test_assistant_service_mcp_status_without_session(tmp_path: Path, monkeypatc
     _set_home(monkeypatch, home)
     service = AssistantService(workspace_root=tmp_path, runs_root=tmp_path / ".runs")
 
-    status = service.get_mcp_status()
+    status = service.workspace.mcp_status()
 
     assert status["configured_count"] == 0
     assert status["connected_count"] == 0
@@ -1002,7 +1025,7 @@ def test_assistant_service_reads_configured_mcp_servers_without_session(tmp_path
     )
     service = AssistantService(workspace_root=tmp_path, runs_root=tmp_path / ".runs")
 
-    status = service.get_mcp_status()
+    status = service.workspace.mcp_status()
 
     assert status["configured_count"] == 1
     assert status["connected_count"] == 0
@@ -1031,14 +1054,14 @@ def test_service_can_toggle_web_for_current_and_future_sessions(tmp_path: Path, 
         session_cls=RecordingSession,
     )
 
-    service.set_web_enabled(True)
-    session = service.create_session()
-    service.set_web_enabled(False)
+    service.workspace.set_web_enabled(True)
+    session = service.sessions.create()
+    service.workspace.set_web_enabled(False)
 
     assert session.web_enabled is True
-    assert service.get_workspace_status().web_enabled is False
-    assert service.current_session().web_enabled is False
-    assert service._session.enable_web is False
+    assert service.workspace.status().web_enabled is False
+    assert service.workspace.current_session().web_enabled is False
+    assert service._context.session.enable_web is False
 
 
 def test_service_saves_interactive_turn_limit_and_updates_current_session(
@@ -1053,15 +1076,15 @@ def test_service_saves_interactive_turn_limit_and_updates_current_session(
         environ={"DEEPSEEK_API_KEY": "secret"},
         gateway_factory=lambda profile: RecordingGateway(profile.name),
     )
-    service.session_cls = RecordingSession
-    service.create_session()
+    service._context.session_factory = RecordingSession
+    service.sessions.create()
 
-    status = service.set_interactive_max_turns(80)
+    status = service.workspace.set_interactive_max_turns(80)
 
     assert status.current_max_turns == 80
     assert status.configured_interactive_max_turns == 80
-    assert service.current_session().max_turns == 80
-    assert service._session.max_turns == 80
+    assert service.workspace.current_session().max_turns == 80
+    assert service._context.session.max_turns == 80
     saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
     assert saved["active_model"] == {"connection_id": "local", "model": "deepseek-chat"}
     assert saved["interactive_max_turns"] == 80
@@ -1079,15 +1102,15 @@ def test_service_sets_current_session_unlimited_without_persisting(
         environ={"DEEPSEEK_API_KEY": "secret"},
         gateway_factory=lambda profile: RecordingGateway(profile.name),
     )
-    service.session_cls = RecordingSession
-    service.create_session()
+    service._context.session_factory = RecordingSession
+    service.sessions.create()
 
-    status = service.set_current_turns_unlimited()
+    status = service.workspace.set_current_turns_unlimited()
 
     assert status.current_max_turns is None
     assert status.configured_interactive_max_turns == 200
-    assert service.current_session().max_turns is None
-    assert service._session.max_turns is None
+    assert service.workspace.current_session().max_turns is None
+    assert service._context.session.max_turns is None
     saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
     assert saved["active_model"] == {"connection_id": "local", "model": "deepseek-chat"}
 
@@ -1104,15 +1127,15 @@ def test_service_switches_current_session_model_without_changing_default(
         tmp_path,
         environ={"DEEPSEEK_API_KEY": "local-secret", "OPENROUTER_API_KEY": "router-secret"},
     )
-    service.create_session()
+    service.sessions.create()
 
-    status = service.switch_current_session_model_selection(
+    status = service.models.switch_current_session_selection(
         ModelSelectionRequest(connection_id="router", model="openai/gpt-5.2-chat")
     )
-    workspace_status = service.get_workspace_status()
+    workspace_status = service.workspace.status()
 
     assert status.model_connection_id == "router"
-    assert service.current_session().model_connection_id == "router"
+    assert service.workspace.current_session().model_connection_id == "router"
     assert workspace_status.profile_name == "router"
     assert workspace_status.model == "openai/gpt-5.2-chat"
     assert workspace_status.base_url == "https://openrouter.ai/api/v1"
@@ -1134,15 +1157,15 @@ def test_service_switch_before_session_uses_profile_for_next_session_without_cre
         environ={"DEEPSEEK_API_KEY": "local-secret", "OPENROUTER_API_KEY": "router-secret"},
     )
 
-    pending = service.switch_current_session_model_selection(
+    pending = service.models.switch_current_session_selection(
         ModelSelectionRequest(connection_id="router", model="openai/gpt-5.2-chat")
     )
 
     assert pending.session_id == "pending"
     assert pending.model_connection_id == "router"
-    assert service.current_session() is None
+    assert service.workspace.current_session() is None
 
-    created = service.create_session()
+    created = service.sessions.create()
 
     assert created.model_connection_id == "router"
     assert load_active_model_selection(config_dir=config_dir) == ModelSelection("local", "deepseek-chat")
@@ -1160,12 +1183,12 @@ def test_resume_session_preserves_switched_model_profile_when_default_differs(
         tmp_path,
         environ={"DEEPSEEK_API_KEY": "local-secret", "OPENROUTER_API_KEY": "router-secret"},
     )
-    created = service.create_session()
-    switched = service.switch_current_session_model_selection(
+    created = service.sessions.create()
+    switched = service.models.switch_current_session_selection(
         ModelSelectionRequest(connection_id="router", model="openai/gpt-5.2-chat")
     )
 
-    resumed = service.resume_session(created.session_path)
+    resumed = service.sessions.resume(created.session_path)
 
     assert switched.model_connection_id == "router"
     assert resumed.model_connection_id == "router"
@@ -1193,14 +1216,14 @@ def test_service_rejects_model_switch_while_current_run_is_active(
         environ={"DEEPSEEK_API_KEY": "local-secret", "OPENROUTER_API_KEY": "router-secret"},
         gateway_factory=gateway_factory,
     )
-    service.create_session()
-    thread = threading.Thread(target=lambda: service.run_prompt_events("hello"))
+    service.sessions.create()
+    thread = threading.Thread(target=lambda: service.sessions.run_prompt_events("hello"))
     thread.start()
     assert entered.wait(timeout=2)
 
     try:
         with pytest.raises(AssistantServiceError, match="current task is running"):
-            service.switch_current_session_model_selection(
+            service.models.switch_current_session_selection(
                 ModelSelectionRequest(connection_id="router", model="openai/gpt-5.2-chat")
             )
     finally:
@@ -1212,15 +1235,15 @@ def test_resume_session_sets_current_session(tmp_path: Path, monkeypatch) -> Non
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_connection(Path.home())
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
-    created = service.create_session()
-    service.run_prompt_events("remember this")
+    created = service.sessions.create()
+    service.sessions.run_prompt_events("remember this")
 
-    resumed = service.resume_session(created.session_path)
+    resumed = service.sessions.resume(created.session_path)
 
     assert resumed.session_id == created.session_id
     assert resumed.turn_count == 1
-    assert service.current_session().session_id == created.session_id
-    history = service.current_session_history()
+    assert service.workspace.current_session().session_id == created.session_id
+    history = service.sessions.history()
     assert len(history) == 1
     assert history[0].request == "remember this"
     assert "remember this" in history[0].summary
@@ -1233,10 +1256,10 @@ def test_external_root_authorization_is_saved_and_restored_with_session(tmp_path
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
     external = tmp_path / "external"
     external.mkdir()
-    created = service.create_session()
+    created = service.sessions.create()
 
-    service.add_external_root(external, "read")
-    restored = service.resume_session(created.session_path)
+    service.sessions.permissions.add_external_root(external, "read")
+    restored = service.sessions.resume(created.session_path)
 
     assert restored.external_roots == [
         {
@@ -1245,21 +1268,21 @@ def test_external_root_authorization_is_saved_and_restored_with_session(tmp_path
             "source": "user",
         },
     ]
-    assert service.get_workspace_status().external_roots == restored.external_roots
+    assert service.workspace.status().external_roots == restored.external_roots
 
 
 def test_permission_mode_is_saved_and_restored_with_session(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_connection(Path.home())
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
-    created = service.create_session()
+    created = service.sessions.create()
 
-    changed = service.set_permission_mode("full_access")
-    restored = service.resume_session(created.session_path)
+    changed = service.sessions.permissions.set_mode("full_access")
+    restored = service.sessions.resume(created.session_path)
 
     assert changed.permission_mode == "full_access"
     assert restored.permission_mode == "full_access"
-    assert service.get_workspace_status().permission_mode == "full_access"
+    assert service.workspace.status().permission_mode == "full_access"
 
 
 def test_switch_project_root_preserves_permission_mode(tmp_path: Path, monkeypatch) -> None:
@@ -1268,10 +1291,10 @@ def test_switch_project_root_preserves_permission_mode(tmp_path: Path, monkeypat
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
     new_project = tmp_path / "new-project"
     new_project.mkdir()
-    service.create_session()
-    service.set_permission_mode("full_access")
+    service.sessions.create()
+    service.sessions.permissions.set_mode("full_access")
 
-    status = service.switch_project_root(new_project)
+    status = service.sessions.permissions.switch_project_root(new_project)
 
     assert status.workspace_root == new_project.resolve()
     assert status.external_roots == []
@@ -1286,10 +1309,10 @@ def test_switch_project_root_clears_external_authorizations(tmp_path: Path, monk
     new_project = tmp_path / "new-project"
     external.mkdir()
     new_project.mkdir()
-    service.create_session()
-    service.add_external_root(external, "full")
+    service.sessions.create()
+    service.sessions.permissions.add_external_root(external, "full")
 
-    status = service.switch_project_root(new_project)
+    status = service.sessions.permissions.switch_project_root(new_project)
 
     assert status.workspace_root == new_project.resolve()
     assert status.external_roots == []
@@ -1299,12 +1322,12 @@ def test_continue_latest_session_uses_current_workspace_only(tmp_path: Path, mon
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_connection(Path.home())
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
-    old_session = service.create_session()
-    service.run_prompt_events("old")
-    latest_session = service.create_session()
-    service.run_prompt_events("latest")
+    old_session = service.sessions.create()
+    service.sessions.run_prompt_events("old")
+    latest_session = service.sessions.create()
+    service.sessions.run_prompt_events("latest")
 
-    restored = service.continue_latest_session()
+    restored = service.sessions.continue_latest()
 
     assert restored.session_id == latest_session.session_id
     assert restored.session_id != old_session.session_id
@@ -1315,7 +1338,7 @@ def test_list_sessions_only_lists_current_workspace(tmp_path: Path, monkeypatch)
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_connection(Path.home())
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
-    service.run_prompt_events("current workspace")
+    service.sessions.run_prompt_events("current workspace")
     other_workspace = tmp_path / "other"
     other_workspace.mkdir()
     other_service = AssistantService(
@@ -1324,9 +1347,9 @@ def test_list_sessions_only_lists_current_workspace(tmp_path: Path, monkeypatch)
         environ={"DEEPSEEK_API_KEY": "secret"},
         gateway_factory=lambda profile: RecordingGateway(profile.name),
     )
-    other_service.run_prompt_events("other workspace")
+    other_service.sessions.run_prompt_events("other workspace")
 
-    sessions = service.list_sessions()
+    sessions = service.sessions.list()
 
     assert [item.first_request for item in sessions] == ["current workspace"]
 
@@ -1337,7 +1360,7 @@ def test_run_prompt_events_forwards_chat_events(tmp_path: Path, monkeypatch) -> 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"})
     events = []
 
-    result = service.run_prompt_events("send events", event_sink=events.append)
+    result = service.sessions.run_prompt_events("send events", event_sink=events.append)
 
     assert result.status == "completed"
     assert [event.state for event in events if isinstance(event, SessionLifecycleEvent)] == [
@@ -1369,11 +1392,11 @@ def test_service_reuses_last_sent_image_attachments_for_followup_turn(
         return gateway
 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
-    created = service.create_session()
+    created = service.sessions.create()
     attachment = _session_image_attachment(created.session_path, "img-one")
 
-    service.run_prompt_events("描述图片", attachments=[attachment])
-    service.run_prompt_events("继续分析")
+    service.sessions.run_prompt_events("描述图片", attachments=[attachment])
+    service.sessions.run_prompt_events("继续分析")
 
     assert len(gateways[0].model_inputs) == 2
     first_content = gateways[0].model_inputs[0]
@@ -1396,13 +1419,13 @@ def test_service_replaces_auto_reused_images_when_new_images_are_sent(
         return gateway
 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
-    created = service.create_session()
+    created = service.sessions.create()
     first = _session_image_attachment(created.session_path, "img-one")
     second = _session_image_attachment(created.session_path, "img-two")
 
-    service.run_prompt_events("描述第一张", attachments=[first])
-    service.run_prompt_events("描述第二张", attachments=[second])
-    service.run_prompt_events("继续分析")
+    service.sessions.run_prompt_events("描述第一张", attachments=[first])
+    service.sessions.run_prompt_events("描述第二张", attachments=[second])
+    service.sessions.run_prompt_events("继续分析")
 
     assert _image_attachment_paths(gateways[0].model_inputs[1]) == [second.relative_path]
     assert _image_attachment_paths(gateways[0].model_inputs[2]) == [second.relative_path]
@@ -1426,12 +1449,12 @@ def test_resumed_session_reuses_last_sent_image_attachments_for_followup_turn(
         return gateway
 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
-    created = service.create_session()
+    created = service.sessions.create()
     attachment = _session_image_attachment(created.session_path, "img-one")
-    service.run_prompt_events("描述图片", attachments=[attachment])
+    service.sessions.run_prompt_events("描述图片", attachments=[attachment])
 
-    service.resume_session(created.session_path)
-    service.run_prompt_events("继续分析")
+    service.sessions.resume(created.session_path)
+    service.sessions.run_prompt_events("继续分析")
 
     assert len(gateways) == 2
     assert _image_attachment_paths(gateways[1].model_inputs[0]) == [attachment.relative_path]
@@ -1444,7 +1467,7 @@ def test_session_creation_requires_usable_active_model(tmp_path: Path, monkeypat
     service = _service(tmp_path)
 
     with pytest.raises(AssistantServiceError, match="DEEPSEEK_API_KEY"):
-        service.create_session()
+        service.sessions.create()
 
 
 def test_service_lists_trusts_and_reads_skills(tmp_path: Path, monkeypatch) -> None:
@@ -1464,9 +1487,9 @@ def test_service_lists_trusts_and_reads_skills(tmp_path: Path, monkeypatch) -> N
     )
     service = AssistantService(workspace_root=workspace, gateway_factory=lambda profile: RecordingGateway())
 
-    initial = service.list_skills()
-    trusted = service.trust_project_skills()
-    content = service.read_skill_for_user("grill-me")
+    initial = service.skills.list()
+    trusted = service.skills.trust_project()
+    content = service.skills.read_for_user("grill-me")
 
     assert [skill["name"] for skill in initial.skills] == ["grill-me"]
     assert initial.blocked_project_skill_roots == [str((workspace / ".haagent" / "skills").resolve())]

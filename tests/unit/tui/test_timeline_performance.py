@@ -6,8 +6,14 @@ tests/unit/tui/test_timeline_performance.py - TUI timeline 性能合同测试
 
 from __future__ import annotations
 
+import asyncio
+
+from textual.app import App, ComposeResult
+
 import haagent.tui.widgets.timeline_models as timeline_module
+from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
+from haagent.tui.widgets.timeline_block import TimelineBlock
 from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
 from haagent.tui.widgets.timeline_rendering import timeline_render_metrics
 
@@ -44,6 +50,34 @@ class InstrumentedTimeline(ConversationTimeline):
             return
         self._assistant_delta_flush_scheduled = True
         self.scheduled_delta_flush_count += 1
+
+
+class CountingItemList(list[TimelineItem]):
+    def __init__(self, items: list[TimelineItem]) -> None:
+        super().__init__(items)
+        self.iteration_count = 0
+
+    def __iter__(self):
+        self.iteration_count += 1
+        return super().__iter__()
+
+
+class LongTimelineApp(App[None]):
+    def compose(self) -> ComposeResult:
+        yield ConversationTimeline(id="conversation")
+
+    def on_mount(self) -> None:
+        timeline = self.query_one(ConversationTimeline)
+        for turn_index in range(500):
+            timeline._append_item(
+                TimelineItem(
+                    item_id=next(timeline._ids),
+                    role="user",
+                    turn_index=turn_index,
+                    content=f"prompt {turn_index}",
+                ),
+            )
+        timeline._sync_blocks()
 
 
 def test_tool_activity_marks_plain_text_dirty_without_eager_full_rebuild() -> None:
@@ -191,6 +225,94 @@ def test_tool_detail_toggle_only_refreshes_recent_assistant_blocks() -> None:
     timeline.set_tool_details(True)
 
     assert timeline.synced_items == [4, 5, 6]
+
+
+def test_visible_projection_scans_item_list_once() -> None:
+    timeline = ConversationTimeline()
+    for turn_index in range(20):
+        detail_id = f"detail-{turn_index}"
+        timeline.add_presentation_item(
+            TimelinePresentationItem(
+                kind="activity",
+                title=f"activity {turn_index}",
+                summary="",
+                severity="info",
+                turn_index=turn_index,
+                detail_id=detail_id,
+            ),
+            ExpandableDetail(detail_id, [f"detail line {turn_index}"]),
+        )
+    timeline._items = CountingItemList(timeline._items)
+
+    visible = timeline._visible_items()
+
+    assert len(visible) == 20
+    assert timeline._items.iteration_count == 1
+
+
+def test_pending_flush_uses_item_index_without_scanning_history() -> None:
+    timeline = InstrumentedTimeline()
+    timeline.update_assistant_delta(1, "answer")
+    timeline._items = CountingItemList(timeline._items)
+
+    timeline.flush_pending_assistant_delta()
+
+    assert timeline._items.iteration_count == 0
+    assert timeline.synced_items == [timeline._items[0].item_id]
+
+
+def test_window_moves_in_bounded_steps_and_plain_text_keeps_full_history() -> None:
+    timeline = ConversationTimeline()
+    for turn_index in range(500):
+        timeline.add_user(f"prompt {turn_index}", turn_index=turn_index)
+    visible = timeline._visible_items()
+
+    tail = timeline._windowed_items(visible)
+    assert [item.turn_index for item in tail] == list(range(300, 500))
+
+    assert timeline._shift_window_earlier(len(visible)) is True
+    earlier = timeline._windowed_items(visible)
+    assert [item.turn_index for item in earlier] == list(range(200, 400))
+
+    assert timeline._shift_window_later(len(visible)) is True
+    assert [item.turn_index for item in timeline._windowed_items(visible)] == list(range(300, 500))
+    assert "prompt 0" in timeline.plain_text
+    assert "prompt 499" in timeline.plain_text
+
+
+def test_long_timeline_mounts_only_the_active_window() -> None:
+    async def run_test() -> None:
+        app = LongTimelineApp()
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            timeline = app.query_one(ConversationTimeline)
+
+            assert len(timeline._blocks) == 200
+            assert len(timeline.query(TimelineBlock)) == 200
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 300
+            assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
+
+            timeline.watch_scroll_y(10, 0)
+            await pilot.pause()
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 200
+            assert max(block._item.turn_index for block in timeline._blocks.values()) == 399
+            assert timeline._window_start == 200
+            assert timeline._window_shift_in_progress is False
+
+            timeline.watch_scroll_y(0, max(timeline.max_scroll_y, 2))
+            await pilot.pause()
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 300
+            assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
+
+            timeline.watch_scroll_y(10, 0)
+            await pilot.pause()
+            timeline.set_stick_to_bottom(True)
+            await pilot.pause()
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 300
+            assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
+
+    asyncio.run(run_test())
 
 
 def test_timeline_render_metrics_reports_detail_weight() -> None:

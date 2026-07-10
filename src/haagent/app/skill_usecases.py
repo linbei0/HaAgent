@@ -1,97 +1,110 @@
 """
-haagent/app/skill_usecases.py - 技能类应用用例
+haagent/app/skill_usecases.py - Skills 与 marketplace 应用 Module
 
-集中封装 AssistantService 的本地 skills 与 marketplace 相关操作。
+管理本地 skill 信任、读取、marketplace 查询缓存和安装。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from haagent.app.assistant_context import AssistantContext
+from haagent.app.assistant_types import (
+    AssistantMarketplaceInstall,
+    AssistantMarketplaceSearch,
+    AssistantMarketplaceSkill,
+    AssistantServiceError,
+    AssistantSkillContent,
+    AssistantSkillList,
+)
 from haagent.skills import trust_project_root, untrust_project_root
-from haagent.skills.marketplace import MarketplaceError, install_marketplace_skill_card, search_marketplace
+from haagent.skills.marketplace import (
+    MarketplaceError,
+    MarketplaceSkillCard,
+    install_marketplace_skill_card,
+    search_marketplace,
+)
 from haagent.tools.skills import skill_list, skill_read
 
-if TYPE_CHECKING:
-    from haagent.app.assistant_service import (
-        AssistantMarketplaceInstall,
-        AssistantMarketplaceSearch,
-        AssistantSkillContent,
-        AssistantSkillList,
-        AssistantService,
-    )
+
+class AssistantSkills:
+    def __init__(self, context: AssistantContext) -> None:
+        self._context = context
+        self._marketplace_results: dict[str, MarketplaceSkillCard] = {}
+
+    def list(self) -> AssistantSkillList:
+        result = skill_list({}, self._context.workspace_root)
+        if result.get("status") != "success":
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            raise AssistantServiceError(str(error.get("message", "failed to list skills")))
+        return AssistantSkillList(
+            skills=list(result.get("skills", [])),
+            blocked_project_skill_roots=[
+                str(path) for path in result.get("blocked_project_skill_roots", [])
+            ],
+        )
+
+    def trust_project(self) -> AssistantSkillList:
+        trust_project_root(self._context.workspace_root)
+        return self.list()
+
+    def untrust_project(self) -> AssistantSkillList:
+        untrust_project_root(self._context.workspace_root)
+        return self.list()
+
+    def read_for_user(self, name: str) -> AssistantSkillContent:
+        result = skill_read({"name": name}, self._context.workspace_root, user_invoked=True)
+        if result.get("status") != "success":
+            error = result.get("error") if isinstance(result.get("error"), dict) else {}
+            raise AssistantServiceError(str(error.get("message", f"skill not found: {name}")))
+        return AssistantSkillContent(
+            name=str(result["name"]),
+            command_name=str(result.get("command_name") or result["name"]),
+            content=str(result["content"]),
+        )
+
+    def search_marketplace(
+        self,
+        query: str,
+        *,
+        providers: list[str] | None = None,
+        limit: int = 10,
+    ) -> AssistantMarketplaceSearch:
+        try:
+            result = search_marketplace(query, providers=providers, limit=limit)
+        except MarketplaceError as error:
+            raise AssistantServiceError(str(error)) from error
+        self._marketplace_results = {card.result_id: card for card in result.cards}
+        return AssistantMarketplaceSearch(
+            status=result.status,
+            query=result.query,
+            results=[_marketplace_skill(card) for card in result.cards],
+            warnings=list(result.warnings),
+        )
+
+    def install_marketplace(self, result_id: str) -> AssistantMarketplaceInstall:
+        card = self._marketplace_results.get(result_id)
+        if card is None:
+            raise AssistantServiceError(f"unknown marketplace result id: {result_id}")
+        try:
+            installed = install_marketplace_skill_card(card)
+        except MarketplaceError as error:
+            raise AssistantServiceError(str(error)) from error
+        return AssistantMarketplaceInstall(
+            name=installed.name,
+            command_name=installed.command_name,
+            skill_dir=installed.skill_dir,
+            skill_file=installed.skill_file,
+            source_url=installed.source_url,
+        )
 
 
-def list_skills_for_user(service: "AssistantService") -> "AssistantSkillList":
-    result = service.skill_list_fn({}, service.workspace_root)
-    if result.get("status") != "success":
-        error = result.get("error") if isinstance(result.get("error"), dict) else {}
-        raise service.error_cls(str(error.get("message", "failed to list skills")))
-    return service.skill_list_cls(
-        skills=list(result.get("skills", [])),
-        blocked_project_skill_roots=[
-            str(path) for path in result.get("blocked_project_skill_roots", [])
-        ],
-    )
-
-
-def trust_project_skills(service: "AssistantService") -> "AssistantSkillList":
-    service.trust_project_root_fn(service.workspace_root)
-    return list_skills_for_user(service)
-
-
-def untrust_project_skills(service: "AssistantService") -> "AssistantSkillList":
-    service.untrust_project_root_fn(service.workspace_root)
-    return list_skills_for_user(service)
-
-
-def read_skill_for_user(service: "AssistantService", name: str) -> "AssistantSkillContent":
-    result = service.skill_read_fn({"name": name}, service.workspace_root, user_invoked=True)
-    if result.get("status") != "success":
-        error = result.get("error") if isinstance(result.get("error"), dict) else {}
-        raise service.error_cls(str(error.get("message", f"skill not found: {name}")))
-    return service.skill_content_cls(
-        name=str(result["name"]),
-        command_name=str(result.get("command_name") or result["name"]),
-        content=str(result["content"]),
-    )
-
-
-def search_skill_marketplace(
-    service: "AssistantService",
-    query: str,
-    *,
-    providers: list[str] | None=None,
-    limit: int=10,
-) -> "AssistantMarketplaceSearch":
-    try:
-        result = service.search_marketplace_fn(query, providers=providers, limit=limit)
-    except MarketplaceError as error:
-        raise service.error_cls(str(error)) from error
-    service._marketplace_results = {card.result_id: card for card in result.cards}
-    return service.marketplace_search_cls(
-        status=result.status,
-        query=result.query,
-        results=[service.marketplace_skill_mapper(card) for card in result.cards],
-        warnings=list(result.warnings),
-    )
-
-
-def install_marketplace_skill(
-    service: "AssistantService",
-    result_id: str,
-) -> "AssistantMarketplaceInstall":
-    card = service._marketplace_results.get(result_id)
-    if card is None:
-        raise service.error_cls(f"unknown marketplace result id: {result_id}")
-    try:
-        installed = service.install_marketplace_skill_card_fn(card)
-    except MarketplaceError as error:
-        raise service.error_cls(str(error)) from error
-    return service.marketplace_install_cls(
-        name=installed.name,
-        command_name=installed.command_name,
-        skill_dir=installed.skill_dir,
-        skill_file=installed.skill_file,
-        source_url=installed.source_url,
+def _marketplace_skill(card: MarketplaceSkillCard) -> AssistantMarketplaceSkill:
+    return AssistantMarketplaceSkill(
+        result_id=card.result_id,
+        provider=card.provider.value,
+        name=card.name,
+        source=card.source,
+        summary=card.summary,
+        detail_url=card.detail_url,
+        installable=card.installable,
+        quality=dict(card.quality),
     )

@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
@@ -82,7 +82,7 @@ def test_tui_status_line_renderer_truncates_to_terminal_width(tmp_path: Path) ->
         workspace_root=tmp_path / "very-long-workspace-name-for-status-rendering",
         model="very-long-model-name-for-status-rendering",
         current_session_id="session-abcdefghijklmnopqrstuvwxyz",
-    ).get_workspace_status()
+    ).workspace.status()
 
     line_80 = status_line(status, ui_state="waiting approval", width=80)
     line_120 = status_line(status, ui_state="running", width=120)
@@ -93,8 +93,8 @@ def test_tui_status_line_renderer_truncates_to_terminal_width(tmp_path: Path) ->
     assert "state: running" in line_120
 
 def test_tui_status_renderers_show_explicit_web_state(tmp_path: Path) -> None:
-    offline = FakeAssistantService(workspace_root=tmp_path / "offline").get_workspace_status()
-    online = FakeAssistantService(workspace_root=tmp_path / "online", enable_web=True).get_workspace_status()
+    offline = FakeAssistantService(workspace_root=tmp_path / "offline").workspace.status()
+    online = FakeAssistantService(workspace_root=tmp_path / "online", enable_web=True).workspace.status()
 
     assert "web:off" in status_line(offline, ui_state="idle", width=120)
     assert "web:on" in status_line(online, ui_state="idle", width=120)

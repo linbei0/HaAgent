@@ -57,7 +57,7 @@ class AttachmentController:
             self._app._refresh()
             return
         try:
-            attachment = self._app.service.paste_clipboard_image(existing=list(self.pending))
+            attachment = self._app.service.sessions.paste_clipboard_image(existing=list(self.pending))
         except Exception as error:
             self._app._conversation.append_block("Command", f"添加图片附件失败：{error}")
             self._app._refresh()

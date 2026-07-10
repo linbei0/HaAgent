@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def show_permissions(app: "HaAgentTuiApp") -> None:
-    status = app.service.get_workspace_status()
+    status = app.service.workspace.status()
     app.push_screen(
         PermissionsModal(
             status.workspace_root,
@@ -55,7 +55,7 @@ def handle_permissions_result(app: "HaAgentTuiApp", result: dict[str, object] | 
             return
         path = Path(str(result.get("path", "")))
         if action == "remove":
-            app.service.remove_external_root(path)
+            app.service.sessions.permissions.remove_external_root(path)
             app._conversation.append_block("Permissions", f"已移除外部目录：{path}")
         elif action == "set_access":
             access = str(result.get("access"))
@@ -65,7 +65,7 @@ def handle_permissions_result(app: "HaAgentTuiApp", result: dict[str, object] | 
                     lambda confirmed, path=path: app._handle_set_full_access_confirmed(path, confirmed),
                 )
                 return
-            app.service.set_external_root_access(path, access)
+            app.service.sessions.permissions.set_external_root_access(path, access)
             label = "只读参考" if access == "read" else "完全信任"
             app._conversation.append_block("Permissions", f"已设为{label}：{path}")
     except Exception as error:
@@ -76,7 +76,7 @@ def handle_permissions_result(app: "HaAgentTuiApp", result: dict[str, object] | 
 
 def set_permission_mode(app: "HaAgentTuiApp", mode: str) -> None:
     try:
-        app.service.set_permission_mode(mode)
+        app.service.sessions.permissions.set_mode(mode)
     except Exception as error:
         app._conversation.append_block("Permissions warning", f"权限模式切换失败：{error}")
     else:
@@ -97,7 +97,7 @@ def handle_permission_mode_confirmed(app: "HaAgentTuiApp", mode: str, confirmed:
 def handle_clear_external_roots_confirmed(app: "HaAgentTuiApp", confirmed: bool) -> None:
     if confirmed:
         try:
-            app.service.clear_external_roots()
+            app.service.sessions.permissions.clear_external_roots()
         except Exception as error:
             app._conversation.append_block("Permissions warning", f"清空外部目录授权失败：{error}")
         else:
@@ -109,7 +109,7 @@ def handle_clear_external_roots_confirmed(app: "HaAgentTuiApp", confirmed: bool)
 def handle_set_full_access_confirmed(app: "HaAgentTuiApp", path: Path, confirmed: bool) -> None:
     if confirmed:
         try:
-            app.service.set_external_root_access(path, "full")
+            app.service.sessions.permissions.set_external_root_access(path, "full")
         except Exception as error:
             app._conversation.append_block("Permissions warning", f"权限操作失败：{error}")
         else:
@@ -128,7 +128,7 @@ def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | Non
         return
     try:
         if decision == "read":
-            app.service.add_external_root(path, "read")
+            app.service.sessions.permissions.add_external_root(path, "read")
             app._set_next_turn_target_path(path)
             app._conversation.append_block("Permissions", f"已作为只读参考加入：{path}")
         elif decision == "full":
@@ -140,11 +140,11 @@ def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | Non
                     app._handle_external_full_trust_confirmed,
                 )
                 return
-            app.service.add_external_root(path, "full")
+            app.service.sessions.permissions.add_external_root(path, "full")
             app._set_next_turn_target_path(path)
             app._conversation.append_block("Permissions", f"已完全信任：{path}")
         elif decision == "switch":
-            app.service.switch_project_root(path)
+            app.service.sessions.permissions.switch_project_root(path)
             app._conversation.append_block("Permissions", f"已切换工作区：{path}")
         else:
             app._conversation.append_block("Permissions", f"已取消外部目录授权：{path}")
@@ -174,7 +174,7 @@ def handle_external_full_trust_confirmed(app: "HaAgentTuiApp", confirmed: bool) 
         app._restore_prompt_focus()
         return
     try:
-        app.service.add_external_root(path, "full")
+        app.service.sessions.permissions.add_external_root(path, "full")
         app._set_next_turn_target_path(path)
     except Exception as error:
         app._conversation.append_block("Permissions warning", f"外部目录授权失败：{error}")

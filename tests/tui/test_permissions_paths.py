@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
@@ -79,7 +79,7 @@ from tests.tui.support import (
 
 def test_status_line_shows_permission_mode(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path, permission_mode="auto_approve")
-    status = service.get_workspace_status()
+    status = service.workspace.status()
 
     assert "perm:auto" in status_line(status, ui_state="idle", width=120)
 

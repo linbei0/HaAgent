@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,

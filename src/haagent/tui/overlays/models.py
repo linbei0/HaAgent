@@ -15,7 +15,7 @@ from textual.app import ComposeResult, ScreenStackError
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from haagent.app.assistant_service import AssistantModelConnection, ModelSelectionRequest
+from haagent.app.assistant_types import AssistantModelConnection, ModelSelectionRequest
 from haagent.tui.design.utils import safe_summary
 
 ModelSwitchAction = Literal["switch_current", "set_default"]

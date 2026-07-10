@@ -9,7 +9,6 @@ haagent/tui/application/app.py - HaAgent TUI 应用编排
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 from textual import events, work
 from textual.app import App, ComposeResult
@@ -227,14 +226,14 @@ class HaAgentTuiApp(App[None]):
     def _next_turn_index(self) -> int:
         # 不吞异常：turn index 直接决定 timeline 写入位置，失败必须可见，
         # 否则错误的 0 会把新一轮内容写到历史 turn 上。
-        status = self.service.get_workspace_status()
+        status = self.service.workspace.status()
         current = status.current_turn_count if status.current_turn_count is not None else 0
         return current + 1
 
     @work(thread=True, exclusive=True)
     def _run_prompt(self, prompt: str, attachments: list[ImageAttachment] | None = None) -> None:
         try:
-            result = self.service.run_prompt_events(
+            result = self.service.sessions.run_prompt_events(
                 prompt,
                 event_sink=lambda event: self.call_from_thread(self._handle_chat_event, event),
                 interaction_handler=self._handle_interaction,
@@ -346,7 +345,7 @@ class HaAgentTuiApp(App[None]):
 
     @work(thread=True, exclusive=True)
     def _warm_file_reference_index(self) -> None:
-        status = self.service.get_workspace_status()
+        status = self.service.workspace.status()
         index = build_file_reference_index(status.workspace_root)
         self.call_from_thread(self._set_file_reference_index, index)
 
@@ -470,10 +469,7 @@ class HaAgentTuiApp(App[None]):
     def _request_current_task_cancel(self):
         if self._state not in {"running", "waiting approval", "waiting input", "cancelling"}:
             return None
-        cancel = getattr(self.service, "cancel_current_run", None)
-        if cancel is None:
-            return SimpleNamespace(status="unavailable")
-        result = cancel()
+        result = self.service.sessions.cancel_current_run()
         if self._pending_interaction is not None:
             self._pending_interaction.response = HumanInteractionResponse(approved=False, answer="")
             self._pending_interaction.done.set()
@@ -530,10 +526,7 @@ class HaAgentTuiApp(App[None]):
         path_authorization.handle_external_full_trust_confirmed(self, confirmed)
 
     def _set_next_turn_target_path(self, path: Path) -> None:
-        setter = getattr(self.service, "set_next_turn_target_paths", None)
-        if setter is None:
-            return
-        setter([path])
+        self.service.sessions.permissions.set_next_turn_targets([path])
 
     def _handle_skills_command(self, argument: str) -> None:
         skills.handle_skills_command(self, argument)
@@ -552,7 +545,7 @@ class HaAgentTuiApp(App[None]):
 
     # ── 初始状态、刷新与布局 ─────────────────────────────────────────────
     def _show_initial_configuration_state(self) -> None:
-        status = self.service.get_workspace_status()
+        status = self.service.workspace.status()
         if status.profile_error is not None:
             self._conversation.append_block("Config", "未找到默认模型配置\n输入 /connect 配置供应商连接。")
         elif status.credential_store_available is False:
@@ -565,7 +558,7 @@ class HaAgentTuiApp(App[None]):
             )
 
     def _refresh(self) -> None:
-        status = self.service.get_workspace_status()
+        status = self.service.workspace.status()
         status_bar = self.query_one("#status-bar", StatusBar)
         status_bar.update_status(
             status_line(status, ui_state=self._state, width=self.size.width, sandbox_status=self._sandbox_status),
@@ -623,7 +616,7 @@ class HaAgentTuiApp(App[None]):
     # ── 图片输入 ─────────────────────────────────────────────────────────
     def _current_model_accepts_images(self) -> bool:
         try:
-            status = self.service.get_workspace_status()
+            status = self.service.workspace.status()
         except Exception as error:
             self._conversation.append_block("Command", f"无法确认当前模型是否支持图片输入：{error}")
             self._refresh()

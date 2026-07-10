@@ -21,17 +21,17 @@ def handle_skills_command(app: "HaAgentTuiApp", argument: str) -> None:
     value = raw_value.lower()
     try:
         if value == "trust":
-            summary = app.service.trust_project_skills()
+            summary = app.service.skills.trust_project()
             app._conversation.append_block("Skills", "已信任当前 workspace 的项目 skills。\n" + skills_summary_text(summary))
         elif value == "untrust":
-            summary = app.service.untrust_project_skills()
+            summary = app.service.skills.untrust_project()
             app._conversation.append_block("Skills", "已取消信任当前 workspace 的项目 skills。\n" + skills_summary_text(summary))
         elif value.startswith("search "):
             query = raw_value.split(" ", 1)[1].strip()
             if not query:
                 app._conversation.append_block("Command", skills_usage_text())
             else:
-                result = app.service.search_skill_marketplace(query, limit=10)
+                result = app.service.skills.search_marketplace(query, limit=10)
                 app._conversation.append_block("Skills marketplace", skill_marketplace_summary_text(result))
         elif value.startswith("install "):
             result_id = raw_value.split(" ", 1)[1].strip()
@@ -70,7 +70,7 @@ def handle_skill_marketplace_install_confirmed(
         app._refresh()
         return
     try:
-        installed = app.service.install_marketplace_skill(result_id)
+        installed = app.service.skills.install_marketplace(result_id)
     except Exception as error:
         app._conversation.append_block("Skills warning", f"skills 操作失败：{error}")
     else:
@@ -85,7 +85,7 @@ def handle_skill_command(app: "HaAgentTuiApp", argument: str) -> None:
         return
     skill_name, _, request = text.partition(" ")
     try:
-        skill = app.service.read_skill_for_user(skill_name)
+        skill = app.service.skills.read_for_user(skill_name)
     except Exception as error:
         app._conversation.append_block("Skills warning", f"读取 skill 失败：{error}")
         app._refresh()
@@ -107,7 +107,7 @@ def handle_skill_command(app: "HaAgentTuiApp", argument: str) -> None:
 
 def open_skill_picker(app: "HaAgentTuiApp", *, mode: str) -> None:
     try:
-        summary = app.service.list_skills()
+        summary = app.service.skills.list()
     except Exception as error:
         app._conversation.append_block("Skills warning", f"读取 skills 失败：{error}")
         app._refresh()

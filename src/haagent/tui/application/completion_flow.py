@@ -93,7 +93,7 @@ class CompletionFlow:
         query = query_after_at(self._app._prompt_value(prompt_input))
         if query is None:
             return
-        status = self._app.service.get_workspace_status()
+        status = self._app.service.workspace.status()
         input_dock = self._app._input_dock()
         input_dock.workspace_root = status.workspace_root
         input_dock.file_reference_index = self._app._file_ref_index

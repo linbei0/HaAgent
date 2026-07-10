@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
@@ -58,6 +58,189 @@ from haagent.tui.widgets import ConversationTimeline, ProgressStatusLine, Prompt
 from haagent.tui.typography.wrap import is_textual_line_breaking_installed
 from textual.widgets import Markdown, OptionList, RichLog, TextArea
 from textual.screen import Screen
+
+
+class FakeSandbox:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    def status(self):
+        return self._owner._get_sandbox_status()
+
+    def doctor_report(self):
+        return self._owner._get_sandbox_doctor_report()
+
+    def enable_docker(self, *, fail_if_unavailable: bool = True):
+        return self._owner._enable_docker_sandbox(fail_if_unavailable=fail_if_unavailable)
+
+    def disable(self):
+        return self._owner._disable_sandbox()
+
+
+class FakeWorkspace:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+        self.sandbox = FakeSandbox(owner)
+
+    def status(self):
+        return self._owner._get_workspace_status()
+
+    def current_session(self):
+        return self._owner._session_status(self._owner.current_session_id)
+
+    def mcp_status(self):
+        return self._owner._get_mcp_status()
+
+    def list_agents(self):
+        return self._owner._list_agents()
+
+    def set_web_enabled(self, enabled: bool):
+        return self._owner._set_web_enabled(enabled)
+
+    def turn_limit_status(self):
+        return self._owner._get_turn_limit_status()
+
+    def set_interactive_max_turns(self, max_turns: int):
+        return self._owner._set_interactive_max_turns(max_turns)
+
+    def set_current_turns_unlimited(self):
+        return self._owner._set_current_turns_unlimited()
+
+
+class FakePermissions:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    def set_mode(self, mode):
+        return self._owner._set_permission_mode(mode)
+
+    def set_next_turn_targets(self, paths):
+        return self._owner._set_next_turn_target_paths(paths)
+
+    def add_external_root(self, path, access):
+        return self._owner._add_external_root(path, access)
+
+    def remove_external_root(self, path):
+        return self._owner._remove_external_root(path)
+
+    def set_external_root_access(self, path, access):
+        return self._owner._set_external_root_access(path, access)
+
+    def clear_external_roots(self):
+        return self._owner._clear_external_roots()
+
+    def switch_project_root(self, path):
+        return self._owner._switch_project_root(path)
+
+
+class FakeSessions:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+        self.permissions = FakePermissions(owner)
+
+    @property
+    def initial_resume(self):
+        return getattr(self._owner, "initial_resume", None)
+
+    @property
+    def initial_continue(self):
+        return bool(getattr(self._owner, "initial_continue", False))
+
+    def create(self):
+        return self._owner._create_session()
+
+    def resume(self, session):
+        return self._owner._resume_session(session)
+
+    def continue_latest(self):
+        return self._owner._continue_latest_session()
+
+    def list(self):
+        return self._owner._list_sessions()
+
+    def history(self):
+        return self._owner._current_session_history()
+
+    def compact(self):
+        return self._owner._compact_current_session()
+
+    def run_prompt_events(self, prompt, **kwargs):
+        return self._owner._run_prompt_events(prompt, **kwargs)
+
+    def paste_clipboard_image(self, **kwargs):
+        return self._owner._paste_clipboard_image(**kwargs)
+
+    def cancel_current_run(self):
+        return self._owner._cancel_current_run()
+
+
+class FakeModels:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    def list_connections(self):
+        return self._owner._list_model_connections()
+
+    def configure_connection(self, request):
+        return self._owner._configure_model_connection(request)
+
+    def delete_connection(self, connection_id):
+        return self._owner._delete_model_connection(connection_id)
+
+    def set_default_selection(self, request):
+        return self._owner._set_default_model_selection(request)
+
+    def get_catalog(self, **kwargs):
+        return self._owner._get_model_catalog(**kwargs)
+
+    def refresh_catalog(self, **kwargs):
+        return self._owner._refresh_model_catalog(**kwargs)
+
+    def test_connection(self, connection_id, *, model=None):
+        return self._owner._test_model_connection(connection_id, model=model)
+
+    def switch_current_session_selection(self, request):
+        return self._owner._switch_current_session_model_selection(request)
+
+
+class FakeSkills:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    def list(self):
+        return self._owner._list_skills()
+
+    def trust_project(self):
+        return self._owner._trust_project_skills()
+
+    def untrust_project(self):
+        return self._owner._untrust_project_skills()
+
+    def read_for_user(self, name):
+        return self._owner._read_skill_for_user(name)
+
+    def search_marketplace(self, query, **kwargs):
+        return self._owner._search_skill_marketplace(query, **kwargs)
+
+    def install_marketplace(self, result_id):
+        return self._owner._install_marketplace_skill(result_id)
+
+
+class FakeMemory:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+
+    def list_candidates(self, *, status="pending"):
+        return self._owner._list_memory_candidates(status=status)
+
+    def get_candidate(self, candidate_id):
+        return self._owner._get_memory_candidate(candidate_id)
+
+    def confirm_candidate(self, candidate_id):
+        return self._owner._confirm_memory_candidate(candidate_id)
+
+    def reject_candidate(self, candidate_id, reason):
+        return self._owner._reject_memory_candidate(candidate_id, reason)
 
 
 class FakeAssistantService:
@@ -117,12 +300,12 @@ class FakeAssistantService:
         self.memory_candidates = list(memory_candidates or [])
         self.memory_error = memory_error
         self.current_session_id = current_session_id
-        self.sessions = list(sessions or [])
+        self.session_summaries = list(sessions or [])
         self.session_histories = dict(session_histories or {})
         self.enable_web = enable_web
         self.external_roots = list(external_roots or [])
         self.permission_mode = permission_mode
-        self.skills = list(skills or [])
+        self.skill_entries = list(skills or [])
         self.blocked_project_skill_roots = list(blocked_project_skill_roots or [])
         self.marketplace_results = list(marketplace_results or [])
         self.marketplace_warnings = list(marketplace_warnings or [])
@@ -195,12 +378,17 @@ class FakeAssistantService:
         self.refreshed_catalog_count = 0
         self.got_catalog_count = 0
         self.catalog_refresh_release: threading.Event | None = None
+        self.workspace = FakeWorkspace(self)
+        self.sessions = FakeSessions(self)
+        self.models = FakeModels(self)
+        self.skills = FakeSkills(self)
+        self.memory = FakeMemory(self)
 
-    def get_workspace_status(self) -> AssistantWorkspaceStatus:
+    def _get_workspace_status(self) -> AssistantWorkspaceStatus:
         current_profile = next(
             (
                 connection
-                for connection in self.list_model_connections()
+                for connection in self._list_model_connections()
                 if connection.id == self.current_session_model_connection
             ),
             None,
@@ -231,19 +419,19 @@ class FakeAssistantService:
             image_input_supported=self.image_input_supported,
         )
 
-    def get_mcp_status(self) -> dict[str, object]:
+    def _get_mcp_status(self) -> dict[str, object]:
         return dict(self.mcp_status)
 
-    def list_agents(self) -> list[dict[str, object]]:
+    def _list_agents(self) -> list[dict[str, object]]:
         return list(self.agents)
 
-    def get_sandbox_status(self) -> AssistantSandboxStatus:
+    def _get_sandbox_status(self) -> AssistantSandboxStatus:
         return self.sandbox_status
 
-    def get_sandbox_doctor_report(self) -> SandboxDoctorReport:
+    def _get_sandbox_doctor_report(self) -> SandboxDoctorReport:
         return self.sandbox_doctor_report
 
-    def enable_docker_sandbox(self, *, fail_if_unavailable: bool = True) -> AssistantSandboxStatus:
+    def _enable_docker_sandbox(self, *, fail_if_unavailable: bool = True) -> AssistantSandboxStatus:
         self.sandbox_enabled_count += 1
         self.sandbox_status = AssistantSandboxStatus(
             backend="docker",
@@ -252,7 +440,7 @@ class FakeAssistantService:
         )
         return self.sandbox_status
 
-    def disable_sandbox(self) -> AssistantSandboxStatus:
+    def _disable_sandbox(self) -> AssistantSandboxStatus:
         self.sandbox_disabled_count += 1
         self.sandbox_status = AssistantSandboxStatus(
             backend="local_subprocess",
@@ -261,7 +449,7 @@ class FakeAssistantService:
         )
         return self.sandbox_status
 
-    def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
+    def _run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
         self.prompts.append(prompt)
         self.prompt_attachments.append(list(attachments or []))
         self.started.set()
@@ -314,7 +502,7 @@ class FakeAssistantService:
             )
         return SimpleNamespace(status="completed")
 
-    def paste_clipboard_image(self, *, existing=None):
+    def _paste_clipboard_image(self, *, existing=None):
         attachment = SimpleNamespace(
             id=f"img-{len(self.clipboard_attachments) + 1}",
             filename=f"img-{len(self.clipboard_attachments) + 1}.png",
@@ -327,26 +515,26 @@ class FakeAssistantService:
         self.clipboard_attachments.append(attachment)
         return attachment
 
-    def create_session(self) -> AssistantSessionStatus:
+    def _create_session(self) -> AssistantSessionStatus:
         session_id = f"session-new-{len(self.created_sessions) + 1}"
         self.created_sessions.append(session_id)
         self.current_session_id = session_id
         return self._session_status(session_id)
 
-    def resume_session(self, session: str | Path) -> AssistantSessionStatus:
+    def _resume_session(self, session: str | Path) -> AssistantSessionStatus:
         session_text = str(session)
         self.resumed_sessions.append(session_text)
-        match = next((item for item in self.sessions if str(item.session_path) == session_text), None)
+        match = next((item for item in self.session_summaries if str(item.session_path) == session_text), None)
         self.current_session_id = match.session_id if match is not None else session_text
         return self._session_status(self.current_session_id)
 
-    def continue_latest_session(self) -> AssistantSessionStatus:
+    def _continue_latest_session(self) -> AssistantSessionStatus:
         self.continued_latest_count += 1
-        if self.sessions:
-            self.current_session_id = self.sessions[0].session_id
+        if self.session_summaries:
+            self.current_session_id = self.session_summaries[0].session_id
         return self._session_status(self.current_session_id)
 
-    def compact_current_session(self):
+    def _compact_current_session(self):
         self.compacted_count += 1
         return SimpleNamespace(
             applied=True,
@@ -357,43 +545,43 @@ class FakeAssistantService:
             saved_chars=1200,
         )
 
-    def cancel_current_run(self):
+    def _cancel_current_run(self):
         self.cancelled_count += 1
         return SimpleNamespace(status="cancelled", reason="user_cancelled")
 
-    def list_sessions(self) -> list[AssistantSessionSummary]:
-        return list(self.sessions)
+    def _list_sessions(self) -> list[AssistantSessionSummary]:
+        return list(self.session_summaries)
 
-    def current_session_history(self):
+    def _current_session_history(self):
         return list(self.session_histories.get(self.current_session_id, []))
 
-    def list_model_connections(self):
+    def _list_model_connections(self):
         return [_connection_record(connection) for connection in self.model_connections]
 
-    def refresh_model_catalog(self):
+    def _refresh_model_catalog(self):
         self.refreshed_catalog_count += 1
         if self.catalog_refresh_release is not None:
             self.catalog_refresh_release.wait(timeout=5)
         return SimpleNamespace(providers=list(self.catalog_providers), used_cache=False, error=None)
 
-    def get_model_catalog(self):
+    def _get_model_catalog(self):
         self.got_catalog_count += 1
         if self.catalog_refresh_release is not None:
             self.catalog_refresh_release.wait(timeout=5)
         providers = self.catalog_providers if self.cached_catalog_providers is None else self.cached_catalog_providers
         return SimpleNamespace(providers=list(providers), used_cache=True, error=None)
 
-    def configure_model_connection(self, request):
+    def _configure_model_connection(self, request):
         self.configured_model_connection = request
         self.configured_api_key = request.api_key
         return request
 
-    def test_model_connection(self, connection_id: str, model: str | None = None):
+    def _test_model_connection(self, connection_id: str, model: str | None = None):
         self.tested_model_connection = connection_id
         self.tested_model = model
         return self.connection_test_result
 
-    def switch_current_session_model_selection(self, request) -> AssistantSessionStatus:
+    def _switch_current_session_model_selection(self, request) -> AssistantSessionStatus:
         connection_id = request.connection_id
         self.switched_model_connection = connection_id
         self.switched_model = request.model
@@ -403,7 +591,7 @@ class FakeAssistantService:
             self.model_connections[index] = SimpleNamespace(
                 **{**normalized.__dict__, "current_session": normalized.id == connection_id},
             )
-        selected = next((item for item in self.list_model_connections() if item.id == connection_id), None)
+        selected = next((item for item in self._list_model_connections() if item.id == connection_id), None)
         return AssistantSessionStatus(
             session_id=self.current_session_id,
             workspace_root=self.workspace_root,
@@ -420,14 +608,14 @@ class FakeAssistantService:
             permission_mode=self.permission_mode,
         )
 
-    def set_default_model_selection(self, request) -> None:
+    def _set_default_model_selection(self, request) -> None:
         self.default_model_selection = request
 
-    def set_web_enabled(self, enabled: bool) -> AssistantWorkspaceStatus:
+    def _set_web_enabled(self, enabled: bool) -> AssistantWorkspaceStatus:
         self.enable_web = enabled
-        return self.get_workspace_status()
+        return self._get_workspace_status()
 
-    def delete_model_connection(self, connection_id: str) -> None:
+    def _delete_model_connection(self, connection_id: str) -> None:
         self.deleted_model_connection = connection_id
         self.model_connections = [
             connection for connection in self.model_connections if _connection_record(connection).id != connection_id
@@ -447,56 +635,56 @@ class FakeAssistantService:
             permission_mode=self.permission_mode,
         )
 
-    def set_permission_mode(self, mode: str) -> AssistantSessionStatus:
+    def _set_permission_mode(self, mode: str) -> AssistantSessionStatus:
         self.permission_mode = mode
         return self._session_status(self.current_session_id)
 
-    def set_next_turn_target_paths(self, paths: list[str | Path]) -> AssistantSessionStatus:
+    def _set_next_turn_target_paths(self, paths: list[str | Path]) -> AssistantSessionStatus:
         self.next_turn_target_paths = [str(Path(path).resolve()) for path in paths]
         return self._session_status(self.current_session_id)
 
-    def add_external_root(self, path: str | Path, access: str) -> AssistantSessionStatus:
+    def _add_external_root(self, path: str | Path, access: str) -> AssistantSessionStatus:
         resolved = str(Path(path).resolve())
         self.external_roots = [root for root in self.external_roots if root["path"] != resolved]
         self.external_roots.append({"path": resolved, "access": access, "source": "user"})
         return self._session_status(self.current_session_id)
 
-    def remove_external_root(self, path: str | Path) -> AssistantSessionStatus:
+    def _remove_external_root(self, path: str | Path) -> AssistantSessionStatus:
         resolved = str(Path(path).resolve())
         self.external_roots = [root for root in self.external_roots if root["path"] != resolved]
         return self._session_status(self.current_session_id)
 
-    def set_external_root_access(self, path: str | Path, access: str) -> AssistantSessionStatus:
-        self.add_external_root(path, access)
+    def _set_external_root_access(self, path: str | Path, access: str) -> AssistantSessionStatus:
+        self._add_external_root(path, access)
         return self._session_status(self.current_session_id)
 
-    def clear_external_roots(self) -> AssistantSessionStatus:
+    def _clear_external_roots(self) -> AssistantSessionStatus:
         self.external_roots = []
         return self._session_status(self.current_session_id)
 
-    def switch_project_root(self, path: str | Path) -> AssistantSessionStatus:
+    def _switch_project_root(self, path: str | Path) -> AssistantSessionStatus:
         self.workspace_root = Path(path).resolve()
         self.external_roots = []
         return self._session_status(self.current_session_id)
 
-    def list_skills(self):
+    def _list_skills(self):
         return SimpleNamespace(
-            skills=list(self.skills),
+            skills=list(self.skill_entries),
             blocked_project_skill_roots=list(self.blocked_project_skill_roots),
         )
 
-    def trust_project_skills(self):
+    def _trust_project_skills(self):
         self.trusted_skills_count += 1
         self.blocked_project_skill_roots = []
-        return self.list_skills()
+        return self._list_skills()
 
-    def untrust_project_skills(self):
+    def _untrust_project_skills(self):
         self.untrusted_skills_count += 1
-        return self.list_skills()
+        return self._list_skills()
 
-    def read_skill_for_user(self, name: str):
+    def _read_skill_for_user(self, name: str):
         self.read_skill_names.append(name)
-        match = next((item for item in self.skills if item.get("name") == name or item.get("command_name") == name), None)
+        match = next((item for item in self.skill_entries if item.get("name") == name or item.get("command_name") == name), None)
         if match is None:
             raise RuntimeError(f"skill not found: {name}")
         return SimpleNamespace(
@@ -505,7 +693,7 @@ class FakeAssistantService:
             content=f"# {match.get('name')}\nFollow this workflow.",
         )
 
-    def search_skill_marketplace(self, query: str, *, providers=None, limit: int = 10):
+    def _search_skill_marketplace(self, query: str, *, providers=None, limit: int = 10):
         provider_tuple = tuple(providers) if providers is not None else None
         self.searched_marketplace_queries.append((query, provider_tuple, limit))
         return SimpleNamespace(
@@ -515,7 +703,7 @@ class FakeAssistantService:
             warnings=list(self.marketplace_warnings),
         )
 
-    def install_marketplace_skill(self, result_id: str):
+    def _install_marketplace_skill(self, result_id: str):
         self.installed_marketplace_ids.append(result_id)
         match = next((item for item in self.marketplace_results if item.result_id == result_id), None)
         if match is None:
@@ -530,14 +718,14 @@ class FakeAssistantService:
             source_url=match.detail_url,
         )
 
-    def list_memory_candidates(self, status: str | None = "pending") -> list[MemoryCandidate]:
+    def _list_memory_candidates(self, status: str | None = "pending") -> list[MemoryCandidate]:
         if self.memory_error is not None:
             raise self.memory_error
         if status is None:
             return list(self.memory_candidates)
         return [candidate for candidate in self.memory_candidates if candidate.status == status]
 
-    def get_memory_candidate(self, candidate_id: str) -> MemoryCandidate:
+    def _get_memory_candidate(self, candidate_id: str) -> MemoryCandidate:
         if self.memory_error is not None:
             raise self.memory_error
         for candidate in self.memory_candidates:
@@ -545,8 +733,8 @@ class FakeAssistantService:
                 return candidate
         raise RuntimeError(f"memory candidate not found: {candidate_id}")
 
-    def confirm_memory_candidate(self, candidate_id: str) -> MemoryRecord:
-        candidate = self.get_memory_candidate(candidate_id)
+    def _confirm_memory_candidate(self, candidate_id: str) -> MemoryRecord:
+        candidate = self._get_memory_candidate(candidate_id)
         self.confirmed_candidate_ids.append(candidate_id)
         self.memory_candidates = [item for item in self.memory_candidates if item.candidate_id != candidate_id]
         return MemoryRecord(
@@ -563,8 +751,8 @@ class FakeAssistantService:
             tags=list(candidate.tags),
         )
 
-    def reject_memory_candidate(self, candidate_id: str, reason: str) -> MemoryCandidate:
-        candidate = self.get_memory_candidate(candidate_id)
+    def _reject_memory_candidate(self, candidate_id: str, reason: str) -> MemoryCandidate:
+        candidate = self._get_memory_candidate(candidate_id)
         self.rejected_candidate_ids.append((candidate_id, reason))
         self.memory_candidates = [item for item in self.memory_candidates if item.candidate_id != candidate_id]
         raw = candidate.to_dict()

@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
@@ -473,7 +473,7 @@ def test_tui_streamed_markdown_table_cells_do_not_show_tooltips(tmp_path: Path) 
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
+        def _run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -579,7 +579,7 @@ def test_tui_streaming_turn_keeps_existing_widget_instances_stable(tmp_path: Pat
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
+        def _run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -627,7 +627,7 @@ def test_tui_streaming_assistant_shows_rotating_cursor_and_cleans_up(tmp_path: P
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
+        def _run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:
@@ -680,7 +680,7 @@ def test_tui_streaming_cursor_keeps_text_semantics_in_no_color_mode(tmp_path: Pa
             self.release_event = release_event
             self.stream_ready = threading.Event()
 
-        def run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
+        def _run_prompt_events(self, prompt: str, *, event_sink=None, interaction_handler=None, attachments=None):
             self.prompts.append(prompt)
             self.started.set()
             if event_sink is not None:

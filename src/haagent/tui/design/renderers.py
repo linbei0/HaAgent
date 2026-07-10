@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from haagent.app.assistant_service import AssistantWorkspaceStatus
+from haagent.app.assistant_types import AssistantWorkspaceStatus
 from haagent.memory import MemoryCandidate
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 from haagent.tui.design.copy import EMPTY_LABELS, PANEL_TITLES

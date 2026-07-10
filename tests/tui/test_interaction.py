@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
-from haagent.app.assistant_service import (
+from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
@@ -265,7 +265,7 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
 
 def test_tui_cancel_returns_idle_when_no_active_run_remains(tmp_path: Path) -> None:
     class IdleCancelService(FakeAssistantService):
-        def cancel_current_run(self):
+        def _cancel_current_run(self):
             self.cancelled_count += 1
             return SimpleNamespace(status="idle", reason="no_active_run")
 

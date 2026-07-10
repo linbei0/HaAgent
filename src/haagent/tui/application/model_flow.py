@@ -41,7 +41,7 @@ class ModelFlow:
     def open_connections(self) -> None:
         if self._app._prompt_has_pending_text():
             return
-        connections = self._app.service.list_model_connections()
+        connections = self._app.service.models.list_connections()
         if connections:
             self._app.push_screen(
                 ConnectionCenterOverlay(connections),
@@ -89,7 +89,7 @@ class ModelFlow:
             self.open_connections()
             return
         try:
-            self._app.service.delete_model_connection(connection_id)
+            self._app.service.models.delete_connection(connection_id)
         except Exception as error:
             self._app._conversation.append_block("Model warning", f"模型删除失败：{error}")
         else:
@@ -102,7 +102,7 @@ class ModelFlow:
             self._app._defer_prompt_focus()
             return
         try:
-            self._app.service.configure_model_connection(result.connection)
+            self._app.service.models.configure_connection(result.connection)
             self._app._run_model_connection_test(result.connection.id, result.test_model)
         except Exception as error:
             self._app._conversation.append_block("Model warning", f"连接配置失败：{error}")
@@ -115,10 +115,10 @@ class ModelFlow:
             self._app.call_from_thread(self.open_setup_wizard, list(self.providers_cache))
             return
         try:
-            catalog = self._app.service.get_model_catalog()
+            catalog = self._app.service.models.get_catalog()
             providers = list(catalog.providers)
             if not configurable_catalog_providers(providers):
-                catalog = self._app.service.refresh_model_catalog()
+                catalog = self._app.service.models.refresh_catalog()
                 providers = list(catalog.providers)
         except Exception as error:
             self._app.call_from_thread(self.handle_catalog_error, error)
@@ -132,10 +132,10 @@ class ModelFlow:
             self._app.call_from_thread(self.open_switch_overlay, list(self.providers_cache))
             return
         try:
-            catalog = self._app.service.get_model_catalog()
+            catalog = self._app.service.models.get_catalog()
             providers = list(catalog.providers)
             if not providers:
-                catalog = self._app.service.refresh_model_catalog()
+                catalog = self._app.service.models.refresh_catalog()
                 providers = list(catalog.providers)
         except Exception as error:
             self._app.call_from_thread(self.handle_catalog_error, error)
@@ -145,7 +145,7 @@ class ModelFlow:
 
     def refresh_catalog_only(self) -> None:
         try:
-            catalog = self._app.service.refresh_model_catalog()
+            catalog = self._app.service.models.refresh_catalog()
         except Exception as error:
             self._app.call_from_thread(self.handle_catalog_error, error)
             return
@@ -155,7 +155,7 @@ class ModelFlow:
 
     def run_connection_test(self, connection_id: str, model: str | None = None) -> None:
         try:
-            result = self._app.service.test_model_connection(connection_id, model=model)
+            result = self._app.service.models.test_connection(connection_id, model=model)
         except Exception as error:
             self._app.call_from_thread(self.handle_catalog_error, error)
             return
@@ -182,7 +182,7 @@ class ModelFlow:
     def open_switch_overlay(self, providers: list[object]) -> None:
         self.dismiss_loading_overlay()
         self._app.push_screen(
-            ModelSwitchOverlay(self._app.service.list_model_connections(), providers),
+            ModelSwitchOverlay(self._app.service.models.list_connections(), providers),
             self.handle_switch_result,
         )
 
@@ -192,10 +192,10 @@ class ModelFlow:
             return
         try:
             if result.action == "set_default":
-                self._app.service.set_default_model_selection(result.selection)
+                self._app.service.models.set_default_selection(result.selection)
                 self._app._conversation.append_line(f"默认模型：{result.selection.model}")
             else:
-                status = self._app.service.switch_current_session_model_selection(result.selection)
+                status = self._app.service.models.switch_current_session_selection(result.selection)
                 model_name = status.model or result.selection.model
                 self._app._conversation.append_line(f"当前会话：{model_name}")
         except Exception as error:

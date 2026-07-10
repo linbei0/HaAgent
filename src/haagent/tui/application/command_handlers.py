@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from haagent.app.assistant_service import AssistantServiceError
+from haagent.app.assistant_types import AssistantServiceError
 
 
 class ChatCommandHandlers:
@@ -23,7 +23,7 @@ class ChatCommandHandlers:
         usage = "用法：/turns [show|unlimited|COUNT]"
         parts = argument.strip().split()
         if not parts or parts == ["show"]:
-            status = self._app.service.get_turn_limit_status()
+            status = self._app.service.workspace.turn_limit_status()
             current = "unlimited" if status.current_max_turns is None else str(status.current_max_turns)
             self._block(
                 f"当前 session turn 限制：{current}\n"
@@ -33,7 +33,7 @@ class ChatCommandHandlers:
             return
         if parts == ["unlimited"]:
             try:
-                self._app.service.set_current_turns_unlimited()
+                self._app.service.workspace.set_current_turns_unlimited()
             except AssistantServiceError as error:
                 self._block(str(error))
             else:
@@ -43,7 +43,7 @@ class ChatCommandHandlers:
         if not count_text.isdigit() or int(count_text) <= 0:
             self._block(usage)
             return
-        self._app.service.set_interactive_max_turns(int(count_text))
+        self._app.service.workspace.set_interactive_max_turns(int(count_text))
         self._block(f"已保存交互默认 turn 限制：{int(count_text)}；当前 session 已同步。")
 
     # ── /sandbox ─────────────────────────────────────────────────────────
@@ -52,9 +52,9 @@ class ChatCommandHandlers:
         usage = "用法：/sandbox [status|doctor|enable docker [--allow-fallback]|disable]"
         try:
             if not parts or parts == ["status"]:
-                self._block(sandbox_status_text(self._app.service.get_sandbox_status()))
+                self._block(sandbox_status_text(self._app.service.workspace.sandbox.status()))
             elif parts == ["doctor"]:
-                self._block(sandbox_doctor_text(self._app.service.get_sandbox_doctor_report()))
+                self._block(sandbox_doctor_text(self._app.service.workspace.sandbox.doctor_report()))
             elif parts[:2] == ["enable", "docker"]:
                 self._enable_docker(parts[2:], usage)
             elif parts == ["disable"]:
@@ -71,12 +71,12 @@ class ChatCommandHandlers:
             self._block(usage)
             return
         allow_fallback = "--allow-fallback" in extra
-        status = self._app.service.enable_docker_sandbox(fail_if_unavailable=not allow_fallback)
+        status = self._app.service.workspace.sandbox.enable_docker(fail_if_unavailable=not allow_fallback)
         self._app._sandbox_status = _sandbox_state(status)
         self._block(f"Docker 沙箱已启用；新 session 生效。\n{sandbox_status_text(status)}")
 
     def _disable_sandbox(self) -> None:
-        status = self._app.service.disable_sandbox()
+        status = self._app.service.workspace.sandbox.disable()
         self._app._sandbox_status = _sandbox_state(status)
         self._block(f"已恢复 local_subprocess；后续新 session 会使用本机执行。\n{sandbox_status_text(status)}")
 
@@ -85,15 +85,15 @@ class ChatCommandHandlers:
         if argument.strip():
             self._block("用法：/web")
             return
-        status = self._app.service.get_workspace_status()
+        status = self._app.service.workspace.status()
         enabled = not status.web_enabled
-        self._app.service.set_web_enabled(enabled)
+        self._app.service.workspace.set_web_enabled(enabled)
         state = "开启" if enabled else "关闭"
         self._block(f"联网已{state}；后续任务可使用 web_search / web_fetch。")
 
     # ── /mcp ─────────────────────────────────────────────────────────────
     def mcp(self) -> None:
-        status = self._app.service.get_mcp_status()
+        status = self._app.service.workspace.mcp_status()
         servers = status.get("servers", [])
         if not isinstance(servers, list) or not servers:
             self._block("No MCP servers configured.")
@@ -119,7 +119,7 @@ class ChatCommandHandlers:
     # ── /agents ──────────────────────────────────────────────────────────
     def agents(self) -> None:
         try:
-            agents = self._app.service.list_agents()
+            agents = self._app.service.workspace.list_agents()
         except Exception as error:
             self._app._conversation.append_block("Agents", f"读取 worker 状态失败：{error}")
             self._app._refresh()
@@ -142,7 +142,7 @@ class ChatCommandHandlers:
     # ── /compact ─────────────────────────────────────────────────────────
     def compact(self) -> None:
         try:
-            result = self._app.service.compact_current_session()
+            result = self._app.service.sessions.compact()
         except Exception as error:
             self._block(f"压缩当前会话失败：{error}")
             return

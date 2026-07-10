@@ -14,7 +14,7 @@ from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from haagent.app.assistant_service import AssistantSessionSummary
+from haagent.app.assistant_types import AssistantSessionSummary
 from haagent.tui.design.copy import EMPTY_LABELS, MODAL_TITLES
 from haagent.tui.design.utils import safe_summary
 

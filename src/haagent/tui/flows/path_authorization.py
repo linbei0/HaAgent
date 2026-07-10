@@ -21,7 +21,7 @@ POSIX_ABSOLUTE_PATH_PATTERN = re.compile(r'(?:"(/[^"\r\n]+)"|(?<!\S)(/[^ \t\r\n"
 
 
 def handle_prompt_path_authorization(app: "HaAgentTuiApp", prompt: str) -> bool:
-    status = app.service.get_workspace_status()
+    status = app.service.workspace.status()
     untrusted_paths = find_untrusted_absolute_paths(
         prompt,
         project_root=status.workspace_root,
@@ -51,7 +51,7 @@ def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | Non
         return
     try:
         if decision == "read":
-            app.service.add_external_root(path, "read")
+            app.service.sessions.permissions.add_external_root(path, "read")
             app._set_next_turn_target_path(path)
             app._conversation.append_block("Permissions", f"已作为只读参考加入：{path}")
         elif decision == "full":
@@ -63,11 +63,11 @@ def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | Non
                     app._handle_external_full_trust_confirmed,
                 )
                 return
-            app.service.add_external_root(path, "full")
+            app.service.sessions.permissions.add_external_root(path, "full")
             app._set_next_turn_target_path(path)
             app._conversation.append_block("Permissions", f"已完全信任：{path}")
         elif decision == "switch":
-            app.service.switch_project_root(path)
+            app.service.sessions.permissions.switch_project_root(path)
             app._conversation.append_block("Permissions", f"已切换工作区：{path}")
         else:
             app._conversation.append_block("Permissions", f"已取消外部目录授权：{path}")
@@ -97,7 +97,7 @@ def handle_external_full_trust_confirmed(app: "HaAgentTuiApp", confirmed: bool) 
         app._restore_prompt_focus()
         return
     try:
-        app.service.add_external_root(path, "full")
+        app.service.sessions.permissions.add_external_root(path, "full")
         app._set_next_turn_target_path(path)
     except Exception as error:
         app._conversation.append_block("Permissions warning", f"外部目录授权失败：{error}")

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from haagent.app.assistant_service import AssistantModelConnection
+from haagent.app.assistant_types import AssistantModelConnection
 from haagent.tui.overlays.connections import ConnectionCenterOverlay, ConnectionSetupWizard
 from haagent.tui.overlays.models import ModelSwitchOverlay, ModelSwitchState
 from textual.app import App

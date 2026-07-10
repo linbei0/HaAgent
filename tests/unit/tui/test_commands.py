@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from haagent.app.assistant_service import AssistantServiceError
+from haagent.app.assistant_types import AssistantServiceError
 from haagent.prompts.packs import iter_prompt_modes
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.application.command_handlers import ChatCommandHandlers
@@ -130,12 +130,13 @@ def test_turns_command_rejects_invalid_arguments() -> None:
 
 class _FakeTurnsService:
     def __init__(self, status, unlimited_error: Exception | None = None) -> None:
+        self.workspace = self
         self._status = status
         self._unlimited_error = unlimited_error
         self.saved_limits: list[int] = []
         self.unlimited_calls = 0
 
-    def get_turn_limit_status(self):
+    def turn_limit_status(self):
         return self._status
 
     def set_interactive_max_turns(self, max_turns: int):

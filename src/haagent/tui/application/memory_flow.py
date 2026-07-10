@@ -63,7 +63,7 @@ class MemoryFlow:
             return
         candidate = self._selected_candidate()
         try:
-            self._app.service.confirm_memory_candidate(candidate.candidate_id)
+            self._app.service.memory.confirm_candidate(candidate.candidate_id)
         except Exception as error:
             self.notice = f"Memory confirm failed: {error}"
             self._app._conversation.append_block("Memory warning", f"Memory confirm failed: {error}")
@@ -79,7 +79,7 @@ class MemoryFlow:
             return
         candidate = self._selected_candidate()
         try:
-            self._app.service.reject_memory_candidate(candidate.candidate_id, "rejected from TUI")
+            self._app.service.memory.reject_candidate(candidate.candidate_id, "rejected from TUI")
         except Exception as error:
             self.notice = f"Memory reject failed: {error}"
             self._app._conversation.append_block("Memory warning", f"Memory reject failed: {error}")
@@ -119,7 +119,7 @@ class MemoryFlow:
 
     def load_candidates(self, *, silent: bool = False) -> None:
         try:
-            self.candidates = self._app.service.list_memory_candidates(status="pending")
+            self.candidates = self._app.service.memory.list_candidates(status="pending")
             self.error = None
             if self.selected >= len(self.candidates):
                 self.selected = max(0, len(self.candidates) - 1)

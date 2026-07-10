@@ -16,7 +16,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from haagent.app.assistant_service import AssistantModelConnection, ModelConnectionConfigureRequest
+from haagent.app.assistant_types import AssistantModelConnection, ModelConnectionConfigureRequest
 from haagent.models.gateway_registry import catalog_provider_capability
 from haagent.tui.design.utils import safe_summary
 

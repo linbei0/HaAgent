@@ -21,19 +21,19 @@ class SessionFlow:
 
     def restore_initial_session(self) -> None:
         """启动时按 --resume / --continue 参数恢复会话。"""
-        initial_resume = getattr(self._app.service, "initial_resume", None)
+        initial_resume = getattr(self._app.service.sessions, "initial_resume", None)
         if initial_resume is not None:
             try:
-                status = self._app.service.resume_session(initial_resume)
+                status = self._app.service.sessions.resume(initial_resume)
             except Exception as error:
                 self._app._conversation.append_block("Session warning", f"恢复会话失败：{error}")
             else:
                 self.show_session_history(status, prefix="已恢复 session")
             return
-        if not bool(getattr(self._app.service, "initial_continue", False)):
+        if not bool(getattr(self._app.service.sessions, "initial_continue", False)):
             return
         try:
-            status = self._app.service.continue_latest_session()
+            status = self._app.service.sessions.continue_latest()
         except Exception as error:
             self._app._conversation.append_block("Session warning", f"继续最新 session 失败：{error}")
         else:
@@ -44,13 +44,13 @@ class SessionFlow:
             self._app.query_one("#prompt-input").insert("s")
             return
         self._app.push_screen(
-            SessionOverlay(self._app.service.list_sessions()),
+            SessionOverlay(self._app.service.sessions.list()),
             self.handle_session_overlay_result,
         )
 
     def new_session(self) -> None:
         try:
-            self._app.service.create_session()
+            self._app.service.sessions.create()
         except Exception as error:
             self._app._conversation.append_block("Session warning", f"新建会话失败：{error}")
         else:
@@ -60,7 +60,7 @@ class SessionFlow:
 
     def resume_latest(self) -> None:
         try:
-            status = self._app.service.continue_latest_session()
+            status = self._app.service.sessions.continue_latest()
         except Exception as error:
             self._app._conversation.append_block("Session warning", f"继续最新会话失败：{error}")
         else:
@@ -74,11 +74,11 @@ class SessionFlow:
             return
         try:
             if result.action == "resume" and result.session is not None:
-                status = self._app.service.resume_session(result.session.session_path)
+                status = self._app.service.sessions.resume(result.session.session_path)
             elif result.action == "continue_latest":
-                status = self._app.service.continue_latest_session()
+                status = self._app.service.sessions.continue_latest()
             else:
-                status = self._app.service.create_session()
+                status = self._app.service.sessions.create()
         except Exception as error:
             self._app._conversation.append_block("Session warning", f"会话操作失败：{error}")
         else:
@@ -94,7 +94,7 @@ class SessionFlow:
         conversation = self._timeline()
         conversation.clear_timeline()
         try:
-            history = list(self._app.service.current_session_history())
+            history = list(self._app.service.sessions.history())
         except Exception as error:
             conversation.add_system("会话", f"{prefix}历史读取失败：{error}")
             history = []

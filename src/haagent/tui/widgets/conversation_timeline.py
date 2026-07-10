@@ -2,7 +2,7 @@
 src/haagent/tui/widgets/conversation_timeline.py - 对话时间线主组件
 
 VerticalScroll 容器，维护 TimelineItem 列表并按需挂载/更新 TimelineBlock。
-支持 streaming 批处理、工具活动延迟刷新和鼠标拖拽暂停交互更新。
+支持 streaming 批处理、增量索引、长会话挂载窗口和鼠标拖拽暂停交互更新。
 """
 
 from __future__ import annotations
@@ -37,6 +37,10 @@ from haagent.tui.widgets.timeline_block import (
 from haagent.tui.widgets.tool_activity import matching_latest_tool_activity, merge_tool_activity
 
 
+TIMELINE_WINDOW_SIZE = 200
+TIMELINE_WINDOW_STEP = 100
+
+
 class ConversationTimeline(VerticalScroll):
     _ids = count(1)
     can_focus = True
@@ -46,6 +50,12 @@ class ConversationTimeline(VerticalScroll):
         kwargs.pop("auto_scroll", None)
         super().__init__(*args, **kwargs)
         self._items: list[TimelineItem] = []
+        # 索引只在统一新增、替换和清空入口维护，热路径无需反复扫描完整会话。
+        self._items_by_id: dict[int, TimelineItem] = {}
+        self._detail_items_by_id: dict[str, TimelineItem] = {}
+        self._assistant_items_by_turn: dict[int, TimelineItem] = {}
+        self._process_items_by_turn: dict[int, list[TimelineItem]] = {}
+        self._visible_items_cache: list[TimelineItem] | None = None
         self._tool_details_enabled = False
         self._plain_text = ""
         self._plain_text_dirty = False
@@ -61,9 +71,17 @@ class ConversationTimeline(VerticalScroll):
         self._mouse_down_location: tuple[float, float] | None = None
         self._selection_dragging = False
         self._expanded_process_turns: set[int] = set()
+        # None 表示尾窗；非 None 时是用户正在回看的完整可见投影起点。
+        self._window_start: int | None = None
+        self._window_shift_in_progress = False
 
     def set_stick_to_bottom(self, enabled: bool) -> None:
+        window_was_away_from_tail = self._window_start is not None
         self._stick_to_bottom = enabled
+        if enabled:
+            self._window_start = None
+            if window_was_away_from_tail and self.is_attached:
+                self._replace_window_blocks()
 
     def scroll_end_if_sticky(self) -> None:
         if self._stick_to_bottom:
@@ -71,19 +89,19 @@ class ConversationTimeline(VerticalScroll):
 
     def scroll_to(self, x: float | None = None, y: float | None = None, **kwargs: Any) -> None:
         if y is not None:
-            self._stick_to_bottom = y >= self.max_scroll_y - 1
+            self._stick_to_bottom = self._window_start is None and y >= self.max_scroll_y - 1
             if not self._stick_to_bottom:
                 self.pause_interactive_updates()
         super().scroll_to(x=x, y=y, **kwargs)
 
     def show_placeholder(self) -> None:
-        self._items.clear()
+        self._clear_items()
         self._plain_text = "Ready. 输入消息后按 Enter 发送；Shift+Enter 换行；Ctrl+Q 退出。"
         self._plain_text_dirty = False
         self._show_singleton("placeholder", "Ready. 输入消息后按 Enter 发送；Shift+Enter 换行；Ctrl+Q 退出。", "timeline-placeholder")
 
     def show_memory(self, text: str) -> None:
-        self._items.clear()
+        self._clear_items()
         self._plain_text = text
         self._plain_text_dirty = False
         self._show_singleton("memory", text, "timeline-memory")
@@ -99,7 +117,7 @@ class ConversationTimeline(VerticalScroll):
         return self._plain_text
 
     def clear_timeline(self) -> None:
-        self._items.clear()
+        self._clear_items()
         self._plain_text = ""
         self._plain_text_dirty = False
         self._pending_tool_item_ids.clear()
@@ -110,6 +128,8 @@ class ConversationTimeline(VerticalScroll):
         self._mouse_down_location = None
         self._selection_dragging = False
         self._expanded_process_turns.clear()
+        self._window_start = None
+        self._window_shift_in_progress = False
         self._remove_singletons()
         for block in list(self._blocks.values()):
             block.remove()
@@ -128,11 +148,11 @@ class ConversationTimeline(VerticalScroll):
         self._mark_plain_text_dirty()
 
     def add_user(self, content: str, *, turn_index: int) -> None:
-        self._items.append(TimelineItem(item_id=next(self._ids), role="user", turn_index=turn_index, content=content, title="你"))
+        self._append_item(TimelineItem(item_id=next(self._ids), role="user", turn_index=turn_index, content=content, title="你"))
         self._render_timeline()
 
     def add_system(self, title: str, content: str, *, turn_index: int = 0) -> None:
-        self._items.append(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
+        self._append_item(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
         self._render_timeline()
 
     def add_notice(
@@ -153,7 +173,7 @@ class ConversationTimeline(VerticalScroll):
             detail_id=detail_id,
             detail_lines=detail_lines or [],
         )
-        self._items.append(item)
+        self._append_item(item)
         self._render_or_mark_dirty()
 
     def add_effect_summary(
@@ -174,7 +194,7 @@ class ConversationTimeline(VerticalScroll):
             detail_id=detail_id,
             detail_lines=detail_lines or [],
         )
-        self._items.append(item)
+        self._append_item(item)
         self._render_or_mark_dirty()
 
     def add_presentation_item(
@@ -202,37 +222,37 @@ class ConversationTimeline(VerticalScroll):
         if not item.detail_id:
             return False
         role = _presentation_role(item)
-        for existing in self._items:
-            if existing.detail_id != item.detail_id:
-                continue
-            existing.role = role
-            existing.turn_index = item.turn_index
-            existing.title = item.title
-            existing.content = item.summary
-            existing.detail_lines = details.lines if details else []
-            if self._move_before_same_turn_assistant(existing):
-                self._render_or_mark_dirty()
-            else:
-                self._sync_block_or_mark_dirty(existing)
-            return True
-        return False
+        existing = self._detail_items_by_id.get(item.detail_id)
+        if existing is None:
+            return False
+        self._unindex_item(existing)
+        existing.role = role
+        existing.turn_index = item.turn_index
+        existing.title = item.title
+        existing.content = item.summary
+        existing.detail_lines = details.lines if details else []
+        self._index_item(existing)
+        self._invalidate_visible_items()
+        if self._move_before_same_turn_assistant(existing):
+            self._render_or_mark_dirty()
+        else:
+            self._sync_block_or_mark_dirty(existing)
+        return True
 
     def add_failure(self, content: str, *, turn_index: int) -> None:
-        self._items.append(TimelineItem(item_id=next(self._ids), role="failure", turn_index=turn_index, content=content, status="failed", title="失败"))
+        self._append_item(TimelineItem(item_id=next(self._ids), role="failure", turn_index=turn_index, content=content, status="failed", title="失败"))
         self._render_timeline()
 
     def toggle_detail(self, item_id: int) -> bool:
-        for item in self._items:
-            if item.item_id != item_id:
-                continue
-            if not item.detail_lines:
-                return False
-            item.expanded = not item.expanded
-            if item.expanded and _is_process_item(item):
-                self._expanded_process_turns.add(item.turn_index)
-            self._render_or_mark_dirty()
-            return True
-        return False
+        item = self._items_by_id.get(item_id)
+        if item is None or not item.detail_lines:
+            return False
+        item.expanded = not item.expanded
+        if item.expanded and _is_process_item(item):
+            self._expanded_process_turns.add(item.turn_index)
+            self._invalidate_visible_items()
+        self._render_or_mark_dirty()
+        return True
 
     def activate_item(self, item_id: int) -> bool:
         if _is_process_group_id(item_id):
@@ -240,20 +260,21 @@ class ConversationTimeline(VerticalScroll):
         return self.toggle_detail(item_id)
 
     def toggle_process_group(self, turn_index: int) -> bool:
-        if not any(item.turn_index == turn_index and _is_process_item(item) for item in self._items):
+        process_items = self._process_items_by_turn.get(turn_index)
+        if not process_items:
             return False
         if turn_index in self._expanded_process_turns:
             self._expanded_process_turns.remove(turn_index)
-            for item in self._items:
-                if item.turn_index == turn_index and _is_process_item(item):
-                    item.expanded = False
+            for item in process_items:
+                item.expanded = False
         else:
             self._expanded_process_turns.add(turn_index)
+        self._invalidate_visible_items()
         self._render_or_mark_dirty()
         return True
 
     def add_assistant_message(self, content: str, *, turn_index: int) -> None:
-        self._items.append(TimelineItem(item_id=next(self._ids), role="assistant", turn_index=turn_index, content=content, status="done", title="HaAgent"))
+        self._append_item(TimelineItem(item_id=next(self._ids), role="assistant", turn_index=turn_index, content=content, status="done", title="HaAgent"))
         self._render_timeline()
 
     def start_assistant_response(self, *, turn_index: int) -> None:
@@ -301,19 +322,59 @@ class ConversationTimeline(VerticalScroll):
         self._mark_plain_text_dirty()
 
     def _assistant_item(self, turn_index: int) -> TimelineItem:
-        for item in self._items:
-            if item.role == "assistant" and item.turn_index == turn_index:
-                return item
+        item = self._assistant_items_by_turn.get(turn_index)
+        if item is not None:
+            return item
         item = TimelineItem(item_id=next(self._ids), role="assistant", turn_index=turn_index, content="", status="streaming", title="HaAgent")
-        self._items.append(item)
+        self._append_item(item)
         return item
+
+    def _append_item(self, item: TimelineItem) -> None:
+        self._items.append(item)
+        self._index_item(item)
+        self._invalidate_visible_items()
 
     def _insert_timeline_item(self, item: TimelineItem) -> None:
         assistant_index = self._same_turn_assistant_index(item.turn_index)
         if item.role in {"activity", "notice", "effect"} and assistant_index is not None:
             self._items.insert(assistant_index, item)
-            return
-        self._items.append(item)
+        else:
+            self._items.append(item)
+        self._index_item(item)
+        self._invalidate_visible_items()
+
+    def _index_item(self, item: TimelineItem) -> None:
+        self._items_by_id[item.item_id] = item
+        if item.detail_id:
+            self._detail_items_by_id[item.detail_id] = item
+        if item.role == "assistant":
+            self._assistant_items_by_turn[item.turn_index] = item
+        if _is_process_item(item):
+            self._process_items_by_turn.setdefault(item.turn_index, []).append(item)
+
+    def _unindex_item(self, item: TimelineItem) -> None:
+        if self._items_by_id.get(item.item_id) is item:
+            self._items_by_id.pop(item.item_id)
+        if item.detail_id and self._detail_items_by_id.get(item.detail_id) is item:
+            self._detail_items_by_id.pop(item.detail_id)
+        if item.role == "assistant" and self._assistant_items_by_turn.get(item.turn_index) is item:
+            self._assistant_items_by_turn.pop(item.turn_index)
+        if _is_process_item(item):
+            process_items = self._process_items_by_turn.get(item.turn_index, [])
+            process_items[:] = [candidate for candidate in process_items if candidate is not item]
+            if not process_items:
+                self._process_items_by_turn.pop(item.turn_index, None)
+
+    def _clear_items(self) -> None:
+        self._items.clear()
+        self._items_by_id.clear()
+        self._detail_items_by_id.clear()
+        self._assistant_items_by_turn.clear()
+        self._process_items_by_turn.clear()
+        self._invalidate_visible_items()
+
+    def _invalidate_visible_items(self) -> None:
+        self._visible_items_cache = None
 
     def _same_turn_assistant_index(self, turn_index: int, *, exclude_item_id: int | None = None) -> int | None:
         for index, item in enumerate(self._items):
@@ -387,8 +448,9 @@ class ConversationTimeline(VerticalScroll):
         pending_ids = set(self._pending_tool_item_ids)
         self._pending_tool_item_ids.clear()
         self._tool_activity_flush_scheduled = False
-        for item in self._items:
-            if item.item_id in pending_ids:
+        for item_id in pending_ids:
+            item = self._items_by_id.get(item_id)
+            if item is not None:
                 self._sync_block(item)
 
     def _queue_assistant_delta_sync(self, item: TimelineItem) -> None:
@@ -415,8 +477,9 @@ class ConversationTimeline(VerticalScroll):
         pending_ids = set(self._pending_assistant_delta_item_ids)
         self._pending_assistant_delta_item_ids.clear()
         self._assistant_delta_flush_scheduled = False
-        for item in self._items:
-            if item.item_id in pending_ids:
+        for item_id in pending_ids:
+            item = self._items_by_id.get(item_id)
+            if item is not None:
                 self._sync_block(item)
 
     def pause_interactive_updates(self) -> None:
@@ -454,7 +517,8 @@ class ConversationTimeline(VerticalScroll):
         self._remove_singletons()
         seen: set[int] = set()
         anchor: Any = None
-        for item in self._visible_items():
+        visible_items = self._visible_items()
+        for item in self._windowed_items(visible_items):
             block = self._blocks.get(item.item_id)
             if block is None:
                 block = TimelineBlock(item, show_tool_details=self._tool_details_enabled)
@@ -487,6 +551,8 @@ class ConversationTimeline(VerticalScroll):
         self._plain_text_dirty = False
 
     def _visible_items(self) -> list[TimelineItem]:
+        if self._visible_items_cache is not None:
+            return self._visible_items_cache
         visible: list[TimelineItem] = []
         process_turns_rendered: set[int] = set()
         for item in self._items:
@@ -496,11 +562,53 @@ class ConversationTimeline(VerticalScroll):
             if item.turn_index in process_turns_rendered:
                 continue
             process_turns_rendered.add(item.turn_index)
-            process_items = [candidate for candidate in self._items if candidate.turn_index == item.turn_index and _is_process_item(candidate)]
+            process_items = self._process_items_by_turn[item.turn_index]
             visible.append(_process_group_item(item.turn_index, len(process_items), expanded=item.turn_index in self._expanded_process_turns))
             if item.turn_index in self._expanded_process_turns:
                 visible.extend(process_items)
-        return visible
+        self._visible_items_cache = visible
+        return self._visible_items_cache
+
+    def _windowed_items(self, visible_items: list[TimelineItem]) -> list[TimelineItem]:
+        if len(visible_items) <= TIMELINE_WINDOW_SIZE:
+            self._window_start = None
+            return visible_items
+        tail_start = len(visible_items) - TIMELINE_WINDOW_SIZE
+        start = tail_start if self._window_start is None else min(self._window_start, tail_start)
+        return visible_items[start : start + TIMELINE_WINDOW_SIZE]
+
+    def _shift_window_earlier(self, visible_count: int) -> bool:
+        tail_start = max(0, visible_count - TIMELINE_WINDOW_SIZE)
+        current_start = tail_start if self._window_start is None else min(self._window_start, tail_start)
+        next_start = max(0, current_start - TIMELINE_WINDOW_STEP)
+        if next_start == current_start:
+            return False
+        self._window_start = next_start
+        return True
+
+    def _shift_window_later(self, visible_count: int) -> bool:
+        if self._window_start is None:
+            return False
+        tail_start = max(0, visible_count - TIMELINE_WINDOW_SIZE)
+        next_start = min(tail_start, self._window_start + TIMELINE_WINDOW_STEP)
+        if next_start == self._window_start:
+            return False
+        self._window_start = None if next_start == tail_start else next_start
+        return True
+
+    def _replace_window_blocks(self) -> None:
+        # 翻窗发生频率远低于流式更新；边界切换时重建有界窗口可保证 DOM 顺序稳定。
+        for block in list(self._blocks.values()):
+            block.remove()
+        self._blocks.clear()
+        self._sync_blocks()
+
+    def _restore_window_anchor(self, item_id: int) -> None:
+        block = self._blocks.get(item_id)
+        if block is not None and block.parent is not None:
+            # 前移窗口后把原首项放回顶部，避免挂载更早消息时阅读位置跳动。
+            self.scroll_to_widget(block, top=True, animate=False, immediate=True)
+        self._window_shift_in_progress = False
 
     def _mark_plain_text_dirty(self) -> None:
         self._plain_text_dirty = True
@@ -528,7 +636,36 @@ class ConversationTimeline(VerticalScroll):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        self._stick_to_bottom = new_value >= self.max_scroll_y - 1
+        if self._window_shift_in_progress:
+            return
+
+        visible_items = self._visible_items()
+        window_items = self._windowed_items(visible_items)
+        if new_value <= 1 and new_value < old_value and window_items:
+            anchor_item_id = window_items[0].item_id
+            if self._shift_window_earlier(len(visible_items)):
+                self._stick_to_bottom = False
+                self.pause_interactive_updates()
+                self._window_shift_in_progress = True
+                self._replace_window_blocks()
+                self.call_after_refresh(self._restore_window_anchor, anchor_item_id)
+                return
+
+        at_window_bottom = new_value >= self.max_scroll_y - 1
+        if at_window_bottom and new_value > old_value and self._window_start is not None:
+            if self._shift_window_later(len(visible_items)):
+                self._stick_to_bottom = self._window_start is None
+                self._window_shift_in_progress = True
+                self._replace_window_blocks()
+                if self._stick_to_bottom:
+                    self._window_shift_in_progress = False
+                    self.resume_interactive_updates()
+                else:
+                    next_window = self._windowed_items(visible_items)
+                    self.call_after_refresh(self._restore_window_anchor, next_window[0].item_id)
+                return
+
+        self._stick_to_bottom = self._window_start is None and at_window_bottom
         if self._stick_to_bottom:
             self.resume_interactive_updates()
         else:

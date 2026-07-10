@@ -7,14 +7,14 @@ tests/unit/multi_agent/test_assistant_service_agents.py - 服务层 worker 状�
 from pathlib import Path
 from types import SimpleNamespace
 
-from haagent.app import assistant_service as assistant_service_module
+from haagent.app import workspace_usecases
 from haagent.app.assistant_service import AssistantService
 from haagent.multi_agent.team_store import TeamStore, WorkerRecord
 
 
 def test_assistant_service_lists_agents_for_current_session(tmp_path: Path, monkeypatch) -> None:
     config_dir = tmp_path / "home" / ".haagent"
-    monkeypatch.setattr(assistant_service_module, "user_config_dir", lambda: config_dir)
+    monkeypatch.setattr(workspace_usecases, "user_config_dir", lambda: config_dir)
     store = TeamStore(config_dir / "teams")
     team = store.ensure_team(
         team_id="team-session-test",
@@ -47,9 +47,9 @@ def test_assistant_service_lists_agents_for_current_session(tmp_path: Path, monk
         ),
     )
     service = AssistantService(workspace_root=tmp_path)
-    service._session = SimpleNamespace(session_id="session-test")
+    service._context.session = SimpleNamespace(session_id="session-test")
 
-    agents = service.list_agents()
+    agents = service.workspace.list_agents()
 
     assert agents == [
         {
@@ -67,4 +67,4 @@ def test_assistant_service_lists_agents_for_current_session(tmp_path: Path, monk
 def test_assistant_service_lists_no_agents_without_session(tmp_path: Path) -> None:
     service = AssistantService(workspace_root=tmp_path)
 
-    assert service.list_agents() == []
+    assert service.workspace.list_agents() == []
