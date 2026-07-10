@@ -90,6 +90,21 @@ def test_tui_tools_entry_points_are_removed() -> None:
     assert "任务工作台" not in chat_help
     assert "focus_tools" not in binding_actions
 
+
+def test_stream_interruption_explains_why_partial_output_is_not_replayed() -> None:
+    view = failure_from_payload(
+        {
+            "failed_stage": "planning",
+            "failure_category": "Model Failure",
+            "reason": "model stream interrupted after partial output",
+            "episode_path": "episode",
+        }
+    )
+
+    text = view.block_text()
+    assert "部分输出" in text
+    assert "未自动重试" in text
+
 def test_tui_timeline_hides_worker_lifecycle_internal_events(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(

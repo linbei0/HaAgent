@@ -49,3 +49,43 @@ def test_runtime_settings_rejects_non_positive_interactive_max_turns(tmp_path, r
 
     with pytest.raises(RuntimeSettingsError):
         load_runtime_settings(config_path=settings_path)
+
+
+def test_runtime_settings_reads_model_retry(tmp_path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "model_retry": {
+                    "max_attempts": 2,
+                    "base_delay_seconds": 0.2,
+                    "throttling_base_delay_seconds": 1,
+                    "max_delay_seconds": 4,
+                    "max_server_retry_after_seconds": 30,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path=settings_path)
+
+    assert settings.model_retry.max_attempts == 2
+    assert settings.model_retry.max_delay_seconds == 4
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    [
+        {"max_attempts": 0},
+        {"max_attempts": True},
+        {"base_delay_seconds": 0},
+        {"max_delay_seconds": 0.1, "base_delay_seconds": 1},
+    ],
+)
+def test_runtime_settings_rejects_invalid_model_retry(tmp_path, raw_value) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"model_retry": raw_value}), encoding="utf-8")
+
+    with pytest.raises(RuntimeSettingsError):
+        load_runtime_settings(config_path=settings_path)

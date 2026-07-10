@@ -7,10 +7,55 @@ src/haagent/models/types.py - 模型网关协议与公共 DTO
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
+
+from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.retry import RetryEvent, RetryFailure
+
+
+ModelFailureCategory = Literal[
+    "network",
+    "timeout",
+    "rate_limited",
+    "server",
+    "client",
+    "auth",
+    "quota_exhausted",
+    "protocol",
+    "response_parse",
+    "stream_interrupted",
+]
+
+
+@dataclass(frozen=True)
+class ModelFailureDetails:
+    """模型 transport 提供给网关的脱敏失败事实。"""
+
+    category: ModelFailureCategory
+    status_code: int | None = None
+    provider_code: str | None = None
+    retry_after_seconds: float | None = None
+    request_id: str | None = None
+    retryable: bool = False
+
+    def to_retry_failure(self) -> RetryFailure:
+        """将模型失败事实无损适配到统一重试内核。"""
+
+        return RetryFailure(
+            category=self.category,
+            status_code=self.status_code,
+            provider_code=self.provider_code,
+            retry_after_seconds=self.retry_after_seconds,
+            request_id=self.request_id,
+            retryable=self.retryable,
+        )
 
 class ModelCallError(RuntimeError):
     """Raised when a model provider fails explicitly."""
+
+    def __init__(self, message: str, *, details: ModelFailureDetails | None = None) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 @dataclass(frozen=True)
@@ -60,6 +105,9 @@ class ModelGateway(Protocol):
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
         event_sink: Callable[[str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        retry_event_sink: Callable[[RetryEvent], None] | None = None,
+        retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
     ) -> ModelResponse:
         """Generate a model response given a conversation messages list."""
 

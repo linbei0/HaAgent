@@ -279,6 +279,7 @@ class RunOrchestrator:
                     verification_loop_limit_evidence=_verification_loop_limit_evidence,
                     task_step_id=task_step_id,
                     task_step_title=task.goal,
+                    cancellation_token=self._cancellation_token,
                 ),
             )
             if turn_result is not None:

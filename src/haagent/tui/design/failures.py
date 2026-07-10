@@ -59,6 +59,14 @@ def failure_next_steps(
     reason: str,
     episode_path: str,
 ) -> list[str]:
+    if "stream_interrupted" in reason or "stream interrupted" in reason:
+        steps = [
+            "已显示部分输出；为避免重复内容，本次未自动重试。",
+            "请重新提交请求或调整范围后开始新的模型调用。",
+        ]
+        if episode_path and episode_path != "unknown":
+            steps.append(f"需要复盘时查看 episode trace：{episode_path}。")
+        return steps
     steps = [
         "查看对话中的失败摘要，确认失败发生在哪个阶段或服务边界。",
         "重试前先调整请求或补充更明确的文件、命令、范围。",

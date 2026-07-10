@@ -16,7 +16,7 @@ from haagent.models.fake import FakeModelGateway
 from haagent.models.anthropic import AnthropicMessagesGateway
 from haagent.models.transport import DEFAULT_CHAT_COMPLETIONS_ENDPOINT, DEFAULT_RESPONSES_ENDPOINT
 from haagent.models.google import GoogleGeminiGateway
-from haagent.models.types import ModelCallError, ModelResponse, ModelUsage, ToolCall
+from haagent.models.types import ModelCallError, ModelFailureDetails, ModelResponse, ModelUsage, ToolCall
 from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models.openai_responses import OpenAIResponsesGateway
 from haagent.models.credentials import FakeCredentialStore
@@ -38,6 +38,8 @@ from haagent.models.model_connections import (
 )
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.retry import RetryController, RetryPolicy
 
 
 def make_task() -> TaskSpec:
@@ -72,6 +74,143 @@ def generate(
         messages,
         tool_schemas or [],
     )
+
+
+def _retry_controller() -> RetryController:
+    return RetryController(
+        RetryPolicy(max_attempts=2),
+        sleep=lambda _: None,
+        random_value=lambda: 0.0,
+    )
+
+
+def test_openai_responses_gateway_retries_once_then_returns_response() -> None:
+    attempts = 0
+    retry_events = []
+
+    def retrying_transport(payload, api_key):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ModelCallError(
+                "temporary",
+                details=ModelFailureDetails(category="server", status_code=503, retryable=True),
+            )
+        return {"output_text": "ok", "output": []}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        transport=retrying_transport,
+        retry_controller=_retry_controller(),
+    )
+
+    assert gateway.generate([], [], retry_event_sink=retry_events.append).content == "ok"
+    assert attempts == 2
+    assert [(event.attempt, event.next_attempt) for event in retry_events] == [(1, 2)]
+
+
+@pytest.mark.parametrize(
+    "gateway_type, response, transport_arity",
+    [
+        (OpenAIChatCompletionsGateway, {"choices": [{"message": {"content": "ok"}}]}, 2),
+        (AnthropicMessagesGateway, {"content": [{"type": "text", "text": "ok"}]}, 3),
+        (GoogleGeminiGateway, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}, 3),
+    ],
+)
+def test_provider_gateways_retry_a_retryable_model_failure(
+    gateway_type,
+    response,
+    transport_arity: int,
+) -> None:
+    attempts = 0
+
+    def retrying_transport(*args):
+        nonlocal attempts
+        assert len(args) == transport_arity
+        attempts += 1
+        if attempts == 1:
+            raise ModelCallError(
+                "temporary",
+                details=ModelFailureDetails(category="server", status_code=503, retryable=True),
+            )
+        return response
+
+    gateway = gateway_type(
+        api_key="key",
+        model="model",
+        transport=retrying_transport,
+        retry_controller=_retry_controller(),
+    )
+
+    assert gateway.generate([], []).content == "ok"
+    assert attempts == 2
+
+
+def test_stream_delta_then_failure_is_not_retried() -> None:
+    attempts = 0
+    deltas: list[str] = []
+
+    def interrupted_stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        attempts += 1
+        sink("partial")
+        raise ModelCallError(
+            "reset",
+            details=ModelFailureDetails(category="network", retryable=True),
+        )
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=interrupted_stream_transport,
+        retry_controller=_retry_controller(),
+    )
+
+    with pytest.raises(ModelCallError) as raised:
+        gateway.generate([], [], event_sink=deltas.append)
+
+    assert attempts == 1
+    assert deltas == ["partial"]
+    assert raised.value.details is not None
+    assert raised.value.details.category == "stream_interrupted"
+
+
+def test_stream_interruption_reports_final_attempt_for_audit() -> None:
+    def interrupted_stream_transport(payload, api_key, sink):
+        del payload, api_key
+        sink("partial")
+        raise ModelCallError(
+            "reset",
+            details=ModelFailureDetails(category="network", retryable=True),
+        )
+
+    exhausted = []
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=interrupted_stream_transport,
+        retry_controller=_retry_controller(),
+    )
+
+    with pytest.raises(ModelCallError):
+        gateway.generate([], [], event_sink=lambda _: None, retry_exhausted_sink=lambda failure, attempt: exhausted.append((failure.category, attempt)))
+
+    assert exhausted == [("stream_interrupted", 1)]
+
+
+def test_gateway_propagates_retry_controller_cancellation() -> None:
+    token = CancellationToken()
+    token.cancel()
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        transport=lambda payload, api_key: {"output_text": "unexpected", "output": []},
+        retry_controller=_retry_controller(),
+    )
+
+    with pytest.raises(RunCancelled):
+        gateway.generate([], [], cancellation_token=token)
 
 
 def make_writer(tmp_path: Path) -> EpisodeWriter:
@@ -1685,7 +1824,7 @@ def test_openai_gateway_failure_is_explicit() -> None:
         transport=transport,
     )
 
-    with pytest.raises(ModelCallError, match="provider unavailable"):
+    with pytest.raises(ModelCallError, match="model request failed"):
         generate(gateway)
 
 

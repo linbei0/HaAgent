@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 
+from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.transport import (
     _endpoint_base_url,
     _image_data_url,
@@ -28,6 +29,8 @@ from haagent.models.types import (
     ToolCall,
     Transport,
 )
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
 
 def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
     output = response.get("output")
@@ -126,6 +129,7 @@ class OpenAIResponsesGateway:
         base_url: str | None = None,
         transport: Transport | None = None,
         stream_transport: StreamTransport | None = None,
+        retry_controller: RetryController | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._model = model
@@ -150,6 +154,7 @@ class OpenAIResponsesGateway:
                 on_delta,
             )
         )
+        self._retry_controller = default_retry_controller(retry_controller)
 
     @property
     def responses_endpoint(self) -> str:
@@ -169,6 +174,9 @@ class OpenAIResponsesGateway:
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
         event_sink: Callable[[str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        retry_event_sink: Callable[[RetryEvent], None] | None = None,
+        retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
     ) -> ModelResponse:
         """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
         if not self._api_key:
@@ -185,13 +193,25 @@ class OpenAIResponsesGateway:
         if event_sink is not None:
             payload["stream"] = True
         try:
-            response = (
-                self._stream_transport(payload, self._api_key, event_sink)
-                if event_sink is not None
-                else self._transport(payload, self._api_key)
+            response = execute_model_request(
+                self._retry_controller,
+                provider=self.provider_name,
+                invoke=lambda on_delta: (
+                    self._stream_transport(payload, self._api_key, on_delta)
+                    if on_delta is not None
+                    else self._transport(payload, self._api_key)
+                ),
+                event_sink=event_sink,
+                cancellation_token=cancellation_token,
+                retry_event_sink=retry_event_sink,
+                retry_exhausted_sink=retry_exhausted_sink,
             )
+        except ModelCallError:
+            raise
+        except RunCancelled:
+            raise
         except Exception as error:
-            raise ModelCallError(str(error)) from error
+            raise unexpected_model_error(error) from error
 
         output_text = response.get("output_text")
         if not isinstance(output_text, str):

@@ -131,6 +131,7 @@ class EpisodeWriter:
         self,
         *,
         turn: int,
+        attempt: int | None = None,
         provider: str,
         model: str | None,
         usage: ModelUsage | None,
@@ -149,8 +150,7 @@ class EpisodeWriter:
         if not isinstance(model_calls, list):
             model_calls = []
             cost["model_calls"] = model_calls
-        model_calls.append(
-            {
+        record = {
                 "turn": turn,
                 "provider": provider,
                 "model": model,
@@ -158,8 +158,10 @@ class EpisodeWriter:
                 "output_tokens": usage.output_tokens,
                 "total_tokens": usage.total_tokens,
                 "raw_usage_source": usage.raw_source,
-            },
-        )
+        }
+        if attempt is not None:
+            record["attempt"] = attempt
+        model_calls.append(record)
         cost["totals"] = _usage_totals(model_calls)
         self._write_json("cost.json", cost)
 

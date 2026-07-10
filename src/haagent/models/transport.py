@@ -7,19 +7,155 @@ src/haagent/models/transport.py - 模型网关 HTTP/SSE 传输与共享解析
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+import http.client
 import json
 from pathlib import Path
-from typing import Any, Callable
+import socket
+from typing import Any, Callable, Mapping, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 import urllib.error
 import urllib.request
 
-from haagent.models.types import ModelCallError, ModelUsage
+from haagent.models.types import ModelCallError, ModelFailureDetails, ModelUsage
 
 DEFAULT_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
 DEFAULT_CHAT_COMPLETIONS_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT = "https://api.anthropic.com/v1/messages"
 DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
+_RESPONSE_BODY_EXCERPT_LENGTH = 4096
+
+ResponseT = TypeVar("ResponseT")
+
+
+def _model_error_from_http_error(provider: str, error: urllib.error.HTTPError) -> ModelCallError:
+    """将 HTTP 失败转为脱敏的模型错误，不暴露响应正文和认证头。"""
+
+    body = error.read(_RESPONSE_BODY_EXCERPT_LENGTH).decode("utf-8", errors="replace")
+    details = _http_details(error.code, error.headers or {}, body)
+    return ModelCallError(
+        f"{provider} request failed with HTTP {error.code}",
+        details=details,
+    )
+
+
+def _model_error_from_network_error(error: Exception) -> ModelCallError:
+    """保留网络失败类别，避免把连接和超时错误压扁成字符串。"""
+
+    category = "timeout" if isinstance(error, (socket.timeout, TimeoutError)) else "network"
+    return ModelCallError(
+        f"model request {category} failure",
+        details=ModelFailureDetails(category=category, retryable=True),
+    )
+
+
+def _http_details(
+    status_code: int,
+    headers: Mapping[str, str],
+    body: str,
+) -> ModelFailureDetails:
+    provider_code = _safe_provider_code(body)
+    if status_code in {401, 403}:
+        category = "auth"
+    elif status_code == 429:
+        category = "rate_limited"
+    elif status_code >= 500:
+        category = "server"
+    elif status_code == 408:
+        category = "timeout"
+    else:
+        category = "client"
+    if status_code == 429 and provider_code == "insufficient_quota":
+        category = "quota_exhausted"
+    retryable = status_code in RETRYABLE_STATUS_CODES and category not in {
+        "auth",
+        "quota_exhausted",
+    }
+    return ModelFailureDetails(
+        category=category,
+        status_code=status_code,
+        provider_code=provider_code,
+        retry_after_seconds=_retry_after_seconds(headers),
+        request_id=_request_id(headers),
+        retryable=retryable,
+    )
+
+
+def _safe_provider_code(body: str) -> str | None:
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    error = parsed.get("error")
+    if isinstance(error, dict) and isinstance(error.get("code"), str):
+        return error["code"]
+    return parsed.get("code") if isinstance(parsed.get("code"), str) else None
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    value = _header_value(headers, "retry-after")
+    if value:
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+            except (TypeError, ValueError, IndexError, OverflowError):
+                retry_at = None
+            if retry_at is not None:
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                seconds = (retry_at - datetime.now(UTC)).total_seconds()
+            else:
+                seconds = None
+        if seconds is not None:
+            return seconds if seconds > 0 else None
+    rate_limit_reset = _header_value(headers, "x-ratelimit-reset-requests")
+    if rate_limit_reset and rate_limit_reset.endswith("s"):
+        try:
+            seconds = float(rate_limit_reset[:-1])
+        except ValueError:
+            return None
+        return seconds if seconds > 0 else None
+    return None
+
+
+def _request_id(headers: Mapping[str, str]) -> str | None:
+    return _header_value(headers, "x-request-id") or _header_value(headers, "request-id")
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str | None:
+    for header_name, value in headers.items():
+        if header_name.lower() == name and isinstance(value, str):
+            return value
+    return None
+
+
+def _with_urlopen(request: urllib.request.Request, provider: str, parse: Callable[[object], ResponseT]) -> ResponseT:
+    """所有 provider transport 共用失败分类边界，禁止在此处重试。"""
+
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return parse(response)
+    except urllib.error.HTTPError as error:
+        raise _model_error_from_http_error(provider, error) from error
+    except (
+        urllib.error.URLError,
+        socket.timeout,
+        TimeoutError,
+        ConnectionError,
+        http.client.HTTPException,
+    ) as error:
+        raise _model_error_from_network_error(error) from error
+    except json.JSONDecodeError as error:
+        raise ModelCallError(
+            f"{provider} response is not valid JSON",
+            details=ModelFailureDetails(category="response_parse", retryable=False),
+        ) from error
 
 
 def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
@@ -198,13 +334,11 @@ def _responses_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
-    return json.loads(body)
+    return _with_urlopen(
+        request,
+        "OpenAI",
+        lambda response: json.loads(response.read().decode("utf-8")),
+    )
 
 
 def _chat_completions_transport(
@@ -222,15 +356,11 @@ def _chat_completions_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(
-            f"OpenAI chat request failed with HTTP {error.code}: {detail}",
-        ) from error
-    return json.loads(body)
+    return _with_urlopen(
+        request,
+        "OpenAI chat",
+        lambda response: json.loads(response.read().decode("utf-8")),
+    )
 
 
 def _anthropic_transport(
@@ -249,15 +379,11 @@ def _anthropic_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(
-            f"Anthropic request failed with HTTP {error.code}: {detail}",
-        ) from error
-    return json.loads(body)
+    return _with_urlopen(
+        request,
+        "Anthropic",
+        lambda response: json.loads(response.read().decode("utf-8")),
+    )
 
 
 def _google_gemini_transport(
@@ -275,15 +401,11 @@ def _google_gemini_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(
-            f"Gemini request failed with HTTP {error.code}: {detail}",
-        ) from error
-    return json.loads(body)
+    return _with_urlopen(
+        request,
+        "Gemini",
+        lambda response: json.loads(response.read().decode("utf-8")),
+    )
 
 
 def _responses_stream_transport(
@@ -301,12 +423,11 @@ def _responses_stream_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return _parse_openai_responses_stream(response, on_delta)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(f"OpenAI request failed with HTTP {error.code}: {detail}") from error
+    return _with_urlopen(
+        request,
+        "OpenAI",
+        lambda response: _parse_openai_responses_stream(response, on_delta),
+    )
 
 
 def _chat_completions_stream_transport(
@@ -324,14 +445,11 @@ def _chat_completions_stream_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return _parse_openai_chat_stream(response, on_delta)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(
-            f"OpenAI chat request failed with HTTP {error.code}: {detail}",
-        ) from error
+    return _with_urlopen(
+        request,
+        "OpenAI chat",
+        lambda response: _parse_openai_chat_stream(response, on_delta),
+    )
 
 
 def _anthropic_stream_transport(
@@ -350,14 +468,11 @@ def _anthropic_stream_transport(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return _parse_anthropic_stream(response, on_delta)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(
-            f"Anthropic request failed with HTTP {error.code}: {detail}",
-        ) from error
+    return _with_urlopen(
+        request,
+        "Anthropic",
+        lambda response: _parse_anthropic_stream(response, on_delta),
+    )
 
 
 def _google_gemini_stream_transport(
@@ -374,14 +489,11 @@ def _google_gemini_stream_transport(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return _parse_gemini_stream(response, on_delta)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ModelCallError(
-            f"Gemini request failed with HTTP {error.code}: {detail}",
-        ) from error
+    return _with_urlopen(
+        request,
+        "Gemini",
+        lambda response: _parse_gemini_stream(response, on_delta),
+    )
 
 
 def _iter_sse_events(response) -> list[dict[str, object]]:

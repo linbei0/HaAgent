@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from haagent.runtime.execution.retry import ReplaySafety
+
 
 ALLOWED_JSON_SCHEMA_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 ALLOWED_RISK_LEVELS = {"low", "medium", "high"}
@@ -20,6 +22,7 @@ class ToolDefinition:
     description: str
     risk_level: str
     parameters: dict[str, Any]
+    replay_safety: ReplaySafety = ReplaySafety.NEVER_REPLAY
 
     def to_model_schema(self) -> dict[str, Any]:
         """导出模型网关需要的稳定字段，不暴露运行时内部风险元数据。"""

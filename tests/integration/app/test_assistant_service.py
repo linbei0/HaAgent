@@ -921,6 +921,32 @@ def test_create_new_session_uses_registry_as_default_gateway_factory(tmp_path: P
     assert isinstance(service._session.model_gateway, OpenAIChatCompletionsGateway)
 
 
+def test_create_and_resume_session_inject_same_retry_policy_into_compatible_factory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _set_home(monkeypatch, tmp_path / "home")
+    _write_user_connection(Path.home())
+    settings_path = Path.home() / ".haagent" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["model_retry"] = {"max_attempts": 2}
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    controllers = []
+
+    def gateway_factory(profile, *, retry_controller):
+        del profile
+        controllers.append(retry_controller)
+        return RecordingGateway("retry")
+
+    service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
+    created = service.create_session()
+    service.resume_session(created.session_path)
+
+    assert [controller.policy.max_attempts for controller in controllers] == [2, 2]
+    assert controllers[0] is not controllers[1]
+
+
 def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, tmp_path / "home")
     _write_user_connection(Path.home())

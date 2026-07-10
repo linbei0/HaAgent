@@ -22,6 +22,8 @@ from haagent.models.model_connections import (
     user_config_dir,
 )
 from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.execution.retry import RetryController
+from haagent.runtime.settings import load_runtime_settings
 
 
 class _EmptyMcpRuntime:
@@ -120,7 +122,10 @@ def _build_gateway(payload: dict[str, Any]):
         raise ValueError("subprocess worker requires a serializable gateway or model_profile")
     active_selection = load_active_model_selection(config_dir=user_config_dir())
     selection = ModelSelection(connection_id=model_profile, model=active_selection.model)
-    return gateway_from_profile(load_model_selection_profile(selection, config_dir=user_config_dir()))
+    return gateway_from_profile(
+        load_model_selection_profile(selection, config_dir=user_config_dir()),
+        retry_controller=RetryController(load_runtime_settings().model_retry),
+    )
 
 
 def _write_result(path: Path, payload: dict[str, Any]) -> None:

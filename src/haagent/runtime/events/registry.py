@@ -255,6 +255,45 @@ def _guardrail_event(event: dict[str, object], context: RawRuntimeUiEventContext
     )
 
 
+def _model_retry_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
+    next_attempt = event.get("next_attempt", "?")
+    delay = _retry_delay_label(event.get("delay_seconds"))
+    return WarningNoticeEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        title="模型重试",
+        message=f"模型暂时不可用，将在 {delay} 秒后第 {next_attempt} 次尝试",
+        notice_kind="model_retry",
+        surface="timeline",
+        details=without_event_type(event),
+    )
+
+
+def _retry_delay_label(value: object) -> str:
+    """将审计用浮点延迟压缩为稳定、可读的 TUI 文案。"""
+
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return f"{float(value):.1f}".rstrip("0").rstrip(".")
+    return "?"
+
+
+def _model_retry_exhausted_event(
+    event: dict[str, object],
+    context: RawRuntimeUiEventContext,
+) -> WarningNoticeEvent:
+    attempt = event.get("attempt", "?")
+    category = summary_value(str(event.get("category", "model failure")), 80)
+    return WarningNoticeEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        title="模型重试已耗尽",
+        message=f"模型在第 {attempt} 次尝试后仍失败（{category}），已耗尽自动重试次数",
+        notice_kind="model_retry_exhausted",
+        surface="timeline",
+        details=without_event_type(event),
+    )
+
+
 def _compression_diagnostic_event(
     event: dict[str, object],
     context: RawRuntimeUiEventContext,
@@ -401,6 +440,8 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("user_input_requested", UserInputStateEvent, _user_input_requested_event),
     _spec("user_input_received", UserInputStateEvent, _user_input_received_event),
     _spec("guardrail_triggered", WarningNoticeEvent, _guardrail_event),
+    _spec("model_retry_scheduled", WarningNoticeEvent, _model_retry_event),
+    _spec("model_retry_exhausted", WarningNoticeEvent, _model_retry_exhausted_event),
     _spec("compression_diagnostic", WarningNoticeEvent, _compression_diagnostic_event),
     _spec("loop_suggestion_added", WarningNoticeEvent, _loop_suggestion_event),
     _spec("safety_abort", WarningNoticeEvent, _safety_abort_event),

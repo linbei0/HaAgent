@@ -13,6 +13,33 @@ from haagent.runtime.events import (
     ToolActivityEvent,
     WarningNoticeEvent,
 )
+from haagent.runtime.events.bus import (
+    ModelRetryExhaustedBusEvent,
+    ModelRetryScheduledBusEvent,
+    bus_event_from_dict,
+    bus_event_to_dict,
+)
+
+
+def test_model_retry_bus_events_round_trip_with_safe_fields() -> None:
+    scheduled = ModelRetryScheduledBusEvent(
+        turn=1,
+        attempt=1,
+        next_attempt=2,
+        category="rate_limited",
+        delay_seconds=1.2,
+        source="retry_after",
+    )
+    exhausted = ModelRetryExhaustedBusEvent(
+        turn=1,
+        attempt=3,
+        category="server",
+        status_code=503,
+        request_id="req_123",
+    )
+
+    assert bus_event_from_dict(bus_event_to_dict(scheduled)) == scheduled
+    assert bus_event_from_dict(bus_event_to_dict(exhausted)) == exhausted
 
 
 def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
@@ -48,6 +75,8 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "task_checkpoint_saved",
         "task_recovery_suggested",
         "task_budget_warning",
+        "model_retry_scheduled",
+        "model_retry_exhausted",
     }
 
 
@@ -57,13 +86,42 @@ def test_runtime_ui_event_mapper_groups_assistant_delta() -> None:
         session_id="session-1",
         turn_index=1,
     )
-
     assert event == AssistantDeltaEvent(
         session_id="session-1",
         turn_index=1,
         model_turn=2,
         delta="正在整理",
     )
+
+
+def test_runtime_ui_event_mapper_exposes_model_retry_as_warning() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {"event_type": "model_retry_scheduled", "turn": 1, "attempt": 1, "next_attempt": 2, "category": "rate_limited", "delay_seconds": 1.23456, "source": "backoff"},
+        session_id="session-1", turn_index=1,
+    )
+
+    assert isinstance(event, WarningNoticeEvent)
+    assert event.notice_kind == "model_retry"
+    assert "1.2 秒后" in event.message
+
+
+def test_runtime_ui_event_mapper_marks_exhausted_model_retry_as_error_notice() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "model_retry_exhausted",
+            "turn": 1,
+            "attempt": 3,
+            "category": "server",
+            "status_code": 503,
+        },
+        session_id="session-1",
+        turn_index=1,
+    )
+
+    assert isinstance(event, WarningNoticeEvent)
+    assert event.notice_kind == "model_retry_exhausted"
+    assert "已耗尽" in event.message
+
 
 
 def test_runtime_ui_event_mapper_groups_tool_events_as_activity() -> None:

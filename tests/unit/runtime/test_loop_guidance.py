@@ -195,6 +195,24 @@ def test_apply_patch_set_not_unique_suggests_expand_context() -> None:
     assert "unique" in suggestion.message.lower() or "longer" in suggestion.message.lower()
 
 
+def test_unknown_execution_suggests_inspection_before_any_retry() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "shell",
+            {},
+            {
+                "status": "error",
+                "execution_state": "unknown",
+                "error": {"type": "timeout", "message": "command timed out"},
+            },
+        )
+    )
+
+    assert suggestion is not None
+    assert "Inspect" in suggestion.message
+    assert "before retrying" in suggestion.message
+
+
 def test_error_without_specific_handler_returns_none() -> None:
     """没有专门处理逻辑的错误不应该产生建议，让 SafetyGuard 处理。"""
     suggestion = suggestion_for_observation(

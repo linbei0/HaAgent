@@ -24,6 +24,7 @@ from haagent.context.messages import (
 from haagent.models.types import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.cancellation import RunCancelled
+from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import check_assistant_output, guardrail_evidence
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
@@ -104,6 +105,7 @@ class TurnLoopDependencies:
     verification_loop_limit_evidence: Callable[[int, object], str]
     task_step_id: str = "step-001"
     task_step_title: str = ""
+    cancellation_token: CancellationToken | None = None
 
 
 def run_turn_loop(
@@ -130,12 +132,16 @@ def run_turn_loop(
         )
         deps.compress_historical_tool_messages(state.messages, deps.writer, turn, deps.emit_event)
 
+        max_attempts = _retry_max_attempts(deps.model_gateway)
+        model_attempt = 1
         deps.writer.append_transcript(
             {
                 "event": "model_call",
                 "provider": deps.model_gateway.provider_name,
                 "context_id": state.context_id,
                 "turn": turn,
+                "attempt": model_attempt,
+                "max_attempts": max_attempts,
                 "goal": deps.task_goal,
             },
         )
@@ -153,21 +159,78 @@ def run_turn_loop(
             deps.raise_if_cancelled()
             deps.emit_event(AssistantDeltaBusEvent(turn=turn, delta=delta))
 
-        if _supports_event_sink(deps.model_gateway):
-            model_response = deps.model_gateway.generate(
-                messages=state.messages,
-                tool_schemas=tool_schemas,
-                event_sink=emit_assistant_delta,
-            )
-        else:
-            model_response = deps.model_gateway.generate(
-                messages=state.messages,
-                tool_schemas=tool_schemas,
-            )
+        generate_kwargs: dict[str, object] = {"messages": state.messages, "tool_schemas": tool_schemas}
+        if _supports_generate_parameter(deps.model_gateway, "event_sink"):
+            generate_kwargs["event_sink"] = emit_assistant_delta
+        if _supports_generate_parameter(deps.model_gateway, "retry_event_sink"):
+            def emit_retry(retry_event) -> None:
+                nonlocal model_attempt
+                deps.writer.append_transcript(
+                    {
+                        "event": "model_attempt_failed",
+                        "turn": turn,
+                        "attempt": retry_event.attempt,
+                        "category": retry_event.category,
+                    },
+                )
+                model_attempt = retry_event.next_attempt
+                retry_record = {
+                    "event": "model_retry_scheduled",
+                    "turn": turn,
+                    "attempt": retry_event.attempt,
+                    "next_attempt": retry_event.next_attempt,
+                    "category": retry_event.category,
+                    "delay_seconds": retry_event.delay_seconds,
+                    "source": retry_event.source,
+                    "retry_after_ignored": retry_event.retry_after_ignored,
+                }
+                deps.writer.append_transcript(retry_record)
+                deps.emit_event({"event_type": "model_retry_scheduled", **{key: value for key, value in retry_record.items() if key != "event"}})
+                deps.writer.append_transcript(
+                    {
+                        "event": "model_call",
+                        "provider": deps.model_gateway.provider_name,
+                        "context_id": state.context_id,
+                        "turn": turn,
+                        "attempt": model_attempt,
+                        "max_attempts": max_attempts,
+                        "goal": deps.task_goal,
+                    },
+                )
+            generate_kwargs["retry_event_sink"] = emit_retry
+        if _supports_generate_parameter(deps.model_gateway, "retry_exhausted_sink"):
+            def emit_retry_exhausted(failure, attempt: int) -> None:
+                deps.writer.append_transcript(
+                    {
+                        "event": "model_attempt_failed",
+                        "turn": turn,
+                        "attempt": attempt,
+                        "category": failure.category,
+                        "status_code": failure.status_code,
+                        "request_id": failure.request_id,
+                    },
+                )
+                if failure.category == "stream_interrupted":
+                    return
+                retry_record = {
+                    "event": "model_retry_exhausted",
+                    "turn": turn,
+                    "attempt": attempt,
+                    "category": failure.category,
+                    "status_code": failure.status_code,
+                    "request_id": failure.request_id,
+                }
+                deps.writer.append_transcript(retry_record)
+                deps.emit_event({"event_type": "model_retry_exhausted", **{key: value for key, value in retry_record.items() if key != "event"}})
+            generate_kwargs["retry_exhausted_sink"] = emit_retry_exhausted
+        if _supports_generate_parameter(deps.model_gateway, "cancellation_token"):
+            generate_kwargs["cancellation_token"] = deps.cancellation_token
+        model_response = deps.model_gateway.generate(**generate_kwargs)
         deps.raise_if_cancelled()
         model_metadata = _gateway_metadata(deps.model_gateway)
         deps.writer.append_model_usage(
             turn=turn,
+            attempt=model_attempt,
             provider=deps.model_gateway.provider_name,
             model=model_metadata.get("model"),
             usage=model_response.usage,
@@ -398,6 +461,7 @@ def _run_tool_calls(
                 tool_name=tool_call.name,
                 args=dict(tool_call.args),
                 error=dict(error),
+                execution_state=str(tool_result.get("execution_state", "")),
             )
             deps.emit_event(failed_event)
             recovery = map_failure_to_recovery(bus_event_to_dict(failed_event))
@@ -730,11 +794,24 @@ def _tool_visible_result_fingerprint(tool_name: str, args: dict[str, Any], resul
 
 
 def _supports_event_sink(model_gateway: ModelGateway) -> bool:
+    return _supports_generate_parameter(model_gateway, "event_sink")
+
+
+def _supports_generate_parameter(model_gateway: ModelGateway, parameter: str) -> bool:
     try:
         signature = inspect.signature(model_gateway.generate)
     except (TypeError, ValueError):
         return False
-    return "event_sink" in signature.parameters
+    return parameter in signature.parameters
+
+
+def _retry_max_attempts(model_gateway: ModelGateway) -> int | None:
+    """从 session 注入的 controller 读取审计上限；旧测试替身不强行声明该字段。"""
+
+    controller = getattr(model_gateway, "_retry_controller", None)
+    policy = getattr(controller, "policy", None)
+    value = getattr(policy, "max_attempts", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _task_step_title(deps: TurnLoopDependencies) -> str:

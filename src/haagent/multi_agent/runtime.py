@@ -7,6 +7,7 @@ src/haagent/multi_agent/runtime.py - 进程内 worker 调度运行时
 from __future__ import annotations
 
 import json
+import inspect
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -38,6 +39,8 @@ from haagent.runtime.execution.path_policy import PathPolicy
 from haagent.runtime.orchestration.task_progress import map_failure_to_recovery
 from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
+from haagent.runtime.settings import load_runtime_settings
+from haagent.runtime.execution.retry import RetryController
 
 
 RESTART_STATUS_NOTE = "Task restarted; prior interactive context was not preserved."
@@ -788,6 +791,10 @@ class MultiAgentRuntime:
             )
         except ProviderProfileError as error:
             raise ValueError(str(error)) from error
+        controller = RetryController(load_runtime_settings().model_retry)
+        signature = inspect.signature(self.gateway_factory)
+        if "retry_controller" in signature.parameters:
+            return self.gateway_factory(profile, retry_controller=controller)
         return self.gateway_factory(profile)
 
     def _emit_worker_event(

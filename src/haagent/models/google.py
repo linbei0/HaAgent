@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 
+from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.transport import (
     _endpoint_base_url,
     _google_gemini_stream_transport,
@@ -29,6 +30,8 @@ from haagent.models.types import (
     ModelUsage,
     ToolCall,
 )
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
 
 def _gemini_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
     system_parts: list[str] = []
@@ -221,12 +224,14 @@ class GoogleGeminiGateway:
         base_url: str | None = None,
         transport: GoogleGeminiTransport | None = None,
         stream_transport: GoogleGeminiStreamTransport | None = None,
+        retry_controller: RetryController | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         self._model = model
         self._endpoint = _normalize_gemini_generate_content_endpoint(base_url, model)
         self._transport = transport or _google_gemini_transport
         self._stream_transport = stream_transport or _google_gemini_stream_transport
+        self._retry_controller = default_retry_controller(retry_controller)
 
     @property
     def generate_content_endpoint(self) -> str:
@@ -246,6 +251,9 @@ class GoogleGeminiGateway:
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
         event_sink: Callable[[str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        retry_event_sink: Callable[[RetryEvent], None] | None = None,
+        retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
     ) -> ModelResponse:
         """调用 Gemini generateContent API，并归一化为统一 ModelResponse。"""
         if not self._api_key:
@@ -262,11 +270,23 @@ class GoogleGeminiGateway:
         if event_sink is not None:
             payload["stream"] = True
         try:
-            response = (
-                self._stream_transport(payload, self._api_key, self._endpoint, event_sink)
-                if event_sink is not None
-                else self._transport(payload, self._api_key, self._endpoint)
+            response = execute_model_request(
+                self._retry_controller,
+                provider=self.provider_name,
+                invoke=lambda on_delta: (
+                    self._stream_transport(payload, self._api_key, self._endpoint, on_delta)
+                    if on_delta is not None
+                    else self._transport(payload, self._api_key, self._endpoint)
+                ),
+                event_sink=event_sink,
+                cancellation_token=cancellation_token,
+                retry_event_sink=retry_event_sink,
+                retry_exhausted_sink=retry_exhausted_sink,
             )
+        except ModelCallError:
+            raise
+        except RunCancelled:
+            raise
         except Exception as error:
-            raise ModelCallError(str(error)) from error
+            raise unexpected_model_error(error) from error
         return _parse_gemini_response(response)

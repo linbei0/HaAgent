@@ -103,6 +103,11 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
 
 
 def _error_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str | None:
+    if result.get("execution_state") == "unknown":
+        return (
+            "Inspect the file, process, or workspace state before retrying. "
+            "Only then run a narrower idempotent verification or replan the task."
+        )
     suggestions = result.get("suggestions")
     if tool_name in {"file_read", "file_list", "grep"} and isinstance(suggestions, list) and suggestions:
         return f"File path failed; try the suggested path with file_read: {suggestions[0]}."

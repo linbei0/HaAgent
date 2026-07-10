@@ -181,6 +181,8 @@ def begin_task_ledger_turn(ledger: TaskLedger, *, prompt: str, turn_index: int) 
         current_step_id = steps[-1].id
     active = _find_or_default_step(steps, current_step_id)
     if active is not None and active.status in {"pending", "blocked", "failed", "skipped"}:
+        if active.status in {"blocked", "failed", "skipped"}:
+            active.retry_count += 1
         active.status = "running"
         active.blocker = None
         active.updated_turn = turn_index
@@ -213,11 +215,26 @@ def update_task_ledger(
     status = current.status
     current_step_id = current.current_step_id
     checkpoint_step_ids: list[str] = []
+    model_attempts_by_turn: dict[int, int] = {}
+    model_turn_starts = 0
+    scheduled_replays = 0
 
     for raw_event in runtime_events:
         # ledger 仍按 dict 字段驱动；总线类型在边界 to_dict，episode schema 不变。
         event = bus_event_to_dict(coerce_bus_event(raw_event))
         event_type = str(event.get("event_type", ""))
+        if event_type == "task_step_progress" and event.get("category") == "model_turn_started":
+            model_turn_starts += 1
+        if event_type in {"model_retry_scheduled", "model_retry_exhausted"}:
+            model_turn = event.get("turn")
+            attempt = event.get("attempt")
+            if isinstance(model_turn, int) and isinstance(attempt, int):
+                model_attempts_by_turn[model_turn] = max(
+                    model_attempts_by_turn.get(model_turn, 0),
+                    attempt,
+                )
+            if event_type == "model_retry_scheduled":
+                scheduled_replays += 1
         if event_type == "tool_finished":
             step = _find_or_default_step(steps, current_step_id)
             if step is not None:
@@ -344,7 +361,15 @@ def update_task_ledger(
         current_step_id=current_step_id,
         steps=steps,
         checkpoints=checkpoints,
-        budgets={**current.budgets, "turns_used": turn_index},
+        budgets={
+            **current.budgets,
+            "turns_used": turn_index,
+            "model_attempts": _model_attempt_total(current.budgets) + _current_model_attempts(
+                model_turn_starts,
+                scheduled_replays,
+                model_attempts_by_turn,
+            ),
+        },
         updated_turn=turn_index,
     )
 
@@ -521,11 +546,28 @@ def _bounded_text(value: str, limit: int = TASK_LEDGER_TEXT_FIELD_LIMIT) -> str:
 
 def _budget_warnings(budgets: dict[str, object]) -> list[str]:
     warnings: list[str] = []
-    for key in ("turns_used", "tool_calls", "retry_count"):
+    for key in ("turns_used", "tool_calls", "retry_count", "model_attempts"):
         value = budgets.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             warnings.append(f"{key}={value}")
     return warnings
+
+
+def _model_attempt_total(budgets: dict[str, object]) -> int:
+    value = budgets.get("model_attempts", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _current_model_attempts(
+    model_turn_starts: int,
+    scheduled_replays: int,
+    attempts_by_turn: dict[int, int],
+) -> int:
+    """优先以真实模型轮次为基数；旧事件流则回退到最终 attempt 事实。"""
+
+    if model_turn_starts:
+        return model_turn_starts + scheduled_replays
+    return sum(attempts_by_turn.values())
 
 
 def _find_or_default_step(steps: list[TaskStep], step_id: str | None) -> TaskStep | None:

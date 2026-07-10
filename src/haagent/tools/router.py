@@ -13,6 +13,7 @@ from typing import Any, Callable
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.tool_results import prepare_tool_result_for_model
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.retry import RetryController, RetryOperation
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.guardrails import GuardrailResult, check_tool_input, guardrail_evidence
 from haagent.runtime.execution.human_interaction import (
@@ -36,6 +37,7 @@ from haagent.tools.handler_factory import build_static_tool_handlers
 from haagent.tools.mcp_tools import run_mcp_tool
 from haagent.tools.registry import (
     TOOL_REGISTRY,
+    ToolDefinition,
     ToolRuntimeRegistry,
     default_tool_runtime_registry,
     validate_tool_registry,
@@ -59,6 +61,7 @@ class ToolRouter:
         worker_permission_requester: Callable[[str, dict[str, Any], PolicyDecision], Any] | None = None,
         sandbox_backend: SandboxBackend | None = None,
         image_attachment_history: list[ImageAttachment] | None = None,
+        retry_controller: RetryController | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -67,6 +70,7 @@ class ToolRouter:
         self._workspace_root = workspace_root.resolve()
         self._skill_settings = skill_settings
         self._cancellation_token = cancellation_token
+        self._retry_controller = retry_controller or RetryController()
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
         self._agent_runtime = agent_runtime
@@ -144,16 +148,25 @@ class ToolRouter:
                         guardrail_evidence(guardrail_result),
                     )
                 elif tool_name == "request_user_input":
-                    result = self._request_user_input(args, interaction_handler)
+                    result = self._execute_tool_operation(
+                        tool_definition,
+                        lambda: self._request_user_input(args, interaction_handler),
+                    )
                 elif tool_name.startswith("mcp__"):
-                    result = run_mcp_tool(
-                        tool_name,
-                        args,
-                        self._mcp_runtime,
-                        cancellation_token=self._cancellation_token,
+                    result = self._execute_tool_operation(
+                        tool_definition,
+                        lambda: run_mcp_tool(
+                            tool_name,
+                            args,
+                            self._mcp_runtime,
+                            cancellation_token=self._cancellation_token,
+                        ),
                     )
                 else:
-                    result = self._run_handler(tool_name, args, interaction_handler)
+                    result = self._execute_tool_operation(
+                        tool_definition,
+                        lambda: self._run_handler(tool_name, args, interaction_handler),
+                    )
         except RunCancelled as error:
             result = tool_error(type(error).__name__, str(error))
             self._write_trace(tool_name, args, result, started, policy_decision, guardrail_result)
@@ -371,6 +384,9 @@ class ToolRouter:
                 None,
             )
         granted_policy = grant_tool_approval(policy_decision)
+        validation_error = _validate_args(tool_name, args, self._tool_registry)
+        if validation_error:
+            return validation_error, granted_policy, None
         guardrail_result = check_tool_input(tool_name, args)
         if guardrail_result is not None:
             return (
@@ -380,16 +396,42 @@ class ToolRouter:
             )
         if tool_name.startswith("mcp__"):
             return (
-                run_mcp_tool(
-                    tool_name,
-                    args,
-                    self._mcp_runtime,
-                    cancellation_token=self._cancellation_token,
+                self._execute_tool_operation(
+                    self._tool_registry.get(tool_name),
+                    lambda: run_mcp_tool(
+                        tool_name,
+                        args,
+                        self._mcp_runtime,
+                        cancellation_token=self._cancellation_token,
+                    ),
                 ),
                 granted_policy,
                 None,
             )
-        return self._run_handler(tool_name, args, interaction_handler), granted_policy, None
+        return (
+            self._execute_tool_operation(
+                self._tool_registry.get(tool_name),
+                lambda: self._run_handler(tool_name, args, interaction_handler),
+            ),
+            granted_policy,
+            None,
+        )
+
+    def _execute_tool_operation(
+        self,
+        tool_definition: ToolDefinition,
+        invoke: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """将通过策略与参数校验的真实工具执行交给统一重试边界。"""
+        # 工具默认不可重放；即使调用失败，控制器也只会保留这一次执行。
+        return self._retry_controller.execute(
+            RetryOperation(
+                name=f"tool.{tool_definition.name}",
+                replay_safety=tool_definition.replay_safety,
+            ),
+            invoke,
+            cancellation_token=self._cancellation_token,
+        )
 
     def _run_handler(
         self,

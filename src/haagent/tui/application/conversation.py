@@ -49,6 +49,9 @@ class ConversationController:
     # ── assistant streaming ──────────────────────────────────────────────
     def start_assistant(self, turn_index: int) -> None:
         self._timeline().start_assistant_response(turn_index=turn_index)
+        # 首个 delta 前失败时也必须能结束 timeline 的 streaming 指示器。
+        self.streaming_turn = turn_index
+        self.streaming_text = ""
 
     def merge_assistant_delta(self, turn_index: int, delta: str) -> None:
         if not delta:

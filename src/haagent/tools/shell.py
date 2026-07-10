@@ -67,11 +67,13 @@ def shell(
         "timeout_seconds": command_result.timeout_seconds,
     }
     if command_result.status == "timeout":
+        result["execution_state"] = "unknown"
         result["error"] = {
             "type": "timeout",
             "message": f"command timed out after {timeout_result} seconds",
         }
     elif command_result.status == "cancelled":
+        result["execution_state"] = "unknown"
         result["error"] = {
             "type": "cancelled",
             "message": "command cancelled by user",

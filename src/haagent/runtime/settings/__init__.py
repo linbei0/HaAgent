@@ -7,10 +7,12 @@ haagent/runtime/settings/__init__.py - runtime 级用户设置
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from haagent.models.model_connections import user_settings_path
+from haagent.runtime.execution.retry import RetryPolicy
 from haagent.runtime.sandbox.settings import (
     SandboxSettings,
     SandboxSettingsError,
@@ -32,6 +34,7 @@ class RuntimeSettingsError(ValueError):
 class RuntimeSettings:
     interactive_max_turns: int = DEFAULT_INTERACTIVE_MAX_TURNS
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
+    model_retry: RetryPolicy = field(default_factory=RetryPolicy)
 
 
 def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings:
@@ -47,6 +50,7 @@ def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings
     return RuntimeSettings(
         interactive_max_turns=_positive_int(value, "interactive_max_turns"),
         sandbox=sandbox,
+        model_retry=_load_model_retry(raw.get("model_retry")),
     )
 
 
@@ -96,3 +100,75 @@ def _positive_int(value: object, field_name: str) -> int:
     if value <= 0:
         raise RuntimeSettingsError(f"{field_name} must be a positive integer")
     return value
+
+
+def _load_model_retry(raw: object) -> RetryPolicy:
+    if raw is None:
+        return RetryPolicy()
+    if not isinstance(raw, dict):
+        raise RuntimeSettingsError("model_retry must be an object")
+    allowed_keys = {
+        "max_attempts",
+        "minimum_delay_seconds",
+        "base_delay_seconds",
+        "throttling_base_delay_seconds",
+        "max_delay_seconds",
+        "max_server_retry_after_seconds",
+    }
+    unknown_keys = set(raw) - allowed_keys
+    if unknown_keys:
+        raise RuntimeSettingsError("model_retry contains unknown fields")
+    defaults = RetryPolicy()
+    max_attempts = _retry_int(raw.get("max_attempts", defaults.max_attempts), "max_attempts")
+    if not 1 <= max_attempts <= 5:
+        raise RuntimeSettingsError("model_retry.max_attempts must be between 1 and 5")
+    base_delay_seconds = _retry_seconds(
+        raw.get("base_delay_seconds", defaults.base_delay_seconds),
+        "base_delay_seconds",
+    )
+    minimum_delay_seconds = _retry_seconds(
+        raw.get("minimum_delay_seconds", defaults.minimum_delay_seconds),
+        "minimum_delay_seconds",
+    )
+    throttling_base_delay_seconds = _retry_seconds(
+        raw.get("throttling_base_delay_seconds", defaults.throttling_base_delay_seconds),
+        "throttling_base_delay_seconds",
+    )
+    max_delay_seconds = _retry_seconds(
+        raw.get("max_delay_seconds", defaults.max_delay_seconds),
+        "max_delay_seconds",
+    )
+    max_server_retry_after_seconds = _retry_seconds(
+        raw.get(
+            "max_server_retry_after_seconds",
+            defaults.max_server_retry_after_seconds,
+        ),
+        "max_server_retry_after_seconds",
+    )
+    if max_delay_seconds < max(base_delay_seconds, throttling_base_delay_seconds):
+        raise RuntimeSettingsError("model_retry.max_delay_seconds must cover base delays")
+    if max_delay_seconds < minimum_delay_seconds:
+        raise RuntimeSettingsError("model_retry.max_delay_seconds must cover minimum_delay_seconds")
+    return RetryPolicy(
+        max_attempts=max_attempts,
+        minimum_delay_seconds=minimum_delay_seconds,
+        base_delay_seconds=base_delay_seconds,
+        throttling_base_delay_seconds=throttling_base_delay_seconds,
+        max_delay_seconds=max_delay_seconds,
+        max_server_retry_after_seconds=max_server_retry_after_seconds,
+    )
+
+
+def _retry_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeSettingsError(f"model_retry.{field_name} must be an integer")
+    return value
+
+
+def _retry_seconds(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeSettingsError(f"model_retry.{field_name} must be a positive number")
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise RuntimeSettingsError(f"model_retry.{field_name} must be a positive number")
+    return seconds

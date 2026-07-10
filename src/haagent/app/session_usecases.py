@@ -6,9 +6,12 @@ haagent/app/session_usecases.py - 会话类应用用例
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from haagent.runtime.execution.retry import RetryController
+from haagent.runtime.settings import load_runtime_settings
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.session.package import ChatSessionError, find_latest_session, list_sessions
 
@@ -34,7 +37,7 @@ def create_session(service: "AssistantService") -> "AssistantSessionStatus":
         service._session = service.session_cls(
             workspace_root=service.workspace_root,
             runs_root=service.runs_root,
-            model_gateway=service.gateway_factory(profile),
+            model_gateway=_gateway_for_profile(service, profile),
             model_profile_name=profile.name,
             model_connection_id=getattr(service, "_last_model_selection", None).connection_id
             if getattr(service, "_last_model_selection", None) is not None
@@ -56,7 +59,7 @@ def resume_session(service: "AssistantService", session: str | Path) -> "Assista
         service._session = service.session_cls.resume(
             session,
             runs_root=service.runs_root,
-            model_gateway=service.gateway_factory(profile),
+            model_gateway=_gateway_for_profile(service, profile),
             model_profile_name=profile.name,
             model_connection_id=getattr(service, "_last_model_selection", None).connection_id
             if getattr(service, "_last_model_selection", None) is not None
@@ -79,6 +82,17 @@ def continue_latest_session(service: "AssistantService") -> "AssistantSessionSta
     if latest is None:
         raise service.error_cls("当前 workspace 没有可恢复会话")
     return resume_session(service, latest.session_path)
+
+
+def _gateway_for_profile(service: "AssistantService", profile):
+    """为每个 session 创建独立 controller，并兼容旧的一参数 gateway factory。"""
+
+    controller = RetryController(load_runtime_settings().model_retry)
+    factory = service.gateway_factory
+    signature = inspect.signature(factory)
+    if "retry_controller" in signature.parameters:
+        return factory(profile, retry_controller=controller)
+    return factory(profile)
 
 
 def list_sessions_for_workspace(service: "AssistantService") -> list["AssistantSessionSummary"]:

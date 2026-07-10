@@ -184,6 +184,22 @@ def test_episode_writer_keeps_usage_unavailable_when_usage_is_none(tmp_path: Pat
     }
 
 
+def test_episode_writer_records_optional_model_attempt_without_changing_token_totals(tmp_path: Path) -> None:
+    writer = create_writer(tmp_path)
+
+    writer.append_model_usage(
+        turn=1,
+        attempt=2,
+        provider="openai",
+        model="gpt-test",
+        usage=ModelUsage(input_tokens=3, output_tokens=2, total_tokens=5),
+    )
+
+    cost = json.loads((writer.path / "cost.json").read_text(encoding="utf-8"))
+    assert cost["model_calls"][0]["attempt"] == 2
+    assert cost["totals"]["total_tokens"] == 5
+
+
 def test_episode_writer_appends_tool_calls_with_instance_write_lock(tmp_path: Path) -> None:
     episode_path = tmp_path / "episode"
     episode_path.mkdir()

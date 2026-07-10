@@ -173,6 +173,39 @@ def test_recovery_and_checkpoint_events_update_active_step(tmp_path) -> None:
     assert any(ref.startswith("checkpoint=") for ref in step.evidence_refs)
 
 
+def test_model_retry_events_accumulate_model_attempt_budget(tmp_path) -> None:
+    ledger = update_task_ledger(
+        empty_task_ledger(),
+        prompt="测试模型重试预算",
+        turn_index=1,
+        result_status="failed",
+        episode_path=tmp_path / ".runs" / "episode-failed",
+        runtime_events=[
+            {"event_type": "model_retry_scheduled", "turn": 1, "attempt": 1, "next_attempt": 2},
+            {"event_type": "model_retry_scheduled", "turn": 1, "attempt": 2, "next_attempt": 3},
+            {"event_type": "model_retry_exhausted", "turn": 1, "attempt": 3},
+        ],
+    )
+
+    assert ledger.budgets["model_attempts"] == 3
+
+
+def test_model_retry_budget_counts_initial_attempt_and_scheduled_replay(tmp_path) -> None:
+    ledger = update_task_ledger(
+        empty_task_ledger(),
+        prompt="测试模型重试预算",
+        turn_index=1,
+        result_status="completed",
+        episode_path=tmp_path / ".runs" / "episode-completed",
+        runtime_events=[
+            {"event_type": "task_step_progress", "category": "model_turn_started"},
+            {"event_type": "model_retry_scheduled", "turn": 1, "attempt": 1, "next_attempt": 2},
+        ],
+    )
+
+    assert ledger.budgets["model_attempts"] == 2
+
+
 def test_blocked_ledger_resumes_same_active_step(tmp_path) -> None:
     blocked = update_task_ledger(
         empty_task_ledger(),

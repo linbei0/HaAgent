@@ -13,6 +13,7 @@ from haagent.context.messages import build_tool_result_message
 from haagent.mcp.runtime import McpRuntimeTimeoutError
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.retry import ReplaySafety, RetryController, RetryOperation
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
 from haagent.runtime.session.attachments import ImageAttachment
@@ -618,11 +619,76 @@ def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -
 
     assert result == {
         "status": "error",
+        "execution_state": "unknown",
         "error": {
             "type": "mcp_timeout",
             "message": "MCP tool fixture.echo timed out after 0.05 seconds",
         },
     }
+
+
+def test_tool_router_executes_handler_once_through_retry_controller(tmp_path: Path) -> None:
+    class RecordingRetryController(RetryController):
+        def __init__(self) -> None:
+            super().__init__()
+            self.operations: list[RetryOperation] = []
+
+        def execute(self, operation: RetryOperation, invoke, **kwargs):
+            self.operations.append(operation)
+            return invoke()
+
+    writer = make_writer(tmp_path)
+    retry_controller = RecordingRetryController()
+    router = ToolRouter(
+        allowed_tools=["fake_tool"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        retry_controller=retry_controller,
+    )
+    calls = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success", "handled": True}
+
+    router._handlers["fake_tool"] = handler
+
+    result = router.dispatch("fake_tool", {"value": 42})
+
+    assert result == {"status": "success", "handled": True}
+    assert calls == [{"value": 42}]
+    assert retry_controller.operations == [
+        RetryOperation("tool.fake_tool", ReplaySafety.NEVER_REPLAY),
+    ]
+
+
+def test_approved_high_risk_tool_validates_arguments_before_execution(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["shell"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["shell"],
+    )
+    calls = []
+    requests = []
+
+    def handler(args):
+        calls.append(args)
+        return {"status": "success"}
+
+    def interaction_handler(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="yes")
+
+    router._handlers["shell"] = handler
+
+    result = router.dispatch("shell", {}, interaction_handler=interaction_handler)
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "tool_argument_invalid"
+    assert len(requests) == 1
+    assert calls == []
 
 
 def test_load_image_attachment_returns_registered_history_image(tmp_path: Path) -> None:

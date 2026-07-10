@@ -812,6 +812,8 @@ def test_tui_failure_event_shows_reason_episode_in_conversation(tmp_path: Path) 
             assert str(episode_path) in conversation.replace("\n", "")
             assert "state: failed" in _text(app, "#status-bar")
             assert list(app.query("#side-bar")) == []
+            assistant = next(item for item in app._timeline()._items if item.role == "assistant")
+            assert assistant.status == "done"
 
     asyncio.run(run())
 

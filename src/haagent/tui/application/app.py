@@ -219,7 +219,7 @@ class HaAgentTuiApp(App[None]):
         timeline = self._timeline()
         timeline.set_stick_to_bottom(True)
         self._conversation.append_block("You", display_prompt or prompt)
-        timeline.start_assistant_response(turn_index=self._active_turn_index)
+        self._conversation.start_assistant(self._active_turn_index)
         self._state = "running"
         self._refresh()
         self._run_prompt(prompt, attachments=attachments or [])

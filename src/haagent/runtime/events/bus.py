@@ -48,7 +48,34 @@ class ToolFailedBusEvent:
     tool_name: str
     args: dict[str, Any]
     error: dict[str, Any]
+    execution_state: str = ""
     event_type: str = field(default="tool_failed", init=False)
+
+
+@dataclass(frozen=True)
+class ModelRetryScheduledBusEvent:
+    """模型请求已安排下一次安全重放的最小审计事实。"""
+
+    turn: int
+    attempt: int
+    next_attempt: int
+    category: str
+    delay_seconds: float
+    source: str
+    retry_after_ignored: bool = False
+    event_type: str = field(default="model_retry_scheduled", init=False)
+
+
+@dataclass(frozen=True)
+class ModelRetryExhaustedBusEvent:
+    """模型可重试失败已耗尽本轮重试预算的脱敏事实。"""
+
+    turn: int
+    attempt: int
+    category: str
+    status_code: int | None = None
+    request_id: str | None = None
+    event_type: str = field(default="model_retry_exhausted", init=False)
 
 
 @dataclass(frozen=True)
@@ -68,6 +95,8 @@ RuntimeBusEvent: TypeAlias = (
     | ToolStartedBusEvent
     | ToolFinishedBusEvent
     | ToolFailedBusEvent
+    | ModelRetryScheduledBusEvent
+    | ModelRetryExhaustedBusEvent
     | LegacyRawBusEvent
 )
 
@@ -108,12 +137,35 @@ def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, o
             "result": dict(event.result),
         }
     if isinstance(event, ToolFailedBusEvent):
-        return {
+        payload = {
             "event_type": "tool_failed",
             "turn": event.turn,
             "tool_name": event.tool_name,
             "args": dict(event.args),
             "error": dict(event.error),
+        }
+        if event.execution_state:
+            payload["execution_state"] = event.execution_state
+        return payload
+    if isinstance(event, ModelRetryScheduledBusEvent):
+        return {
+            "event_type": "model_retry_scheduled",
+            "turn": event.turn,
+            "attempt": event.attempt,
+            "next_attempt": event.next_attempt,
+            "category": event.category,
+            "delay_seconds": event.delay_seconds,
+            "source": event.source,
+            "retry_after_ignored": event.retry_after_ignored,
+        }
+    if isinstance(event, ModelRetryExhaustedBusEvent):
+        return {
+            "event_type": "model_retry_exhausted",
+            "turn": event.turn,
+            "attempt": event.attempt,
+            "category": event.category,
+            "status_code": event.status_code,
+            "request_id": event.request_id,
         }
     raise TypeError(f"unsupported bus event: {type(event)!r}")
 
@@ -151,6 +203,26 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
             tool_name=str(payload.get("tool_name", "")),
             args=dict(args) if isinstance(args, dict) else {},
             error=dict(error) if isinstance(error, dict) else {},
+            execution_state=str(payload.get("execution_state", "")),
+        )
+    if event_type == "model_retry_scheduled":
+        return ModelRetryScheduledBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            attempt=int(payload.get("attempt", 0) or 0),
+            next_attempt=int(payload.get("next_attempt", 0) or 0),
+            category=str(payload.get("category", "")),
+            delay_seconds=float(payload.get("delay_seconds", 0) or 0),
+            source=str(payload.get("source", "")),
+            retry_after_ignored=payload.get("retry_after_ignored") is True,
+        )
+    if event_type == "model_retry_exhausted":
+        status_code = payload.get("status_code")
+        return ModelRetryExhaustedBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            attempt=int(payload.get("attempt", 0) or 0),
+            category=str(payload.get("category", "")),
+            status_code=status_code if isinstance(status_code, int) and not isinstance(status_code, bool) else None,
+            request_id=str(payload.get("request_id")) if payload.get("request_id") is not None else None,
         )
     return LegacyRawBusEvent(payload=dict(payload))
 

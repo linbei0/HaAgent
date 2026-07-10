@@ -217,6 +217,12 @@ def map_failure_to_recovery(event_or_result: dict[str, object]) -> TaskRecoveryS
     error = event_or_result.get("error") if isinstance(event_or_result.get("error"), dict) else {}
     error_type = str(error.get("type", "unknown")).lower()
     message = str(error.get("message", ""))
+    if event_or_result.get("execution_state") == "unknown":
+        return TaskRecoverySuggestion(
+            category="tool_execution_unknown",
+            reason=_bounded(message),
+            suggested_action="inspect_state_before_retry",
+        )
     if "timeout" in error_type or "timed out" in message.lower():
         return TaskRecoverySuggestion(
             category="tool_timeout",

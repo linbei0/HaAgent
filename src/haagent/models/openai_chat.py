@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 
+from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.transport import (
     _chat_completions_stream_transport,
     _chat_completions_transport,
@@ -28,6 +29,8 @@ from haagent.models.types import (
     ToolCall,
     Transport,
 )
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
 
 def _chat_tool_schemas(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """把内部工具 schema 转成 Chat Completions 的 function tool 格式。"""
@@ -145,6 +148,7 @@ class OpenAIChatCompletionsGateway:
         base_url: str | None = None,
         transport: Transport | None = None,
         stream_transport: StreamTransport | None = None,
+        retry_controller: RetryController | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._model = model
@@ -164,6 +168,7 @@ class OpenAIChatCompletionsGateway:
                 on_delta,
             )
         )
+        self._retry_controller = default_retry_controller(retry_controller)
 
     @property
     def chat_completions_endpoint(self) -> str:
@@ -183,6 +188,9 @@ class OpenAIChatCompletionsGateway:
         messages: list[dict[str, Any]],
         tool_schemas: list[dict[str, Any]],
         event_sink: Callable[[str], None] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        retry_event_sink: Callable[[RetryEvent], None] | None = None,
+        retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
     ) -> ModelResponse:
         """调用 OpenAI Chat Completions 兼容 API，并归一化为 ModelResponse。"""
         if not self._api_key:
@@ -200,12 +208,30 @@ class OpenAIChatCompletionsGateway:
         if event_sink is not None:
             payload["stream"] = True
         try:
-            response = (
-                self._stream_transport(payload, self._api_key, event_sink)
-                if event_sink is not None
-                else self._transport(payload, self._api_key)
+            response = execute_model_request(
+                self._retry_controller,
+                provider=self.provider_name,
+                invoke=lambda on_delta: (
+                    self._stream_transport(payload, self._api_key, on_delta)
+                    if on_delta is not None
+                    else self._transport(payload, self._api_key)
+                ),
+                event_sink=event_sink,
+                cancellation_token=cancellation_token,
+                retry_event_sink=retry_event_sink,
+                retry_exhausted_sink=retry_exhausted_sink,
             )
+        except ModelCallError as error:
+            raise ModelCallError(
+                _openai_chat_error_message(str(error)),
+                details=error.details,
+            ) from error
+        except RunCancelled:
+            raise
         except Exception as error:
-            raise ModelCallError(_openai_chat_error_message(str(error))) from error
+            raise unexpected_model_error(
+                error,
+                message=_openai_chat_error_message(str(error)),
+            ) from error
         return _parse_chat_completion_response(response)
 

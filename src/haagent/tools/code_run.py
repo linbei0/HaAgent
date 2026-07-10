@@ -88,11 +88,13 @@ def code_run(
         "script_path": script_path.relative_to(root).as_posix(),
     }
     if command_result.status == "timeout":
+        result["execution_state"] = "unknown"
         result["error"] = {
             "type": "timeout",
             "message": f"python code timed out after {timeout_result} seconds",
         }
     elif command_result.status == "cancelled":
+        result["execution_state"] = "unknown"
         result["error"] = {
             "type": "cancelled",
             "message": "python code cancelled by user",

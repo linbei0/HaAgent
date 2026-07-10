@@ -113,6 +113,15 @@ def test_failure_to_recovery_mapping_handles_common_failures() -> None:
         {
             "event_type": "tool_failed",
             "tool_name": "shell",
+            "execution_state": "unknown",
+            "error": {"type": "timeout", "message": "command timed out"},
+        },
+    ).suggested_action == "inspect_state_before_retry"
+
+    assert map_failure_to_recovery(
+        {
+            "event_type": "tool_failed",
+            "tool_name": "shell",
             "error": {"type": "timeout", "message": "command timed out"},
         },
     ).suggested_action == "retry_with_narrower_command"

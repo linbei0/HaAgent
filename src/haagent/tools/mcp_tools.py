@@ -65,7 +65,9 @@ def run_mcp_tool(
             cancellation_token=cancellation_token,
         )
     except McpRuntimeTimeoutError as error:
-        return tool_error("mcp_timeout", str(error))
+        result = tool_error("mcp_timeout", str(error))
+        result["execution_state"] = "unknown"
+        return result
     except McpToolExecutionError as error:
         return tool_error("mcp_tool_error", str(error))
     except McpServerNotConnectedError as error:
