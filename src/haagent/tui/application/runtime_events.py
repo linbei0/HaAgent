@@ -32,7 +32,7 @@ from haagent.tui.presentation.progress import (
     present_tool_activity,
     present_user_input_state,
 )
-from haagent.tui.widgets.timeline import ConversationTimeline
+from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 
 
 RuntimeUiEventHandler = Callable[[object, RuntimeUiEvent], None]
@@ -48,12 +48,12 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
 
 def _handle_assistant_delta(app, event: RuntimeUiEvent) -> None:
     typed = _as_event(event, AssistantDeltaEvent)
-    app._merge_assistant_delta(typed.turn_index, typed.delta)
+    app._conversation.merge_assistant_delta(typed.turn_index, typed.delta)
 
 
 def _handle_assistant_message(app, event: RuntimeUiEvent) -> None:
     typed = _as_event(event, AssistantMessageEvent)
-    app._finalize_assistant_message(typed.turn_index, typed.content)
+    app._conversation.finalize_assistant_message(typed.turn_index, typed.content)
     app.clear_progress_status()
 
 
@@ -89,11 +89,11 @@ def _handle_user_input_state(app, event: UserInputStateEvent) -> None:
 
 def _handle_memory_notice(app, event: MemoryNoticeEvent) -> None:
     message = event.message or "发现可记忆候选，已放入候选队列，等待你确认。"
-    app._append_block("Memory", message)
-    app._memory_notice = message
-    app._memory_mode = True
-    app._memory_detail_mode = False
-    app._load_memory_candidates(silent=True)
+    app._conversation.append_block("Memory", message)
+    app.memory_flow.notice = message
+    app.memory_flow.mode = True
+    app.memory_flow.detail_mode = False
+    app.memory_flow.load_candidates(silent=True)
 
 
 def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
@@ -109,8 +109,8 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
         },
         event.reason,
     )
-    app._append_block("Failure", app._last_failure.block_text())
-    app._finalize_streaming_assistant_if_needed()
+    app._conversation.append_block("Failure", app._last_failure.block_text())
+    app._conversation.finalize_streaming_if_needed()
 
 
 def _handle_task_progress(app, event: TaskProgressEvent) -> None:
@@ -124,9 +124,13 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
     if event.surface == "hidden":
         return
     if event.surface == "tool_detail":
-        app._record_tool_diagnostic(event.turn_index, _warning_tool_name(event), _warning_detail_message(event))
+        app._conversation.record_tool_diagnostic(
+            event.turn_index,
+            _warning_tool_name(event),
+            _warning_detail_message(event),
+        )
         return
-    app._append_block(event.title, event.message)
+    app._conversation.append_block(event.title, event.message)
 
 
 def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:

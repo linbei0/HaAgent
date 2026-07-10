@@ -78,7 +78,12 @@ class ConnectionCenterState:
         return replace(self, selected_index=next_index)
 
     def render(self) -> str:
-        lines = ["供应商连接", f"搜索: {self.query or '-'}", ""]
+        lines = [
+            "供应商连接（已配置）",
+            "下方仅显示已保存的连接；按 n 新建可浏览全部供应商。",
+            f"搜索: {self.query or '-'}",
+            "",
+        ]
         visible = self.visible_connections
         if not visible:
             lines.append("无匹配连接")
@@ -90,7 +95,12 @@ class ConnectionCenterState:
                 f"{selected} {connection.name:<16} {provider:<24} "
                 f"{connection.gateway_provider:<12} {credential}"
             )
-        lines.extend(["", "输入过滤  ↑/↓ 移动  d 删除连接  n 新建连接  r 刷新  t 测试  Esc 关闭"])
+        lines.extend(
+            [
+                "",
+                "输入过滤  ↑/↓ 移动  n 新建(全部供应商)  t 测试  d 删除  r 刷新目录  Esc 关闭",
+            ]
+        )
         return "\n".join(lines)
 
 
@@ -167,7 +177,18 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
             option_list = self.query_one(OptionList)
         except NoMatches:
             return
-        body.update("\n".join(["供应商连接", f"搜索: {state.query or '-'}", ""]))
+        # 头部引导：本列表是已配置连接，不是全量供应商目录；n 进入新建向导。
+        body.update(
+            "\n".join(
+                [
+                    "供应商连接（已配置）",
+                    "下方仅显示已保存的连接；按 n 新建可浏览全部供应商。",
+                    f"搜索: {state.query or '-'}",
+                    "n 新建(全部供应商)  t 测试  d 删除  r 刷新目录  Esc 关闭",
+                    "",
+                ]
+            )
+        )
         options = [_connection_option(connection) for connection in state.visible_connections]
         if not options:
             options = [Option("无匹配连接", id="empty", disabled=True)]

@@ -15,7 +15,7 @@ from haagent.tui.commands import command_registry
 from haagent.tui.commands.suggestions import CommandSuggestionOverlay
 from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex
-from haagent.tui.widgets.timeline import PromptInput, _end_location
+from haagent.tui.widgets.prompt_input import PromptInput, _end_location
 
 
 class InputDock(Vertical):

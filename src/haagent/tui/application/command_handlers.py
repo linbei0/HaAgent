@@ -121,11 +121,11 @@ class ChatCommandHandlers:
         try:
             agents = self._app.service.list_agents()
         except Exception as error:
-            self._app._append_block("Agents", f"读取 worker 状态失败：{error}")
+            self._app._conversation.append_block("Agents", f"读取 worker 状态失败：{error}")
             self._app._refresh()
             return
         if not agents:
-            self._app._append_block("Agents", "当前 session 没有 worker。")
+            self._app._conversation.append_block("Agents", "当前 session 没有 worker。")
             self._app._refresh()
             return
         lines = ["Workers:"]
@@ -136,7 +136,7 @@ class ChatCommandHandlers:
             description = str(item.get("description", "")).strip()
             suffix = f" - {description}" if description else ""
             lines.append(f"- {agent_id} [{subagent_type}] {status}{suffix}")
-        self._app._append_block("Agents", "\n".join(lines))
+        self._app._conversation.append_block("Agents", "\n".join(lines))
         self._app._refresh()
 
     # ── /compact ─────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ class ChatCommandHandlers:
         self._block(f"工具详情已{state}")
 
     def _block(self, body: str) -> None:
-        self._app._append_block("Command", body)
+        self._app._conversation.append_block("Command", body)
         self._app._refresh()
 
 

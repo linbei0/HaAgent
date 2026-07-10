@@ -46,7 +46,7 @@ class CommandDispatcher:
 
     def dispatch(self, result: SlashCommandResult) -> bool:
         if result.error:
-            self._app._append_block("Command", result.error)
+            self._app._conversation.append_block("Command", result.error)
             self._app._refresh()
             return True
         command = result.command
@@ -59,5 +59,5 @@ class CommandDispatcher:
         return True
 
     def _open_memory_if_closed(self) -> None:
-        if not self._app._memory_mode:
+        if not self._app.memory_flow.mode:
             self._app.memory_flow.toggle()

@@ -26,7 +26,7 @@ class SessionFlow:
             try:
                 status = self._app.service.resume_session(initial_resume)
             except Exception as error:
-                self._app._append_block("Session warning", f"恢复会话失败：{error}")
+                self._app._conversation.append_block("Session warning", f"恢复会话失败：{error}")
             else:
                 self.show_session_history(status, prefix="已恢复 session")
             return
@@ -35,7 +35,7 @@ class SessionFlow:
         try:
             status = self._app.service.continue_latest_session()
         except Exception as error:
-            self._app._append_block("Session warning", f"继续最新 session 失败：{error}")
+            self._app._conversation.append_block("Session warning", f"继续最新 session 失败：{error}")
         else:
             self.show_session_history(status, prefix="已继续最新 session")
 
@@ -52,7 +52,7 @@ class SessionFlow:
         try:
             self._app.service.create_session()
         except Exception as error:
-            self._app._append_block("Session warning", f"新建会话失败：{error}")
+            self._app._conversation.append_block("Session warning", f"新建会话失败：{error}")
         else:
             self._app._reset_image_input_state()
             self.clear_conversation_for_new_session()
@@ -62,10 +62,10 @@ class SessionFlow:
         try:
             status = self._app.service.continue_latest_session()
         except Exception as error:
-            self._app._append_block("Session warning", f"继续最新会话失败：{error}")
+            self._app._conversation.append_block("Session warning", f"继续最新会话失败：{error}")
         else:
             self._app._reset_image_input_state()
-            self._app._append_line(f"已恢复会话：{status.session_id}")
+            self._app._conversation.append_line(f"已恢复会话：{status.session_id}")
         self._app._refresh()
 
     def handle_session_overlay_result(self, result: SessionOverlayResult | None) -> None:
@@ -80,7 +80,7 @@ class SessionFlow:
             else:
                 status = self._app.service.create_session()
         except Exception as error:
-            self._app._append_block("Session warning", f"会话操作失败：{error}")
+            self._app._conversation.append_block("Session warning", f"会话操作失败：{error}")
         else:
             self._app._reset_image_input_state()
             if result.action == "new":
@@ -104,10 +104,10 @@ class SessionFlow:
             conversation.add_assistant_message(assistant_text, turn_index=turn.turn_index)
             if turn.status != "completed":
                 conversation.add_system("状态", f"状态：{turn.status}", turn_index=turn.turn_index)
-        self._app._reset_streaming_state()
+        self._app._conversation.reset_streaming_state()
 
     def clear_conversation_for_new_session(self) -> None:
-        self._app._reset_streaming_state()
+        self._app._conversation.reset_streaming_state()
         self._app._active_turn_index = None
         self._timeline().clear_timeline()
 

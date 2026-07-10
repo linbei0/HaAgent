@@ -6,8 +6,9 @@ tests/unit/tui/test_tool_detail_budget.py - 工具详情原地预算测试
 
 from __future__ import annotations
 
-import haagent.tui.widgets.timeline as timeline_module
-from haagent.tui.widgets.timeline import ToolActivity
+from haagent.tui.widgets.timeline_block import ToolActivityLog
+from haagent.tui.widgets.timeline_models import ToolActivity
+from haagent.tui.widgets.timeline_rendering import render_tool_summary
 from textual._cells import cell_len
 from textual.app import App, ComposeResult
 from textual.widgets import Log
@@ -25,7 +26,7 @@ def test_tool_detail_renderer_keeps_recent_items_and_reports_collapsed_count() -
         for index in range(12)
     ]
 
-    lines = timeline_module._render_tool_summary(tools, show_details=True)
+    lines = render_tool_summary(tools, show_details=True)
     text = "\n".join(lines)
 
     assert "已折叠 4 条较早工具详情" in text
@@ -36,7 +37,7 @@ def test_tool_detail_renderer_keeps_recent_items_and_reports_collapsed_count() -
 
 
 def test_tool_activity_log_uses_textual_log_with_budgeted_lines() -> None:
-    log_cls = getattr(timeline_module, "ToolActivityLog", None)
+    log_cls = ToolActivityLog
 
     assert log_cls is not None
     log = log_cls()
@@ -67,12 +68,12 @@ def test_tool_activity_log_uses_textual_log_with_budgeted_lines() -> None:
 def test_tool_activity_log_does_not_paint_trailing_empty_cells() -> None:
     class ToolLogApp(App[None]):
         def compose(self) -> ComposeResult:
-            yield timeline_module.ToolActivityLog()
+            yield ToolActivityLog()
 
     async def run() -> None:
         app = ToolLogApp()
         async with app.run_test(size=(80, 20)):
-            log = app.query_one(timeline_module.ToolActivityLog)
+            log = app.query_one(ToolActivityLog)
             line = "工具 web_search ok"
             log.write_line(line, scroll_end=False)
             strip = log._render_line(0, 0, 80)

@@ -20,21 +20,59 @@ from haagent.runtime.events import (
     WarningNoticeEvent,
 )
 from haagent.tui.application.runtime_events import RUNTIME_UI_EVENT_HANDLERS, handle_runtime_ui_event
-from haagent.tui.widgets.timeline import ConversationTimeline, TimelineItem
+from haagent.tui.widgets.conversation_timeline import ConversationTimeline
+from haagent.tui.widgets.timeline_models import TimelineItem
 
 
 def test_runtime_ui_event_handler_registry_covers_protocol_types() -> None:
     assert set(RUNTIME_UI_EVENT_HANDLERS) == set(RUNTIME_UI_EVENT_TYPES)
 
 
+class _FakeConversation:
+    def __init__(self, app: "FakeRuntimeEventApp") -> None:
+        self._app = app
+
+    def merge_assistant_delta(self, turn_index: int, delta: str) -> None:
+        self._app.assistant_deltas.append((turn_index, delta))
+
+    def finalize_assistant_message(self, turn_index: int, content: str) -> None:
+        self._app.assistant_messages.append((turn_index, content))
+        self._app.presentation_texts.append(f"助手\n{content}")
+
+    def record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
+        self._app.tool_activities.append((turn_index, tool_name, status, summary))
+
+    def record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
+        self._app.tool_diagnostics.append((turn_index, tool_name, message))
+
+    def append_block(self, title: str, body: str, *, turn_index: int | None = None) -> None:
+        self._app.blocks.append((title, body))
+
+    def append_line(self, line: str, *, turn_index: int | None = None) -> None:
+        self._app.lines.append(line)
+
+    def finalize_streaming_if_needed(self) -> None:
+        self._app.finalized_streams += 1
+
+
+class _FakeMemoryFlow:
+    def __init__(self, app: "FakeRuntimeEventApp") -> None:
+        self._app = app
+        self.notice = None
+        self.mode = False
+        self.detail_mode = True
+
+    def load_candidates(self, *, silent: bool = False) -> None:
+        assert silent is True
+        self._app.memory_loads += 1
+
+
 class FakeRuntimeEventApp:
     def __init__(self) -> None:
         self._state = "idle"
-        self._memory_notice = None
-        self._memory_mode = False
-        self._memory_detail_mode = True
         self._last_failure = None
         self._sandbox_status = None
+        self._active_turn_index = 0
         self.assistant_deltas: list[tuple[int, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
         self.tool_activities: list[tuple[int, str, str, str]] = []
@@ -50,35 +88,11 @@ class FakeRuntimeEventApp:
         self.memory_loads = 0
         self.finalized_streams = 0
         self.refreshes = 0
-
-    def _merge_assistant_delta(self, turn_index: int, delta: str) -> None:
-        self.assistant_deltas.append((turn_index, delta))
-
-    def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
-        self.assistant_messages.append((turn_index, content))
-        self.presentation_texts.append(f"助手\n{content}")
-
-    def _record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
-        self.tool_activities.append((turn_index, tool_name, status, summary))
-
-    def _record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
-        self.tool_diagnostics.append((turn_index, tool_name, message))
-
-    def _append_block(self, title: str, body: str) -> None:
-        self.blocks.append((title, body))
-
-    def _append_line(self, line: str) -> None:
-        self.lines.append(line)
+        self._conversation = _FakeConversation(self)
+        self.memory_flow = _FakeMemoryFlow(self)
 
     def _set_answer_required(self, question: str) -> None:
         self.answer_questions.append(question)
-
-    def _load_memory_candidates(self, *, silent: bool = False) -> None:
-        assert silent is True
-        self.memory_loads += 1
-
-    def _finalize_streaming_assistant_if_needed(self) -> None:
-        self.finalized_streams += 1
 
     def _refresh(self) -> None:
         self.refreshes += 1
@@ -122,6 +136,21 @@ class TimelineRuntimeEventApp(FakeRuntimeEventApp):
         super().__init__()
         self.timeline = ConversationTimeline()
 
+        class _TimelineConversation(_FakeConversation):
+            def finalize_assistant_message(self, turn_index: int, content: str) -> None:
+                self._app.assistant_messages.append((turn_index, content))
+                self._app.timeline._items.append(
+                    TimelineItem(
+                        item_id=next(self._app.timeline._ids),
+                        role="assistant",
+                        turn_index=turn_index,
+                        content=content,
+                    )
+                )
+                self._app.timeline._mark_plain_text_dirty()
+
+        self._conversation = _TimelineConversation(self)
+
     def query_one(self, selector: str, widget_type):
         assert selector == "#conversation"
         return self.timeline
@@ -129,13 +158,6 @@ class TimelineRuntimeEventApp(FakeRuntimeEventApp):
     @property
     def plain_text(self) -> str:
         return self.timeline.plain_text
-
-    def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
-        self.assistant_messages.append((turn_index, content))
-        self.timeline._items.append(
-            TimelineItem(item_id=next(self.timeline._ids), role="assistant", turn_index=turn_index, content=content)
-        )
-        self.timeline._mark_plain_text_dirty()
 
     def count_presentations_containing(self, text: str) -> int:
         return self.plain_text.count(text)
@@ -648,9 +670,9 @@ def test_runtime_ui_event_handler_opens_memory_notice() -> None:
     handle_runtime_ui_event(app, MemoryNoticeEvent("session-1", 1, "发现 1 条候选", count=1))
 
     assert app.blocks == [("Memory", "发现 1 条候选")]
-    assert app._memory_notice == "发现 1 条候选"
-    assert app._memory_mode is True
-    assert app._memory_detail_mode is False
+    assert app.memory_flow.notice == "发现 1 条候选"
+    assert app.memory_flow.mode is True
+    assert app.memory_flow.detail_mode is False
     assert app.memory_loads == 1
 
 

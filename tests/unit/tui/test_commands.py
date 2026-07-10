@@ -149,14 +149,21 @@ class _FakeTurnsService:
         return self._status
 
 
+class _FakeConversation:
+    def __init__(self, app: '_FakeTurnsApp') -> None:
+        self._app = app
+
+    def append_block(self, title: str, body: str, *, turn_index: int | None = None) -> None:
+        self._app.blocks.append((title, body))
+
+
 class _FakeTurnsApp:
     def __init__(self, status, unlimited_error: Exception | None = None) -> None:
         self.service = _FakeTurnsService(status, unlimited_error)
         self.blocks: list[tuple[str, str]] = []
         self.refreshes = 0
-
-    def _append_block(self, title: str, body: str) -> None:
-        self.blocks.append((title, body))
+        self._active_turn_index = 0
+        self._conversation = _FakeConversation(self)
 
     def _refresh(self) -> None:
         self.refreshes += 1

@@ -129,17 +129,24 @@ def test_file_reference_overlay_uses_option_list_without_rescanning_preloaded_in
     asyncio.run(run())
 
 
+class _DispatchConversation:
+    def __init__(self, app: "_DispatchApp") -> None:
+        self._app = app
+
+    def append_block(self, title: str, body: str, *, turn_index: int | None = None) -> None:
+        self._app.blocks.append((title, body))
+
+
 class _DispatchApp:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.blocks: list[tuple[str, str]] = []
         self.refreshes = 0
+        self._active_turn_index = 0
+        self._conversation = _DispatchConversation(self)
 
     def action_help(self) -> None:
         self.calls.append("help")
-
-    def _append_block(self, title: str, body: str) -> None:
-        self.blocks.append((title, body))
 
     def _refresh(self) -> None:
         self.refreshes += 1

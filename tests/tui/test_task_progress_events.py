@@ -12,7 +12,8 @@ from textual.app import App, ComposeResult
 
 from haagent.runtime.events.types import TaskProgressEvent
 from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem, present_task_progress
-from haagent.tui.widgets.timeline import ConversationTimeline, TimelineItem
+from haagent.tui.widgets.conversation_timeline import ConversationTimeline
+from haagent.tui.widgets.timeline_models import TimelineItem
 
 
 class TimelineClickTestApp(App[None]):

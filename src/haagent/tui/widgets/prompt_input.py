@@ -46,7 +46,8 @@ class PromptInput(TextArea):
             event.prevent_default()
             app.action_handle_file_ref_key(event)
             return
-        if getattr(app, "_memory_mode", False) and getattr(app, "_pending_interaction", None) is None:
+        memory_flow = getattr(app, "memory_flow", None)
+        if memory_flow is not None and memory_flow.mode and getattr(app, "_pending_interaction", None) is None:
             handled = False
             if event.key == "enter":
                 app.action_memory_enter()
@@ -99,7 +100,8 @@ class PromptInput(TextArea):
         if getattr(self.app, "file_reference_is_open", lambda: False)():
             self.app.action_accept_file_ref()
             return
-        if getattr(self.app, "_memory_mode", False):
+        memory_flow = getattr(self.app, "memory_flow", None)
+        if memory_flow is not None and memory_flow.mode:
             self.app.action_memory_enter()
             return
         self.app.action_submit_prompt()

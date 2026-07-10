@@ -88,6 +88,19 @@ def test_connection_center_overlay_uses_option_list_for_connections() -> None:
     asyncio.run(run())
 
 
+def test_connection_center_header_guides_new_connection_for_all_providers() -> None:
+    from haagent.tui.overlays.connections import ConnectionCenterState
+
+    # state.render 与 overlay 头部共用引导文案；OptionList 只列已配置连接。
+    rendered = ConnectionCenterState(
+        connections=[_connection("deepseek-default", "default", "deepseek")]
+    ).render()
+    assert "已配置" in rendered
+    assert "n 新建" in rendered
+    assert "全部供应商" in rendered
+    assert "下方仅显示已保存的连接" in rendered
+
+
 def test_model_switch_state_expands_catalog_models_for_each_connection() -> None:
     connections = [
         _connection("requesty-personal", "personal", "requesty"),

@@ -533,7 +533,3 @@ class ConversationTimeline(VerticalScroll):
             self.resume_interactive_updates()
         else:
             self.pause_interactive_updates()
-
-
-# 公共别名：ConversationView 与 ConversationTimeline 等价
-ConversationView = ConversationTimeline

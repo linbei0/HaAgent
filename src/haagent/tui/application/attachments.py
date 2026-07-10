@@ -49,17 +49,17 @@ class AttachmentController:
 
     def paste_from_clipboard(self) -> None:
         if self._app._state in {"running", "cancelling", "waiting approval"}:
-            self._app._append_block("Command", "运行中不能修改待发送附件。")
+            self._app._conversation.append_block("Command", "运行中不能修改待发送附件。")
             self._app._refresh()
             return
         if len(self.pending) >= MAX_IMAGE_ATTACHMENTS:
-            self._app._append_block("Command", f"每条消息最多 {MAX_IMAGE_ATTACHMENTS} 张图片。")
+            self._app._conversation.append_block("Command", f"每条消息最多 {MAX_IMAGE_ATTACHMENTS} 张图片。")
             self._app._refresh()
             return
         try:
             attachment = self._app.service.paste_clipboard_image(existing=list(self.pending))
         except Exception as error:
-            self._app._append_block("Command", f"添加图片附件失败：{error}")
+            self._app._conversation.append_block("Command", f"添加图片附件失败：{error}")
             self._app._refresh()
             return
         self.session_image_count += 1

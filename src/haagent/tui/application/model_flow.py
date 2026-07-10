@@ -71,7 +71,7 @@ class ModelFlow:
                 self._app._run_model_connection_test(result.connection_id)
                 return
         except Exception as error:
-            self._app._append_block("Model warning", f"连接操作失败：{error}")
+            self._app._conversation.append_block("Model warning", f"连接操作失败：{error}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
@@ -91,9 +91,9 @@ class ModelFlow:
         try:
             self._app.service.delete_model_connection(connection_id)
         except Exception as error:
-            self._app._append_block("Model warning", f"模型删除失败：{error}")
+            self._app._conversation.append_block("Model warning", f"模型删除失败：{error}")
         else:
-            self._app._append_line(f"模型连接已删除：{connection_id}")
+            self._app._conversation.append_line(f"模型连接已删除：{connection_id}")
         self._app._refresh()
         self.open_connections()
 
@@ -105,7 +105,7 @@ class ModelFlow:
             self._app.service.configure_model_connection(result.connection)
             self._app._run_model_connection_test(result.connection.id, result.test_model)
         except Exception as error:
-            self._app._append_block("Model warning", f"连接配置失败：{error}")
+            self._app._conversation.append_block("Model warning", f"连接配置失败：{error}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
@@ -166,7 +166,7 @@ class ModelFlow:
         configurable_providers = configurable_catalog_providers(providers)
         if not configurable_providers:
             self.dismiss_loading_overlay()
-            self._app._append_block(
+            self._app._conversation.append_block(
                 "Model warning",
                 "模型目录没有可配置模型。\n请刷新目录或检查网络；如果使用缓存，请删除损坏的 models_catalog_cache.json 后重试。",
             )
@@ -193,31 +193,31 @@ class ModelFlow:
         try:
             if result.action == "set_default":
                 self._app.service.set_default_model_selection(result.selection)
-                self._app._append_line(f"默认模型：{result.selection.model}")
+                self._app._conversation.append_line(f"默认模型：{result.selection.model}")
             else:
                 status = self._app.service.switch_current_session_model_selection(result.selection)
                 model_name = status.model or result.selection.model
-                self._app._append_line(f"当前会话：{model_name}")
+                self._app._conversation.append_line(f"当前会话：{model_name}")
         except Exception as error:
-            self._app._append_block("Model warning", f"模型切换失败：{error}")
+            self._app._conversation.append_block("Model warning", f"模型切换失败：{error}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
     def handle_catalog_success(self, providers: list[object]) -> None:
-        self._app._append_line(f"模型目录已刷新：{len(providers)} 个 provider")
+        self._app._conversation.append_line(f"模型目录已刷新：{len(providers)} 个 provider")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
     def handle_connection_test_result(self, result: object) -> None:
         status = "OK" if bool(getattr(result, "ok", False)) else "失败"
         message = str(getattr(result, "message", ""))
-        self._app._append_line(f"模型连接测试 {status}: {message}")
+        self._app._conversation.append_line(f"模型连接测试 {status}: {message}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
     def handle_catalog_error(self, error: Exception) -> None:
         self.dismiss_loading_overlay()
-        self._app._append_block("Model warning", f"模型操作失败：{error}")
+        self._app._conversation.append_block("Model warning", f"模型操作失败：{error}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 

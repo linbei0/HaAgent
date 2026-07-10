@@ -6,7 +6,7 @@ src/haagent/tui/widgets/__init__.py - TUI 基础 widget 包
 prompt_input / status），此处只做统一导出入口。
 """
 
-from haagent.tui.widgets.conversation_timeline import ConversationTimeline, ConversationView
+from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.input_dock import InputDock
 from haagent.tui.widgets.prompt_input import PromptInput, _end_location
 from haagent.tui.widgets.status import FooterBar, ProgressStatusLine, ResizeMessage, StatusBar
@@ -17,7 +17,6 @@ from haagent.tui.widgets.tool_activity import merge_tool_activity
 __all__ = [
     "AssistantMarkdown",
     "ConversationTimeline",
-    "ConversationView",
     "FooterBar",
     "InputDock",
     "ProgressStatusLine",

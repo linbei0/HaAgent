@@ -30,7 +30,6 @@ from haagent.tui.application.model_flow import ModelFlow
 from haagent.tui.application.runtime_events import handle_runtime_ui_event
 from haagent.tui.application.session_flow import SessionFlow
 from haagent.tui.commands import command_registry, is_prompt_mode_command, parse_slash_command
-from haagent.tui.commands.suggestions import CommandSuggestionOverlay
 from haagent.tui.design.failures import FailureView, failure_from_payload
 from haagent.tui.design.keys import APP_BINDINGS, footer_text
 from haagent.tui.design.renderers import status_line
@@ -44,7 +43,6 @@ from haagent.tui.design.theme import (
     theme_label,
 )
 from haagent.tui.design.utils import safe_summary
-from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex, build_file_reference_index
 from haagent.tui.flows import path_authorization, permissions, skills
 from haagent.tui.overlays.modals import EditDiffModal, HelpModal, ToolApprovalModal
@@ -54,7 +52,6 @@ from haagent.tui.state import MIN_HEIGHT, MIN_WIDTH, PendingInteraction, layout_
 from haagent.tui.typography import install_textual_line_breaking
 from haagent.tui.widgets import (
     ConversationTimeline,
-    ConversationView,
     FooterBar,
     InputDock,
     ProgressStatusLine,
@@ -63,23 +60,6 @@ from haagent.tui.widgets import (
     StatusBar,
     _end_location,
 )
-
-def find_untrusted_absolute_paths(
-    text: str,
-    *,
-    project_root: Path,
-    external_roots: list[dict[str, str]] | None = None,
-) -> list[Path]:
-    return path_authorization.find_untrusted_absolute_paths(
-        text,
-        project_root=project_root,
-        external_roots=external_roots,
-    )
-
-
-def is_wide_external_root(path: Path) -> bool:
-    return path_authorization.is_wide_external_root(path)
-
 
 def _permission_mode_label(mode: str) -> str:
     if mode == "auto_approve":
@@ -122,49 +102,8 @@ class HaAgentTuiApp(App[None]):
         self.completion_flow = CompletionFlow(self)
         self._theme_choice = select_theme()
         self._file_ref_index: FileReferenceIndex | None = None
-        self.is_wide_external_root = is_wide_external_root
+        self.is_wide_external_root = path_authorization.is_wide_external_root
         self.permission_mode_label = _permission_mode_label
-
-    # ── 兼容属性：转发到对应 controller/flow ─────────────────────────────
-    @property
-    def _conversation_lines(self) -> list[str]:
-        return self._conversation.lines
-
-    @property
-    def _command_suggestion_overlay(self) -> CommandSuggestionOverlay | None:
-        return self.completion_flow.command_overlay
-
-    @property
-    def _file_ref_overlay(self) -> FileReferenceOverlay | None:
-        return self.completion_flow.file_ref_overlay
-
-    @property
-    def _pending_attachments(self) -> list[ImageAttachment]:
-        return self._attachments.pending
-
-    @property
-    def _memory_mode(self) -> bool:
-        return self.memory_flow.mode
-
-    @_memory_mode.setter
-    def _memory_mode(self, value: bool) -> None:
-        self.memory_flow.mode = value
-
-    @property
-    def _memory_detail_mode(self) -> bool:
-        return self.memory_flow.detail_mode
-
-    @_memory_detail_mode.setter
-    def _memory_detail_mode(self, value: bool) -> None:
-        self.memory_flow.detail_mode = value
-
-    @property
-    def _memory_notice(self) -> str | None:
-        return self.memory_flow.notice
-
-    @_memory_notice.setter
-    def _memory_notice(self, value: str | None) -> None:
-        self.memory_flow.notice = value
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -194,13 +133,13 @@ class HaAgentTuiApp(App[None]):
         self._update_responsive_layout(width=event.size.width, height=event.size.height)
 
     def on_key(self, event: events.Key) -> None:
-        if self._command_suggestion_overlay is not None and event.key in {"escape", "up", "down", "enter"}:
+        if self.completion_flow.command_overlay is not None and event.key in {"escape", "up", "down", "enter"}:
             self.action_handle_command_suggestion_key(event)
             return
-        if self._file_ref_overlay is not None and event.key in {"escape", "up", "down", "enter"}:
+        if self.completion_flow.file_ref_overlay is not None and event.key in {"escape", "up", "down", "enter"}:
             self.action_handle_file_ref_key(event)
             return
-        if self._memory_mode and self._pending_interaction is None:
+        if self.memory_flow.mode and self._pending_interaction is None:
             if self.memory_flow.handle_key(event.key):
                 event.stop()
                 return
@@ -217,13 +156,13 @@ class HaAgentTuiApp(App[None]):
             event.stop()
             self.action_open_command_suggestions()
             return
-        if event.key == "enter" and self._memory_mode:
+        if event.key == "enter" and self.memory_flow.mode:
             event.stop()
             self.action_memory_enter()
-        elif event.key in {"a", "y"} and self._memory_mode:
+        elif event.key in {"a", "y"} and self.memory_flow.mode:
             event.stop()
             self.action_confirm_memory()
-        elif event.key == "r" and self._memory_mode:
+        elif event.key == "r" and self.memory_flow.mode:
             event.stop()
             self.action_reject_memory()
 
@@ -279,7 +218,7 @@ class HaAgentTuiApp(App[None]):
         self._conversation.stick_to_bottom = True
         timeline = self._timeline()
         timeline.set_stick_to_bottom(True)
-        self._append_block("You", display_prompt or prompt)
+        self._conversation.append_block("You", display_prompt or prompt)
         timeline.start_assistant_response(turn_index=self._active_turn_index)
         self._state = "running"
         self._refresh()
@@ -316,7 +255,7 @@ class HaAgentTuiApp(App[None]):
             self._state = "idle"
         elif status == "cancelled":
             self._state = "cancelled"
-            self._append_block("Cancel", "任务已取消。你可以调整请求后再次提交。")
+            self._conversation.append_block("Cancel", "任务已取消。你可以调整请求后再次提交。")
         elif status != "completed":
             self._state = "failed"
             if self._last_failure is None:
@@ -327,30 +266,14 @@ class HaAgentTuiApp(App[None]):
                     {"status": status, "reason": status},
                     fallback_message=status,
                 )
-                self._append_block("Failure", self._last_failure.block_text())
+                self._conversation.append_block("Failure", self._last_failure.block_text())
         self._refresh()
 
     def _handle_prompt_error(self, error: Exception) -> None:
         self._state = "failed"
-        self._append_block("Failure", str(error))
+        self._conversation.append_block("Failure", str(error))
         self._conversation.finalize_streaming_if_needed()
         self._refresh()
-
-    # ── streaming 转发（供 runtime_events 调用）────────────────────────────
-    def _merge_assistant_delta(self, turn_index: int, delta: str) -> None:
-        self._conversation.merge_assistant_delta(turn_index, delta)
-
-    def _finalize_assistant_message(self, turn_index: int, content: str) -> None:
-        self._conversation.finalize_assistant_message(turn_index, content)
-
-    def _finalize_streaming_assistant_if_needed(self) -> None:
-        self._conversation.finalize_streaming_if_needed()
-
-    def _reset_streaming_state(self) -> None:
-        self._conversation.reset_streaming_state()
-
-    def _record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
-        self._conversation.record_tool_diagnostic(turn_index, tool_name, message)
 
     def set_progress_status(self, status: ProgressStatusState) -> None:
         self.query_one("#progress-status", ProgressStatusLine).update_status(status.text, severity=status.severity)
@@ -474,8 +397,6 @@ class HaAgentTuiApp(App[None]):
     def action_reject_memory(self) -> None:
         self.memory_flow.reject()
 
-    def _load_memory_candidates(self, *, silent: bool = False) -> None:
-        self.memory_flow.load_candidates(silent=silent)
 
     # ── 交互（审批 / 补充输入）───────────────────────────────────────────
     def _handle_interaction(self, request: HumanInteractionRequest) -> HumanInteractionResponse:
@@ -537,13 +458,13 @@ class HaAgentTuiApp(App[None]):
             return
         status = str(getattr(result, "status", "cancelled"))
         if status == "unavailable":
-            self._append_block("Cancel", "当前 service 未提供可取消协议；本轮不能安全取消。")
+            self._conversation.append_block("Cancel", "当前 service 未提供可取消协议；本轮不能安全取消。")
         elif status == "idle":
             self._state = "idle"
-            self._append_block("Cancel", "当前没有仍在运行的任务。")
+            self._conversation.append_block("Cancel", "当前没有仍在运行的任务。")
         else:
             self._state = "cancelling"
-            self._append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
+            self._conversation.append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
         self._refresh()
 
     def _request_current_task_cancel(self):
@@ -569,9 +490,9 @@ class HaAgentTuiApp(App[None]):
         self._theme_choice = next_theme(self._theme_choice)
         self._apply_theme()
         if no_color_enabled():
-            self._append_line("NO_COLOR 已启用，主题保持单色")
+            self._conversation.append_line("NO_COLOR 已启用，主题保持单色")
         else:
-            self._append_line(f"主题已切换：{theme_label(self._theme_choice)}")
+            self._conversation.append_line(f"主题已切换：{theme_label(self._theme_choice)}")
         self._refresh()
 
     def action_conversation_page_up(self) -> None:
@@ -633,12 +554,12 @@ class HaAgentTuiApp(App[None]):
     def _show_initial_configuration_state(self) -> None:
         status = self.service.get_workspace_status()
         if status.profile_error is not None:
-            self._append_block("Config", "未找到默认模型配置\n输入 /connect 配置供应商连接。")
+            self._conversation.append_block("Config", "未找到默认模型配置\n输入 /connect 配置供应商连接。")
         elif status.credential_store_available is False:
             reason = status.credential_store_error or "unknown"
-            self._append_block("Config", f"系统凭据库不可用：{reason}\n输入 /connect 重新配置供应商连接。")
+            self._conversation.append_block("Config", f"系统凭据库不可用：{reason}\n输入 /connect 重新配置供应商连接。")
         elif status.api_key_env and not status.api_key_available:
-            self._append_block(
+            self._conversation.append_block(
                 "Config",
                 f"API key 缺失：{status.api_key_env}\n输入 /connect 可以配置或测试供应商连接；HaAgent 不会显示真实 API key。",
             )
@@ -656,7 +577,7 @@ class HaAgentTuiApp(App[None]):
 
     def _refresh_conversation(self) -> None:
         conversation = self._timeline()
-        if self._memory_mode:
+        if self.memory_flow.mode:
             conversation.show_memory(self.memory_flow.panel_text())
             self._conversation.clear_placeholder_state()
             return
@@ -667,8 +588,8 @@ class HaAgentTuiApp(App[None]):
             return "too_small"
         if self._pending_interaction is not None:
             return "pending_input" if self._pending_interaction.request.interaction_type == "user_input" else "approval"
-        if self._memory_mode:
-            return "memory_detail" if self._memory_detail_mode else "memory_list"
+        if self.memory_flow.mode:
+            return "memory_detail" if self.memory_flow.detail_mode else "memory_list"
         return "chat"
 
     def _apply_theme(self) -> None:
@@ -686,9 +607,9 @@ class HaAgentTuiApp(App[None]):
 
     def _apply_focus_classes(self) -> None:
         prompt = self._prompt_input()
-        conversation = self.query_one("#conversation", ConversationView)
+        conversation = self.query_one("#conversation", ConversationTimeline)
         prompt.set_class(prompt.has_focus, "panel-focused")
-        conversation.set_class(not prompt.has_focus or self._memory_mode, "panel-focused")
+        conversation.set_class(not prompt.has_focus or self.memory_flow.mode, "panel-focused")
 
     def _update_responsive_layout(self, width: int | None = None, height: int | None = None) -> None:
         terminal_width = width if width is not None else self.size.width
@@ -704,13 +625,13 @@ class HaAgentTuiApp(App[None]):
         try:
             status = self.service.get_workspace_status()
         except Exception as error:
-            self._append_block("Command", f"无法确认当前模型是否支持图片输入：{error}")
+            self._conversation.append_block("Command", f"无法确认当前模型是否支持图片输入：{error}")
             self._refresh()
             return False
         if getattr(status, "image_input_supported", None) is not False:
             return True
         model_label = status.model or status.profile_name or "当前模型"
-        self._append_block(
+        self._conversation.append_block(
             "Command",
             f"当前模型不支持图片输入：{model_label}。请切换到支持视觉的模型后再发送。",
         )
@@ -721,12 +642,6 @@ class HaAgentTuiApp(App[None]):
         self._attachments.reset()
         self._set_prompt_value(self._prompt_input(), "")
 
-    # ── 对话写入（转发到 ConversationController）──────────────────────────
-    def _append_block(self, title: str, body: str) -> None:
-        self._conversation.append_block(title, body, turn_index=self._active_turn_index or 0)
-
-    def _append_line(self, line: str) -> None:
-        self._conversation.append_line(line, turn_index=self._active_turn_index or 0)
 
     # ── 焦点与 prompt 辅助 ───────────────────────────────────────────────
     def _prompt_input(self) -> PromptInput:

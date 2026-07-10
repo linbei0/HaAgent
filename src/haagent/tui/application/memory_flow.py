@@ -66,10 +66,10 @@ class MemoryFlow:
             self._app.service.confirm_memory_candidate(candidate.candidate_id)
         except Exception as error:
             self.notice = f"Memory confirm failed: {error}"
-            self._app._append_block("Memory warning", f"Memory confirm failed: {error}")
+            self._app._conversation.append_block("Memory warning", f"Memory confirm failed: {error}")
         else:
             self.notice = f"已确认记忆候选：{candidate.candidate_id}"
-            self._app._append_line(f"记忆已确认：{candidate.candidate_id}")
+            self._app._conversation.append_line(f"记忆已确认：{candidate.candidate_id}")
         self.detail_mode = False
         self.load_candidates()
         self._app._refresh()
@@ -82,10 +82,10 @@ class MemoryFlow:
             self._app.service.reject_memory_candidate(candidate.candidate_id, "rejected from TUI")
         except Exception as error:
             self.notice = f"Memory reject failed: {error}"
-            self._app._append_block("Memory warning", f"Memory reject failed: {error}")
+            self._app._conversation.append_block("Memory warning", f"Memory reject failed: {error}")
         else:
             self.notice = f"已拒绝记忆候选：{candidate.candidate_id}"
-            self._app._append_line(f"记忆已拒绝：{candidate.candidate_id}")
+            self._app._conversation.append_line(f"记忆已拒绝：{candidate.candidate_id}")
         self.detail_mode = False
         self.load_candidates()
         self._app._refresh()
@@ -127,7 +127,7 @@ class MemoryFlow:
             self.candidates = []
             self.error = str(error)
             if not silent:
-                self._app._append_block("Memory warning", f"Memory candidates unavailable: {error}")
+                self._app._conversation.append_block("Memory warning", f"Memory candidates unavailable: {error}")
 
     def panel_text(self) -> str:
         return MemoryPanelPresenter(

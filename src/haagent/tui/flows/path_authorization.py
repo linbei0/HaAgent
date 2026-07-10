@@ -32,7 +32,7 @@ def handle_prompt_path_authorization(app: "HaAgentTuiApp", prompt: str) -> bool:
     target_path = untrusted_paths[0]
     if getattr(status, "permission_mode", "request_approval") == "full_access":
         app._set_next_turn_target_path(target_path)
-        app._append_block("Permissions", "完全访问权限已启用；本轮不会限制工作区外路径。")
+        app._conversation.append_block("Permissions", "完全访问权限已启用；本轮不会限制工作区外路径。")
         app._start_prompt(prompt)
         return True
     app._pending_external_prompt = prompt
@@ -53,7 +53,7 @@ def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | Non
         if decision == "read":
             app.service.add_external_root(path, "read")
             app._set_next_turn_target_path(path)
-            app._append_block("Permissions", f"已作为只读参考加入：{path}")
+            app._conversation.append_block("Permissions", f"已作为只读参考加入：{path}")
         elif decision == "full":
             if is_wide_external_root(path):
                 app._pending_full_trust_prompt = prompt
@@ -65,17 +65,17 @@ def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | Non
                 return
             app.service.add_external_root(path, "full")
             app._set_next_turn_target_path(path)
-            app._append_block("Permissions", f"已完全信任：{path}")
+            app._conversation.append_block("Permissions", f"已完全信任：{path}")
         elif decision == "switch":
             app.service.switch_project_root(path)
-            app._append_block("Permissions", f"已切换工作区：{path}")
+            app._conversation.append_block("Permissions", f"已切换工作区：{path}")
         else:
-            app._append_block("Permissions", f"已取消外部目录授权：{path}")
+            app._conversation.append_block("Permissions", f"已取消外部目录授权：{path}")
             app._refresh()
             app._restore_prompt_focus()
             return
     except Exception as error:
-        app._append_block("Permissions warning", f"外部目录授权失败：{error}")
+        app._conversation.append_block("Permissions warning", f"外部目录授权失败：{error}")
         app._refresh()
         app._restore_prompt_focus()
         return
@@ -92,7 +92,7 @@ def handle_external_full_trust_confirmed(app: "HaAgentTuiApp", confirmed: bool) 
         app._restore_prompt_focus()
         return
     if not confirmed:
-        app._append_block("Permissions", f"已取消完全信任：{path}")
+        app._conversation.append_block("Permissions", f"已取消完全信任：{path}")
         app._refresh()
         app._restore_prompt_focus()
         return
@@ -100,11 +100,11 @@ def handle_external_full_trust_confirmed(app: "HaAgentTuiApp", confirmed: bool) 
         app.service.add_external_root(path, "full")
         app._set_next_turn_target_path(path)
     except Exception as error:
-        app._append_block("Permissions warning", f"外部目录授权失败：{error}")
+        app._conversation.append_block("Permissions warning", f"外部目录授权失败：{error}")
         app._refresh()
         app._restore_prompt_focus()
         return
-    app._append_block("Permissions", f"已完全信任：{path}")
+    app._conversation.append_block("Permissions", f"已完全信任：{path}")
     app._refresh()
     app._start_prompt(prompt)
 

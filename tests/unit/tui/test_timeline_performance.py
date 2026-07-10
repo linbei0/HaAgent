@@ -6,12 +6,10 @@ tests/unit/tui/test_timeline_performance.py - TUI timeline 性能合同测试
 
 from __future__ import annotations
 
-import haagent.tui.widgets.timeline as timeline_module
-from haagent.tui.widgets.timeline import (
-    ConversationTimeline,
-    TimelineItem,
-    ToolActivity,
-)
+import haagent.tui.widgets.timeline_models as timeline_module
+from haagent.tui.widgets.conversation_timeline import ConversationTimeline
+from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
+from haagent.tui.widgets.timeline_rendering import timeline_render_metrics
 
 
 class InstrumentedTimeline(ConversationTimeline):
@@ -228,10 +226,7 @@ def test_timeline_render_metrics_reports_detail_weight() -> None:
         ),
     ]
 
-    metrics_fn = getattr(timeline_module, "timeline_render_metrics", None)
-
-    assert callable(metrics_fn)
-    metrics = metrics_fn(items, show_tool_details=True)
+    metrics = timeline_render_metrics(items, show_tool_details=True)
 
     assert metrics.item_count == 2
     assert metrics.tool_count == 2

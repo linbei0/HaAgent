@@ -27,21 +27,24 @@ class ConversationController:
         self.streaming_text = ""
 
     # ── 基础写入 ─────────────────────────────────────────────────────────
-    def append_block(self, title: str, body: str, *, turn_index: int) -> None:
+    def append_block(self, title: str, body: str, *, turn_index: int | None = None) -> None:
+        # turn_index 默认取当前活动 turn，避免各 flow 重复写 app 门面转发。
+        resolved = turn_index if turn_index is not None else (self._app._active_turn_index or 0)
         display_title = BLOCK_TITLES.get(title, title)
         self.lines.append(f"{display_title}\n  {body}")
         if title == "You":
-            self._timeline().add_user(body, turn_index=turn_index)
+            self._timeline().add_user(body, turn_index=resolved)
         elif title == "Assistant":
-            self._timeline().add_assistant_message(body, turn_index=turn_index)
+            self._timeline().add_assistant_message(body, turn_index=resolved)
         elif title == "Failure":
-            self._timeline().add_failure(body, turn_index=turn_index)
+            self._timeline().add_failure(body, turn_index=resolved)
         else:
-            self._timeline().add_system(display_title, body, turn_index=turn_index)
+            self._timeline().add_system(display_title, body, turn_index=resolved)
 
-    def append_line(self, line: str, *, turn_index: int) -> None:
+    def append_line(self, line: str, *, turn_index: int | None = None) -> None:
+        resolved = turn_index if turn_index is not None else (self._app._active_turn_index or 0)
         self.lines.append(line)
-        self._timeline().add_system("系统", line, turn_index=turn_index)
+        self._timeline().add_system("系统", line, turn_index=resolved)
 
     # ── assistant streaming ──────────────────────────────────────────────
     def start_assistant(self, turn_index: int) -> None:
