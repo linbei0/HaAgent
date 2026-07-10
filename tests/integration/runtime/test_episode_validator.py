@@ -716,6 +716,7 @@ def test_failed_run_with_tool_argument_error_validates_package(tmp_path: Path) -
     assert tool_call["status"] == "error"
     (result.episode_path / "verification").mkdir(exist_ok=True)
     (result.episode_path / "verification" / "commands.jsonl").write_text("", encoding="utf-8")
+    (result.episode_path / "verification" / "files.jsonl").write_text("", encoding="utf-8")
     validate_episode_package(result.episode_path)
 
 
@@ -731,6 +732,20 @@ def test_package_validator_rejects_verification_command_missing_command(tmp_path
     with pytest.raises(
         EpisodeValidationError,
         match="verification/commands.jsonl line 1 missing required field: command",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_invalid_file_verification_evidence(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    evidence_path = result.episode_path / "verification" / "files.jsonl"
+    evidence_path.write_text(json.dumps({"path": 123, "status": "success"}) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="verification/files.jsonl line 1 path must be a string",
     ):
         validate_episode_package(result.episode_path)
 
@@ -800,6 +815,19 @@ def test_package_validator_rejects_missing_verification_metadata(tmp_path: Path)
     with pytest.raises(
         EpisodeValidationError,
         match="verification/commands.jsonl line 1 missing required field: stdout_excerpt",
+    ):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_missing_file_verification_evidence(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    (result.episode_path / "verification" / "files.jsonl").unlink()
+
+    with pytest.raises(
+        EpisodeValidationError,
+        match="episode package missing required file: verification/files.jsonl",
     ):
         validate_episode_package(result.episode_path)
 

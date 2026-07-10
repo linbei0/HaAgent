@@ -69,6 +69,22 @@ class ParallelToolCallsGateway:
         return ModelResponse("done after parallel tool feedback", [])
 
 
+class FileWriteGateway:
+    provider_name = "file-write"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def generate(self, messages, tool_schemas):
+        self.call_count += 1
+        if self.call_count == 1:
+            return ModelResponse(
+                "",
+                [ToolCall("file_write", {"path": "notes.txt", "content": "final", "mode": "create"})],
+            )
+        return ModelResponse("done after writing", [])
+
+
 def test_tool_observation_is_written_before_terminal_tool_routing_failure(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -171,6 +187,46 @@ verification_commands: []
     assert tool_call["status"] == "error"
     assert tool_call["error"]["type"] == "tool_argument_invalid"
     assert tool_call["error"]["message"] == "unexpected argument: path"
+
+
+def test_file_write_records_final_file_evidence_before_completion(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Write a note
+constraints: []
+allowed_tools:
+  - file_write
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools:
+    - file_write
+  approved_tools:
+    - file_write
+""".strip(),
+        encoding="utf-8",
+    )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=FileWriteGateway(),
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    evidence = [
+        json.loads(line)
+        for line in (result.episode_path / "verification" / "files.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert evidence == [
+        {
+            "path": "notes.txt",
+            "change_type": "added",
+            "status": "success",
+            "size_bytes": len(b"final"),
+            "sha256": "2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007",
+        },
+    ]
 
 
 def test_parallel_tool_calls_do_not_skip_siblings_after_tool_error(tmp_path: Path) -> None:

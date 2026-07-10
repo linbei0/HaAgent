@@ -20,6 +20,7 @@ from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, serialize_path_policy
 from haagent.runtime.orchestration.recorder import RunResult
 from haagent.runtime.session.attachments import ImageAttachment
+from haagent.runtime.session.chat_task_contract import build_chat_task_contract
 from haagent.skills import load_skill_registry
 from haagent.tools.registry import ToolRuntimeRegistry
 from haagent.tools.presentation import summarize_tool_args, summarize_tool_result
@@ -193,15 +194,20 @@ def write_chat_task_yaml(
         if policy.permission_mode in {"auto_approve", "full_access"}
         else []
     )
+    contract = build_chat_task_contract(
+        goal=request,
+        workspace_root=workspace_root,
+        target_paths=list(target_paths or []),
+    )
     task = {
         "goal": request,
         "workspace_root": str(workspace_root.resolve()),
         "path_policy": serialize_path_policy(policy),
         "target_paths": list(target_paths or []),
         "prompt_pack_ids": list(prompt_pack_ids or []),
-        "constraints": [],
+        "constraints": contract["constraints"],
         "allowed_tools": allowed_tools,
-        "acceptance_criteria": ["Complete the requested chat task."],
+        "acceptance_criteria": contract["acceptance_criteria"],
         "verification_commands": [],
         "policy": {
             "approval_allowed_tools": approval_allowed_tools,

@@ -66,6 +66,7 @@ class TurnLoopState:
     has_file_change: bool = False
     has_shell_verification: bool = False
     passed_verification_commands: set[str] = field(default_factory=set)
+    changed_files: list[dict[str, object]] = field(default_factory=list)
     verification_engine: VerificationEngine | None = None
     pending_worker_task_ids: list[str] = field(default_factory=list)
 
@@ -298,7 +299,13 @@ def _handle_no_tool_response(
     if state.verification_engine is None:
         state.verification_engine = VerificationEngine(deps.writer, deps.workspace_root)
     deps.raise_if_cancelled()
-    verification_result = state.verification_engine.run(deps.verification_commands)
+    if state.changed_files:
+        verification_result = state.verification_engine.run(
+            deps.verification_commands,
+            changed_files=state.changed_files,
+        )
+    else:
+        verification_result = state.verification_engine.run(deps.verification_commands)
     if verification_result.status == "success":
         deps.recorder.transition(RunStatus.COMPLETED)
         deps.writer.write_failure_attribution(None)
@@ -496,6 +503,7 @@ def _run_tool_calls(
         if tool_call.name in {"apply_patch", "apply_patch_set", "file_write"}:
             state.completion_observations = [observation]
             state.has_file_change = True
+            _record_changed_files(state.changed_files, tool_result)
         else:
             state.completion_observations.append(observation)
         if tool_call.name in {"shell", "code_run"} and tool_result.get("exit_code") == 0:
@@ -617,6 +625,15 @@ def _tool_started_event(turn: int, tool_call: ToolCall) -> ToolStartedBusEvent:
         tool_name=tool_call.name,
         args=dict(tool_call.args),
     )
+
+
+def _record_changed_files(changed_files: list[dict[str, object]], tool_result: dict[str, object]) -> None:
+    raw_changes = tool_result.get("changed_files")
+    if not isinstance(raw_changes, list):
+        return
+    for change in raw_changes:
+        if isinstance(change, dict):
+            changed_files.append(dict(change))
 
 
 def _wait_for_pending_worker_tasks(

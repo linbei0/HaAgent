@@ -7,6 +7,7 @@ tests/unit/runtime/test_run_turns.py - 单轮工具执行循环测试
 from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 
 from haagent.models.types import ToolCall
@@ -50,7 +51,12 @@ class _FakeRouter:
 
 class _FakeWriter:
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path or Path.cwd()
+        self._temporary_directory: TemporaryDirectory[str] | None = None
+        if path is None:
+            self._temporary_directory = TemporaryDirectory(prefix="haagent-turns-")
+            self.path = Path(self._temporary_directory.name)
+        else:
+            self.path = path
         self.transcript: list[dict[str, Any]] = []
         self.failure_records: list[dict[str, Any] | None] = []
 
@@ -112,6 +118,12 @@ def test_same_turn_multiple_tool_calls_execute_concurrently() -> None:
 
     assert elapsed < 0.40
     assert sorted(router.calls) == ["file_read", "grep"]
+
+
+def test_fake_writer_uses_an_isolated_temporary_directory() -> None:
+    writer = _FakeWriter()
+
+    assert writer.path != Path.cwd()
 
 
 def test_turn_loop_emits_key_step_progress_events() -> None:

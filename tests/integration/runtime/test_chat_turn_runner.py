@@ -61,6 +61,11 @@ def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> 
     assert task.goal == "summarize docs"
     assert task.workspace_root == str(tmp_path.resolve())
     assert task.target_paths == ["README.md"]
+    assert task.constraints == ["Keep file and command operations within the workspace root."]
+    assert task.acceptance_criteria == [
+        "Address the stated user goal.",
+        "Use explicitly referenced target paths as task context: README.md.",
+    ]
     assert "web_search" in task.allowed_tools
     assert captured["session_summary"] == "summary"
     assert captured["historical_tool_compression_count"] == 2

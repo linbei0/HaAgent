@@ -25,6 +25,7 @@ REQUIRED_PACKAGE_FILES = [
     "transcript.jsonl",
     "tool-calls.jsonl",
     "verification/commands.jsonl",
+    "verification/files.jsonl",
     "failure-attribution.md",
     "failure.json",
     "environment.json",
@@ -32,6 +33,7 @@ REQUIRED_PACKAGE_FILES = [
     "sandbox.json",
 ]
 VERIFICATION_COMMANDS_FILE = "verification/commands.jsonl"
+VERIFICATION_FILES_FILE = "verification/files.jsonl"
 INSPECT_PRE_VERIFICATION_CORE_FILES = [
     "episode.json",
     "task.yaml",
@@ -83,7 +85,11 @@ def _read_validated_episode_package(
 ) -> EpisodePackageView:
     """读取、校验并组装 package view；保持 validate 入口只负责触发该流程。"""
     required_files = (
-        [path for path in REQUIRED_PACKAGE_FILES if path != VERIFICATION_COMMANDS_FILE]
+        [
+            path
+            for path in REQUIRED_PACKAGE_FILES
+            if path not in {VERIFICATION_COMMANDS_FILE, VERIFICATION_FILES_FILE}
+        ]
         if allow_missing_pre_verification
         else REQUIRED_PACKAGE_FILES
     )
@@ -129,6 +135,12 @@ def _read_validated_episode_package(
     _validate_plan(plan)
     _validate_tool_calls(tool_calls)
     _validate_verification_commands(verification_commands)
+    _validate_verification_files(
+        episode_path,
+        allow_missing_pre_verification=allow_missing_pre_verification,
+        episode_metadata=episode_metadata,
+        transcript=transcript,
+    )
     _validate_cross_file_consistency(
         episode_path,
         episode_metadata,
@@ -428,8 +440,54 @@ def _validate_verification_commands(records: list[dict[str, Any]]) -> None:
         for field_name in ["stdout_original_length", "stderr_original_length"]:
             if not isinstance(record[field_name], int):
                 raise EpisodeValidationError(
-                    f"verification/commands.jsonl line {index} {field_name} must be an int",
+                f"verification/commands.jsonl line {index} {field_name} must be an int",
+            )
+
+
+def _validate_verification_files(
+    episode_path: Path,
+    *,
+    allow_missing_pre_verification: bool,
+    episode_metadata: dict[str, Any],
+    transcript: list[dict[str, Any]],
+) -> None:
+    path = episode_path / VERIFICATION_FILES_FILE
+    if not path.exists():
+        if allow_missing_pre_verification and _can_omit_verification_commands(
+            episode_metadata,
+            transcript,
+        ):
+            return
+        raise EpisodeValidationError(
+            f"episode package missing required file: {VERIFICATION_FILES_FILE}",
+        )
+    records = _validate_jsonl_fields(path, VERIFICATION_FILES_FILE, ["path", "status"])
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record["path"], str):
+            raise EpisodeValidationError(
+                f"verification/files.jsonl line {index} path must be a string",
+            )
+        if record["status"] not in {"success", "failed"}:
+            raise EpisodeValidationError(
+                f"verification/files.jsonl line {index} status is invalid: {record['status']}",
+            )
+        if not isinstance(record.get("change_type"), str):
+            raise EpisodeValidationError(
+                f"verification/files.jsonl line {index} change_type must be a string",
+            )
+        if record["status"] == "success":
+            if not isinstance(record.get("size_bytes"), int):
+                raise EpisodeValidationError(
+                    f"verification/files.jsonl line {index} size_bytes must be an int",
                 )
+            if not isinstance(record.get("sha256"), str):
+                raise EpisodeValidationError(
+                    f"verification/files.jsonl line {index} sha256 must be a string",
+                )
+        elif not isinstance(record.get("reason"), str):
+            raise EpisodeValidationError(
+                f"verification/files.jsonl line {index} reason must be a string",
+            )
 
 
 def _validate_environment(environment: dict[str, Any]) -> None:
