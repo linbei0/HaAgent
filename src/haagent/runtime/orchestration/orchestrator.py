@@ -521,9 +521,17 @@ def _record_guardrail(
 def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:
     error = tool_result.get("error") if isinstance(tool_result.get("error"), dict) else {}
     error_type = str(error.get("type", ""))
-    if error_type in {"approval_denied", "approval_pending", "policy_denied", "guardrail_denied", "tool_not_allowed", "unknown_tool"}:
+    # 审批/策略/护栏硬拒绝终态；误用工具名回 observation 让模型自纠
+    if error_type in {"approval_denied", "approval_pending", "policy_denied", "guardrail_denied"}:
         return True
-    if error_type in {"patch_text_not_found", "patch_text_not_unique", "code_run_failed", "timeout"}:
+    if error_type in {
+        "tool_not_allowed",
+        "unknown_tool",
+        "patch_text_not_found",
+        "patch_text_not_unique",
+        "code_run_failed",
+        "timeout",
+    }:
         return False
     if tool_result.get("suggestions"):
         return False

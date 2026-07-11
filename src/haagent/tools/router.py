@@ -186,6 +186,35 @@ class ToolRouter:
                 error_type=str(error.get("type", "")),
             )
 
+    def record_skipped(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """记录未启动的 tool call；不跑 policy、guardrail 或 handler。"""
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        # 调度器跳过契约：仅接受结构化 not_started 结果，避免误写成功 trace
+        if (
+            result.get("status") != "error"
+            or error.get("type") != "tool_call_skipped"
+            or result.get("execution_state") != "not_started"
+        ):
+            raise ToolRoutingError(
+                "record_skipped only accepts tool_call_skipped not_started errors",
+                error_type="tool_call_skipped_invalid",
+            )
+        self._write_trace(
+            tool_name,
+            args,
+            result,
+            started=0.0,
+            policy_decision=None,
+            guardrail_result=None,
+            duration_seconds=0.0,
+        )
+        return result
+
     def _prepare_model_visible_result(self, tool_name: str, result: dict[str, Any]) -> dict[str, Any]:
         return prepare_tool_result_for_model(
             tool_name,
@@ -462,8 +491,15 @@ class ToolRouter:
         started: float,
         policy_decision: PolicyDecision | None,
         guardrail_result: GuardrailResult | None,
+        duration_seconds: float | None = None,
     ) -> None:
         trace_result = _result_for_trace(result)
+        # 未启动调用强制 duration=0；真实 dispatch 仍用 wall-clock
+        measured = (
+            float(duration_seconds)
+            if duration_seconds is not None
+            else time.perf_counter() - started
+        )
         self._episode_writer.append_tool_call(
             {
                 "tool_name": tool_name,
@@ -478,7 +514,7 @@ class ToolRouter:
                     "external_root_count": len(self._path_policy.external_roots),
                 },
                 "guardrail": guardrail_result.to_dict() if guardrail_result else None,
-                "duration_seconds": time.perf_counter() - started,
+                "duration_seconds": measured,
             },
         )
 

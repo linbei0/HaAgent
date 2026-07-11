@@ -31,6 +31,7 @@ SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": [],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "skill_read": ToolDefinition(
         name="skill_read",
@@ -47,6 +48,7 @@ SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["name"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "skill_market_search": ToolDefinition(
         name="skill_market_search",
@@ -72,5 +74,6 @@ SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["query"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
 }

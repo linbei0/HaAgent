@@ -14,6 +14,7 @@ def make_tool(risk_level: str) -> ToolDefinition:
         description="test tool",
         risk_level=risk_level,
         parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="read_only",
     )
 
 

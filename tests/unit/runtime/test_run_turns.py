@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import threading
 import time
 
 from haagent.models.types import ToolCall
@@ -20,16 +21,27 @@ from haagent.runtime.orchestration.turns import (
     _run_tool_calls,
     run_turn_loop,
 )
+from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 
 
 class _FakeRouter:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result = result
         self.waited_task_ids: list[str] = []
+        self.skipped: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
 
     def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None) -> dict[str, Any]:
         del tool_name, args, interaction_handler
         return dict(self.result)
+
+    def record_skipped(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.skipped.append((tool_name, dict(args), dict(result)))
+        return result
 
     def raise_for_error(self, result: dict[str, Any]) -> None:
         raise AssertionError(f"unexpected terminal error: {result}")
@@ -74,23 +86,297 @@ class _FakeWriter:
 
 
 class _PerToolRouter:
-    def __init__(self, results: dict[str, dict[str, Any]], delays: dict[str, float] | None = None) -> None:
+    def __init__(
+        self,
+        results: dict[str, dict[str, Any]],
+        delays: dict[str, float] | None = None,
+        *,
+        track_active: bool = False,
+    ) -> None:
         self.results = results
         self.delays = delays or {}
         self.calls: list[str] = []
+        self.skipped: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        self.start_order: list[str] = []
+        self.end_order: list[str] = []
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.track_active = track_active
+        self.call_starts: dict[str, float] = {}
+        self.call_ends: dict[str, float] = {}
 
     def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None) -> dict[str, Any]:
-        self.calls.append(tool_name)
+        with self._lock:
+            self.calls.append(tool_name)
+            self.start_order.append(tool_name)
+            self.call_starts[tool_name] = time.perf_counter()
+            if self.track_active:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
         if interaction_handler is not None and args.get("interact"):
             interaction_handler(SimpleNamespace(tool_name=tool_name))
-        time.sleep(self.delays.get(tool_name, 0.0))
-        return dict(self.results[tool_name])
+        delay_key = str(args.get("delay_key") or tool_name)
+        time.sleep(self.delays.get(delay_key, self.delays.get(tool_name, 0.0)))
+        result_key = str(args.get("result_key") or tool_name)
+        result = dict(self.results[result_key])
+        with self._lock:
+            self.end_order.append(tool_name)
+            self.call_ends[tool_name] = time.perf_counter()
+            if self.track_active:
+                self.active -= 1
+        return result
+
+    def record_skipped(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.skipped.append((tool_name, dict(args), dict(result)))
+        return result
 
     def raise_for_error(self, result: dict[str, Any]) -> None:
         raise AssertionError(f"unexpected terminal error: {result}")
 
     def wait_for_agent_task(self, task_id: str, timeout: float | None = None) -> dict[str, Any]:
         raise AssertionError(f"unexpected worker wait: {task_id}, timeout={timeout}")
+
+
+def test_read_batch_respects_max_parallel_read_tools() -> None:
+    results = {f"file_read_{index}": {"status": "success", "content": str(index)} for index in range(10)}
+    delays = {f"file_read_{index}": 0.12 for index in range(10)}
+    router = _PerToolRouter(results, delays=delays, track_active=True)
+    # unique names via delay_key/result_key but real tool name file_read
+    tool_calls = [
+        ToolCall(
+            name="file_read",
+            args={"path": f"{index}.txt", "delay_key": f"file_read_{index}", "result_key": f"file_read_{index}"},
+            id=f"call_{index}",
+        )
+        for index in range(10)
+    ]
+    deps = _deps(router=router, max_parallel_read_tools=4)
+    _run_tool_calls(turn=1, tool_calls_with_ids=tool_calls, state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+    assert router.max_active <= 4
+    assert router.max_active > 1
+    assert len(router.calls) == 10
+
+
+def test_serial_barrier_between_write_and_following_read() -> None:
+    router = _PerToolRouter(
+        {
+            "file_read": {"status": "success", "content": "r"},
+            "grep": {"status": "success", "content": "g"},
+            "file_write": {"status": "success", "content": "w"},
+            "shell": {"status": "success", "content": "s"},
+        },
+        delays={"file_read": 0.08, "grep": 0.08, "file_write": 0.08, "shell": 0.01},
+        track_active=True,
+    )
+    # second file_read distinguished by result_key after write
+    results = {
+        "file_read_a": {"status": "success", "content": "a"},
+        "grep": {"status": "success", "content": "g"},
+        "file_write": {"status": "success", "content": "w"},
+        "file_read_b": {"status": "success", "content": "b"},
+        "shell": {"status": "success", "content": "s"},
+    }
+    delays = {
+        "file_read_a": 0.08,
+        "grep": 0.08,
+        "file_write": 0.08,
+        "file_read_b": 0.05,
+        "shell": 0.01,
+    }
+    router = _PerToolRouter(results, delays=delays, track_active=True)
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_read", args={"path": "a.txt", "delay_key": "file_read_a", "result_key": "file_read_a"}, id="c1"),
+            ToolCall(name="grep", args={"pattern": "x", "delay_key": "grep", "result_key": "grep"}, id="c2"),
+            ToolCall(name="file_write", args={"path": "c.txt", "delay_key": "file_write", "result_key": "file_write"}, id="c3"),
+            ToolCall(name="file_read", args={"path": "c.txt", "delay_key": "file_read_b", "result_key": "file_read_b"}, id="c4"),
+            ToolCall(name="shell", args={"command": "echo", "delay_key": "shell", "result_key": "shell"}, id="c5"),
+        ],
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=_deps(router=router),
+    )
+    # write must start after first batch ends; second read after write
+    assert router.start_order[:3] == ["file_read", "grep", "file_write"] or (
+        set(router.start_order[:2]) == {"file_read", "grep"}
+        and router.start_order[2] == "file_write"
+    )
+    write_start = router.call_starts["file_write"]
+    assert write_start >= router.call_ends.get("grep", write_start) - 0.05
+    assert router.start_order.index("shell") > router.start_order.index("file_write")
+    # second file_read is after write in start_order (indices 3 then maybe shell)
+    assert router.start_order.count("file_read") == 2
+    first_read_idx = router.start_order.index("file_read")
+    second_read_idx = router.start_order.index("file_read", first_read_idx + 1)
+    write_idx = router.start_order.index("file_write")
+    assert first_read_idx < write_idx < second_read_idx
+
+
+def test_workspace_writes_do_not_overlap() -> None:
+    router = _PerToolRouter(
+        {
+            "file_write_a": {"status": "success"},
+            "file_write_b": {"status": "success"},
+        },
+        delays={"file_write_a": 0.12, "file_write_b": 0.12},
+        track_active=True,
+    )
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(
+                name="file_write",
+                args={"path": "a.txt", "delay_key": "file_write_a", "result_key": "file_write_a"},
+                id="w1",
+            ),
+            ToolCall(
+                name="file_write",
+                args={"path": "b.txt", "delay_key": "file_write_b", "result_key": "file_write_b"},
+                id="w2",
+            ),
+        ],
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=_deps(router=router),
+    )
+    assert router.max_active == 1
+    assert router.start_order == ["file_write", "file_write"]
+
+
+def test_read_batch_failure_skips_unstarted_and_later_calls() -> None:
+    results = {
+        "r0": {"status": "error", "error": {"type": "boom", "message": "fail"}},
+        "r1": {"status": "success", "content": "ok"},
+        "r2": {"status": "success", "content": "later"},
+        "r3": {"status": "success", "content": "later"},
+        "write": {"status": "success"},
+    }
+    delays = {"r0": 0.05, "r1": 0.15, "r2": 0.05, "r3": 0.05, "write": 0.01}
+    router = _PerToolRouter(results, delays=delays, track_active=True)
+    state = TurnLoopState(messages=[], context_id="ctx")
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_read", args={"path": "0", "delay_key": "r0", "result_key": "r0"}, id="c0"),
+            ToolCall(name="file_read", args={"path": "1", "delay_key": "r1", "result_key": "r1"}, id="c1"),
+            ToolCall(name="file_read", args={"path": "2", "delay_key": "r2", "result_key": "r2"}, id="c2"),
+            ToolCall(name="file_read", args={"path": "3", "delay_key": "r3", "result_key": "r3"}, id="c3"),
+            ToolCall(name="file_write", args={"path": "w", "delay_key": "write", "result_key": "write"}, id="cw"),
+        ],
+        state=state,
+        deps=_deps(router=router, max_parallel_read_tools=2),
+    )
+    assert "file_write" not in router.calls
+    assert len(router.skipped) >= 1
+    skipped_ids = [
+        message["tool_call_id"]
+        for message in state.messages
+        if message.get("tool_call_id") and "tool_call_skipped" in message.get("content", "")
+    ]
+    assert skipped_ids
+    assert any(item[2].get("execution_state") == "not_started" for item in router.skipped)
+
+
+def test_serial_write_failure_skips_later_calls() -> None:
+    router = _PerToolRouter(
+        {
+            "file_write": {
+                "status": "error",
+                "error": {"type": "write_failed", "message": "nope"},
+            },
+            "file_read": {"status": "success", "content": "x"},
+            "shell": {"status": "success"},
+        }
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_write", args={"path": "a.txt"}, id="w"),
+            ToolCall(name="file_read", args={"path": "a.txt"}, id="r"),
+            ToolCall(name="shell", args={"command": "echo"}, id="s"),
+        ],
+        state=state,
+        deps=_deps(router=router),
+    )
+    assert router.calls == ["file_write"]
+    assert [name for name, _, _ in router.skipped] == ["file_read", "shell"]
+
+
+def test_not_started_emits_tool_failed_without_tool_started() -> None:
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    router = _PerToolRouter(
+        {
+            "file_write": {
+                "status": "error",
+                "error": {"type": "write_failed", "message": "nope"},
+            },
+            "file_read": {"status": "success"},
+        }
+    )
+    events: list[object] = []
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="file_write", args={"path": "a.txt"}, id="w"),
+            ToolCall(name="file_read", args={"path": "a.txt"}, id="r"),
+        ],
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=_deps(router=router, emit_event=events.append),
+    )
+    payloads = [bus_event_to_dict(event) for event in events]
+    started_tools = [p["tool_name"] for p in payloads if p.get("event_type") == "tool_started"]
+    failed = [p for p in payloads if p.get("event_type") == "tool_failed"]
+    assert started_tools == ["file_write"]
+    not_started = [p for p in failed if p.get("execution_state") == "not_started"]
+    assert len(not_started) == 1
+    assert not_started[0]["tool_name"] == "file_read"
+
+
+def test_high_risk_read_only_tool_is_serial() -> None:
+    high_read = ToolDefinition(
+        name="risky_read",
+        description="high risk read",
+        risk_level="high",
+        parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="read_only",
+    )
+    registry = default_tool_runtime_registry({"risky_read": high_read})
+    router = _PerToolRouter(
+        {
+            "risky_read": {"status": "success", "content": "x"},
+        },
+        delays={"risky_read": 0.15},
+        track_active=True,
+    )
+    # two same-name tools with delay keys
+    results = {"a": {"status": "success"}, "b": {"status": "success"}}
+    delays = {"a": 0.15, "b": 0.15}
+    router = _PerToolRouter(results, delays=delays, track_active=True)
+    started = time.perf_counter()
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="risky_read", args={"delay_key": "a", "result_key": "a"}, id="a"),
+            ToolCall(name="risky_read", args={"delay_key": "b", "result_key": "b"}, id="b"),
+        ],
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=_deps(
+            router=router,
+            allowed_tools=["risky_read"],
+            tool_registry=registry,
+            max_parallel_read_tools=4,
+        ),
+    )
+    elapsed = time.perf_counter() - started
+    assert router.max_active == 1
+    assert elapsed >= 0.28
 
 
 def test_same_turn_multiple_tool_calls_execute_concurrently() -> None:
@@ -193,7 +479,54 @@ def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
     assert progress_events[0]["step_id"] == "step-001"
 
 
+def test_tool_not_allowed_does_not_abort_turn_as_terminal() -> None:
+    """误调未授权工具名应写入 observation 并继续，而不是 raise_for_error 终态失败。"""
+    from haagent.runtime.orchestration.orchestrator import _tool_error_is_terminal
+
+    class _RaiseTrackingRouter(_FakeRouter):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "status": "error",
+                    "error": {
+                        "type": "tool_not_allowed",
+                        "message": "tool is not allowed: read_file",
+                    },
+                }
+            )
+            self.raised: list[dict[str, Any]] = []
+
+        def raise_for_error(self, result: dict[str, Any]) -> None:
+            self.raised.append(dict(result))
+            raise AssertionError(f"unexpected terminal error: {result}")
+
+    router = _RaiseTrackingRouter()
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _replace_dep(
+        _deps(router=router),
+        "tool_error_is_terminal",
+        _tool_error_is_terminal,
+    )
+
+    early = _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="read_file", args={"path": "a.txt"}, id="call_bad"),
+        ],
+        state=state,
+        deps=deps,
+    )
+
+    assert early is None
+    assert router.raised == []
+    assert any(
+        message.get("tool_call_id") == "call_bad" and "tool_not_allowed" in message.get("content", "")
+        for message in state.messages
+    )
+
+
 def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
+    # 两个都已 in-flight 时 sibling 仍应完成；用 delay 保证并发启动
     router = _PerToolRouter(
         {
             "file_read": {
@@ -201,10 +534,12 @@ def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
                 "error": {"type": "tool_argument_invalid", "message": "missing path"},
             },
             "grep": {"status": "success", "content": "grep result"},
-        }
+        },
+        delays={"file_read": 0.08, "grep": 0.08},
+        track_active=True,
     )
     state = TurnLoopState(messages=[], context_id="ctx")
-    deps = _deps(router=router)
+    deps = _deps(router=router, max_parallel_read_tools=2)
 
     _run_tool_calls(
         turn=1,
@@ -217,6 +552,7 @@ def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
     )
 
     assert sorted(router.calls) == ["file_read", "grep"]
+    assert router.max_active == 2
     assert len(state.messages) == 3
     assert state.messages[0]["tool_call_id"] == "call_error"
     assert state.messages[1]["tool_call_id"] == "call_success"
@@ -384,7 +720,7 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
         ),
         task_goal="test duplicate observations",
         allowed_tools=["file_read"],
-        tool_registry=SimpleNamespace(),
+        tool_registry=default_tool_runtime_registry(),
         verification_commands=[],
         workspace_root=object(),
         max_turns=3,
@@ -678,15 +1014,28 @@ def _deps(
     writer: _FakeWriter | None = None,
     emit_event=lambda event: None,
     recorder=None,
+    allowed_tools: list[str] | None = None,
+    tool_registry=None,
+    max_parallel_read_tools: int = 4,
 ) -> TurnLoopDependencies:
+    tools = allowed_tools or [
+        "agent",
+        "file_read",
+        "grep",
+        "file_write",
+        "shell",
+        "code_run",
+        "request_user_input",
+        "fake_tool",
+    ]
     return TurnLoopDependencies(
         model_gateway=SimpleNamespace(),
         writer=writer or _FakeWriter(),
         recorder=recorder or SimpleNamespace(transition=lambda status: None, finish=lambda status: None, state_history=[]),
         router=router,
         task_goal="test",
-        allowed_tools=["agent", "file_read"],
-        tool_registry=SimpleNamespace(allowed_definitions=lambda names: []),
+        allowed_tools=tools,
+        tool_registry=tool_registry or default_tool_runtime_registry(),
         verification_commands=[],
         workspace_root=object(),
         max_turns=3,
@@ -706,6 +1055,7 @@ def _deps(
         verification_observation=lambda result: {},
         verification_evidence=lambda result: "",
         verification_loop_limit_evidence=lambda max_turns, result: "",
+        max_parallel_read_tools=max_parallel_read_tools,
     )
 
 

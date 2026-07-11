@@ -31,6 +31,7 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["description", "prompt", "subagent_type"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     ),
     "send_message": ToolDefinition(
         name="send_message",
@@ -45,6 +46,7 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["to", "message"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     ),
     "task_stop": ToolDefinition(
         name="task_stop",
@@ -59,6 +61,7 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["task_id"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     ),
     "task_get": ToolDefinition(
         name="task_get",
@@ -72,6 +75,7 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["task_id"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "task_list": ToolDefinition(
         name="task_list",
@@ -88,6 +92,7 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": [],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "task_output": ToolDefinition(
         name="task_output",
@@ -105,5 +110,6 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["task_id"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
 }

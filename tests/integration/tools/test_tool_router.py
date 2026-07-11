@@ -520,6 +520,50 @@ class TimeoutMcpRuntime(FakeMcpRuntime):
         raise McpRuntimeTimeoutError("MCP tool fixture.echo timed out after 0.05 seconds")
 
 
+def test_record_skipped_writes_trace_without_running_handler(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_read"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+    )
+    skipped = {
+        "status": "error",
+        "error": {
+            "type": "tool_call_skipped",
+            "message": (
+                "tool call was not started because an earlier call "
+                "in the same model response failed"
+            ),
+        },
+        "execution_state": "not_started",
+    }
+
+    result = router.record_skipped("file_read", {"path": "a.txt"}, skipped)
+
+    assert result == skipped
+    record = _read_single_tool_call(writer)
+    assert record["tool_name"] == "file_read"
+    assert record["status"] == "error"
+    assert record["error"] == skipped["error"]
+    assert record["policy"] is None
+    assert record["duration_seconds"] == 0
+
+
+def test_record_skipped_rejects_non_skipped_result(tmp_path: Path) -> None:
+    from haagent.tools.base import ToolRoutingError
+
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_read"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+    )
+
+    with pytest.raises(ToolRoutingError, match="record_skipped only accepts"):
+        router.record_skipped("file_read", {}, {"status": "success"})
+
+
 def test_tool_router_dispatches_dynamic_mcp_tool_through_trace(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     dynamic = ToolDefinition(
@@ -532,6 +576,7 @@ def test_tool_router_dispatches_dynamic_mcp_tool_through_trace(tmp_path: Path) -
             "required": ["text"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     )
     runtime = FakeMcpRuntime()
     router = ToolRouter(
@@ -569,6 +614,7 @@ def test_tool_router_offloads_large_mcp_output_for_model_visibility(tmp_path: Pa
             "required": ["url"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     )
     large_output = "start " + ("middle " * 2200) + "important tail"
     runtime = FakeMcpRuntime(output=large_output)
@@ -605,6 +651,7 @@ def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -
         description="Echo text",
         risk_level="high",
         parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="external_effect",
     )
     router = ToolRouter(
         allowed_tools=["mcp__fixture__echo"],
@@ -803,6 +850,7 @@ def test_tool_router_does_not_swallow_run_cancelled_for_mcp_tool(tmp_path: Path)
         description="Echo text",
         risk_level="high",
         parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="external_effect",
     )
     router = ToolRouter(
         allowed_tools=["mcp__fixture__echo"],
@@ -828,6 +876,7 @@ def test_dynamic_mcp_tool_defaults_to_high_risk_approval(tmp_path: Path) -> None
         description="Echo text",
         risk_level="high",
         parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="external_effect",
     )
     router = ToolRouter(
         allowed_tools=["mcp__fixture__echo"],

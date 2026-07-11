@@ -19,6 +19,7 @@ CORE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": [],
             "additionalProperties": True,
         },
+        execution_effect="read_only",
     ),
     "load_image_attachment": ToolDefinition(
         name="load_image_attachment",
@@ -38,6 +39,7 @@ CORE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["image_id"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "request_user_input": ToolDefinition(
         name="request_user_input",
@@ -58,6 +60,7 @@ CORE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["question"],
             "additionalProperties": False,
         },
+        execution_effect="interaction",
     ),
     "start_memory_update": ToolDefinition(
         name="start_memory_update",
@@ -74,5 +77,6 @@ CORE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": [],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     ),
 }

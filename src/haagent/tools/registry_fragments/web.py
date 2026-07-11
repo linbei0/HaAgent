@@ -42,6 +42,7 @@ WEB_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["query"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "web_fetch": ToolDefinition(
         name="web_fetch",
@@ -62,5 +63,6 @@ WEB_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["url"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
 }

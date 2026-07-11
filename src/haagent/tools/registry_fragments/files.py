@@ -31,6 +31,7 @@ FILE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": [],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "grep": ToolDefinition(
         name="grep",
@@ -63,6 +64,7 @@ FILE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["pattern"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "file_read": ToolDefinition(
         name="file_read",
@@ -91,6 +93,7 @@ FILE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["path"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "file_write": ToolDefinition(
         name="file_write",
@@ -116,6 +119,7 @@ FILE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["path", "content", "mode"],
             "additionalProperties": False,
         },
+        execution_effect="workspace_write",
     ),
     "apply_patch": ToolDefinition(
         name="apply_patch",
@@ -140,6 +144,7 @@ FILE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["path", "old_text", "new_text"],
             "additionalProperties": False,
         },
+        execution_effect="workspace_write",
     ),
     "apply_patch_set": ToolDefinition(
         name="apply_patch_set",
@@ -163,5 +168,6 @@ FILE_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["replacements"],
             "additionalProperties": False,
         },
+        execution_effect="workspace_write",
     ),
 }

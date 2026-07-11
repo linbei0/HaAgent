@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from itertools import count
 from threading import Lock
@@ -106,6 +106,7 @@ class TurnLoopDependencies:
     task_step_id: str = "step-001"
     task_step_title: str = ""
     cancellation_token: CancellationToken | None = None
+    max_parallel_read_tools: int = 4
 
 
 def run_turn_loop(
@@ -646,31 +647,221 @@ def _dispatch_tool_calls(
     tool_calls: list[ToolCall],
     deps: TurnLoopDependencies,
 ) -> list[dict[str, Any]]:
+    """按 effect 划分只读批次与串行屏障，并保持原始 tool-call 顺序。"""
     if not tool_calls:
         return []
-    if len(tool_calls) == 1:
-        tool_call = tool_calls[0]
-        deps.raise_if_cancelled()
-        deps.emit_event(_tool_started_event(turn, tool_call))
-        return [
-            _dispatch_tool_call(
-                tool_call,
-                deps,
-                _interaction_handler_for_turn(turn, deps),
-            )
-        ]
+    if deps.max_parallel_read_tools <= 0:
+        raise ValueError("max_parallel_read_tools must be > 0")
 
     interaction_handler = _interaction_handler_for_turn(turn, deps)
-    for tool_call in tool_calls:
+    results: list[dict[str, Any] | None] = [None] * len(tool_calls)
+    index = 0
+    stop_remaining = False
+
+    while index < len(tool_calls):
+        if stop_remaining:
+            _skip_remaining_tool_calls(
+                tool_calls=tool_calls,
+                results=results,
+                start_index=index,
+                deps=deps,
+            )
+            break
+
+        deps.raise_if_cancelled()
+        tool_call = tool_calls[index]
+        if _tool_call_is_parallel_safe(tool_call, deps=deps):
+            batch_end = index + 1
+            while batch_end < len(tool_calls) and _tool_call_is_parallel_safe(
+                tool_calls[batch_end],
+                deps=deps,
+            ):
+                batch_end += 1
+            failed = _run_read_batch(
+                turn=turn,
+                tool_calls=tool_calls,
+                start_index=index,
+                end_index=batch_end,
+                results=results,
+                deps=deps,
+                interaction_handler=interaction_handler,
+            )
+            if failed:
+                stop_remaining = True
+                if batch_end < len(tool_calls):
+                    _skip_remaining_tool_calls(
+                        tool_calls=tool_calls,
+                        results=results,
+                        start_index=batch_end,
+                        deps=deps,
+                    )
+            index = batch_end
+            continue
+
+        # 串行屏障：写入、外部副作用、交互、高风险与未知工具独占执行
         deps.raise_if_cancelled()
         deps.emit_event(_tool_started_event(turn, tool_call))
+        result = _dispatch_tool_call(tool_call, deps, interaction_handler)
+        results[index] = result
+        if result.get("status") == "error":
+            stop_remaining = True
+            _skip_remaining_tool_calls(
+                tool_calls=tool_calls,
+                results=results,
+                start_index=index + 1,
+                deps=deps,
+            )
+            break
+        index += 1
 
-    with ThreadPoolExecutor(max_workers=len(tool_calls), thread_name_prefix="haagent-tool") as executor:
-        futures = [
-            executor.submit(_dispatch_tool_call, tool_call, deps, interaction_handler)
-            for tool_call in tool_calls
-        ]
-        return [future.result() for future in futures]
+    return [item if item is not None else _not_started_tool_result() for item in results]
+
+
+def _tool_call_is_parallel_safe(tool_call: ToolCall, *, deps: TurnLoopDependencies) -> bool:
+    if tool_call.name not in deps.allowed_tools:
+        return False
+    if not deps.tool_registry.has(tool_call.name):
+        return False
+    definition = deps.tool_registry.get(tool_call.name)
+    return (
+        definition.execution_effect == "read_only"
+        and definition.risk_level != "high"
+    )
+
+
+def _not_started_tool_result() -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error": {
+            "type": "tool_call_skipped",
+            "message": (
+                "tool call was not started because an earlier call "
+                "in the same model response failed"
+            ),
+        },
+        "execution_state": "not_started",
+    }
+
+
+def _skip_remaining_tool_calls(
+    *,
+    tool_calls: list[ToolCall],
+    results: list[dict[str, Any] | None],
+    start_index: int,
+    deps: TurnLoopDependencies,
+) -> None:
+    for index in range(start_index, len(tool_calls)):
+        if results[index] is not None:
+            continue
+        tool_call = tool_calls[index]
+        skipped = _not_started_tool_result()
+        # 未启动调用只写 trace，不进入 dispatch/policy/handler
+        results[index] = deps.router.record_skipped(tool_call.name, tool_call.args, skipped)
+
+
+def _run_read_batch(
+    *,
+    turn: int,
+    tool_calls: list[ToolCall],
+    start_index: int,
+    end_index: int,
+    results: list[dict[str, Any] | None],
+    deps: TurnLoopDependencies,
+    interaction_handler: HumanInteractionHandler | None,
+) -> bool:
+    """滑动窗口执行连续只读批次；返回是否出现 error。"""
+    batch_indices = list(range(start_index, end_index))
+    if not batch_indices:
+        return False
+    if len(batch_indices) == 1:
+        index = batch_indices[0]
+        deps.raise_if_cancelled()
+        deps.emit_event(_tool_started_event(turn, tool_calls[index]))
+        results[index] = _dispatch_tool_call(tool_calls[index], deps, interaction_handler)
+        return results[index].get("status") == "error"
+
+    max_workers = min(deps.max_parallel_read_tools, len(batch_indices))
+    next_pos = 0
+    in_flight: dict[Future[dict[str, Any]], int] = {}
+    failed = False
+    cancelled_error: RunCancelled | None = None
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="haagent-tool") as executor:
+        def submit_available() -> None:
+            nonlocal next_pos
+            # 只维持最多 max_workers 个 in-flight，失败后不再领取
+            while (
+                not failed
+                and cancelled_error is None
+                and next_pos < len(batch_indices)
+                and len(in_flight) < max_workers
+            ):
+                deps.raise_if_cancelled()
+                index = batch_indices[next_pos]
+                next_pos += 1
+                # tool_started 仅在取得 active slot 后、提交 worker 前发出
+                deps.emit_event(_tool_started_event(turn, tool_calls[index]))
+                future = executor.submit(
+                    _dispatch_tool_call,
+                    tool_calls[index],
+                    deps,
+                    interaction_handler,
+                )
+                in_flight[future] = index
+
+        try:
+            submit_available()
+        except RunCancelled as error:
+            cancelled_error = error
+
+        while in_flight and cancelled_error is None:
+            done, _ = wait(set(in_flight), return_when=FIRST_COMPLETED)
+            for future in done:
+                index = in_flight.pop(future)
+                try:
+                    result = future.result()
+                except RunCancelled as error:
+                    cancelled_error = error
+                    continue
+                results[index] = result
+                if result.get("status") == "error":
+                    failed = True
+            if cancelled_error is not None:
+                break
+            if not failed:
+                try:
+                    submit_available()
+                except RunCancelled as error:
+                    cancelled_error = error
+                    break
+
+        while in_flight:
+            done, _ = wait(set(in_flight), return_when=FIRST_COMPLETED)
+            for future in done:
+                index = in_flight.pop(future)
+                try:
+                    result = future.result()
+                except RunCancelled as error:
+                    cancelled_error = error
+                    continue
+                results[index] = result
+                if result.get("status") == "error":
+                    failed = True
+
+    if cancelled_error is not None:
+        raise cancelled_error
+
+    if failed:
+        for index in batch_indices:
+            if results[index] is None:
+                tool_call = tool_calls[index]
+                skipped = _not_started_tool_result()
+                results[index] = deps.router.record_skipped(
+                    tool_call.name,
+                    tool_call.args,
+                    skipped,
+                )
+    return failed
 
 
 def _dispatch_tool_call(

@@ -18,6 +18,7 @@ MCP_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": [],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
     "read_mcp_resource": ToolDefinition(
         name="read_mcp_resource",
@@ -32,5 +33,6 @@ MCP_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["server", "uri"],
             "additionalProperties": False,
         },
+        execution_effect="read_only",
     ),
 }

@@ -7,6 +7,7 @@ tests/unit/tools/test_tool_registry.py - Tool Registry v1 测试
 import pytest
 
 from haagent.tools.registry import (
+    ALLOWED_EXECUTION_EFFECTS,
     TOOL_REGISTRY,
     ToolDefinition,
     allowed_tool_definitions,
@@ -49,12 +50,67 @@ def test_tool_registry_contains_mvp_tools() -> None:
     assert all(isinstance(definition, ToolDefinition) for definition in TOOL_REGISTRY.values())
 
 
+def test_tool_registry_static_execution_effects() -> None:
+    expected = {
+        "fake_tool": "read_only",
+        "load_image_attachment": "read_only",
+        "request_user_input": "interaction",
+        "start_memory_update": "external_effect",
+        "agent": "external_effect",
+        "send_message": "external_effect",
+        "task_stop": "external_effect",
+        "task_get": "read_only",
+        "task_list": "read_only",
+        "task_output": "read_only",
+        "file_list": "read_only",
+        "grep": "read_only",
+        "file_read": "read_only",
+        "file_write": "workspace_write",
+        "apply_patch": "workspace_write",
+        "apply_patch_set": "workspace_write",
+        "skill_list": "read_only",
+        "skill_read": "read_only",
+        "skill_market_search": "read_only",
+        "web_search": "read_only",
+        "web_fetch": "read_only",
+        "list_mcp_resources": "read_only",
+        "read_mcp_resource": "read_only",
+        "code_run": "external_effect",
+        "shell": "external_effect",
+    }
+    assert {name: TOOL_REGISTRY[name].execution_effect for name in expected} == expected
+    assert ALLOWED_EXECUTION_EFFECTS == {
+        "read_only",
+        "workspace_write",
+        "external_effect",
+        "interaction",
+    }
+
+
+def test_execution_effect_is_not_exported_to_model_schema() -> None:
+    schema = TOOL_REGISTRY["file_read"].to_model_schema()
+    assert set(schema) == {"name", "description", "parameters"}
+    assert "execution_effect" not in schema
+    assert "risk_level" not in schema
+
+
+def test_tool_definition_requires_execution_effect() -> None:
+    with pytest.raises(TypeError):
+        ToolDefinition(  # type: ignore[call-arg]
+            name="missing_effect",
+            description="missing",
+            risk_level="low",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+
 def test_merge_tool_registry_fragments_rejects_duplicate_tool_names() -> None:
     definition = ToolDefinition(
         name="duplicate",
         description="test",
         risk_level="low",
         parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="read_only",
     )
 
     with pytest.raises(ValueError, match="duplicate tool definition: duplicate"):
@@ -258,6 +314,7 @@ def test_runtime_registry_exports_dynamic_mcp_tool_schema() -> None:
             "required": ["text"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     )
     registry = default_tool_runtime_registry({"mcp__fixture__echo": dynamic})
 
@@ -273,6 +330,7 @@ def test_runtime_registry_does_not_mutate_global_tool_registry() -> None:
         description="Echo text",
         risk_level="high",
         parameters={"type": "object", "properties": {}, "required": []},
+        execution_effect="external_effect",
     )
 
     default_tool_runtime_registry({"mcp__fixture__echo": dynamic})
@@ -328,6 +386,21 @@ def test_current_tool_registry_self_check_passes() -> None:
     validate_tool_registry()
 
 
+def test_tool_registry_self_check_rejects_invalid_execution_effect() -> None:
+    registry = {
+        "bad": ToolDefinition(
+            name="bad",
+            description="bad",
+            risk_level="low",
+            parameters={"type": "object", "properties": {}, "required": []},
+            execution_effect="side_effect",  # type: ignore[arg-type]
+        ),
+    }
+
+    with pytest.raises(ValueError, match="bad execution_effect is invalid: side_effect"):
+        validate_tool_registry(registry)
+
+
 def test_tool_registry_self_check_rejects_unknown_schema_type() -> None:
     registry = {
         "bad": ToolDefinition(
@@ -339,6 +412,7 @@ def test_tool_registry_self_check_rejects_unknown_schema_type() -> None:
                 "properties": {"value": {"type": "mystery"}},
                 "required": [],
             },
+            execution_effect="read_only",
         ),
     }
 
@@ -353,6 +427,7 @@ def test_tool_registry_self_check_rejects_required_not_list() -> None:
             description="bad",
             risk_level="low",
             parameters={"type": "object", "properties": {}, "required": "value"},
+            execution_effect="read_only",
         ),
     }
 
@@ -367,6 +442,7 @@ def test_tool_registry_self_check_rejects_properties_not_dict() -> None:
             description="bad",
             risk_level="low",
             parameters={"type": "object", "properties": [], "required": []},
+            execution_effect="read_only",
         ),
     }
 
@@ -381,6 +457,7 @@ def test_tool_registry_self_check_rejects_invalid_risk_level() -> None:
             description="bad",
             risk_level="extreme",
             parameters={"type": "object", "properties": {}, "required": []},
+            execution_effect="read_only",
         ),
     }
 

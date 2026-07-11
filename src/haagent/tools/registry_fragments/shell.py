@@ -34,6 +34,7 @@ SHELL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["code"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     ),
     "shell": ToolDefinition(
         name="shell",
@@ -61,5 +62,6 @@ SHELL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["command"],
             "additionalProperties": False,
         },
+        execution_effect="external_effect",
     ),
 }

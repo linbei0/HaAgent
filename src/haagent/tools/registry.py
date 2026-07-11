@@ -7,13 +7,25 @@ haagent/tools/registry.py - 工具注册表组合入口
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from haagent.runtime.execution.retry import ReplaySafety
 
 
 ALLOWED_JSON_SCHEMA_TYPES = {"string", "integer", "number", "boolean", "object", "array"}
 ALLOWED_RISK_LEVELS = {"low", "medium", "high"}
+ExecutionEffect = Literal[
+    "read_only",
+    "workspace_write",
+    "external_effect",
+    "interaction",
+]
+ALLOWED_EXECUTION_EFFECTS = {
+    "read_only",
+    "workspace_write",
+    "external_effect",
+    "interaction",
+}
 
 
 @dataclass(frozen=True)
@@ -22,10 +34,11 @@ class ToolDefinition:
     description: str
     risk_level: str
     parameters: dict[str, Any]
+    execution_effect: ExecutionEffect
     replay_safety: ReplaySafety = ReplaySafety.NEVER_REPLAY
 
     def to_model_schema(self) -> dict[str, Any]:
-        """导出模型网关需要的稳定字段，不暴露运行时内部风险元数据。"""
+        """导出模型网关需要的稳定字段，不暴露运行时内部风险与 effect 元数据。"""
         return {
             "name": self.name,
             "description": self.description,
@@ -101,6 +114,10 @@ def validate_tool_registry(registry: dict[str, ToolDefinition] | None = None) ->
     for name, definition in registry.items():
         if definition.risk_level not in ALLOWED_RISK_LEVELS:
             raise ValueError(f"{name} risk_level is invalid: {definition.risk_level}")
+        if definition.execution_effect not in ALLOWED_EXECUTION_EFFECTS:
+            raise ValueError(
+                f"{name} execution_effect is invalid: {definition.execution_effect}",
+            )
         _validate_parameters_schema(name, definition.parameters)
 
 

@@ -196,6 +196,7 @@ def test_chat_turn_runner_allows_dynamic_mcp_tool_in_task_contract(tmp_path: Pat
         description="Echo text",
         risk_level="high",
         parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+        execution_effect="external_effect",
     )
     registry = default_tool_runtime_registry({"mcp__fixture__echo": dynamic})
     captured: dict[str, object] = {}

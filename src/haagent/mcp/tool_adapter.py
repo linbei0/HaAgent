@@ -34,6 +34,7 @@ def mcp_tool_definitions(tools: list[McpToolInfo]) -> dict[str, ToolDefinition]:
             description=tool.description or f"MCP tool {tool.name} from server {tool.server_name}",
             risk_level=tool.risk_level,
             parameters=dict(tool.input_schema),
+            execution_effect="external_effect",
         )
         for tool in tools
     }
