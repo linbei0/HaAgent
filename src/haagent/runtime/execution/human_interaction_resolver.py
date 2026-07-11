@@ -2,6 +2,8 @@
 src/haagent/runtime/execution/human_interaction_resolver.py - 人机交互解析器
 
 记录同一次 run 内已完成的人机交互，并按稳定签名复用审批和补充信息结果。
+edit_diff 的「本会话始终允许」与 permission_mode 自动跳过由结构化 session 状态决定，
+不得用完整 path/diff 签名冒充同类改动，也不得伪造用户手动点击事件。
 """
 
 from __future__ import annotations
@@ -12,10 +14,24 @@ from typing import Any
 
 from haagent.runtime.execution.command import redact_secret_like_text
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.execution.path_policy import PermissionMode
 
 
 ANSWER_EXCERPT_LIMIT = 240
 QUESTION_EXCERPT_LIMIT = 180
+
+# 审计用合成 answer：标明跳过原因，避免被当成用户在 modal 上点了 once/always
+MODE_AUTO_ANSWER = "mode_auto"
+SESSION_ALWAYS_ANSWER = "session_always"
+STATUS_MODE_AUTO = "mode_auto_approved"
+STATUS_SESSION_ALWAYS = "session_always_allowed"
+
+
+@dataclass
+class SessionInteractionState:
+    """跨 turn / resume 的会话级交互状态（仅结构化标志，不含完整 diff）。"""
+
+    edit_diff_session_always: bool = False
 
 
 @dataclass(frozen=True)
@@ -50,11 +66,51 @@ class HumanInteractionResolution:
 
 
 class HumanInteractionResolver:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        permission_mode: PermissionMode = "request_approval",
+        edit_diff_session_always: bool = False,
+        session_interaction_state: SessionInteractionState | None = None,
+    ) -> None:
+        self._permission_mode: PermissionMode = permission_mode
+        # 允许外部传入同一 session 的可变状态，使 always 能跨 turn 并随 metadata 持久化
+        if session_interaction_state is not None:
+            self._session_state = session_interaction_state
+        else:
+            self._session_state = SessionInteractionState(
+                edit_diff_session_always=edit_diff_session_always,
+            )
         self._resolutions: dict[str, HumanInteractionResolution] = {}
         self._ordered_signatures: list[str] = []
 
+    @property
+    def edit_diff_session_always(self) -> bool:
+        return self._session_state.edit_diff_session_always
+
+    @property
+    def permission_mode(self) -> PermissionMode:
+        return self._permission_mode
+
+    @property
+    def session_interaction_state(self) -> SessionInteractionState:
+        return self._session_state
+
     def resolve(self, request: HumanInteractionRequest) -> HumanInteractionResolution | None:
+        # edit_diff：先看 permission_mode / session always，再看完整签名（once 复用）
+        if request.interaction_type == "edit_diff":
+            if self._permission_mode in {"auto_approve", "full_access"}:
+                return self._synthetic_edit_diff(
+                    request,
+                    status=STATUS_MODE_AUTO,
+                    answer=MODE_AUTO_ANSWER,
+                )
+            if self._session_state.edit_diff_session_always:
+                return self._synthetic_edit_diff(
+                    request,
+                    status=STATUS_SESSION_ALWAYS,
+                    answer=SESSION_ALWAYS_ANSWER,
+                )
         return self._resolutions.get(interaction_signature(request))
 
     def record(
@@ -65,6 +121,13 @@ class HumanInteractionResolver:
         turn: int,
     ) -> HumanInteractionResolution:
         signature = interaction_signature(request)
+        # always 只提升 edit_diff 会话标志，绝不扩展到 shell/code_run 等 approval 类别
+        if (
+            request.interaction_type == "edit_diff"
+            and response.approved
+            and response.answer == "always"
+        ):
+            self._session_state.edit_diff_session_always = True
         resolution = HumanInteractionResolution(
             signature=signature,
             interaction_type=request.interaction_type,
@@ -87,6 +150,26 @@ class HumanInteractionResolver:
             for signature in self._ordered_signatures
             if signature in self._resolutions
         ]
+
+    def _synthetic_edit_diff(
+        self,
+        request: HumanInteractionRequest,
+        *,
+        status: str,
+        answer: str,
+    ) -> HumanInteractionResolution:
+        # 合成解析仅用于自动跳过；signature 仍按请求计算便于 trace，但不写入 once 复用表
+        return HumanInteractionResolution(
+            signature=interaction_signature(request),
+            interaction_type=request.interaction_type,
+            tool_name=request.tool_name,
+            question=request.question,
+            status=status,
+            approved=True,
+            answer=answer,
+            turn=0,
+            args_summary=dict(request.args_summary),
+        )
 
 
 def interaction_signature(request: HumanInteractionRequest) -> str:

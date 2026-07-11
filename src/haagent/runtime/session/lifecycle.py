@@ -17,6 +17,7 @@ from haagent.mcp.settings import load_mcp_settings
 from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.types import ModelGateway
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, load_path_policy
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.session.package import (
@@ -84,6 +85,7 @@ class SessionRuntimeState:
     tool_registry: Any
     session_path: Path
     created_at: str
+    session_interaction_state: SessionInteractionState
 
 
 def bootstrap_mcp(mcp_runtime: Any | None = None) -> tuple[Any, Any, bool, list[str], Any]:
@@ -169,6 +171,7 @@ def build_create_state(
         tool_registry=tool_registry,
         session_path=runs_root / "sessions" / sid,
         created_at=datetime.now(UTC).isoformat(),
+        session_interaction_state=SessionInteractionState(),
     )
 
 
@@ -241,6 +244,10 @@ def build_resume_state(
         tool_registry=tool_registry,
         session_path=session_path,
         created_at=str(metadata["created_at"]),
+        # resume 同一 session：恢复 edit_diff 始终允许；缺失字段视为 False
+        session_interaction_state=SessionInteractionState(
+            edit_diff_session_always=bool(metadata.get("edit_diff_session_always", False)),
+        ),
     )
 
 
@@ -283,6 +290,8 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         tool_registry=state.tool_registry,
         session_path=state.runs_root / "sessions" / sid,
         created_at=datetime.now(UTC).isoformat(),
+        # 新 session 不继承上一会话的 edit_diff always
+        session_interaction_state=SessionInteractionState(),
     )
 
 
@@ -323,3 +332,4 @@ def apply_state(instance: Any, state: SessionRuntimeState) -> None:
     instance._tool_registry = state.tool_registry
     instance.session_path = state.session_path
     instance._created_at = state.created_at
+    instance._session_interaction_state = state.session_interaction_state

@@ -256,6 +256,7 @@ def write_session_metadata(
     image_attachment_history: list[ImageAttachment],
     created_at: str,
     turn_count: int,
+    edit_diff_session_always: bool = False,
 ) -> str:
     """写入 session.json；返回实际保留的 created_at。"""
     session_path.mkdir(parents=True, exist_ok=True)
@@ -272,6 +273,8 @@ def write_session_metadata(
         "session_id": session_id,
         "workspace_root": str(workspace_root),
         "path_policy": serialize_path_policy(path_policy),
+        # 仅布尔标志，不保存完整 diff；新 session 默认 False
+        "edit_diff_session_always": bool(edit_diff_session_always),
         "provider": provider,
         "model_profile_name": model_profile_name,
         "model_connection_id": model_connection_id,

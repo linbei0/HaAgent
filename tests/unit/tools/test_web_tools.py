@@ -320,3 +320,241 @@ def test_web_search_missing_api_key_returns_explicit_error() -> None:
             "message": "TAVILY_API_KEY is required for tavily web search",
         },
     }
+
+
+def test_direct_mode_still_resolves_and_rejects_non_public_dns() -> None:
+    def private_resolver(host: str, port: int):
+        del host, port
+        return {ipaddress.ip_address("10.0.0.8")}
+
+    with pytest.raises(NetworkGuardError, match="non-public"):
+        ensure_public_http_url("https://example.com/", resolver=private_resolver)
+
+
+def test_proxy_env_is_passed_to_httpx_client_with_trust_env_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class CapturingClient:
+        def __init__(self, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        def __enter__(self) -> CapturingClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def request(self, method: str, url: str, **kwargs: object) -> httpx.Response:
+            del method, kwargs
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, text="ok", request=request)
+
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://proxy.example.com:7890")
+    monkeypatch.setattr(httpx, "Client", CapturingClient)
+
+    response = fetch_public_http_response("https://example.com/page", resolver=_public_resolver)
+
+    assert response.status_code == 200
+    assert seen["trust_env"] is False
+    assert seen["proxy"] == "http://proxy.example.com:7890"
+    assert seen["follow_redirects"] is False
+
+
+def test_proxy_mode_does_not_call_local_resolver_for_ordinary_hostnames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_resolver(host: str, port: int):
+        raise AssertionError(f"proxy mode must not resolve {host}:{port} locally")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok", request=request)
+
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://proxy.example.com:7890")
+    response = fetch_public_http_response(
+        "https://www.reuters.com/",
+        resolver=fail_resolver,
+        transport=httpx.MockTransport(handler),
+    )
+    assert response.status_code == 200
+
+
+def test_proxy_url_with_embedded_credentials_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://user:secret@proxy.example.com:7890")
+    with pytest.raises(NetworkGuardError, match="embedded credentials"):
+        fetch_public_http_response(
+            "https://example.com/",
+            resolver=_public_resolver,
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost/",
+        "http://localhost.localdomain/",
+        "http://metadata.google.internal/",
+        "http://127.0.0.1/",
+        "http://10.0.0.5/",
+    ],
+)
+def test_proxy_mode_rejects_local_hostnames_and_private_ip_literals(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://proxy.example.com:7890")
+    with pytest.raises(NetworkGuardError, match="local hostnames|non-public"):
+        fetch_public_http_response(
+            url,
+            resolver=_public_resolver,
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request)),
+        )
+
+
+def test_proxy_mode_revalidates_dangerous_redirect_hops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://example.com/start":
+            return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"}, request=request)
+        return httpx.Response(200, text="unexpected", request=request)
+
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://proxy.example.com:7890")
+    with pytest.raises(NetworkGuardError, match="non-public"):
+        fetch_public_http_response(
+            "https://example.com/start",
+            resolver=_public_resolver,
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def test_web_fetch_maps_connect_timeout_to_structured_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        request = httpx.Request("GET", "https://www.reuters.com/")
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    monkeypatch.setattr("haagent.tools.web.fetch_public_http_response", boom)
+    result = web_fetch({"url": "https://www.reuters.com/world/"})
+
+    assert result["status"] == "error"
+    error = result["error"]
+    assert error["type"] == "web_connect_timeout"
+    assert error["target_host"] == "www.reuters.com"
+    assert error["failure_stage"] == "connect"
+    assert error["proxy_configured"] is False
+    assert error["resolution_mode"] == "direct"
+    assert error["retriable"] is True
+    assert "timeout_seconds" in error
+    assert "timed out" not in error["message"].lower() or "connect" in error["message"].lower()
+    assert "action_hint" in error
+    assert "HAAGENT_WEB_PROXY" in error["action_hint"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_type", "stage", "proxy_env", "url"),
+    [
+        (
+            httpx.ReadTimeout("read timed out", request=httpx.Request("GET", "https://example.com/")),
+            "web_read_timeout",
+            "read",
+            None,
+            "https://example.com/page",
+        ),
+        (
+            httpx.ProxyError("proxy rejected", request=httpx.Request("GET", "https://example.com/")),
+            "web_proxy_failed",
+            "proxy",
+            "http://proxy.example.com:7890",
+            "https://example.com/page",
+        ),
+        (
+            httpx.ConnectError(
+                "[Errno 11001] getaddrinfo failed",
+                request=httpx.Request("GET", "https://missing.example/"),
+            ),
+            "web_dns_failed",
+            "dns",
+            None,
+            "https://missing.example/",
+        ),
+    ],
+)
+def test_web_fetch_maps_read_timeout_proxy_error_and_dns_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    exc: Exception,
+    expected_type: str,
+    stage: str,
+    proxy_env: str | None,
+    url: str,
+) -> None:
+    monkeypatch.setattr(
+        "haagent.tools.web.fetch_public_http_response",
+        lambda *a, e=exc, **k: (_ for _ in ()).throw(e),
+    )
+    if proxy_env:
+        monkeypatch.setenv("HAAGENT_WEB_PROXY", proxy_env)
+    else:
+        monkeypatch.delenv("HAAGENT_WEB_PROXY", raising=False)
+
+    result = web_fetch({"url": url})
+    error = result["error"]
+    assert error["type"] == expected_type
+    assert error["failure_stage"] == stage
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert "proxy.example.com" not in dumped
+    assert "user:secret" not in dumped
+
+
+def test_web_fetch_error_does_not_leak_proxy_url_or_sensitive_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        request = httpx.Request("GET", "https://example.com/path?token=super-secret")
+        raise httpx.ProxyError(
+            "Unable to connect to proxy http://user:pass@proxy.example.com:7890",
+            request=request,
+        )
+
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://user:pass@proxy.example.com:7890")
+    monkeypatch.setattr("haagent.tools.web.fetch_public_http_response", boom)
+    # 代理凭据在配置阶段就会拒绝；此处模拟 fetch 层已收到 ProxyError 时的脱敏。
+    monkeypatch.delenv("HAAGENT_WEB_PROXY", raising=False)
+    monkeypatch.setenv("HAAGENT_WEB_PROXY", "http://proxy.example.com:7890")
+
+    result = web_fetch({"url": "https://example.com/path?token=super-secret"})
+    dumped = json.dumps(result, ensure_ascii=False)
+    assert result["error"]["type"] == "web_proxy_failed"
+    assert "proxy.example.com" not in dumped
+    assert "user:pass" not in dumped
+    assert "super-secret" not in dumped
+    assert result["error"]["target_host"] == "example.com"
+    assert result["error"]["proxy_configured"] is True
+
+
+def test_web_fetch_maps_http_status_and_target_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    def status_error(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        request = httpx.Request("GET", "https://example.com/missing")
+        response = httpx.Response(404, text="missing", request=request)
+        response.raise_for_status()
+        return response
+
+    monkeypatch.setattr("haagent.tools.web.fetch_public_http_response", status_error)
+    result = web_fetch({"url": "https://example.com/missing"})
+    assert result["error"]["type"] == "web_http_error"
+    assert result["error"]["failure_stage"] == "http"
+
+    def denied(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        raise NetworkGuardError("target resolves to non-public address(es): 10.0.0.1")
+
+    monkeypatch.setattr("haagent.tools.web.fetch_public_http_response", denied)
+    denied_result = web_fetch({"url": "https://example.com/"})
+    assert denied_result["error"]["type"] == "web_target_denied"
+    assert denied_result["error"]["retriable"] is False

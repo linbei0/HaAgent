@@ -2,6 +2,7 @@
 haagent/tools/network_guard.py - 联网目标安全校验
 
 为只读联网工具校验 HTTP(S) URL、公网解析结果、代理配置和重定向链路。
+支持 direct（本地解析目标）与 proxy（代理解析目标）两种解析模式。
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import ipaddress
 import os
 import socket
 from collections.abc import Callable
+from enum import Enum
 from urllib.parse import ParseResult, urljoin, urlparse
 
 import httpx
@@ -18,6 +20,11 @@ import httpx
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 Resolver = Callable[[str, int], set[IPAddress]]
 DEFAULT_PORTS = {"http": 80, "https": 443}
+# 连接/读取分离，避免笼统 “timed out”；常量集中，规模克制。
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_READ_TIMEOUT_SECONDS = 15.0
+DEFAULT_WRITE_TIMEOUT_SECONDS = 10.0
+DEFAULT_POOL_TIMEOUT_SECONDS = 10.0
 LOCAL_HOSTNAMES = {
     "localhost",
     "localhost.localdomain",
@@ -32,8 +39,26 @@ LOCAL_HOST_SUFFIXES = (
 )
 
 
+class ResolutionMode(str, Enum):
+    """目标主机解析方式：无代理直连，有显式代理则交给代理端解析。"""
+
+    DIRECT = "direct"
+    PROXY = "proxy"
+
+
 class NetworkGuardError(ValueError):
     """联网目标违反安全策略时抛出。"""
+
+
+def default_http_timeout(
+    *,
+    connect: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    read: float = DEFAULT_READ_TIMEOUT_SECONDS,
+    write: float = DEFAULT_WRITE_TIMEOUT_SECONDS,
+    pool: float = DEFAULT_POOL_TIMEOUT_SECONDS,
+) -> httpx.Timeout:
+    """构建分离 connect/read/write/pool 的超时配置。"""
+    return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
 
 
 def validate_http_url(url: str) -> None:
@@ -47,8 +72,26 @@ def validate_http_url(url: str) -> None:
         raise NetworkGuardError("URLs with embedded credentials are not allowed")
 
 
+def get_resolution_mode(*, proxy: str | None = None) -> ResolutionMode:
+    """有显式代理时自动进入 proxy，否则 direct。"""
+    return ResolutionMode.PROXY if proxy else ResolutionMode.DIRECT
+
+
 def ensure_public_http_url(url: str, *, resolver: Resolver | None = None) -> None:
-    """拒绝 loopback、私网、metadata 和其它非公网 HTTP 目标。"""
+    """拒绝 loopback、私网、metadata 和其它非公网 HTTP 目标（direct 模式）。"""
+    ensure_http_url_allowed(url, mode=ResolutionMode.DIRECT, resolver=resolver)
+
+
+def ensure_http_url_allowed(
+    url: str,
+    *,
+    mode: ResolutionMode,
+    resolver: Resolver | None = None,
+) -> None:
+    """按解析模式校验单个出站 URL。"""
+    if mode is ResolutionMode.PROXY:
+        _ensure_proxy_safe_http_url(url)
+        return
     parsed = _validated_parsed_http_url(url)
     hostname = _normalized_hostname(parsed.hostname)
     literal = _parse_ip_literal(hostname)
@@ -72,28 +115,31 @@ def fetch_public_http_response(
     headers: dict[str, str] | None = None,
     params: dict[str, object] | None = None,
     json_body: dict[str, object] | None = None,
-    timeout: float = 15.0,
+    timeout: float | httpx.Timeout = DEFAULT_READ_TIMEOUT_SECONDS,
     max_redirects: int = 5,
     resolver: Resolver | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> httpx.Response:
-    """请求 HTTP 资源，并在每个重定向 hop 前重新校验目标。"""
+    """请求 HTTP 资源，并在每个重定向 hop 前按当前模式重新校验目标。"""
     current_url = url
     current_params = params
     proxy = _configured_proxy()
+    mode = get_resolution_mode(proxy=proxy)
+    request_timeout = timeout if isinstance(timeout, httpx.Timeout) else default_http_timeout(read=float(timeout))
 
     client_kwargs: dict[str, object] = {
         "follow_redirects": False,
-        "timeout": timeout,
+        "timeout": request_timeout,
         "trust_env": False,
         "transport": transport,
     }
+    # 显式代理且无自定义 transport 时交给 httpx；MockTransport 测试路径不注入 proxy。
     if proxy is not None and transport is None:
         client_kwargs["proxy"] = proxy
 
     with httpx.Client(**client_kwargs) as client:
         for redirect_count in range(max_redirects + 1):
-            ensure_public_http_url(current_url, resolver=resolver)
+            ensure_http_url_allowed(current_url, mode=mode, resolver=resolver)
             response = client.request(
                 method,
                 current_url,
@@ -116,11 +162,23 @@ def fetch_public_http_response(
 
 
 def _configured_proxy() -> str | None:
+    # 唯一显式代理入口；不继承 HTTP(S)_PROXY / ALL_PROXY。
     proxy = os.environ.get("HAAGENT_WEB_PROXY")
     if not proxy:
         return None
     validate_http_url(proxy)
     return proxy
+
+
+def _ensure_proxy_safe_http_url(url: str) -> None:
+    """代理模式：普通域名由代理端解析，本地只拦主机名与 IP 字面量。"""
+    parsed = _validated_parsed_http_url(url)
+    hostname = _normalized_hostname(parsed.hostname)
+    literal = _parse_ip_literal(hostname)
+    if literal is not None:
+        _ensure_global_literal_ip(literal)
+        return
+    _ensure_not_local_hostname(hostname)
 
 
 def _resolve_host_addresses(host: str, port: int) -> set[IPAddress]:

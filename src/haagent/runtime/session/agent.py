@@ -302,6 +302,7 @@ class AgentSession:
                     worker_permission_requester=self._worker_permission_requester,
                     attachments=prompt_attachments,
                     image_attachment_history=self._image_attachment_history,
+                    session_interaction_state=self._session_interaction_state,
                 ),
             )
         except Exception:
@@ -311,6 +312,8 @@ class AgentSession:
         turn_result = self._build_turn_result(clean_prompt, result)
         turn_result = with_in_band_verification(turn_result, runtime_events)
         self.turn_count += 1
+        # always 可能在本 turn 的 resolver 中被置位；落盘以便 resume 恢复
+        self._write_session_metadata()
         if new_attachments:
             self._last_user_image_attachments = list(new_attachments)
             self._image_attachment_history = merge_image_attachment_history(
@@ -577,6 +580,7 @@ class AgentSession:
             tool_registry=self._tool_registry,
             session_path=self.session_path,
             created_at=self._created_at,
+            session_interaction_state=self._session_interaction_state,
         )
 
     def _write_task_ledger(self) -> None:
@@ -729,6 +733,7 @@ class AgentSession:
             image_attachment_history=self._image_attachment_history,
             created_at=self._created_at,
             turn_count=self.turn_count,
+            edit_diff_session_always=self._session_interaction_state.edit_diff_session_always,
         )
 
     def _write_manual_compaction_state(self) -> None:

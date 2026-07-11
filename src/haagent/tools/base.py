@@ -20,5 +20,14 @@ class ToolRoutingError(RuntimeError):
         self.error_type = error_type
 
 
-def tool_error(error_type: str, message: str) -> dict[str, Any]:
-    return {"status": "error", "error": {"type": error_type, "message": message}}
+def tool_error(
+    error_type: str,
+    message: str,
+    **details: Any,
+) -> dict[str, Any]:
+    error: dict[str, Any] = {"type": error_type, "message": message}
+    # 额外结构化字段（如 failure_stage）供工具结果与 UI 摘要使用；不强制所有调用方提供。
+    for key, value in details.items():
+        if value is not None:
+            error[key] = value
+    return {"status": "error", "error": error}

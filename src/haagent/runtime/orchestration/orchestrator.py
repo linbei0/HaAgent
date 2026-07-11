@@ -42,6 +42,7 @@ from haagent.runtime.execution.human_interaction import (
 from haagent.runtime.execution.human_interaction_resolver import (
     HumanInteractionResolution,
     HumanInteractionResolver,
+    SessionInteractionState,
 )
 from haagent.runtime.orchestration.loop_guidance import (
     ToolSuggestion,
@@ -85,6 +86,7 @@ class RunOrchestrator:
         mcp_runtime: Any | None = None,
         leader_session_id: str | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
+        session_interaction_state: SessionInteractionState | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -101,6 +103,8 @@ class RunOrchestrator:
         self._mcp_runtime = mcp_runtime
         self._leader_session_id = leader_session_id or "leader"
         self._worker_permission_requester = worker_permission_requester
+        # 跨 turn 共享；always 写回此对象，由 AgentSession 持久化
+        self._session_interaction_state = session_interaction_state or SessionInteractionState()
 
     def _emit_event(self, event: RuntimeBusEvent | dict[str, object]) -> None:
         # 兼容仍发 raw dict 的 multi_agent / compression / task_progress 路径。
@@ -189,7 +193,11 @@ class RunOrchestrator:
             has_file_change = False
             has_shell_verification = False
             safety_guard = SafetyGuard()
-            interaction_resolver = HumanInteractionResolver()
+            # permission_mode 控制 edit_diff 自动跳过；session always 来自跨 turn 状态
+            interaction_resolver = HumanInteractionResolver(
+                permission_mode=path_policy.permission_mode,
+                session_interaction_state=self._session_interaction_state,
+            )
 
             prepared_messages = prepare_initial_messages(
                 context_builder_cls=ContextBuilder,
@@ -534,6 +542,7 @@ def _interaction_bridge(
 ) -> HumanInteractionHandler:
     def handle(request: HumanInteractionRequest) -> HumanInteractionResponse:
         if resolution := interaction_resolver.resolve(request):
+            # mode_auto / session_always / 精确签名复用：写 interaction_reused，不伪造用户点击
             reused_event = _interaction_reused_event(turn, resolution)
             writer.append_interaction_event("interaction_reused", _transcript_event(reused_event))
             orchestrator._emit_event(reused_event)
@@ -582,6 +591,7 @@ def _interaction_reused_event(turn: int, resolution: HumanInteractionResolution)
         "question": resolution.question,
         "status": resolution.status,
         "approved": resolution.approved,
+        "answer": resolution.answer,
         "resolved_turn": resolution.turn,
         "signature": resolution.signature,
     }

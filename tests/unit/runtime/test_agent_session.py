@@ -347,3 +347,70 @@ def test_agent_session_emits_recovery_for_model_failure(tmp_path: Path) -> None:
     assert recovery_events
     assert recovery_events[-1].category == "model_error"
     assert recovery_events[-1].suggested_action == "retry_or_switch_model"
+
+
+def test_edit_diff_session_always_persists_on_resume_not_new_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """always 随 session metadata 恢复；new() 与新 session 不继承。"""
+    from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+    from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
+
+    def _run(self, request):
+        del self
+        # 模拟用户在本 turn 选择 always：写回共享 session 状态
+        assert request.session_interaction_state is not None
+        resolver = HumanInteractionResolver(
+            permission_mode=request.path_policy.permission_mode,
+            session_interaction_state=request.session_interaction_state,
+        )
+        resolver.record(
+            HumanInteractionRequest(
+                interaction_type="edit_diff",
+                tool_name="file_write",
+                question="Approve?",
+                args_summary={"path": "a.txt", "diff_preview": "+a"},
+            ),
+            HumanInteractionResponse(approved=True, answer="always"),
+            turn=1,
+        )
+        return RunResult(
+            status=RunStatus.COMPLETED,
+            state_history=[RunStatus.EXECUTING, RunStatus.COMPLETED],
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-always",
+        )
+
+    def _build_result(self, prompt, result):
+        del prompt, result
+        return ChatTurnResult(
+            session_id=self.session_id,
+            turn_index=self.turn_count + 1,
+            status="completed",
+            episode_path=tmp_path / ".runs" / "episodes" / "episode-always",
+            provider="fake",
+            final_response="ok",
+            verification_status="not_run",
+        )
+
+    monkeypatch.setattr(ChatTurnRunner, "run", _run)
+    monkeypatch.setattr(AgentSession, "_build_turn_result", _build_result)
+
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+    session.run_prompt_events("write files")
+    assert session._session_interaction_state.edit_diff_session_always is True
+
+    metadata = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
+    assert metadata["edit_diff_session_always"] is True
+
+    resumed = AgentSession.resume(session.session_path, model_gateway=None)
+    assert resumed._session_interaction_state.edit_diff_session_always is True
+
+    session.new()
+    assert session._session_interaction_state.edit_diff_session_always is False
+    new_meta = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
+    assert new_meta.get("edit_diff_session_always") is False

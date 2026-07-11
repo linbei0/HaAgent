@@ -2263,6 +2263,184 @@ def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None
     assert result["error"]["type"] == "policy_denied"
 
 
+def test_auto_approve_path_policy_skips_edit_diff_for_multiple_writes(tmp_path: Path) -> None:
+    """auto_approve：已授权路径上多次 file_write 不触发 edit_diff handler。"""
+    from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
+
+    writer = make_writer(tmp_path)
+    policy = PathPolicy(project_root=tmp_path, permission_mode="auto_approve")
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        path_policy=policy,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+    handler_calls: list[object] = []
+
+    def interaction_handler(request):
+        handler_calls.append(request)
+        return HumanInteractionResponse(approved=False, answer="deny")
+
+    # 模拟 orchestrator bridge：mode 自动跳过时不调用用户 handler
+    resolver = HumanInteractionResolver(permission_mode="auto_approve")
+
+    def bridge(request):
+        if resolution := resolver.resolve(request):
+            return resolution.to_response()
+        handler_calls.append(request)
+        return interaction_handler(request)
+
+    r1 = router.dispatch(
+        "file_write",
+        {"path": "a.txt", "content": "one\n", "mode": "create"},
+        interaction_handler=bridge,
+    )
+    r2 = router.dispatch(
+        "file_write",
+        {"path": "b.txt", "content": "two\n", "mode": "create"},
+        interaction_handler=bridge,
+    )
+
+    assert r1["status"] == "success"
+    assert r2["status"] == "success"
+    assert handler_calls == []
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "one\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "two\n"
+
+
+def test_auto_approve_still_denies_unauthorized_external_path(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    writer = make_writer(project)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=project,
+        path_policy=PathPolicy(project_root=project, permission_mode="auto_approve"),
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+    handler_calls: list[object] = []
+
+    def interaction_handler(request):
+        handler_calls.append(request)
+        return HumanInteractionResponse(approved=True, answer="once")
+
+    result = router.dispatch(
+        "file_write",
+        {"path": str(external / "x.txt"), "content": "no\n", "mode": "create"},
+        interaction_handler=interaction_handler,
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "path_policy_denied"
+    assert not (external / "x.txt").exists()
+    assert handler_calls == []
+
+
+def test_full_access_skips_edit_diff_and_allows_external_write(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    writer = make_writer(project)
+    policy = PathPolicy(project_root=project, permission_mode="full_access")
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=project,
+        path_policy=policy,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+    from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
+
+    resolver = HumanInteractionResolver(permission_mode="full_access")
+    handler_calls: list[object] = []
+
+    def bridge(request):
+        if resolution := resolver.resolve(request):
+            return resolution.to_response()
+        handler_calls.append(request)
+        return HumanInteractionResponse(approved=False, answer="deny")
+
+    result = router.dispatch(
+        "file_write",
+        {"path": str(external / "out.txt"), "content": "ok\n", "mode": "create"},
+        interaction_handler=bridge,
+    )
+
+    assert result["status"] == "success"
+    assert (external / "out.txt").read_text(encoding="utf-8") == "ok\n"
+    assert handler_calls == []
+
+
+def test_request_approval_always_skips_later_edit_diffs_not_shell(tmp_path: Path) -> None:
+    """always 只免除后续 edit_diff；shell 仍需 approval。"""
+    from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
+
+    writer = make_writer(tmp_path)
+    resolver = HumanInteractionResolver(permission_mode="request_approval")
+    edit_prompts: list[str] = []
+    approval_prompts: list[str] = []
+
+    def bridge(request):
+        if resolution := resolver.resolve(request):
+            return resolution.to_response()
+        if request.interaction_type == "edit_diff":
+            edit_prompts.append(request.args_summary.get("path", ""))
+            response = HumanInteractionResponse(approved=True, answer="always" if len(edit_prompts) == 1 else "once")
+        else:
+            approval_prompts.append(request.tool_name)
+            response = HumanInteractionResponse(approved=False, answer="no")
+        resolver.record(request, response, turn=len(edit_prompts) + len(approval_prompts))
+        return response
+
+    file_router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+    assert (
+        file_router.dispatch(
+            "file_write",
+            {"path": "a.txt", "content": "a\n", "mode": "create"},
+            interaction_handler=bridge,
+        )["status"]
+        == "success"
+    )
+    assert (
+        file_router.dispatch(
+            "file_write",
+            {"path": "b.txt", "content": "b\n", "mode": "create"},
+            interaction_handler=bridge,
+        )["status"]
+        == "success"
+    )
+    assert edit_prompts == ["a.txt"]
+
+    shell_router = ToolRouter(
+        allowed_tools=["shell"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["shell"],
+    )
+    shell_result = shell_router.dispatch(
+        "shell",
+        {"command": "echo hi", "cwd": "."},
+        interaction_handler=bridge,
+    )
+    assert shell_result["status"] == "error"
+    assert shell_result["error"]["type"] in {"policy_denied", "approval_denied"}
+    assert approval_prompts == ["shell"]
+
+
 def _read_single_tool_call(writer: EpisodeWriter) -> dict[str, object]:
     trace = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8")
     return json.loads(trace)

@@ -17,6 +17,7 @@ from haagent.models.types import ModelGateway
 from haagent.prompts.commands import parse_prompt_command
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
+from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, serialize_path_policy
 from haagent.runtime.orchestration.recorder import RunResult
 from haagent.runtime.session.attachments import ImageAttachment
@@ -68,6 +69,7 @@ class OrchestratorFactory(Protocol):
         mcp_runtime: object | None = None,
         leader_session_id: str | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
+        session_interaction_state: SessionInteractionState | None = None,
     ):
         ...
 
@@ -103,6 +105,7 @@ class ChatTurnRequest:
     worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None
     attachments: list[ImageAttachment] = field(default_factory=list)
     image_attachment_history: list[ImageAttachment] = field(default_factory=list)
+    session_interaction_state: SessionInteractionState | None = None
 
 
 class ChatTurnRunner:
@@ -146,6 +149,7 @@ class ChatTurnRunner:
                 mcp_runtime=request.mcp_runtime,
                 leader_session_id=request.leader_session_id,
                 worker_permission_requester=request.worker_permission_requester,
+                session_interaction_state=request.session_interaction_state,
             )
             return orchestrator.run(task_path)
 
