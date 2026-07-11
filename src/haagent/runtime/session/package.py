@@ -52,6 +52,31 @@ def resolve_session_path(session: str | Path, runs_root: Path) -> Path:
     return (runs_root / "sessions" / str(session)).resolve()
 
 
+def peek_first_turn_request(session_path: Path) -> str:
+    """只读 turns.jsonl 首行 request，避免列表热路径解析整文件。"""
+    turns_path = session_path / "turns.jsonl"
+    if not turns_path.exists():
+        return "none"
+    try:
+        with turns_path.open("r", encoding="utf-8") as file:
+            for line in file:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ChatSessionError("invalid turns.jsonl line 1") from error
+                if not isinstance(record, dict):
+                    raise ChatSessionError("invalid turns.jsonl line 1: must contain an object")
+                request = record.get("request")
+                if not isinstance(request, str):
+                    raise ChatSessionError("invalid turns.jsonl line 1: request must be a string")
+                return request
+    except OSError as error:
+        raise ChatSessionError(f"unable to read turns.jsonl: {turns_path}") from error
+    return "none"
+
+
 def list_sessions(runs_root: Path, workspace_root: Path) -> list[SessionSummary]:
     """列出当前 workspace 下的 chat 会话摘要。"""
     sessions_root = runs_root / "sessions"
@@ -65,15 +90,20 @@ def list_sessions(runs_root: Path, workspace_root: Path) -> list[SessionSummary]
         metadata = read_session_metadata(session_path)
         if Path(str(metadata["workspace_root"])).resolve() != resolved_workspace:
             continue
-        turns = read_session_turns(session_path)
-        first_request = str(turns[0]["request"]) if turns else "none"
+        # 优先 session.json 预览；缺省/"none" 且有轮次时再 peek（兼容旧 package）。
+        raw_first = metadata.get("first_request")
+        turn_count = int(metadata["turn_count"])
+        if isinstance(raw_first, str) and raw_first and not (raw_first == "none" and turn_count > 0):
+            first_request = raw_first
+        else:
+            first_request = peek_first_turn_request(session_path)
         summaries.append(
             SessionSummary(
                 session_id=str(metadata["session_id"]),
                 created_at=str(metadata["created_at"]),
                 updated_at=str(metadata["updated_at"]),
                 workspace_root=resolved_workspace,
-                turn_count=int(metadata["turn_count"]),
+                turn_count=turn_count,
                 first_request=first_request,
                 session_path=session_path.resolve(),
             ),
@@ -257,6 +287,7 @@ def write_session_metadata(
     created_at: str,
     turn_count: int,
     edit_diff_session_always: bool = False,
+    first_request: str | None = None,
 ) -> str:
     """写入 session.json；返回实际保留的 created_at。"""
     session_path.mkdir(parents=True, exist_ok=True)
@@ -290,6 +321,8 @@ def write_session_metadata(
         "created_at": effective_created_at,
         "updated_at": datetime.now(UTC).isoformat(),
         "turn_count": turn_count,
+        # 列表预览字段；旧 package 无此键时 list_sessions 回退 peek turns。
+        "first_request": first_request if first_request is not None else "none",
     }
     metadata_path.write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",

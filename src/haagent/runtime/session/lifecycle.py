@@ -69,6 +69,8 @@ class SessionRuntimeState:
     session_id: str
     turn_count: int
     summaries: list[str]
+    # 完整 turn 记录缓存；供 UI history 复用，避免 resume 后再读 turns.jsonl。
+    turn_records: list[dict[str, object]]
     manual_compaction_summary: str | None
     manual_compaction_turn_count: int
     next_turn_target_paths: list[str]
@@ -155,6 +157,7 @@ def build_create_state(
         session_id=sid,
         turn_count=0,
         summaries=[],
+        turn_records=[],
         manual_compaction_summary=None,
         manual_compaction_turn_count=0,
         next_turn_target_paths=[],
@@ -186,6 +189,11 @@ def build_resume_state(
     model_base_url: str | None = None,
     max_turns: int | None,
     enable_web: bool = False,
+    mcp_runtime: Any | None = None,
+    tool_registry: Any | None = None,
+    mcp_settings: Any | None = None,
+    mcp_tool_names: list[str] | None = None,
+    owns_mcp_runtime: bool | None = None,
 ) -> SessionRuntimeState:
     session_path = resolve_session_path(session, runs_root or Path(".runs"))
     metadata = read_session_metadata(session_path)
@@ -206,8 +214,26 @@ def build_resume_state(
         task_ledger = load_task_ledger(session_path / "task-ledger.json")
     except TaskLedgerError as error:
         raise ChatSessionError(str(error)) from error
-    # resume 路径保持历史行为：始终自建 MCP，不恢复 worker/tool override。
-    mcp_settings, runtime, owns, mcp_tool_names, tool_registry = bootstrap_mcp(None)
+    # 有现成 MCP 时复用（会话切换热路径）；否则自建。不恢复 worker/tool override。
+    if mcp_runtime is not None:
+        settings = mcp_settings if mcp_settings is not None else load_mcp_settings()
+        names = (
+            list(mcp_tool_names)
+            if mcp_tool_names is not None
+            else [
+                mcp_tool_alias(tool.server_name, tool.name)
+                for tool in mcp_runtime.list_tools()
+            ]
+        )
+        registry = (
+            tool_registry
+            if tool_registry is not None
+            else default_tool_runtime_registry(mcp_tool_definitions(mcp_runtime.list_tools()))
+        )
+        runtime = mcp_runtime
+        owns = True if owns_mcp_runtime is None else bool(owns_mcp_runtime)
+    else:
+        settings, runtime, owns, names, registry = bootstrap_mcp(None)
     return SessionRuntimeState(
         workspace_root=workspace_root,
         path_policy=path_policy,
@@ -228,6 +254,7 @@ def build_resume_state(
         session_id=str(metadata["session_id"]),
         turn_count=int(metadata["turn_count"]),
         summaries=[str(turn["summary"]) for turn in turns],
+        turn_records=list(turns),
         manual_compaction_summary=compaction_summary,
         manual_compaction_turn_count=compacted_turn_count,
         next_turn_target_paths=[],
@@ -237,11 +264,11 @@ def build_resume_state(
         working_state=working_state,
         task_ledger=task_ledger,
         current_cancellation_token=None,
-        mcp_settings=mcp_settings,
+        mcp_settings=settings,
         mcp_runtime=runtime,
         owns_mcp_runtime=owns,
-        mcp_tool_names=mcp_tool_names,
-        tool_registry=tool_registry,
+        mcp_tool_names=names,
+        tool_registry=registry,
         session_path=session_path,
         created_at=str(metadata["created_at"]),
         # resume 同一 session：恢复 edit_diff 始终允许；缺失字段视为 False
@@ -274,6 +301,7 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         session_id=sid,
         turn_count=0,
         summaries=[],
+        turn_records=[],
         manual_compaction_summary=None,
         manual_compaction_turn_count=0,
         next_turn_target_paths=state.next_turn_target_paths,
@@ -316,6 +344,7 @@ def apply_state(instance: Any, state: SessionRuntimeState) -> None:
     instance.session_id = state.session_id
     instance.turn_count = state.turn_count
     instance._summaries = state.summaries
+    instance._turn_records = list(state.turn_records)
     instance._manual_compaction_summary = state.manual_compaction_summary
     instance._manual_compaction_turn_count = state.manual_compaction_turn_count
     instance._next_turn_target_paths = state.next_turn_target_paths

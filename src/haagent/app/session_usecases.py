@@ -117,19 +117,35 @@ class AssistantSessions:
 
     def create(self) -> AssistantSessionStatus:
         try:
-            self._close_session_if_needed()
-            profile = self._load_session_profile()
-            self._context.session = self._context.session_factory(
-                workspace_root=self._context.workspace_root,
-                runs_root=self._context.runs_root,
-                model_gateway=self._gateway_for_profile(profile),
-                model_profile_name=profile.name,
-                model_connection_id=self._current_connection_id(),
-                model_name=profile.model,
-                model_base_url=profile.base_url,
-                max_turns=self._context.max_turns,
-                enable_web=self._context.enable_web,
-            )
+            existing = self._context.session
+            # 已有 session 时复用 MCP/gateway，避免 /new 每次重建 runtime。
+            if existing is not None and hasattr(existing, "new"):
+                if self._context.pending_model_selection is not None:
+                    profile = self._load_session_profile()
+                    existing.switch_model_gateway(
+                        profile_name=profile.name,
+                        model_connection_id=self._current_connection_id(),
+                        provider=profile.provider,
+                        model=profile.model,
+                        base_url=profile.base_url or "",
+                        gateway=self._gateway_for_profile(profile),
+                    )
+                    self._context.pending_model_selection = None
+                existing.new()
+            else:
+                self._close_session_if_needed()
+                profile = self._load_session_profile()
+                self._context.session = self._context.session_factory(
+                    workspace_root=self._context.workspace_root,
+                    runs_root=self._context.runs_root,
+                    model_gateway=self._gateway_for_profile(profile),
+                    model_profile_name=profile.name,
+                    model_connection_id=self._current_connection_id(),
+                    model_name=profile.model,
+                    model_base_url=profile.base_url,
+                    max_turns=self._context.max_turns,
+                    enable_web=self._context.enable_web,
+                )
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
         assert self._context.session is not None
@@ -137,19 +153,35 @@ class AssistantSessions:
 
     def resume(self, session: str | Path) -> AssistantSessionStatus:
         try:
-            self._close_session_if_needed()
+            existing = self._context.session
             profile = self._load_resume_profile(session)
-            self._context.session = self._context.session_factory.resume(
-                session,
-                runs_root=self._context.runs_root,
-                model_gateway=self._gateway_for_profile(profile),
-                model_profile_name=profile.name,
-                model_connection_id=self._current_connection_id(),
-                model_name=profile.model,
-                model_base_url=profile.base_url,
-                max_turns=self._context.max_turns,
-                enable_web=self._context.enable_web,
-            )
+            # 已有 live session 时就地 reload package，复用 MCP（避免 5–10s 进程级重建）。
+            if existing is not None and hasattr(existing, "reload"):
+                gateway = self._gateway_for_resume(existing, profile)
+                existing.reload(
+                    session,
+                    runs_root=self._context.runs_root,
+                    model_gateway=gateway,
+                    model_profile_name=profile.name,
+                    model_connection_id=self._current_connection_id(),
+                    model_name=profile.model,
+                    model_base_url=profile.base_url,
+                    max_turns=self._context.max_turns,
+                    enable_web=self._context.enable_web,
+                )
+            else:
+                self._close_session_if_needed()
+                self._context.session = self._context.session_factory.resume(
+                    session,
+                    runs_root=self._context.runs_root,
+                    model_gateway=self._gateway_for_profile(profile),
+                    model_profile_name=profile.name,
+                    model_connection_id=self._current_connection_id(),
+                    model_name=profile.model,
+                    model_base_url=profile.base_url,
+                    max_turns=self._context.max_turns,
+                    enable_web=self._context.enable_web,
+                )
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
         assert self._context.session is not None
@@ -256,6 +288,17 @@ class AssistantSessions:
         if "retry_controller" in inspect.signature(factory).parameters:
             return factory(profile, retry_controller=controller)
         return factory(profile)
+
+    def _gateway_for_resume(self, existing: AgentSession, profile: ProviderProfile):
+        """模型未变则复用 gateway；变更时才重建。"""
+        same_connection = (
+            getattr(existing, "model_connection_id", None) == self._current_connection_id()
+            and getattr(existing, "model_name", None) == profile.model
+            and (getattr(existing, "model_base_url", None) or "") == (profile.base_url or "")
+        )
+        if same_connection and existing.model_gateway is not None:
+            return existing.model_gateway
+        return self._gateway_for_profile(profile)
 
     def _load_session_profile(self) -> ProviderProfile:
         selection = self._context.pending_model_selection or load_active_model_selection(config_dir=user_config_dir())

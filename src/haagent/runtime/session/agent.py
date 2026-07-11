@@ -184,6 +184,11 @@ class AgentSession:
         model_base_url: str | None = None,
         max_turns: int | None = CHAT_MAX_TURNS,
         enable_web: bool = False,
+        mcp_runtime: Any | None = None,
+        tool_registry: Any | None = None,
+        mcp_settings: Any | None = None,
+        mcp_tool_names: list[str] | None = None,
+        owns_mcp_runtime: bool | None = None,
     ) -> "AgentSession":
         state = build_resume_state(
             session,
@@ -195,10 +200,50 @@ class AgentSession:
             model_base_url=model_base_url,
             max_turns=max_turns,
             enable_web=enable_web,
+            mcp_runtime=mcp_runtime,
+            tool_registry=tool_registry,
+            mcp_settings=mcp_settings,
+            mcp_tool_names=mcp_tool_names,
+            owns_mcp_runtime=owns_mcp_runtime,
         )
         instance = cls.__new__(cls)
         apply_state(instance, state)
         return instance
+
+    def reload(
+        self,
+        session: str | Path,
+        *,
+        runs_root: Path | None = None,
+        model_gateway: ModelGateway | None = None,
+        model_profile_name: str | None = None,
+        model_connection_id: str | None = None,
+        model_name: str | None = None,
+        model_base_url: str | None = None,
+        max_turns: int | None = None,
+        enable_web: bool | None = None,
+    ) -> None:
+        """把磁盘 session package 装入当前实例，复用 MCP/tool registry（可选换 gateway）。"""
+        if self._current_cancellation_token is not None:
+            raise ChatSessionError("current task is running")
+        # 未显式传入的字段保持当前 live session 值，避免误清 max_turns/web。
+        state = build_resume_state(
+            session,
+            runs_root=self.runs_root if runs_root is None else runs_root,
+            model_gateway=self.model_gateway if model_gateway is None else model_gateway,
+            model_profile_name=self.model_profile_name if model_profile_name is None else model_profile_name,
+            model_connection_id=self.model_connection_id if model_connection_id is None else model_connection_id,
+            model_name=self.model_name if model_name is None else model_name,
+            model_base_url=self.model_base_url if model_base_url is None else model_base_url,
+            max_turns=self.max_turns if max_turns is None else max_turns,
+            enable_web=self.enable_web if enable_web is None else enable_web,
+            mcp_runtime=self._mcp_runtime,
+            tool_registry=self._tool_registry,
+            mcp_settings=self._mcp_settings,
+            mcp_tool_names=list(self._mcp_tool_names),
+            owns_mcp_runtime=self._owns_mcp_runtime,
+        )
+        apply_state(self, state)
 
     def set_max_turns(self, max_turns: int | None) -> None:
         self.max_turns = max_turns
@@ -564,6 +609,7 @@ class AgentSession:
             session_id=self.session_id,
             turn_count=self.turn_count,
             summaries=list(self._summaries),
+            turn_records=list(getattr(self, "_turn_records", [])),
             manual_compaction_summary=self._manual_compaction_summary,
             manual_compaction_turn_count=self._manual_compaction_turn_count,
             next_turn_target_paths=list(self._next_turn_target_paths),
@@ -599,8 +645,19 @@ class AgentSession:
         return self._session_memory().summary_text
 
     def turn_summaries(self) -> list[SessionTurnSummary]:
-        """读取当前 session 已记录轮次，供 UI 展示可恢复上下文。"""
-        return [session_turn_summary(turn) for turn in read_session_turns(self.session_path)]
+        """返回当前 session 已记录轮次；优先复用内存缓存，避免重复读盘。"""
+        records = getattr(self, "_turn_records", None)
+        if records is None:
+            # 兼容旧测试/手写实例：无缓存时回退读盘并补齐缓存。
+            records = read_session_turns(self.session_path)
+            self._turn_records = list(records)
+        elif not records:
+            # 空缓存可能是新建会话，也可能是外部直接写了 turns.jsonl（兼容旧路径）。
+            disk_records = read_session_turns(self.session_path)
+            if disk_records:
+                self._turn_records = list(disk_records)
+                records = self._turn_records
+        return [session_turn_summary(turn) for turn in records]
 
     def compact_current_session(self) -> SessionCompactResult:
         if self.model_gateway is None:
@@ -701,6 +758,9 @@ class AgentSession:
         )
 
     def _record_turn(self, prompt: str, result: ChatTurnResult, summary: str) -> None:
+        from haagent.runtime.session.package import assistant_display_text
+        from haagent.runtime.session.turn import summary_value
+
         append_turn_record(
             self.session_path,
             turn_index=result.turn_index,
@@ -711,6 +771,19 @@ class AgentSession:
             verification_status=result.verification_status,
             final_response=result.final_response,
         )
+        # 与 append_turn_record 写入字段保持一致，供 history 免二次读盘。
+        record = {
+            "turn_index": result.turn_index,
+            "request": summary_value(prompt, 300),
+            "summary": summary,
+            "status": result.status,
+            "episode_path": str(result.episode_path),
+            "verification_status": result.verification_status,
+            "assistant_display_text": assistant_display_text(result.final_response),
+        }
+        if not hasattr(self, "_turn_records") or self._turn_records is None:
+            self._turn_records = []
+        self._turn_records.append(record)
         self._write_session_metadata()
 
     def _write_working_state(self) -> None:
@@ -718,6 +791,12 @@ class AgentSession:
         write_working_state(self.session_path / "working_state.json", self._working_state)
 
     def _write_session_metadata(self) -> None:
+        first_request = "none"
+        records = getattr(self, "_turn_records", None) or []
+        if records:
+            request = records[0].get("request")
+            if isinstance(request, str) and request:
+                first_request = request
         write_session_metadata(
             self.session_path,
             session_id=self.session_id,
@@ -734,6 +813,7 @@ class AgentSession:
             created_at=self._created_at,
             turn_count=self.turn_count,
             edit_diff_session_always=self._session_interaction_state.edit_diff_session_always,
+            first_request=first_request,
         )
 
     def _write_manual_compaction_state(self) -> None:

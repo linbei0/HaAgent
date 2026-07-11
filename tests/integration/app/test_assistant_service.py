@@ -968,10 +968,12 @@ def test_create_and_resume_session_inject_same_retry_policy_into_compatible_fact
 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
     created = service.sessions.create()
+    # 同模型 resume 复用 gateway，不二次注入；仅 create 走 factory。
     service.sessions.resume(created.session_path)
 
-    assert [controller.policy.max_attempts for controller in controllers] == [2, 2]
-    assert controllers[0] is not controllers[1]
+    assert [controller.policy.max_attempts for controller in controllers] == [2]
+    assert service._context.session is not None
+    assert service._context.session.model_gateway is not None
 
 
 def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, monkeypatch) -> None:
@@ -1460,8 +1462,10 @@ def test_resumed_session_reuses_last_sent_image_attachments_for_followup_turn(
     service.sessions.resume(created.session_path)
     service.sessions.run_prompt_events("继续分析")
 
-    assert len(gateways) == 2
-    assert _image_attachment_paths(gateways[1].model_inputs[0]) == [attachment.relative_path]
+    # resume 复用同一 gateway；第二轮仍应带上上次图片附件。
+    assert len(gateways) == 1
+    assert len(gateways[0].model_inputs) >= 2
+    assert _image_attachment_paths(gateways[0].model_inputs[-1]) == [attachment.relative_path]
 
 
 def test_session_creation_requires_usable_active_model(tmp_path: Path, monkeypatch) -> None:

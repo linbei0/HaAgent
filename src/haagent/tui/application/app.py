@@ -46,6 +46,7 @@ from haagent.tui.files.refs import FileReferenceIndex, build_file_reference_inde
 from haagent.tui.flows import path_authorization, permissions, skills
 from haagent.tui.overlays.modals import EditDiffModal, HelpModal, ToolApprovalModal
 from haagent.tui.overlays.search import SearchOverlay
+from haagent.tui.overlays.sessions import SessionOverlayResult
 from haagent.tui.presentation.progress import ProgressStatusState
 from haagent.tui.state import MIN_HEIGHT, MIN_WIDTH, PendingInteraction, layout_for_size
 from haagent.tui.typography import install_textual_line_breaking
@@ -353,6 +354,57 @@ class HaAgentTuiApp(App[None]):
         self._file_ref_index = index
         if self.is_mounted:
             self._input_dock().file_reference_index = index
+
+    # ── 会话切换后台 worker（磁盘/MCP 不得阻塞 UI 线程）──────────────────
+    @work(thread=True, exclusive=True, group="session-ops")
+    def _load_session_list_worker(self) -> None:
+        try:
+            sessions = self.service.sessions.list()
+        except Exception as error:
+            self.call_from_thread(self.session_flow.handle_session_list_error, error)
+            return
+        self.call_from_thread(self.session_flow.open_sessions_with_list, sessions)
+
+    @work(thread=True, exclusive=True, group="session-ops")
+    def _run_session_create_worker(self) -> None:
+        try:
+            self.service.sessions.create()
+        except Exception as error:
+            self.call_from_thread(
+                self.session_flow.apply_session_error,
+                f"新建会话失败：{error}",
+            )
+            return
+        self.call_from_thread(self.session_flow.apply_create_success)
+
+    @work(thread=True, exclusive=True, group="session-ops")
+    def _run_session_continue_worker(self) -> None:
+        try:
+            status = self.service.sessions.continue_latest()
+        except Exception as error:
+            self.call_from_thread(
+                self.session_flow.apply_session_error,
+                f"继续最新会话失败：{error}",
+            )
+            return
+        self.call_from_thread(self.session_flow.apply_continue_success, status)
+
+    @work(thread=True, exclusive=True, group="session-ops")
+    def _run_session_overlay_worker(self, result: SessionOverlayResult) -> None:
+        try:
+            if result.action == "resume" and result.session is not None:
+                status = self.service.sessions.resume(result.session.session_path)
+            elif result.action == "continue_latest":
+                status = self.service.sessions.continue_latest()
+            else:
+                status = self.service.sessions.create()
+        except Exception as error:
+            self.call_from_thread(
+                self.session_flow.apply_session_error,
+                f"会话操作失败：{error}",
+            )
+            return
+        self.call_from_thread(self.session_flow.apply_overlay_success, result, status)
 
     # ── 模型目录后台 worker（薄 @work 包装，逻辑在 ModelFlow）──────────────
     @work(thread=True, exclusive=True)

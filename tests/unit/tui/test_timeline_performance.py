@@ -7,6 +7,7 @@ tests/unit/tui/test_timeline_performance.py - TUI timeline 性能合同测试
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from textual.app import App, ComposeResult
 
@@ -196,6 +197,25 @@ def test_final_assistant_message_waits_while_interaction_is_paused() -> None:
 
     assert timeline.synced_items == [timeline._items[0].item_id]
     assert timeline._items[0].status == "done"
+
+
+def test_load_session_history_renders_once_for_many_turns() -> None:
+    timeline = InstrumentedTimeline()
+    turns = [
+        SimpleNamespace(
+            turn_index=index,
+            request=f"prompt {index}",
+            summary=f"summary {index}",
+            status="completed",
+            assistant_display_text=f"answer {index}",
+        )
+        for index in range(1, 41)
+    ]
+
+    timeline.load_session_history(turns)
+
+    assert timeline.render_timeline_count == 1
+    assert len(timeline._items) == 80
 
 
 def test_reapplying_same_tool_detail_state_does_not_rerender_timeline() -> None:

@@ -151,6 +151,47 @@ class ConversationTimeline(VerticalScroll):
         self._append_item(TimelineItem(item_id=next(self._ids), role="user", turn_index=turn_index, content=content, title="你"))
         self._render_timeline()
 
+    def load_session_history(self, turns: list[Any]) -> None:
+        """批量装载会话历史，只触发一次 timeline 同步。"""
+        from haagent.tui.application.session_flow import session_turn_assistant_text
+
+        self.clear_timeline()
+        for turn in turns:
+            turn_index = int(getattr(turn, "turn_index", 0) or 0)
+            request = str(getattr(turn, "request", "") or "")
+            assistant_text = session_turn_assistant_text(turn)
+            self._append_item(
+                TimelineItem(
+                    item_id=next(self._ids),
+                    role="user",
+                    turn_index=turn_index,
+                    content=request,
+                    title="你",
+                ),
+            )
+            self._append_item(
+                TimelineItem(
+                    item_id=next(self._ids),
+                    role="assistant",
+                    turn_index=turn_index,
+                    content=assistant_text,
+                    status="done",
+                    title="HaAgent",
+                ),
+            )
+            status = str(getattr(turn, "status", "completed") or "completed")
+            if status != "completed":
+                self._append_item(
+                    TimelineItem(
+                        item_id=next(self._ids),
+                        role="system",
+                        turn_index=turn_index,
+                        content=f"状态：{status}",
+                        title="状态",
+                    ),
+                )
+        self._render_timeline()
+
     def add_system(self, title: str, content: str, *, turn_index: int = 0) -> None:
         self._append_item(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
         self._render_timeline()
