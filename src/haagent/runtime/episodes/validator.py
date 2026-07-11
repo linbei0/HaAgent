@@ -199,10 +199,10 @@ def _read_inspect_episode_package(episode_path: Path) -> EpisodePackageView:
             VERIFICATION_COMMANDS_FILE,
             ["command", "status"],
         )
-        verification_reached = True
     else:
         verification_commands = []
-        verification_reached = False
+    # 此分支只处理 verifying 前失败；空日志存在是 package 合同，不代表已进入验证阶段。
+    verification_reached = False
     _validate_verification_commands(verification_commands)
 
     plan = _read_optional_json(episode_path / "plan.json")

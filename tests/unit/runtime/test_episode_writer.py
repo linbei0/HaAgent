@@ -42,6 +42,8 @@ verification_commands: []
     assert (writer.path / "context-manifest.json").exists()
     assert (writer.path / "transcript.jsonl").exists()
     assert (writer.path / "tool-calls.jsonl").exists()
+    assert (writer.path / "verification" / "commands.jsonl").read_text(encoding="utf-8") == ""
+    assert (writer.path / "verification" / "files.jsonl").read_text(encoding="utf-8") == ""
     assert (writer.path / "failure-attribution.md").exists()
     assert (writer.path / "environment.json").exists()
     assert (writer.path / "sandbox.json").exists()

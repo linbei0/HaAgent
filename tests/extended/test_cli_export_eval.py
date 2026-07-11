@@ -89,6 +89,27 @@ verification_commands: []
             ),
             encoding="utf-8",
         )
+        (episode_path / "cost.json").write_text(
+            json.dumps(
+                {
+                    "cost_schema_version": "1.0",
+                    "usage_available": False,
+                    "pricing_available": False,
+                    "currency": None,
+                    "estimated_cost": None,
+                    "pricing_source": None,
+                    "reason": "model gateway did not provide usage metadata",
+                    "model_calls": [],
+                    "totals": {
+                        "model_call_count": 0,
+                        "input_tokens": None,
+                        "output_tokens": None,
+                        "total_tokens": None,
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
         (episode_path / "plan.json").write_text(
             json.dumps(
                 {
@@ -113,6 +134,7 @@ verification_commands: []
     )
     (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
     (episode_path / "verification" / "commands.jsonl").write_text("", encoding="utf-8")
+    (episode_path / "verification" / "files.jsonl").write_text("", encoding="utf-8")
     (episode_path / "failure-attribution.md").write_text("current attribution", encoding="utf-8")
 
 

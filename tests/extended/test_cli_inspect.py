@@ -17,6 +17,7 @@ from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.session.task_ledger import TaskCheckpoint, TaskLedger, TaskStep
+from haagent.tools import handler_factory as handler_factory_module
 
 
 class FakeResult:
@@ -107,6 +108,7 @@ verification_commands: []
     )
     (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
     (episode_path / "verification" / "commands.jsonl").write_text("", encoding="utf-8")
+    (episode_path / "verification" / "files.jsonl").write_text("", encoding="utf-8")
     (episode_path / "failure-attribution.md").write_text("current attribution", encoding="utf-8")
 
 
@@ -394,6 +396,7 @@ verification_commands: []
         json.dumps(valid_verification_command()) + "\n",
         encoding="utf-8",
     )
+    (episode_path / "verification" / "files.jsonl").write_text("", encoding="utf-8")
     (episode_path / "failure.json").write_text(
         json.dumps({"status": "success", "failure": None}),
         encoding="utf-8",
@@ -596,7 +599,13 @@ verification_commands: []
         encoding="utf-8",
     )
     (episode_path / "transcript.jsonl").write_text(
-        json.dumps({"event": "state_transition", "status": "failed"}) + "\n",
+        "\n".join(
+            [
+                json.dumps({"event": "state_transition", "status": "verifying"}),
+                json.dumps({"event": "state_transition", "status": "failed"}),
+            ],
+        )
+        + "\n",
         encoding="utf-8",
     )
     (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
@@ -616,6 +625,7 @@ verification_commands: []
         + "\n",
         encoding="utf-8",
     )
+    (episode_path / "verification" / "files.jsonl").write_text("", encoding="utf-8")
     (episode_path / "failure.json").write_text(
         json.dumps(
             {
@@ -1251,10 +1261,10 @@ policy:
         encoding="utf-8",
     )
 
-    def approved_shell(args, workspace_root):
+    def approved_shell(args, workspace_root, path_policy, **kwargs):
         return {"status": "success", "stdout": "ok\n", "stderr": ""}
 
-    monkeypatch.setattr("haagent.tools.router.shell", approved_shell)
+    monkeypatch.setattr(handler_factory_module, "shell", approved_shell)
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
         model_gateway=ShellOnceGateway(),
@@ -1528,7 +1538,8 @@ verification_commands:
 
     commands_path = result.episode_path / "verification" / "commands.jsonl"
     assert result.status is RunStatus.FAILED
-    assert not commands_path.exists()
+    assert commands_path.read_text(encoding="utf-8") == ""
+    assert (result.episode_path / "verification" / "files.jsonl").read_text(encoding="utf-8") == ""
 
     exit_code = cli.main(["inspect", str(result.episode_path)])
 
@@ -1555,7 +1566,8 @@ def test_cli_inspect_task_loading_failure_outputs_failure_summary_without_later_
     assert result.status is RunStatus.FAILED
     assert not (result.episode_path / "plan.json").exists()
     assert not (result.episode_path / "context-manifest.json").exists()
-    assert not (result.episode_path / "verification" / "commands.jsonl").exists()
+    assert (result.episode_path / "verification" / "commands.jsonl").read_text(encoding="utf-8") == ""
+    assert (result.episode_path / "verification" / "files.jsonl").read_text(encoding="utf-8") == ""
 
     exit_code = cli.main(["inspect", str(result.episode_path)])
 

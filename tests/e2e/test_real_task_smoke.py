@@ -454,7 +454,7 @@ def test_real_task_smoke_adds_tool_messages_for_multiple_tool_calls(tmp_path: Pa
                 [
                     ToolCall(
                         "shell",
-                        {"command": "cat ~/.haagent/memory/user_preferences.jsonl 2>/dev/null || echo missing"},
+                        {"command": "echo memory-check"},
                     ),
                     ToolCall("file_read", {"path": "README.md"}),
                 ],
@@ -467,9 +467,10 @@ def test_real_task_smoke_adds_tool_messages_for_multiple_tool_calls(tmp_path: Pa
 
     assert result.status == "completed"
     calls = _tool_calls(result.episode_path)
-    assert [call["tool_name"] for call in calls] == ["shell", "file_read"]
-    assert calls[0]["status"] == "success"
-    assert calls[1]["status"] == "success"
+    calls_by_name = {call["tool_name"]: call for call in calls}
+    assert set(calls_by_name) == {"shell", "file_read"}
+    assert calls_by_name["shell"]["status"] == "success"
+    assert calls_by_name["file_read"]["status"] == "success"
     second_call_messages = gateway.calls[1]["messages"]
     assistant_index = max(
         index

@@ -45,6 +45,11 @@ class EpisodeWriter:
             shutil.copytree(attachments_dir, episode_path / "attachments")
         (episode_path / "transcript.jsonl").write_text("", encoding="utf-8")
         (episode_path / "tool-calls.jsonl").write_text("", encoding="utf-8")
+        # 必需验证日志从 package 创建起存在，提前失败路径也必须可校验。
+        verification_dir = episode_path / "verification"
+        verification_dir.mkdir()
+        (verification_dir / "commands.jsonl").write_text("", encoding="utf-8")
+        (verification_dir / "files.jsonl").write_text("", encoding="utf-8")
         writer = cls(path=episode_path, task_path=task_path)
         writer.write_cost_metadata()
         return writer

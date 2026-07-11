@@ -8,6 +8,7 @@ inspect/eval/export 高级 harness 回归保留显式入口，避免每次本地
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,23 @@ SLOW_NODE_KEYWORDS = {
     "test_run_command_records_timeout",
     "test_verification_engine_records_timeout",
 }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def isolate_user_home(tmp_path_factory: pytest.TempPathFactory):
+    """每个 xdist worker 使用独立 HOME，避免读取真实凭据和 MCP 配置。"""
+    isolated_home = tmp_path_factory.mktemp("user-home")
+    original = {name: os.environ.get(name) for name in ("HOME", "USERPROFILE")}
+    os.environ["HOME"] = str(isolated_home)
+    os.environ["USERPROFILE"] = str(isolated_home)
+    try:
+        yield isolated_home
+    finally:
+        for name, value in original.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

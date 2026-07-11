@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from haagent.models.model_connections import ProviderProfile
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.session.package import (
     list_sessions,
@@ -237,8 +238,22 @@ def test_assistant_resume_reuses_existing_mcp_runtime(tmp_path: Path) -> None:
     )
     sessions = AssistantSessions(context)
     mcp_before = first._mcp_runtime
+    resume_profile = ProviderProfile(
+        name="test",
+        provider="openai",
+        base_url="https://example.invalid/v1",
+        model="test-model",
+        api_key_env="TEST_API_KEY",
+        credential_source="env",
+        credential_source_used="env",
+        api_key="test-key",
+    )
 
-    with patch(
+    with patch.object(
+        sessions,
+        "_load_resume_profile",
+        return_value=resume_profile,
+    ), patch(
         "haagent.runtime.session.lifecycle.bootstrap_mcp",
         side_effect=AssertionError("resume must reuse existing MCP runtime"),
     ), patch(
