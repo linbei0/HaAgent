@@ -27,7 +27,10 @@
 
 ## 3. Profile、凭据与 Secret
 
-- Profile 是模型连接配置，支持 OpenAI Responses-compatible endpoint（`openai`）和 OpenAI Chat Completions-compatible endpoint（`openai-chat`）。
+- Profile 是模型连接配置，支持云端、本地 Ollama、LM Studio 及显式混合 fallback；OpenAI-compatible endpoint 仍使用 `openai` / `openai-chat` gateway。
+- 本地发现只探测 `127.0.0.1:11434` 和 `127.0.0.1:1234`，不扫描局域网；发现失败必须区分不可达、未授权和无效响应。
+- `providers.json` 当前保存 version 3；旧 version 2 连接读取为 `runtime_kind=remote`。本地连接可以使用 `credential_source=none`，能力快照不持久化。
+- `settings.json` 可保存一个 `fallback_model` 和 `cloud_fallback_consent`。本地到云端 fallback 必须有明确 consent，本地到本地不需要；fallback 不得在已有输出后重放。
 - 默认 profile 存放在用户级 `~/.haagent/providers.json`；active profile 存放在 `~/.haagent/settings.json`。
 - Workspace 和 session 是目录相关运行状态，默认写入当前目录的 `.runs/sessions`。
 - 真实 API key 解析优先级是：当前环境变量、系统凭据库、显式 opt-in 的明文用户文件。
@@ -69,6 +72,7 @@
 - `ChatEvent` 是前端无关的事件契约，payload 只放展示和状态判断需要的摘要。
 - `ChatEvent` payload 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。
 - 稳定事件类型包括 session/turn 开始结束、工具开始/完成/失败、assistant 消息、审批请求/批准/拒绝、用户补充输入请求/接收、failure 和 session finished。
+- 模型路由还记录 `model_protocol_fallback` 与 `model_fallback`，包含脱敏连接、模型、协议、原因和能力缺失；顶部状态和活动流应展示实际使用模型。
 
 ## 7. 记忆系统
 

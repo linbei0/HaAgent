@@ -154,6 +154,7 @@ class AssistantModelConnection:
     credential_source: str
     credential_available: bool
     credential_source_used: str | None
+    runtime_kind: str = "remote"
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,7 @@ class ModelConnectionConfigureRequest:
     api_key_env: str
     credential_source: str
     api_key: str | None = None
+    runtime_kind: str = "remote"
 
 
 @dataclass(frozen=True)

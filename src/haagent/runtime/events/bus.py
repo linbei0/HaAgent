@@ -79,6 +79,25 @@ class ModelRetryExhaustedBusEvent:
 
 
 @dataclass(frozen=True)
+class ModelRouteFallbackBusEvent:
+    turn: int
+    kind: str
+    reason: str
+    from_connection: str | None
+    from_model: str | None
+    from_protocol: str | None
+    to_connection: str | None
+    to_model: str | None
+    to_protocol: str | None
+    required_capabilities: tuple[str, ...] = ()
+    missing_capabilities: tuple[str, ...] = ()
+
+    @property
+    def event_type(self) -> str:
+        return self.kind
+
+
+@dataclass(frozen=True)
 class LegacyRawBusEvent:
     """未切片的 raw dict 事件包装；to_dict 原样返回。"""
 
@@ -97,6 +116,7 @@ RuntimeBusEvent: TypeAlias = (
     | ToolFailedBusEvent
     | ModelRetryScheduledBusEvent
     | ModelRetryExhaustedBusEvent
+    | ModelRouteFallbackBusEvent
     | LegacyRawBusEvent
 )
 
@@ -167,6 +187,20 @@ def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, o
             "status_code": event.status_code,
             "request_id": event.request_id,
         }
+    if isinstance(event, ModelRouteFallbackBusEvent):
+        return {
+            "event_type": event.kind,
+            "turn": event.turn,
+            "reason": event.reason,
+            "from_connection": event.from_connection,
+            "from_model": event.from_model,
+            "from_protocol": event.from_protocol,
+            "to_connection": event.to_connection,
+            "to_model": event.to_model,
+            "to_protocol": event.to_protocol,
+            "required_capabilities": list(event.required_capabilities),
+            "missing_capabilities": list(event.missing_capabilities),
+        }
     raise TypeError(f"unsupported bus event: {type(event)!r}")
 
 
@@ -224,6 +258,22 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
             status_code=status_code if isinstance(status_code, int) and not isinstance(status_code, bool) else None,
             request_id=str(payload.get("request_id")) if payload.get("request_id") is not None else None,
         )
+    if event_type in {"model_protocol_fallback", "model_fallback"}:
+        required = payload.get("required_capabilities")
+        missing = payload.get("missing_capabilities")
+        return ModelRouteFallbackBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            kind=event_type,
+            reason=str(payload.get("reason", "")),
+            from_connection=_optional_string(payload.get("from_connection")),
+            from_model=_optional_string(payload.get("from_model")),
+            from_protocol=_optional_string(payload.get("from_protocol")),
+            to_connection=_optional_string(payload.get("to_connection")),
+            to_model=_optional_string(payload.get("to_model")),
+            to_protocol=_optional_string(payload.get("to_protocol")),
+            required_capabilities=tuple(str(item) for item in required) if isinstance(required, list) else (),
+            missing_capabilities=tuple(str(item) for item in missing) if isinstance(missing, list) else (),
+        )
     return LegacyRawBusEvent(payload=dict(payload))
 
 
@@ -240,3 +290,7 @@ def is_slice_bus_event(event: RuntimeBusEvent | dict[str, object]) -> bool:
     if isinstance(event, LegacyRawBusEvent):
         return False
     return event.event_type in _SLICE_EVENT_TYPES
+
+
+def _optional_string(value: object) -> str | None:
+    return str(value) if value is not None else None

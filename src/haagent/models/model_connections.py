@@ -28,6 +28,7 @@ USER_CONFIG_DIR_NAME = ".haagent"
 USER_PROVIDERS_FILE = "providers.json"
 USER_SETTINGS_FILE = "settings.json"
 SUPPORTED_GATEWAY_PROVIDERS = {"openai", "openai-chat"}
+SUPPORTED_RUNTIME_KINDS = {"remote", "ollama", "lm_studio"}
 DEFAULT_CREDENTIAL_SOURCE = "keyring"
 DEFAULT_CREDENTIAL_STORE: CredentialStore = KeyringCredentialStore()
 
@@ -46,6 +47,7 @@ class ProviderProfile:
     credential_source: str
     credential_source_used: str
     api_key: str = field(repr=False)
+    runtime_kind: str = "remote"
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class ProviderConnectionRecord:
     base_url: str
     api_key_env: str
     credential_source: str = DEFAULT_CREDENTIAL_SOURCE
+    runtime_kind: str = "remote"
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -69,6 +72,7 @@ class ProviderConnectionRecord:
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
             "credential_source": self.credential_source,
+            "runtime_kind": self.runtime_kind,
         }
 
 
@@ -79,6 +83,13 @@ class ModelSelection:
 
     def to_dict(self) -> dict[str, str]:
         return {"connection_id": self.connection_id, "model": self.model}
+
+
+@dataclass(frozen=True)
+class ModelRoute:
+    primary: ModelSelection
+    fallback: ModelSelection | None
+    cloud_fallback_consent: bool
 
 
 def user_config_dir() -> Path:
@@ -101,8 +112,10 @@ def save_provider_connection_with_key(
     config_dir: Path | None = None,
 ) -> Path:
     has_api_key = api_key is not None and bool(api_key.strip())
-    if record.credential_source == "env" and has_api_key:
-        raise ProviderProfileError("env credential_source does not allow saving api_key")
+    if record.credential_source in {"env", "none"} and has_api_key:
+        raise ProviderProfileError(
+            f"{record.credential_source} credential_source does not allow saving api_key",
+        )
     path = save_provider_connection(record, config_dir=config_dir)
     if not has_api_key:
         return path
@@ -142,7 +155,7 @@ def save_provider_connection(record: ProviderConnectionRecord, *, config_dir: Pa
     _write_json(
         path,
         {
-            "version": 2,
+            "version": 3,
             "connections": [connection.to_dict() for connection in next_records],
             "custom_models": [],
         },
@@ -162,7 +175,7 @@ def delete_provider_connection(connection_id: str, *, config_dir: Path | None = 
     _write_json(
         path,
         {
-            "version": 2,
+            "version": 3,
             "connections": [connection.to_dict() for connection in next_records],
             "custom_models": [],
         },
@@ -202,6 +215,13 @@ def provider_connection_credential_status(
 ) -> CredentialStatus:
     config_path = (config_dir / USER_PROVIDERS_FILE) if config_dir is not None else None
     connection = load_provider_connection_record(connection_id, config_path=config_path)
+    if connection.credential_source == "none":
+        return CredentialStatus(
+            api_key_available=True,
+            credential_source_configured="none",
+            credential_source_used="none",
+            credential_store_available=None,
+        )
     return credential_status(
         _credential_record(connection),
         environ=environ,
@@ -222,6 +242,18 @@ def load_model_selection_profile(
         (config_dir / USER_PROVIDERS_FILE) if config_dir is not None else None
     )
     connection = load_provider_connection_record(selection.connection_id, config_path=connection_config_path)
+    if connection.credential_source == "none":
+        return ProviderProfile(
+            name=f"{connection.id}:{selection.model}",
+            provider=connection.gateway_provider,
+            base_url=connection.base_url,
+            model=selection.model,
+            api_key_env=connection.api_key_env,
+            credential_source=connection.credential_source,
+            credential_source_used="none",
+            api_key="",
+            runtime_kind=connection.runtime_kind,
+        )
     try:
         resolved = resolve_api_key(
             _credential_record(connection),
@@ -246,6 +278,7 @@ def load_model_selection_profile(
         credential_source=connection.credential_source,
         credential_source_used=resolved.credential_source_used or "",
         api_key=resolved.api_key,
+        runtime_kind=connection.runtime_kind,
     )
 
 
@@ -278,6 +311,43 @@ def save_active_model_selection(selection: ModelSelection, *, config_dir: Path |
     return path
 
 
+def load_model_route(*, settings_path: Path | None = None, config_dir: Path | None = None) -> ModelRoute:
+    directory = config_dir or user_config_dir()
+    path = settings_path or directory / USER_SETTINGS_FILE
+    primary = load_active_model_selection(settings_path=path, config_dir=directory)
+    settings = _load_settings_record(path)
+    fallback = _model_selection_from_setting(settings.get("fallback_model"))
+    return ModelRoute(
+        primary=primary,
+        fallback=fallback,
+        cloud_fallback_consent=settings.get("cloud_fallback_consent") is True,
+    )
+
+
+def save_fallback_model_selection(
+    selection: ModelSelection | None,
+    *,
+    cloud_fallback_consent: bool,
+    config_dir: Path | None = None,
+) -> Path:
+    directory = config_dir or user_config_dir()
+    path = directory / USER_SETTINGS_FILE
+    directory.mkdir(parents=True, exist_ok=True)
+    settings = _load_settings_record(path) if path.exists() else {}
+    if selection is None:
+        settings.pop("fallback_model", None)
+        settings["cloud_fallback_consent"] = False
+    else:
+        if not selection.connection_id.strip():
+            raise ProviderProfileError("fallback model connection_id is required")
+        if not selection.model.strip():
+            raise ProviderProfileError("fallback model model is required")
+        settings["fallback_model"] = selection.to_dict()
+        settings["cloud_fallback_consent"] = cloud_fallback_consent
+    _write_json(path, settings)
+    return path
+
+
 def _credential_record(connection: ProviderConnectionRecord) -> CredentialRecord:
     return CredentialRecord(
         profile_name=connection.id,
@@ -296,17 +366,23 @@ def _refresh_active_model_after_connection_delete(
     if not settings_path.exists():
         return
     settings = _load_settings_record(settings_path)
+    fallback_model = settings.get("fallback_model")
+    fallback_connection_id = (
+        fallback_model.get("connection_id") if isinstance(fallback_model, dict) else None
+    )
+    if fallback_connection_id == connection_id:
+        settings.pop("fallback_model", None)
+        settings["cloud_fallback_consent"] = False
     active_model = settings.get("active_model")
     active_connection_id = active_model.get("connection_id") if isinstance(active_model, dict) else None
-    if active_connection_id != connection_id:
-        return
-    if next_records:
-        settings["active_model"] = {
-            "connection_id": next_records[0].id,
-            "model": str(active_model.get("model", "")) if isinstance(active_model, dict) else "",
-        }
-    else:
-        settings.pop("active_model", None)
+    if active_connection_id == connection_id:
+        if next_records:
+            settings["active_model"] = {
+                "connection_id": next_records[0].id,
+                "model": str(active_model.get("model", "")) if isinstance(active_model, dict) else "",
+            }
+        else:
+            settings.pop("active_model", None)
     if settings:
         _write_json(settings_path, settings)
     else:
@@ -344,8 +420,9 @@ def _connection_from_record(record: dict[str, object]) -> ProviderConnectionReco
         provider_name=_required_string(record, "provider_name"),
         gateway_provider=_required_gateway_provider(record),
         base_url=_required_string(record, "base_url"),
-        api_key_env=_required_string(record, "api_key_env"),
+        api_key_env=_api_key_env(record),
         credential_source=_credential_source(record),
+        runtime_kind=_runtime_kind(record),
     )
 
 
@@ -356,8 +433,14 @@ def _validate_connection_record(record: dict[str, object]) -> None:
     _required_string(record, "provider_name")
     _required_gateway_provider(record)
     _required_string(record, "base_url")
-    _required_string(record, "api_key_env")
-    _credential_source(record)
+    credential_source = _credential_source(record)
+    if credential_source == "none":
+        api_key_env = record.get("api_key_env")
+        if not isinstance(api_key_env, str):
+            raise ProviderProfileError("provider connection field must be a string: api_key_env")
+    else:
+        _required_string(record, "api_key_env")
+    _runtime_kind(record)
     if "api_key" in record:
         raise ProviderProfileError("provider connection must not contain api_key")
 
@@ -374,6 +457,13 @@ def _required_string(record: dict[str, object], field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ProviderProfileError(f"provider connection field is required: {field_name}")
     return value
+
+
+def _api_key_env(record: dict[str, object]) -> str:
+    value = record.get("api_key_env")
+    if _credential_source(record) == "none" and isinstance(value, str):
+        return value
+    return _required_string(record, "api_key_env")
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
@@ -398,9 +488,28 @@ def _credential_source(record: dict[str, object]) -> str:
     value = record.get("credential_source", DEFAULT_CREDENTIAL_SOURCE)
     if not isinstance(value, str) or not value.strip():
         raise ProviderProfileError("provider connection field is required: credential_source")
-    if value not in {"env", "keyring", "insecure_file"}:
+    if value not in {"env", "keyring", "insecure_file", "none"}:
         raise ProviderProfileError(f"unsupported credential_source in connection: {value}")
     return value
+
+
+def _runtime_kind(record: dict[str, object]) -> str:
+    value = record.get("runtime_kind", "remote")
+    if not isinstance(value, str) or value not in SUPPORTED_RUNTIME_KINDS:
+        raise ProviderProfileError(f"unsupported runtime_kind in connection: {value}")
+    return value
+
+
+def _model_selection_from_setting(value: object) -> ModelSelection | None:
+    if not isinstance(value, dict):
+        return None
+    connection_id = value.get("connection_id")
+    model = value.get("model")
+    if not isinstance(connection_id, str) or not connection_id.strip():
+        raise ProviderProfileError("fallback_model connection_id is required")
+    if not isinstance(model, str) or not model.strip():
+        raise ProviderProfileError("fallback_model model is required")
+    return ModelSelection(connection_id=connection_id, model=model)
 
 
 def _config_dir_for(config_path: Path | None) -> Path:

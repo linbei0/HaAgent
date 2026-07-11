@@ -33,9 +33,11 @@ from haagent.models.model_connections import (
     load_model_selection_profile,
     provider_connection_credential_status,
     save_active_model_selection,
+    save_fallback_model_selection,
     save_provider_connection_with_key,
     user_config_dir,
 )
+from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel, discover_local_runtimes
 from haagent.models.types import ModelCallError
 from haagent.runtime.session.package import ChatSessionError
 
@@ -64,6 +66,7 @@ class AssistantModels:
                     credential_source=record.credential_source,
                     credential_available=credential.api_key_available,
                     credential_source_used=credential.credential_source_used,
+                    runtime_kind=record.runtime_kind,
                 ),
             )
         return connections
@@ -78,6 +81,7 @@ class AssistantModels:
             base_url=request.base_url,
             api_key_env=request.api_key_env,
             credential_source=request.credential_source,
+            runtime_kind=request.runtime_kind,
         )
         try:
             save_provider_connection_with_key(
@@ -89,6 +93,48 @@ class AssistantModels:
         except (ProviderProfileError, CredentialError) as error:
             raise AssistantServiceError(str(error)) from error
         return record
+
+    def discover_local_runtimes(self) -> tuple[LocalRuntimeDiscovery, LocalRuntimeDiscovery]:
+        return discover_local_runtimes(environ=self._context.environ)
+
+    def save_local_model(
+        self,
+        discovery: LocalRuntimeDiscovery,
+        model: LocalRuntimeModel,
+    ) -> ModelSelection:
+        if discovery.status != "available" or model not in discovery.models:
+            raise AssistantServiceError("local model must come from an available discovery result")
+        runtime_name = "Ollama" if discovery.runtime_kind == "ollama" else "LM Studio"
+        connection_id = f"local-{discovery.runtime_kind.replace('_', '-')}"
+        lm_studio_key = str(self._context.environ.get("LM_STUDIO_API_KEY", "")).strip()
+        credential_source = "env" if discovery.runtime_kind == "lm_studio" and lm_studio_key else "none"
+        record = ProviderConnectionRecord(
+            id=connection_id,
+            name=runtime_name,
+            provider_id=discovery.runtime_kind.replace("_", "-"),
+            provider_name=runtime_name,
+            gateway_provider="openai",
+            base_url=discovery.base_url,
+            api_key_env="LM_STUDIO_API_KEY" if credential_source == "env" else "",
+            credential_source=credential_source,
+            runtime_kind=discovery.runtime_kind,
+        )
+        save_provider_connection_with_key(record, None, config_dir=user_config_dir())
+        return ModelSelection(connection_id=connection_id, model=model.id)
+
+    def set_fallback_selection(
+        self,
+        request: ModelSelectionRequest,
+        *,
+        cloud_fallback_consent: bool = False,
+    ) -> None:
+        selection = ModelSelection(connection_id=request.connection_id, model=request.model)
+        load_model_selection_profile(selection, environ=self._context.environ, config_dir=user_config_dir())
+        save_fallback_model_selection(
+            selection,
+            cloud_fallback_consent=cloud_fallback_consent,
+            config_dir=user_config_dir(),
+        )
 
     def set_default_selection(self, request: ModelSelectionRequest) -> None:
         selection = ModelSelection(connection_id=request.connection_id, model=request.model)

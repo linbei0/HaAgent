@@ -364,6 +364,11 @@ class HaAgentTuiApp(App[None]):
         self.model_flow.load_switch_catalog()
 
     @work(thread=True, exclusive=True)
+    def _scan_local_model_runtimes(self) -> None:
+        # 本地 HTTP 探测必须留在 worker 线程，避免阻塞 Textual UI 事件循环。
+        self.model_flow.scan_local_runtimes()
+
+    @work(thread=True, exclusive=True)
     def _refresh_model_catalog_only(self) -> None:
         self.model_flow.refresh_catalog_only()
 

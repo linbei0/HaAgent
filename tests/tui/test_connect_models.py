@@ -20,6 +20,8 @@ from haagent.app.assistant_types import (
     SandboxDoctorReport,
 )
 from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
+from haagent.models.capabilities import ModelCapabilities
+from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel
 from haagent.runtime.events import (
     ApprovalStateEvent,
     AssistantDeltaEvent,
@@ -39,7 +41,7 @@ from haagent.tui.commands import SlashCommandResult, command_registry, parse_sla
 from haagent.tui.design.failures import failure_from_payload, failure_next_steps
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
 from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
-from haagent.tui.overlays.models import ModelCatalogLoadingOverlay
+from haagent.tui.overlays.models import LocalRuntimeOverlay, ModelCatalogLoadingOverlay
 from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
 from haagent.tui.design.renderers import memory_panel_text, status_line
 from haagent.tui.state.search import ConversationSearchState
@@ -591,6 +593,41 @@ def test_tui_model_overlay_without_connections_guides_to_connect(tmp_path: Path)
 
             assert "请先 /connect" in _all_text(app)
             assert service.switched_model_connection is None
+
+    asyncio.run(run())
+
+
+def test_local_runtime_overlay_renders_through_textual_widget_pipeline(tmp_path: Path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path)
+    discovery = LocalRuntimeDiscovery(
+        runtime_kind="ollama",
+        base_url="http://127.0.0.1:11434/v1",
+        status="available",
+        models=(
+            LocalRuntimeModel(
+                id="qwen3:1.7b",
+                name="qwen3:1.7b",
+                loaded=True,
+                capabilities=ModelCapabilities(
+                    tools="supported",
+                    streaming="supported",
+                    vision="unsupported",
+                    reasoning="supported",
+                    tools_mode="native",
+                    context_window_tokens=32768,
+                    protocols=frozenset({"responses", "chat_completions"}),
+                ),
+            ),
+        ),
+    )
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.push_screen(LocalRuntimeOverlay((discovery,)))
+            await pilot.pause(0.1)
+            assert "qwen3:1.7b" in _all_text(app)
+            assert "tools=native" in _all_text(app)
 
     asyncio.run(run())
 

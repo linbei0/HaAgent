@@ -10,6 +10,7 @@ import os
 from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
+from haagent.models.capabilities import ModelCapabilities
 from haagent.models.transport import (
     _endpoint_base_url,
     _image_data_url,
@@ -130,8 +131,10 @@ class OpenAIResponsesGateway:
         transport: Transport | None = None,
         stream_transport: StreamTransport | None = None,
         retry_controller: RetryController | None = None,
+        require_api_key: bool = True,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self._require_api_key = require_api_key
         self._model = model
         configured_base_url = (
             base_url
@@ -169,6 +172,16 @@ class OpenAIResponsesGateway:
             base_url=_endpoint_base_url(self._responses_endpoint),
         )
 
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities(
+            tools="supported",
+            streaming="supported",
+            vision="supported",
+            reasoning="unknown",
+            tools_mode="native",
+            protocols=frozenset({"responses"}),
+        )
+
     def generate(
         self,
         messages: list[dict[str, Any]],
@@ -179,7 +192,7 @@ class OpenAIResponsesGateway:
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
     ) -> ModelResponse:
         """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
-        if not self._api_key:
+        if self._require_api_key and not self._api_key:
             raise ModelCallError("OPENAI_API_KEY is required for OpenAIResponsesGateway")
 
         # Responses API uses "input" — convert messages to input format
@@ -197,9 +210,9 @@ class OpenAIResponsesGateway:
                 self._retry_controller,
                 provider=self.provider_name,
                 invoke=lambda on_delta: (
-                    self._stream_transport(payload, self._api_key, on_delta)
+                    self._stream_transport(payload, self._api_key or "", on_delta)
                     if on_delta is not None
-                    else self._transport(payload, self._api_key)
+                    else self._transport(payload, self._api_key or "")
                 ),
                 event_sink=event_sink,
                 cancellation_token=cancellation_token,

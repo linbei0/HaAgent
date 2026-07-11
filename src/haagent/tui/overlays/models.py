@@ -17,8 +17,15 @@ from textual.widgets import Static
 
 from haagent.app.assistant_types import AssistantModelConnection, ModelSelectionRequest
 from haagent.tui.design.utils import safe_summary
+from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel
 
-ModelSwitchAction = Literal["switch_current", "set_default"]
+ModelSwitchAction = Literal[
+    "switch_current",
+    "set_default",
+    "set_fallback",
+    "set_fallback_cloud",
+    "scan_local",
+]
 MODEL_SWITCH_PAGE_SIZE = 15
 
 
@@ -35,7 +42,7 @@ class ModelSwitchRow:
 @dataclass(frozen=True)
 class ModelSwitchResult:
     action: ModelSwitchAction
-    selection: ModelSelectionRequest
+    selection: ModelSelectionRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -128,7 +135,7 @@ class ModelSwitchState:
             provider_connection = safe_summary(f"{row.provider_name} / {row.connection_name}", 34)
             model = safe_summary(row.model, 48)
             lines.append(f"{selected} {provider_connection:<34} {model}")
-        lines.extend(["", "输入过滤  ↑/↓ 移动  Enter 当前会话  p 默认  Esc 关闭"])
+        lines.extend(["", "输入过滤  ↑/↓ 移动  Enter 当前会话  p 默认  b 备用  c 云端备用  l 扫描本机  Esc 关闭"])
         return "\n".join(lines)
 
 
@@ -166,6 +173,18 @@ class ModelSwitchOverlay(ModalScreen[ModelSwitchResult | None]):
             event.stop()
             self._dismiss_selection("set_default")
             return
+        if key == "b":
+            event.stop()
+            self._dismiss_selection("set_fallback")
+            return
+        if key == "c":
+            event.stop()
+            self._dismiss_selection("set_fallback_cloud")
+            return
+        if key == "l":
+            event.stop()
+            self._safe_dismiss(ModelSwitchResult(action="scan_local"))
+            return
         if event.character and event.character.isprintable():
             event.stop()
             self._set_state(self.state.with_query(self.state.query + event.character))
@@ -201,3 +220,56 @@ class ModelCatalogLoadingOverlay(ModalScreen[None]):
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
             event.stop()
+
+
+@dataclass(frozen=True)
+class LocalModelSelection:
+    discovery: LocalRuntimeDiscovery
+    model: LocalRuntimeModel
+
+
+class LocalRuntimeOverlay(ModalScreen[LocalModelSelection | None]):
+    def __init__(self, discoveries: tuple[LocalRuntimeDiscovery, ...]) -> None:
+        super().__init__()
+        self.discoveries = discoveries
+        self.rows = [
+            LocalModelSelection(discovery, model)
+            for discovery in discoveries
+            if discovery.status == "available"
+            for model in discovery.models
+        ]
+        self.selected_index = 0
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._render_text(), id="local-runtime-dialog")
+
+    def _render_text(self) -> str:
+        lines = ["本地模型运行时", ""]
+        for discovery in self.discoveries:
+            if discovery.status != "available":
+                lines.append(f"{discovery.runtime_kind}: {discovery.status} - {discovery.reason or ''}")
+        for index, row in enumerate(self.rows):
+            caps = row.model.capabilities
+            selected = ">" if index == self.selected_index else " "
+            lines.append(
+                f"{selected} {row.discovery.runtime_kind} / {row.model.id}  "
+                f"loaded={'yes' if row.model.loaded else 'no'}  context={caps.context_window_tokens or '?'}  "
+                f"tools={caps.tools_mode}  vision={caps.vision}  reasoning={caps.reasoning}"
+            )
+        if not self.rows:
+            lines.append("未发现可用的本地聊天模型")
+        lines.extend(["", "↑/↓ 移动  Enter 保存并切换  Esc 关闭"])
+        return "\n".join(lines)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.dismiss(None)
+        elif event.key in {"up", "down"} and self.rows:
+            event.stop()
+            delta = -1 if event.key == "up" else 1
+            self.selected_index = min(max(self.selected_index + delta, 0), len(self.rows) - 1)
+            self.query_one("#local-runtime-dialog", Static).update(self._render_text())
+        elif event.key == "enter" and self.rows:
+            event.stop()
+            self.dismiss(self.rows[self.selected_index])

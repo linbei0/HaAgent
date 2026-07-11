@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from haagent.models.types import ModelGatewayMetadata, ModelResponse, ToolCall
+from haagent.models.capabilities import ModelCapabilities
 
 
 class FakeModelGateway:
@@ -51,6 +52,16 @@ class FakeModelGateway:
             endpoint=None,
             base_url=None,
             profile_name=None,
+        )
+
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities(
+            tools="supported",
+            streaming="supported",
+            vision="unknown",
+            reasoning="unknown",
+            tools_mode="native",
+            protocols=frozenset({"responses", "chat_completions"}),
         )
 
 

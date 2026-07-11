@@ -30,6 +30,7 @@ from haagent.models.types import (
     ModelUsage,
     ToolCall,
 )
+from haagent.models.capabilities import ModelCapabilities
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
 
@@ -209,6 +210,15 @@ def _parse_anthropic_usage(response: dict[str, object]) -> ModelUsage | None:
 
 class AnthropicMessagesGateway:
     provider_name = "anthropic"
+
+    def capabilities(self) -> ModelCapabilities:
+        return ModelCapabilities(
+            tools="supported",
+            streaming="supported",
+            vision="supported",
+            reasoning="unknown",
+            tools_mode="native",
+        )
 
     def __init__(
         self,

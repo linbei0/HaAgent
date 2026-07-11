@@ -294,6 +294,24 @@ def _model_retry_exhausted_event(
     )
 
 
+def _model_route_fallback_event(
+    event: dict[str, object],
+    context: RawRuntimeUiEventContext,
+) -> WarningNoticeEvent:
+    event_type = str(event.get("event_type", "model_fallback"))
+    source = str(event.get("from_model") or event.get("from_connection") or "primary")
+    target = str(event.get("to_model") or event.get("to_connection") or "fallback")
+    protocol = event_type == "model_protocol_fallback"
+    return WarningNoticeEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        title="Model protocol fallback" if protocol else "Model fallback",
+        message=f"{source} -> {target}: {event.get('reason', '')}",
+        notice_kind=event_type,
+        details=without_event_type(event),
+    )
+
+
 def _compression_diagnostic_event(
     event: dict[str, object],
     context: RawRuntimeUiEventContext,
@@ -442,6 +460,8 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("guardrail_triggered", WarningNoticeEvent, _guardrail_event),
     _spec("model_retry_scheduled", WarningNoticeEvent, _model_retry_event),
     _spec("model_retry_exhausted", WarningNoticeEvent, _model_retry_exhausted_event),
+    _spec("model_protocol_fallback", WarningNoticeEvent, _model_route_fallback_event),
+    _spec("model_fallback", WarningNoticeEvent, _model_route_fallback_event),
     _spec("compression_diagnostic", WarningNoticeEvent, _compression_diagnostic_event),
     _spec("loop_suggestion_added", WarningNoticeEvent, _loop_suggestion_event),
     _spec("safety_abort", WarningNoticeEvent, _safety_abort_event),

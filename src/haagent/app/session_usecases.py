@@ -25,8 +25,10 @@ from haagent.models.model_connections import (
     ProviderProfile,
     load_active_model_selection,
     load_model_selection_profile,
+    load_model_route,
     user_config_dir,
 )
+from haagent.models.gateway_registry import gateway_from_profile, gateway_from_route
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathAccess, PermissionMode
 from haagent.runtime.execution.retry import RetryController
@@ -234,6 +236,23 @@ class AssistantSessions:
         """为每个 session 创建独立 retry controller，并兼容一参数 Factory Adapter。"""
         controller = RetryController(load_runtime_settings().model_retry)
         factory = self._context.gateway_factory
+        if factory is gateway_from_profile:
+            route = load_model_route(config_dir=user_config_dir())
+            fallback_profile = (
+                load_model_selection_profile(
+                    route.fallback,
+                    environ=self._context.environ,
+                    config_dir=user_config_dir(),
+                )
+                if route.fallback is not None
+                else None
+            )
+            return gateway_from_route(
+                profile,
+                fallback_profile=fallback_profile,
+                cloud_fallback_consent=route.cloud_fallback_consent,
+                retry_controller=controller,
+            )
         if "retry_controller" in inspect.signature(factory).parameters:
             return factory(profile, retry_controller=controller)
         return factory(profile)

@@ -11,6 +11,7 @@ from typing import Any, Callable, Literal, Protocol
 
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.retry import RetryEvent, RetryFailure
+from haagent.models.capabilities import ModelCapabilities
 
 
 ModelFailureCategory = Literal[
@@ -113,6 +114,9 @@ class ModelGateway(Protocol):
 
     def metadata(self) -> ModelGatewayMetadata:
         """Return non-sensitive metadata for episode audit records."""
+
+    def capabilities(self) -> ModelCapabilities:
+        """Return tri-state capabilities used by route negotiation."""
 
 
 

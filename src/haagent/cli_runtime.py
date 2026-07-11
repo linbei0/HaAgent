@@ -13,13 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from haagent.models.gateway_registry import gateway_from_profile
+from haagent.models.gateway_registry import gateway_from_profile, gateway_from_route
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderProfile,
     ProviderProfileError,
     load_active_model_selection,
     load_model_selection_profile,
+    load_model_route,
 )
 from haagent.models.types import ModelGateway
 from haagent.runtime.session.agent import AgentSession
@@ -79,7 +80,16 @@ class CliRuntime:
         if args.provider is None:
             if args.model is not None or args.base_url is not None:
                 raise ProviderProfileError("--model and --base-url require --provider or --profile")
-            return self.gateway_factory(load_model_selection_profile(load_active_model_selection()))
+            route = load_model_route()
+            primary = load_model_selection_profile(route.primary)
+            fallback = load_model_selection_profile(route.fallback) if route.fallback is not None else None
+            if self.gateway_factory is gateway_from_profile:
+                return gateway_from_route(
+                    primary,
+                    fallback_profile=fallback,
+                    cloud_fallback_consent=route.cloud_fallback_consent,
+                )
+            return self.gateway_factory(primary)
 
         if args.provider in {"openai", "openai-chat", "anthropic", "google"}:
             return self.gateway_factory(self._cli_provider_profile(args))

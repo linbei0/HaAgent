@@ -359,7 +359,7 @@ def test_service_configures_connection_over_obsolete_provider_file(
 
     provider_config = json.loads((config_dir / "providers.json").read_text(encoding="utf-8"))
     assert "profiles" not in provider_config
-    assert provider_config["version"] == 2
+    assert provider_config["version"] == 3
     assert provider_config["connections"][0]["id"] == "requesty-work"
     assert store.values["connection:requesty-work"] == "sk-work"
 
@@ -941,7 +941,11 @@ def test_create_new_session_uses_registry_as_default_gateway_factory(tmp_path: P
     service.sessions.create()
 
     assert service._context.gateway_factory is gateway_from_profile
-    assert isinstance(service._context.session.model_gateway, OpenAIChatCompletionsGateway)
+    from haagent.models.negotiating_gateway import NegotiatingModelGateway
+
+    gateway = service._context.session.model_gateway
+    assert isinstance(gateway, NegotiatingModelGateway)
+    assert isinstance(gateway._primary, OpenAIChatCompletionsGateway)
 
 
 def test_create_and_resume_session_inject_same_retry_policy_into_compatible_factory(

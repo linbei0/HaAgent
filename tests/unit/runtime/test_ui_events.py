@@ -77,6 +77,8 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "task_budget_warning",
         "model_retry_scheduled",
         "model_retry_exhausted",
+        "model_protocol_fallback",
+        "model_fallback",
     }
 
 

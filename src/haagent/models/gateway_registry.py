@@ -7,6 +7,7 @@ src/haagent/models/gateway_registry.py - 模型网关能力映射
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 
 from haagent.models.anthropic import AnthropicMessagesGateway
 from haagent.models.catalog import ModelCatalogProvider
@@ -15,6 +16,9 @@ from haagent.models.model_connections import ProviderProfile, ProviderProfileErr
 from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models.openai_responses import OpenAIResponsesGateway
 from haagent.models.types import ModelGateway
+from haagent.models.negotiating_gateway import NegotiatingModelGateway
+from haagent.models.local_runtime import discover_lm_studio, discover_ollama
+from haagent.models.capabilities import ModelCapabilities
 from haagent.runtime.execution.retry import RetryController
 
 
@@ -71,14 +75,99 @@ def gateway_from_profile(
     if retry_controller is not None:
         gateway_kwargs["retry_controller"] = retry_controller
     if profile.provider == "openai":
-        return OpenAIResponsesGateway(**gateway_kwargs)
+        return OpenAIResponsesGateway(
+            **gateway_kwargs,
+            require_api_key=profile.runtime_kind == "remote",
+        )
     if profile.provider == "openai-chat":
-        return OpenAIChatCompletionsGateway(**gateway_kwargs)
+        return OpenAIChatCompletionsGateway(
+            **gateway_kwargs,
+            require_api_key=profile.runtime_kind == "remote",
+        )
     if profile.provider == "anthropic":
         return AnthropicMessagesGateway(**gateway_kwargs)
     if profile.provider == "google":
         return GoogleGeminiGateway(**gateway_kwargs)
     raise GatewayRegistryError(f"unsupported provider in profile: {profile.provider}")
+
+
+def gateway_from_route(
+    primary_profile: ProviderProfile,
+    *,
+    fallback_profile: ProviderProfile | None = None,
+    cloud_fallback_consent: bool = False,
+    retry_controller: RetryController | None = None,
+    route_event_sink=None,
+) -> ModelGateway:
+    """从 settings route 构造协商网关；显式 profile 调用仍使用 gateway_from_profile。"""
+    primary = _with_discovered_capabilities(
+        gateway_from_profile(primary_profile, retry_controller=retry_controller),
+        primary_profile,
+        protocol="responses" if primary_profile.provider == "openai" else None,
+    )
+    fallback = (
+        _with_discovered_capabilities(
+            gateway_from_profile(fallback_profile, retry_controller=retry_controller),
+            fallback_profile,
+            protocol="responses" if fallback_profile.provider == "openai" else None,
+        )
+        if fallback_profile is not None
+        else None
+    )
+    primary_chat = None
+    if primary_profile.provider == "openai":
+        primary_chat = _with_discovered_capabilities(OpenAIChatCompletionsGateway(
+            api_key=primary_profile.api_key or None,
+            model=primary_profile.model,
+            base_url=primary_profile.base_url,
+            retry_controller=retry_controller,
+            require_api_key=primary_profile.runtime_kind == "remote",
+        ), primary_profile, protocol="chat_completions")
+    return NegotiatingModelGateway(
+        primary=primary,
+        primary_chat=primary_chat,
+        fallback=fallback,
+        primary_runtime_kind=primary_profile.runtime_kind,
+        fallback_runtime_kind=fallback_profile.runtime_kind if fallback_profile else "remote",
+        cloud_fallback_consent=cloud_fallback_consent,
+        route_event_sink=route_event_sink,
+        primary_connection=primary_profile.name.split(":", 1)[0],
+        fallback_connection=(fallback_profile.name.split(":", 1)[0] if fallback_profile else None),
+    )
+
+
+class _CapabilityOverrideGateway:
+    def __init__(self, gateway: ModelGateway, capabilities: ModelCapabilities) -> None:
+        self._gateway = gateway
+        self._capabilities = capabilities
+        self.provider_name = gateway.provider_name
+
+    def capabilities(self) -> ModelCapabilities:
+        return self._capabilities
+
+    def metadata(self):
+        return self._gateway.metadata()
+
+    def generate(self, *args, **kwargs):
+        return self._gateway.generate(*args, **kwargs)
+
+
+def _with_discovered_capabilities(
+    gateway: ModelGateway,
+    profile: ProviderProfile,
+    *,
+    protocol: str | None,
+) -> ModelGateway:
+    if profile.runtime_kind == "remote":
+        return gateway
+    discovery = discover_ollama() if profile.runtime_kind == "ollama" else discover_lm_studio()
+    model = next((item for item in discovery.models if item.id == profile.model), None)
+    if model is None:
+        return gateway
+    capabilities = model.capabilities
+    if protocol in {"responses", "chat_completions"}:
+        capabilities = replace(capabilities, protocols=frozenset({protocol}))
+    return _CapabilityOverrideGateway(gateway, capabilities)
 
 
 def _is_openai_compatible_catalog_provider(provider: ModelCatalogProvider) -> bool:

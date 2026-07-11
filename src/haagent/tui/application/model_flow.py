@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from haagent.models.gateway_registry import catalog_provider_capability
+from haagent.app.assistant_types import ModelSelectionRequest
 from haagent.tui.overlays.connections import (
     ConnectionCenterOverlay,
     ConnectionCenterResult,
@@ -21,6 +22,8 @@ from haagent.tui.overlays.models import (
     ModelCatalogLoadingOverlay,
     ModelSwitchOverlay,
     ModelSwitchResult,
+    LocalRuntimeOverlay,
+    LocalModelSelection,
 )
 
 
@@ -191,15 +194,57 @@ class ModelFlow:
             self._app._defer_prompt_focus()
             return
         try:
+            if result.action == "scan_local":
+                self._app.push_screen(ModelCatalogLoadingOverlay())
+                self._app._scan_local_model_runtimes()
+                return
+            if result.selection is None:
+                return
             if result.action == "set_default":
                 self._app.service.models.set_default_selection(result.selection)
                 self._app._conversation.append_line(f"默认模型：{result.selection.model}")
+            elif result.action in {"set_fallback", "set_fallback_cloud"}:
+                self._app.service.models.set_fallback_selection(
+                    result.selection,
+                    cloud_fallback_consent=result.action == "set_fallback_cloud",
+                )
+                self._app._conversation.append_line(f"备用模型：{result.selection.model}")
             else:
                 status = self._app.service.models.switch_current_session_selection(result.selection)
                 model_name = status.model or result.selection.model
                 self._app._conversation.append_line(f"当前会话：{model_name}")
         except Exception as error:
             self._app._conversation.append_block("Model warning", f"模型切换失败：{error}")
+        self._app._refresh()
+        self._app._defer_prompt_focus()
+
+    def scan_local_runtimes(self) -> None:
+        try:
+            discoveries = self._app.service.models.discover_local_runtimes()
+        except Exception as error:
+            self._app.call_from_thread(self.handle_catalog_error, error)
+            return
+        self._app.call_from_thread(self.open_local_runtime_overlay, discoveries)
+
+    def open_local_runtime_overlay(self, discoveries) -> None:
+        self.dismiss_loading_overlay()
+        self._app.push_screen(LocalRuntimeOverlay(tuple(discoveries)), self.handle_local_model_selection)
+
+    def handle_local_model_selection(self, result: LocalModelSelection | None) -> None:
+        if result is None:
+            self._app._defer_prompt_focus()
+            return
+        try:
+            selection = self._app.service.models.save_local_model(result.discovery, result.model)
+            status = self._app.service.models.switch_current_session_selection(
+                ModelSelectionRequest(
+                    connection_id=selection.connection_id,
+                    model=selection.model,
+                ),
+            )
+            self._app._conversation.append_line(f"当前会话：{status.model or selection.model}")
+        except Exception as error:
+            self._app._conversation.append_block("Model warning", f"本地模型保存失败：{error}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 

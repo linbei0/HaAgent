@@ -159,6 +159,29 @@ def run_turn_loop(
             deps.raise_if_cancelled()
             deps.emit_event(AssistantDeltaBusEvent(turn=turn, delta=delta))
 
+        set_route_event_sink = getattr(deps.model_gateway, "set_route_event_sink", None)
+        if callable(set_route_event_sink):
+            def emit_model_route_event(route_event) -> None:
+                from haagent.runtime.events.bus import ModelRouteFallbackBusEvent
+
+                bus_event = ModelRouteFallbackBusEvent(
+                    turn=turn,
+                    kind=route_event.kind,
+                    reason=route_event.reason,
+                    from_connection=route_event.from_connection,
+                    from_model=route_event.from_model,
+                    from_protocol=route_event.from_protocol,
+                    to_connection=route_event.to_connection,
+                    to_model=route_event.to_model,
+                    to_protocol=route_event.to_protocol,
+                    required_capabilities=route_event.required_capabilities,
+                    missing_capabilities=route_event.missing_capabilities,
+                )
+                deps.emit_event(bus_event)
+                deps.writer.append_transcript(bus_event_to_dict(bus_event))
+
+            set_route_event_sink(emit_model_route_event)
+
         generate_kwargs: dict[str, object] = {"messages": state.messages, "tool_schemas": tool_schemas}
         if _supports_generate_parameter(deps.model_gateway, "event_sink"):
             generate_kwargs["event_sink"] = emit_assistant_delta
