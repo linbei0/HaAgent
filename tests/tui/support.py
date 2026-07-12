@@ -8,16 +8,25 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from haagent import cli
 from haagent.app.assistant_types import (
     AssistantSandboxStatus,
+    AssistantSchedule,
+    AssistantScheduleRun,
+    AssistantScheduleSummary,
     AssistantSessionStatus,
     AssistantSessionSummary,
     AssistantWorkspaceStatus,
+    BackgroundServiceStatus,
+    RunQuery,
     SandboxDoctorReport,
+    ScheduleCreateRequest,
+    SchedulePreviewRequest,
+    ScheduleUpdateRequest,
 )
 from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
 from haagent.runtime.events import (
@@ -277,6 +286,263 @@ class FakeChannels:
         raise RuntimeError(f"missing channel {instance_id}")
 
 
+class FakeSchedules:
+    """TUI 计划任务 Fake：经 service.schedules 调用，不碰真实 DB。"""
+
+    def __init__(self, owner) -> None:
+        self._owner = owner
+        self.paused: list[str] = []
+        self.resumed: list[str] = []
+        self.archived: list[str] = []
+        self.deleted: list[str] = []
+        self.run_now_ids: list[str] = []
+        self.marked_read: list[str] = []
+        self.cancelled: list[str] = []
+        self.mark_all_count = 0
+        self.preview_calls = 0
+        self.install_count = 0
+        self.uninstall_count = 0
+        self.created: list[ScheduleCreateRequest] = []
+        self.background = BackgroundServiceStatus(
+            state="not_installed",
+            host_type="windows_task",
+            detail="未安装",
+            executable="haagent",
+        )
+
+    def list(self, status=None):
+        del status
+        return list(getattr(self._owner, "schedule_summaries", []) or [])
+
+    def get(self, schedule_id: str) -> AssistantSchedule:
+        details = getattr(self._owner, "schedule_details", {}) or {}
+        if schedule_id in details:
+            return details[schedule_id]
+        for item in self.list():
+            if item.id == schedule_id:
+                from haagent.scheduling.models import RetryPolicy
+
+                return AssistantSchedule(
+                    id=item.id,
+                    name=item.name,
+                    prompt="prompt",
+                    workspace_root=item.workspace_root,
+                    destination_kind="new_session",
+                    destination_session_path=None,
+                    connection_id=item.connection_id,
+                    model=item.model,
+                    web_enabled=False,
+                    allowed_tools=("file_read",),
+                    approval_allowed_tools=(),
+                    approved_tools=(),
+                    permission_mode="request_approval",
+                    dtstart_local=datetime(2026, 7, 12, 9, 0),
+                    timezone=item.timezone,
+                    rrule=item.rrule,
+                    status=item.status,
+                    misfire_policy="latest",
+                    overlap_policy="skip",
+                    retry_policy=RetryPolicy(),
+                    revision=item.revision,
+                    next_run_at_utc=item.next_run_at_utc,
+                    last_run_at_utc=item.last_run_at_utc,
+                )
+        raise RuntimeError(f"missing schedule {schedule_id}")
+
+    def duplicate(self, schedule_id: str) -> AssistantSchedule:
+        source = self.get(schedule_id)
+        from haagent.scheduling.models import RetryPolicy
+
+        req = ScheduleCreateRequest(
+            name=f"{source.name} 副本",
+            prompt=source.prompt,
+            workspace_root=source.workspace_root,
+            destination_kind=source.destination_kind,
+            destination_session_path=source.destination_session_path,
+            connection_id=source.connection_id,
+            model=source.model,
+            web_enabled=source.web_enabled,
+            allowed_tools=tuple(source.allowed_tools),
+            approval_allowed_tools=tuple(source.approval_allowed_tools),
+            approved_tools=tuple(source.approved_tools),
+            permission_mode=source.permission_mode,
+            dtstart_local=source.dtstart_local,
+            timezone=source.timezone,
+            rrule=source.rrule,
+            misfire_policy=source.misfire_policy,
+            overlap_policy=source.overlap_policy,
+            retry_policy=source.retry_policy or RetryPolicy(),
+        )
+        return self.create(req)
+
+    def create(self, request: ScheduleCreateRequest) -> AssistantSchedule:
+        self.created.append(request)
+        from haagent.scheduling.models import RetryPolicy
+
+        created = AssistantSchedule(
+            id="sch_created" if len(self.created) == 1 else f"sch_created_{len(self.created)}",
+            name=request.name,
+            prompt=request.prompt,
+            workspace_root=request.workspace_root,
+            destination_kind=request.destination_kind,
+            destination_session_path=request.destination_session_path,
+            connection_id=request.connection_id,
+            model=request.model,
+            web_enabled=request.web_enabled,
+            allowed_tools=request.allowed_tools,
+            approval_allowed_tools=request.approval_allowed_tools,
+            approved_tools=request.approved_tools,
+            permission_mode=request.permission_mode,
+            dtstart_local=request.dtstart_local,
+            timezone=request.timezone,
+            rrule=request.rrule,
+            status="active",
+            misfire_policy=request.misfire_policy,
+            overlap_policy=request.overlap_policy,
+            retry_policy=request.retry_policy or RetryPolicy(),
+            revision=1,
+        )
+        self._owner.schedule_summaries = list(getattr(self._owner, "schedule_summaries", []) or [])
+        self._owner.schedule_summaries.append(
+            AssistantScheduleSummary(
+                id=created.id,
+                name=created.name,
+                status=created.status,
+                timezone=created.timezone,
+                rrule=created.rrule,
+                next_run_at_utc=None,
+                last_run_at_utc=None,
+                workspace_root=created.workspace_root,
+                revision=1,
+                model=created.model,
+                connection_id=created.connection_id,
+            )
+        )
+        details = dict(getattr(self._owner, "schedule_details", {}) or {})
+        details[created.id] = created
+        self._owner.schedule_details = details
+        return created
+
+    def update(self, schedule_id: str, request: ScheduleUpdateRequest) -> AssistantSchedule:
+        del request
+        return self.get(schedule_id)
+
+    def pause(self, schedule_id: str) -> AssistantSchedule:
+        self.paused.append(schedule_id)
+        return self.get(schedule_id)
+
+    def resume(self, schedule_id: str, *, now) -> AssistantSchedule:
+        del now
+        self.resumed.append(schedule_id)
+        return self.get(schedule_id)
+
+    def archive(self, schedule_id: str) -> AssistantSchedule:
+        self.archived.append(schedule_id)
+        return self.get(schedule_id)
+
+    def delete(self, schedule_id: str) -> None:
+        self.deleted.append(schedule_id)
+
+    def run_now(self, schedule_id: str, *, request_id: str) -> AssistantScheduleRun:
+        del request_id
+        self.run_now_ids.append(schedule_id)
+        return AssistantScheduleRun(
+            id="run_manual",
+            schedule_id=schedule_id,
+            schedule_revision=1,
+            trigger_key="manual:test",
+            trigger_kind="manual",
+            scheduled_for_utc=datetime.now(timezone.utc),
+            status="queued",
+            attempt_count=0,
+            summary="",
+            unread=True,
+        )
+
+    def list_runs(self, query: RunQuery) -> list[AssistantScheduleRun]:
+        runs = list(getattr(self._owner, "schedule_runs", []) or [])
+        if query.schedule_id:
+            runs = [r for r in runs if r.schedule_id == query.schedule_id]
+        if query.unread_only:
+            runs = [r for r in runs if r.unread]
+        if query.status:
+            runs = [r for r in runs if r.status == query.status]
+        return runs[: query.limit]
+
+    def get_run(self, run_id: str) -> AssistantScheduleRun:
+        for run in getattr(self._owner, "schedule_runs", []) or []:
+            if run.id == run_id:
+                return run
+        raise RuntimeError(f"missing run {run_id}")
+
+    def mark_run_read(self, run_id: str) -> None:
+        self.marked_read.append(run_id)
+        runs = list(getattr(self._owner, "schedule_runs", []) or [])
+        updated = []
+        for run in runs:
+            if run.id == run_id and run.unread:
+                from dataclasses import replace
+
+                updated.append(replace(run, unread=False))
+            else:
+                updated.append(run)
+        self._owner.schedule_runs = updated
+
+    def mark_all_runs_read(self) -> int:
+        self.mark_all_count += 1
+        runs = list(getattr(self._owner, "schedule_runs", []) or [])
+        count = sum(1 for r in runs if r.unread)
+        from dataclasses import replace
+
+        self._owner.schedule_runs = [replace(r, unread=False) for r in runs]
+        return count
+
+    def cancel_run(self, run_id: str) -> AssistantScheduleRun:
+        self.cancelled.append(run_id)
+        for run in getattr(self._owner, "schedule_runs", []) or []:
+            if run.id == run_id:
+                from dataclasses import replace
+
+                return replace(run, status="cancelled", cancellation_requested=True)
+        raise RuntimeError(f"missing run {run_id}")
+
+    def preview(self, request: SchedulePreviewRequest, *, count: int = 3):
+        del request
+        self.preview_calls += 1
+        base = datetime(2026, 7, 13, 1, 0, tzinfo=timezone.utc)
+        from datetime import timedelta
+
+        return tuple(base + timedelta(days=i) for i in range(count))
+
+    def background_status(self) -> BackgroundServiceStatus:
+        return self.background
+
+    def install_background_service(self) -> BackgroundServiceStatus:
+        self.install_count += 1
+        self.background = BackgroundServiceStatus(
+            state="running",
+            host_type=self.background.host_type,
+            detail="已安装并运行",
+            executable=self.background.executable,
+            last_heartbeat_utc=datetime.now(timezone.utc),
+        )
+        return self.background
+
+    def uninstall_background_service(self) -> BackgroundServiceStatus:
+        self.uninstall_count += 1
+        self.background = BackgroundServiceStatus(
+            state="not_installed",
+            host_type=self.background.host_type,
+            detail="已卸载",
+            executable=self.background.executable,
+        )
+        return self.background
+
+    def unread_count(self) -> int:
+        runs = list(getattr(self._owner, "schedule_runs", []) or [])
+        return sum(1 for r in runs if r.unread)
+
+
 class FakeAssistantService:
     def __init__(
         self,
@@ -419,6 +685,10 @@ class FakeAssistantService:
         self.memory = FakeMemory(self)
         self.channel_instances: list[SimpleNamespace] = []
         self.channels = FakeChannels(self)
+        self.schedule_summaries: list[AssistantScheduleSummary] = []
+        self.schedule_details: dict[str, AssistantSchedule] = {}
+        self.schedule_runs: list[AssistantScheduleRun] = []
+        self.schedules = FakeSchedules(self)
 
     def _get_workspace_status(self) -> AssistantWorkspaceStatus:
         current_profile = next(

@@ -29,6 +29,7 @@ from haagent.tui.application.conversation import ConversationController
 from haagent.tui.application.memory_flow import MemoryFlow
 from haagent.tui.application.model_flow import ModelFlow
 from haagent.tui.application.runtime_events import handle_runtime_ui_event
+from haagent.tui.application.schedule_flow import ScheduleFlow
 from haagent.tui.application.session_flow import SessionFlow
 from haagent.tui.commands import command_registry, is_prompt_mode_command, parse_slash_command
 from haagent.tui.design.failures import FailureView, failure_from_payload
@@ -100,6 +101,7 @@ class HaAgentTuiApp(App[None]):
         self._command_dispatcher = CommandDispatcher(self)
         self.model_flow = ModelFlow(self)
         self.channel_flow = ChannelFlow(self)
+        self.schedule_flow = ScheduleFlow(self)
         self.session_flow = SessionFlow(self)
         self.memory_flow = MemoryFlow(self)
         self.completion_flow = CompletionFlow(self)
@@ -127,10 +129,15 @@ class HaAgentTuiApp(App[None]):
         self._apply_theme()
         self._show_initial_configuration_state()
         self.session_flow.restore_initial_session()
+        self.schedule_flow.start_background_polling()
         self._refresh()
         self._update_responsive_layout()
         self._prompt_input().focus()
         self._warm_file_reference_index()
+
+    def on_unmount(self) -> None:
+        # 停止 badge 轮询并停止 TUI 内嵌 coordinator host，释放租约。
+        self.schedule_flow.stop_background_polling()
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_responsive_layout(width=event.size.width, height=event.size.height)
@@ -431,6 +438,11 @@ class HaAgentTuiApp(App[None]):
     def _run_model_connection_test(self, connection_id: str, model: str | None = None) -> None:
         self.model_flow.run_connection_test(connection_id, model)
 
+    # ── 计划任务后台 worker（薄 @work；测试路径可走 schedule_flow 同步打开）──
+    @work(thread=True, exclusive=True, group="schedules")
+    def _load_schedules_overlay_worker(self, tab: str = "plans") -> None:
+        self.schedule_flow.open_schedules_async(initial_tab=tab)  # type: ignore[arg-type]
+
     # ── 渠道后台 worker（薄 @work 包装，逻辑在 ChannelFlow）──────────────
     @work(thread=True, exclusive=True, group="channels")
     def _run_channel_weixin_login(self, instance_id: str | None) -> None:
@@ -630,9 +642,22 @@ class HaAgentTuiApp(App[None]):
     def _refresh(self) -> None:
         status = self.service.workspace.status()
         status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.update_status(
-            status_line(status, ui_state=self._state, width=self.size.width, sandbox_status=self._sandbox_status),
+        base = status_line(
+            status,
+            ui_state=self._state,
+            width=self.size.width,
+            sandbox_status=self._sandbox_status,
         )
+        # 未读计划运行 badge：颜色非唯一语义，文案本身可访问。
+        unread = int(getattr(self.schedule_flow, "unread_count", 0) or 0)
+        if unread > 0:
+            badge = f" 计划任务 {unread}"
+            # 窄屏优先保留 badge
+            if self.size.width <= 80:
+                base = f"{badge.strip()} | {base}"
+            else:
+                base = f"{base}{badge}"
+        status_bar.update_status(base)
         self._apply_status_classes(status_bar)
         self._refresh_conversation()
         self.query_one("#footer-bar", FooterBar).update_footer(footer_text(self._help_context()))

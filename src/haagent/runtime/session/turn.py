@@ -185,6 +185,11 @@ def write_chat_task_yaml(
             allowed_tools.extend(["list_mcp_resources", "read_mcp_resource"])
     else:
         allowed_tools = list(allowed_tools_override)
+        # 显式 override 时仍尊重 enable_web：计划任务可能存了无 web 的工具快照
+        if enable_web:
+            for name in CHAT_WEB_TOOLS:
+                if name not in allowed_tools:
+                    allowed_tools.append(name)
     policy = path_policy or default_path_policy(workspace_root)
     approval_allowed_tools = (
         list(approval_allowed_tools_override)

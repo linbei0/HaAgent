@@ -7,7 +7,8 @@ haagent/app/assistant_types.py - 个人助手应用层稳定类型
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from haagent.models.gateway_registry import GatewayCapability
@@ -16,6 +17,16 @@ from haagent.channels.settings import ChannelPermissionMode
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.path_policy import PermissionMode
 from haagent.runtime.sandbox.status import SandboxDoctorReport
+from haagent.scheduling.models import (
+    DestinationKind,
+    FailureCategory,
+    MisfirePolicy,
+    OverlapPolicy,
+    RetryPolicy,
+    RunStatus,
+    ScheduleStatus,
+    TriggerKind,
+)
 
 
 GatewayFactory = Callable[..., ModelGateway]
@@ -293,3 +304,148 @@ class AssistantChannelTestResult:
             f"AssistantChannelTestResult(ok={self.ok!r}, "
             f"instance_id={self.instance_id!r}, message={self.message!r})"
         )
+
+
+@dataclass(frozen=True)
+class ScheduleCreateRequest:
+    name: str
+    prompt: str
+    workspace_root: Path
+    destination_kind: DestinationKind
+    destination_session_path: Path | None
+    connection_id: str
+    model: str
+    web_enabled: bool
+    allowed_tools: tuple[str, ...]
+    approval_allowed_tools: tuple[str, ...]
+    approved_tools: tuple[str, ...]
+    permission_mode: PermissionMode
+    dtstart_local: datetime
+    timezone: str
+    rrule: str | None
+    misfire_policy: MisfirePolicy = "latest"
+    overlap_policy: OverlapPolicy = "skip"
+    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+
+
+@dataclass(frozen=True)
+class ScheduleUpdateRequest:
+    expected_revision: int
+    name: str | None = None
+    prompt: str | None = None
+    workspace_root: Path | None = None
+    destination_kind: DestinationKind | None = None
+    destination_session_path: Path | None | object = ...
+    connection_id: str | None = None
+    model: str | None = None
+    web_enabled: bool | None = None
+    allowed_tools: tuple[str, ...] | None = None
+    approval_allowed_tools: tuple[str, ...] | None = None
+    approved_tools: tuple[str, ...] | None = None
+    permission_mode: PermissionMode | None = None
+    dtstart_local: datetime | None = None
+    timezone: str | None = None
+    rrule: str | None | object = ...
+    misfire_policy: MisfirePolicy | None = None
+    overlap_policy: OverlapPolicy | None = None
+    retry_policy: RetryPolicy | None = None
+
+
+@dataclass(frozen=True)
+class SchedulePreviewRequest:
+    dtstart_local: datetime
+    timezone: str
+    rrule: str | None
+    after: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RunQuery:
+    schedule_id: str | None = None
+    unread_only: bool = False
+    status: RunStatus | None = None
+    limit: int = 100
+
+
+@dataclass(frozen=True)
+class AssistantScheduleSummary:
+    id: str
+    name: str
+    status: ScheduleStatus
+    timezone: str
+    rrule: str | None
+    next_run_at_utc: datetime | None
+    last_run_at_utc: datetime | None
+    workspace_root: Path
+    revision: int
+    model: str
+    connection_id: str
+
+
+@dataclass(frozen=True)
+class AssistantSchedule:
+    id: str
+    name: str
+    prompt: str
+    workspace_root: Path
+    destination_kind: DestinationKind
+    destination_session_path: Path | None
+    connection_id: str
+    model: str
+    web_enabled: bool
+    allowed_tools: tuple[str, ...]
+    approval_allowed_tools: tuple[str, ...]
+    approved_tools: tuple[str, ...]
+    permission_mode: PermissionMode
+    dtstart_local: datetime
+    timezone: str
+    rrule: str | None
+    status: ScheduleStatus
+    misfire_policy: MisfirePolicy
+    overlap_policy: OverlapPolicy
+    retry_policy: RetryPolicy
+    revision: int
+    next_run_at_utc: datetime | None = None
+    last_run_at_utc: datetime | None = None
+
+
+@dataclass(frozen=True)
+class AssistantScheduleRun:
+    id: str
+    schedule_id: str
+    schedule_revision: int
+    trigger_key: str
+    trigger_kind: TriggerKind
+    scheduled_for_utc: datetime
+    status: RunStatus
+    attempt_count: int
+    summary: str
+    unread: bool
+    session_id: str | None = None
+    session_path: str | None = None
+    episode_path: str | None = None
+    failure_category: FailureCategory | None = None
+    failure_reason: str | None = None
+    needs_attention_reason: str | None = None
+    started_at_utc: datetime | None = None
+    finished_at_utc: datetime | None = None
+    cancellation_requested: bool = False
+
+
+@dataclass(frozen=True)
+class BackgroundServiceStatus:
+    state: str
+    host_type: str
+    detail: str = ""
+    executable: str | None = None
+    last_heartbeat_utc: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ScheduleHostStatus:
+    """TUI 内嵌 schedule worker 的可展示状态；不暴露内部对象。"""
+
+    running: bool
+    owner_id: str | None = None
+    last_error: str | None = None
+    fatal: bool = False

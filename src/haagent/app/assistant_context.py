@@ -6,13 +6,17 @@ haagent/app/assistant_context.py - 应用 Module 私有共享状态
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from haagent.app.assistant_types import GatewayFactory
 from haagent.models.model_connections import ModelSelection
 from haagent.runtime.session.agent import AgentSession
+
+if TYPE_CHECKING:
+    from haagent.scheduling.store import ScheduleStore
 
 
 @dataclass
@@ -29,3 +33,6 @@ class AssistantContext:
     session: AgentSession | None = None
     pending_model_selection: ModelSelection | None = None
     last_model_selection: ModelSelection | None = None
+    schedule_db_path: Path | None = None
+    schedule_store_factory: Callable[[], ScheduleStore] | None = None
+    background_adapter_factory: Callable[[], object] | None = None

@@ -7,6 +7,10 @@ src/haagent/tui/overlays/__init__.py - TUI overlay 和 modal 包
 from haagent.tui.overlays.modals import ConfirmModal, EditDiffModal, ExternalDirectoryDecisionModal, HelpModal, PermissionsModal, ToolApprovalModal
 from haagent.tui.overlays.connections import ConnectionCenterOverlay, ConnectionCenterResult, ConnectionSetupResult, ConnectionSetupWizard
 from haagent.tui.overlays.models import ModelCatalogLoadingOverlay, ModelSwitchOverlay, ModelSwitchResult, ModelSwitchState
+from haagent.tui.overlays.schedule_background import ScheduleBackgroundState
+from haagent.tui.overlays.schedule_editor import ScheduleEditorOverlay, ScheduleEditorState
+from haagent.tui.overlays.schedule_runs import ScheduleRunsState, filter_runs
+from haagent.tui.overlays.schedules import SchedulesOverlay, SchedulesOverlayResult, SchedulesOverlayState
 from haagent.tui.overlays.search import SearchOverlay
 from haagent.tui.overlays.sessions import SessionOverlay, SessionOverlayResult, SessionOverlayState
 from haagent.tui.overlays.skill_picker import SkillPickerOverlay
@@ -26,6 +30,13 @@ __all__ = [
     "ModelSwitchResult",
     "ModelSwitchState",
     "PermissionsModal",
+    "ScheduleBackgroundState",
+    "ScheduleEditorOverlay",
+    "ScheduleEditorState",
+    "ScheduleRunsState",
+    "SchedulesOverlay",
+    "SchedulesOverlayResult",
+    "SchedulesOverlayState",
     "SearchOverlay",
     "SessionOverlay",
     "SessionOverlayResult",
@@ -33,4 +44,5 @@ __all__ = [
     "SkillPickerOverlay",
     "ToolApprovalModal",
     "WorkspacePickerOverlay",
+    "filter_runs",
 ]

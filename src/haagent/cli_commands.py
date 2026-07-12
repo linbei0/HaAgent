@@ -112,6 +112,19 @@ def handle_tui_migration(args) -> int:
     return 1
 
 
+def handle_schedule_worker(args) -> int:
+    """高级内部入口：前台/一次性计划 worker；非普通用户主路径。"""
+    from haagent.scheduling.worker import run_schedule_worker
+
+    once = bool(getattr(args, "once", False))
+    db = getattr(args, "db", None)
+    return run_schedule_worker(
+        db_path=Path(db) if db is not None else None,
+        once=once,
+        install_signals=not once,
+    )
+
+
 def handle_gateway(args) -> int:
     """高级渠道网关：status 只读配置；run 前台挂载 Adapter；pair 重发配对码。"""
     action = getattr(args, "gateway_action", None)

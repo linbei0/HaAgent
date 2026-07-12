@@ -30,6 +30,7 @@ class CommandDispatcher:
             "open_connections": lambda result: app.model_flow.open_connections(),
             "open_models": lambda result: app.model_flow.open_models(),
             "open_channels": lambda result: app.channel_flow.open_channels(),
+            "open_schedules": lambda result: app.schedule_flow.open_schedules(),
             "mcp": lambda result: app._command_handlers.mcp(),
             "agents": lambda result: app._command_handlers.agents(),
             "memory": lambda result: self._open_memory_if_closed(),

@@ -54,6 +54,7 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("Ctrl+T", "切换主题"),
         ("Ctrl+P", "打开权限设置"),
         ("/sessions", "打开 session 列表"),
+        ("/schedules", "打开计划任务"),
         ("/memory", "打开记忆候选审查"),
         ("?", "打开此帮助"),
         ("Ctrl+Q", "退出 TUI"),
@@ -112,7 +113,7 @@ _HELP_TITLES: dict[KeyContext, str] = {
 }
 
 _FOOTER_KEYS: dict[KeyContext, list[str]] = {
-    "chat": ["Enter", "Shift+Enter", "/", "Ctrl+F", "Ctrl+P", "Ctrl+T", "/memory", "?", "Ctrl+Q"],
+    "chat": ["Enter", "Shift+Enter", "/", "Ctrl+F", "Ctrl+P", "Ctrl+T", "/schedules", "/memory", "?", "Ctrl+Q"],
     "memory_list": ["↑/↓", "g/G", "Enter", "a/y", "r", "Esc", "?", "Ctrl+Q"],
     "memory_detail": ["Esc", "a/y", "r", "?", "Ctrl+Q"],
     "pending_input": ["Enter", "Shift+Enter", "Esc", "?", "Ctrl+Q"],
@@ -181,6 +182,8 @@ def _footer_label(description: str) -> str:
         return "滚动"
     if description.startswith("打开记忆"):
         return "记忆"
+    if description.startswith("打开计划"):
+        return "计划"
     if description.startswith("打开快捷"):
         return "命令"
     if description.startswith("搜索"):

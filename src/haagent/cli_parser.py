@@ -18,6 +18,7 @@ from haagent.cli_commands import (
     handle_inspect,
     handle_run,
     handle_sandbox,
+    handle_schedule_worker,
     handle_smoke,
     handle_tui_entry,
     handle_tui_migration,
@@ -297,6 +298,24 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         help="channel instance id (default: sole enabled instance)",
     )
     gateway_pair.set_defaults(handler=handle_gateway)
+
+    # 高级内部入口：系统后台 worker；不进入普通根帮助主线。
+    schedule_worker_parser = subparsers.add_parser(
+        "schedule-worker",
+        help=argparse.SUPPRESS,
+    )
+    schedule_worker_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="expand due work, claim/execute claimable runs, then exit",
+    )
+    schedule_worker_parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="path to schedules SQLite database (default: ~/.haagent/schedules.sqlite3)",
+    )
+    schedule_worker_parser.set_defaults(handler=handle_schedule_worker)
 
     return parser
 

@@ -244,8 +244,13 @@ def test_tui_slash_command_suggestions_scroll_visible_window() -> None:
     assert "> " in rendered
     assert any(command.name in rendered for command in command_registry().commands())
     assert "/help" not in rendered
-    assert "/skill" in rendered
+    # 可见窗口随 slash 命令总数变化；只断言焦点行在窗口内且唯一
     assert rendered.count("> ") == 1
+    focused = next(
+        (line for line in rendered.splitlines() if line.startswith("> ")),
+        "",
+    )
+    assert focused.startswith("> /")
 
 def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path) -> None:
     async def run() -> None:

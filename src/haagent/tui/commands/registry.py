@@ -54,6 +54,7 @@ def command_registry() -> CommandRegistry:
             SlashCommand("connect", "配置供应商连接和 API key", "open_connections"),
             SlashCommand("model", "切换模型", "open_models"),
             SlashCommand("channels", "配置聊天渠道（微信等）", "open_channels"),
+            SlashCommand("schedules", "管理计划任务与运行收件箱", "open_schedules"),
             SlashCommand("mcp", "查看 MCP 连接状态", "mcp"),
             SlashCommand("agents", "查看当前 worker 状态", "agents"),
             SlashCommand("memory", "打开记忆候选审查", "memory"),

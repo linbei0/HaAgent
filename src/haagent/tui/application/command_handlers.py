@@ -18,6 +18,10 @@ class ChatCommandHandlers:
     def __init__(self, app: Any) -> None:
         self._app = app
 
+    # ── /schedules ───────────────────────────────────────────────────────
+    def schedules(self) -> None:
+        self._app.schedule_flow.open_schedules()
+
     # ── /turns ───────────────────────────────────────────────────────────
     def turns(self, argument: str) -> None:
         usage = "用法：/turns [show|unlimited|COUNT]"

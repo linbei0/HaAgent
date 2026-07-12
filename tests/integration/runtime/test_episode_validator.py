@@ -712,8 +712,11 @@ def test_failed_run_with_tool_argument_error_validates_package(tmp_path: Path) -
     result = RunOrchestrator(runs_root=tmp_path / ".runs", model_gateway=gateway).run(task_path)
 
     assert result.status is RunStatus.FAILED
-    tool_call = json.loads((result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    # tool-calls.jsonl 可能含多行；取首条错误记录
+    first_line = (result.episode_path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    tool_call = json.loads(first_line)
     assert tool_call["status"] == "error"
+
     (result.episode_path / "verification").mkdir(exist_ok=True)
     (result.episode_path / "verification" / "commands.jsonl").write_text("", encoding="utf-8")
     (result.episode_path / "verification" / "files.jsonl").write_text("", encoding="utf-8")
