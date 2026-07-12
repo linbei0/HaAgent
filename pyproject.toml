@@ -15,6 +15,20 @@ dependencies = [
     "uniseg>=0.10.1,<1.0",
 ]
 
+[project.optional-dependencies]
+# 微信文本阶段：终端 ASCII 二维码（扫码登录 UX）
+channels-weixin = [
+    "qrcode>=7.4.2",
+]
+# 微信媒体阶段（M2）：AES CDN 下载/上传；文本阶段不安装
+channels-weixin-media = [
+    "cryptography>=42.0.0",
+]
+channels-wecom = []
+channels-feishu = []
+channels-dingtalk = []
+channels-qq = []
+
 [project.scripts]
 haagent = "haagent.cli:main"
 
@@ -38,4 +52,5 @@ testpaths = ["tests"]
 markers = [
     "slow: tests that start the Textual app or run real agent workflows; deselect with -m \"not slow\" for fast local runs",
     "real_llm: manual tests that call a real model and are skipped unless --real-llm is provided",
+    "weixin_e2e: real Weixin iLink sandbox; requires --run-weixin-e2e and HAAGENT_WEIXIN_BOT_TOKEN",
 ]

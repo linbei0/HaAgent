@@ -127,3 +127,12 @@ def test_insecure_file_requires_explicit_source(tmp_path: Path) -> None:
 def test_insecure_file_rejects_empty_key(tmp_path: Path) -> None:
     with pytest.raises(CredentialError, match="API key is required"):
         save_insecure_api_key("local", "", config_dir=tmp_path)
+
+
+def test_fake_credential_store_delete_password() -> None:
+    store = FakeCredentialStore({"channel:weixin:wx-1:bot_token": "secret-token"})
+    assert store.get_password("haagent", "channel:weixin:wx-1:bot_token") == "secret-token"
+    store.delete_password("haagent", "channel:weixin:wx-1:bot_token")
+    assert store.get_password("haagent", "channel:weixin:wx-1:bot_token") is None
+    # 重复删除不报错
+    store.delete_password("haagent", "channel:weixin:wx-1:bot_token")

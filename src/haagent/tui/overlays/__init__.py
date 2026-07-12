@@ -10,6 +10,7 @@ from haagent.tui.overlays.models import ModelCatalogLoadingOverlay, ModelSwitchO
 from haagent.tui.overlays.search import SearchOverlay
 from haagent.tui.overlays.sessions import SessionOverlay, SessionOverlayResult, SessionOverlayState
 from haagent.tui.overlays.skill_picker import SkillPickerOverlay
+from haagent.tui.overlays.workspace_picker import WorkspacePickerOverlay
 
 __all__ = [
     "ConfirmModal",
@@ -31,4 +32,5 @@ __all__ = [
     "SessionOverlayState",
     "SkillPickerOverlay",
     "ToolApprovalModal",
+    "WorkspacePickerOverlay",
 ]

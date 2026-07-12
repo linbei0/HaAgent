@@ -243,6 +243,40 @@ class FakeMemory:
         return self._owner._reject_memory_candidate(candidate_id, reason)
 
 
+class FakeChannels:
+    def __init__(self, owner) -> None:
+        self._owner = owner
+        self.pairing_codes: list[tuple[str, str]] = []
+
+    def list_instances(self):
+        return list(self._owner.channel_instances)
+
+    def set_enabled(self, instance_id, enabled):
+        for item in self._owner.channel_instances:
+            if item.id == instance_id:
+                item.enabled = enabled
+                return item
+        raise RuntimeError(f"missing channel {instance_id}")
+
+    def delete_instance(self, instance_id):
+        self._owner.channel_instances = [
+            item for item in self._owner.channel_instances if item.id != instance_id
+        ]
+
+    def issue_pairing_code(self, instance_id, *, expires_in_seconds=600):
+        del expires_in_seconds
+        code = "FAKEPAIR"
+        self.pairing_codes.append((instance_id, code))
+        return code
+
+    def set_workspace_root(self, instance_id, workspace_root):
+        for item in self._owner.channel_instances:
+            if item.id == instance_id:
+                item.workspace_root = workspace_root
+                return item
+        raise RuntimeError(f"missing channel {instance_id}")
+
+
 class FakeAssistantService:
     def __init__(
         self,
@@ -383,6 +417,8 @@ class FakeAssistantService:
         self.models = FakeModels(self)
         self.skills = FakeSkills(self)
         self.memory = FakeMemory(self)
+        self.channel_instances: list[SimpleNamespace] = []
+        self.channels = FakeChannels(self)
 
     def _get_workspace_status(self) -> AssistantWorkspaceStatus:
         current_profile = next(

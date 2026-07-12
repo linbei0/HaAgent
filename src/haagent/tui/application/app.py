@@ -13,6 +13,7 @@ from pathlib import Path
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import TextArea
 
 from haagent.app.assistant_service import AssistantService
@@ -20,6 +21,7 @@ from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.tui.application.attachments import AttachmentController, prompt_without_image_tokens
+from haagent.tui.application.channel_flow import ChannelFlow
 from haagent.tui.application.command_handlers import ChatCommandHandlers
 from haagent.tui.application.commands import CommandDispatcher
 from haagent.tui.application.completion_flow import CompletionFlow
@@ -97,6 +99,7 @@ class HaAgentTuiApp(App[None]):
         self._command_handlers = ChatCommandHandlers(self)
         self._command_dispatcher = CommandDispatcher(self)
         self.model_flow = ModelFlow(self)
+        self.channel_flow = ChannelFlow(self)
         self.session_flow = SessionFlow(self)
         self.memory_flow = MemoryFlow(self)
         self.completion_flow = CompletionFlow(self)
@@ -428,6 +431,16 @@ class HaAgentTuiApp(App[None]):
     def _run_model_connection_test(self, connection_id: str, model: str | None = None) -> None:
         self.model_flow.run_connection_test(connection_id, model)
 
+    # ── 渠道后台 worker（薄 @work 包装，逻辑在 ChannelFlow）──────────────
+    @work(thread=True, exclusive=True, group="channels")
+    def _run_channel_weixin_login(self, instance_id: str | None) -> None:
+        # QR 轮询与 HTTP 必须在 worker，避免阻塞 Textual UI 线程。
+        self.channel_flow.run_weixin_login(instance_id)
+
+    @work(thread=True, exclusive=True, group="channels")
+    def _run_channel_connection_test(self, instance_id: str) -> None:
+        self.channel_flow.run_connection_test(instance_id)
+
     # ── 记忆动作（薄分发到 MemoryFlow）───────────────────────────────────
     def action_toggle_memory(self) -> None:
         self.memory_flow.toggle()
@@ -715,7 +728,11 @@ class HaAgentTuiApp(App[None]):
         prompt_input.move_cursor(_end_location(value))
 
     def _restore_prompt_focus(self, _result: object | None = None) -> None:
-        self._prompt_input().focus()
+        # 延迟回调可能在 Textual 卸载 default screen 后才执行；此时不应让焦点恢复中断退出。
+        try:
+            self._prompt_input().focus()
+        except NoMatches:
+            return
 
     def _defer_prompt_focus(self, _result: object | None = None) -> None:
         self.set_timer(0.01, self._restore_prompt_focus)

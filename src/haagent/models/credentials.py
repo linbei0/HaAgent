@@ -29,6 +29,9 @@ class CredentialStore(Protocol):
     def set_password(self, service_name: str, username: str, password: str) -> None:
         """写入系统凭据库。"""
 
+    def delete_password(self, service_name: str, username: str) -> None:
+        """删除系统凭据库中的密码；不存在时视为成功。"""
+
 
 @dataclass(frozen=True)
 class CredentialRecord:
@@ -75,6 +78,20 @@ class KeyringCredentialStore:
         except Exception as error:
             raise CredentialError(str(error)) from error
 
+    def delete_password(self, service_name: str, username: str) -> None:
+        # 删除渠道实例等场景需要清理 keyring；条目不存在时静默成功。
+        try:
+            import keyring
+            from keyring.errors import PasswordDeleteError
+        except Exception as error:  # pragma: no cover
+            raise CredentialError(str(error)) from error
+        try:
+            keyring.delete_password(service_name, username)
+        except PasswordDeleteError:
+            return
+        except Exception as error:
+            raise CredentialError(str(error)) from error
+
 
 class FakeCredentialStore:
     """测试用内存凭据库，不触碰真实系统 keyring。"""
@@ -99,6 +116,11 @@ class FakeCredentialStore:
         if not self.available:
             raise CredentialError(self.error)
         self.values[username] = password
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        if not self.available:
+            raise CredentialError(self.error)
+        self.values.pop(username, None)
 
 
 def resolve_api_key(

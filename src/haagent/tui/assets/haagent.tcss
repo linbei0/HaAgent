@@ -350,7 +350,9 @@ ConfirmModal,
 ExternalDirectoryDecisionModal,
 SessionOverlay,
 SearchOverlay,
-SkillPickerOverlay {
+SkillPickerOverlay,
+WorkspacePickerOverlay,
+ChannelsOverlay {
     align: center middle;
 }
 
@@ -361,7 +363,9 @@ SkillPickerOverlay {
 #external-directory-dialog,
 #sessions-dialog,
 #search-dialog,
-#skill-picker-dialog {
+#skill-picker-dialog,
+#workspace-picker-dialog,
+#channels-dialog {
     width: 72;
     height: auto;
     padding: 1 2;
@@ -373,7 +377,9 @@ SkillPickerOverlay {
 #external-directory-dialog,
 #sessions-dialog,
 #search-dialog,
-#skill-picker-dialog {
+#skill-picker-dialog,
+#workspace-picker-dialog,
+#channels-dialog {
     border: solid $primary;
 }
 

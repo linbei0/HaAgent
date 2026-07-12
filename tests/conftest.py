@@ -69,6 +69,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run manual real-model dogfood tests; skipped by default",
     )
+    parser.addoption(
+        "--run-weixin-e2e",
+        action="store_true",
+        default=False,
+        help="run real Weixin iLink e2e smoke under tests/e2e/channels; requires credentials",
+    )
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool:

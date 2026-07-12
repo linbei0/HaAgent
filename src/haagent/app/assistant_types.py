@@ -12,6 +12,7 @@ from pathlib import Path
 
 from haagent.models.gateway_registry import GatewayCapability
 from haagent.models.types import ModelGateway
+from haagent.channels.settings import ChannelPermissionMode
 from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.execution.path_policy import PermissionMode
 from haagent.runtime.sandbox.status import SandboxDoctorReport
@@ -226,3 +227,69 @@ class ModelConnectionConfigureRequest:
 class ModelSelectionRequest:
     connection_id: str
     model: str
+
+
+@dataclass(frozen=True, repr=False)
+class AssistantChannelInstance:
+    id: str
+    platform: str
+    enabled: bool
+    workspace_root: Path
+    credential_username: str
+    credential_available: bool
+    state: str
+    metadata: dict[str, str]
+    permission_mode: ChannelPermissionMode = "request_approval"
+
+    def __repr__(self) -> str:
+        # 禁止在日志/测试失败输出中泄露 bot_token 等 secret。
+        return (
+            f"AssistantChannelInstance(id={self.id!r}, platform={self.platform!r}, "
+            f"enabled={self.enabled!r}, state={self.state!r}, "
+            f"permission_mode={self.permission_mode!r}, "
+            f"credential_available={self.credential_available!r})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class AssistantChannelQrStart:
+    instance_id: str
+    qrcode_id: str
+    qrcode_url: str
+
+    def __repr__(self) -> str:
+        return (
+            f"AssistantChannelQrStart(instance_id={self.instance_id!r}, "
+            f"qrcode_id={self.qrcode_id!r})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class AssistantChannelQrPoll:
+    status: str
+    instance_id: str
+    credential_available: bool = False
+    message: str = ""
+    # 仅 confirmed 时填充；只展示一次，不写入配置/日志 repr。
+    pairing_code: str | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"AssistantChannelQrPoll(status={self.status!r}, "
+            f"instance_id={self.instance_id!r}, "
+            f"credential_available={self.credential_available!r}, "
+            f"has_pairing_code={self.pairing_code is not None})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class AssistantChannelTestResult:
+    ok: bool
+    instance_id: str
+    message: str
+
+    def __repr__(self) -> str:
+        return (
+            f"AssistantChannelTestResult(ok={self.ok!r}, "
+            f"instance_id={self.instance_id!r}, message={self.message!r})"
+        )

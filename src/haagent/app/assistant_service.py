@@ -10,7 +10,14 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from haagent.app import memory_usecases, model_connection_usecases, session_usecases, skill_usecases, workspace_usecases
+from haagent.app import (
+    channel_usecases,
+    memory_usecases,
+    model_connection_usecases,
+    session_usecases,
+    skill_usecases,
+    workspace_usecases,
+)
 from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import GatewayFactory
 from haagent.models.gateway_registry import gateway_from_profile
@@ -51,3 +58,4 @@ class AssistantService:
         self.models = model_connection_usecases.AssistantModels(self._context)
         self.skills = skill_usecases.AssistantSkills(self._context)
         self.memory = memory_usecases.AssistantMemory(self._context)
+        self.channels = channel_usecases.AssistantChannels(self._context)

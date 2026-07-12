@@ -14,6 +14,7 @@ from haagent.cli_commands import (
     handle_dogfood,
     handle_eval,
     handle_export_eval,
+    handle_gateway,
     handle_inspect,
     handle_run,
     handle_sandbox,
@@ -272,6 +273,31 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         provider_help="model provider for eval replay (default: fake)",
     )
     check_parser.set_defaults(handler=lambda args: handle_check(args, runtime))
+
+    # 高级运维入口：前台运行聊天渠道网关，不替代普通 TUI。
+    gateway_parser = subparsers.add_parser(
+        "gateway",
+        help="advanced channel gateway (run/status); not the ordinary TUI entry",
+    )
+    gateway_sub = gateway_parser.add_subparsers(dest="gateway_action", required=True)
+    gateway_run = gateway_sub.add_parser("run", help="run channel gateway in foreground")
+    gateway_run.add_argument(
+        "--workspace-root",
+        type=Path,
+        help="default workspace root for channel sessions (default: current directory)",
+    )
+    gateway_run.set_defaults(handler=handle_gateway)
+    gateway_status = gateway_sub.add_parser("status", help="show configured channel instances")
+    gateway_status.set_defaults(handler=handle_gateway)
+    gateway_pair = gateway_sub.add_parser("pair", help="re-issue one-time pairing code for a channel instance")
+    gateway_pair.add_argument(
+        "--instance-id",
+        dest="instance_id",
+        default=None,
+        help="channel instance id (default: sole enabled instance)",
+    )
+    gateway_pair.set_defaults(handler=handle_gateway)
+
     return parser
 
 

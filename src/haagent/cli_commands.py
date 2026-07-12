@@ -24,8 +24,10 @@ from haagent.cli_render import (
     print_smoke_result,
 )
 from haagent.app.assistant_service import AssistantService
+from haagent.channels.process_lock import GatewayInstanceLock
 from haagent.cli_runtime import CliRuntime, SmokeDefinition
-from haagent.models.model_connections import ProviderProfileError
+from haagent.models.credentials import KEYRING_SERVICE_NAME, KeyringCredentialStore
+from haagent.models.model_connections import ProviderProfileError, user_config_dir
 from haagent.runtime.evaluation.checks import run_quality_checks
 from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks, skipped_dogfood_report
 from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package
@@ -43,6 +45,10 @@ from haagent.tui.application.app import run_tui
 
 AUTHORING_ALLOWED_TOOLS = ["file_list", "grep", "file_read", "apply_patch", "shell"]
 AUTHORING_APPROVED_TOOLS = ["apply_patch", "shell"]
+
+# 测试可替换：平台 Adapter 工厂与凭据库。
+_gateway_adapter_factories: dict[str, Any] = {}
+_gateway_credential_store: Any = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +110,296 @@ def handle_tui_entry(args) -> int:
 def handle_tui_migration(args) -> int:
     print("此交互入口已迁移到 TUI；请运行 haagent 打开 TUI 后完成该操作。")
     return 1
+
+
+def handle_gateway(args) -> int:
+    """高级渠道网关：status 只读配置；run 前台挂载 Adapter；pair 重发配对码。"""
+    action = getattr(args, "gateway_action", None)
+    if action == "status":
+        return _gateway_status()
+    if action == "run":
+        workspace = args.workspace_root if getattr(args, "workspace_root", None) is not None else Path.cwd()
+        return _gateway_run(Path(workspace).resolve())
+    if action == "pair":
+        return _gateway_pair(getattr(args, "instance_id", None))
+    print("error: unknown gateway action")
+    return 2
+
+
+def _gateway_model_preflight(workspace_root: Path) -> tuple[bool, str]:
+    """
+    启动前检查模型 profile/凭据是否可用。
+
+    返回 (ok, message)；失败时 message 供 CLI 短输出，不含 secret。
+    """
+    try:
+        service = AssistantService(workspace_root=workspace_root)
+        status = service.workspace.status()
+    except Exception as error:
+        return False, f"model preflight failed: {type(error).__name__}"
+    if getattr(status, "profile_error", None):
+        return False, f"model profile error: {status.profile_error}"
+    if not getattr(status, "api_key_available", False):
+        return False, "model credential unavailable; configure via TUI first"
+    if not getattr(status, "model", None) and not getattr(status, "profile_name", None):
+        return False, "no active model profile; configure via TUI first"
+    return True, "ok"
+
+
+def _gateway_status() -> int:
+    from haagent.channels.settings import load_channel_settings
+    from haagent.channels.state import ChannelStateStore
+
+    config_path = user_config_dir() / "channels.json"
+    state_path = user_config_dir() / "channels.sqlite3"
+    settings = load_channel_settings(config_path)
+    print(f"instances={len(settings.instances)}")
+    if not settings.instances:
+        print("no channel instances configured; use TUI /channels")
+        return 0
+    store = _resolve_gateway_store()
+    state = ChannelStateStore(state_path)
+    try:
+        for item in settings.instances:
+            try:
+                token = store.get_password(KEYRING_SERVICE_NAME, item.credential_username)
+                cred = "ok" if token else "missing"
+            except Exception:
+                cred = "error"
+            enabled = "on" if item.enabled else "off"
+            # 脱敏摘要：pairing 状态与 cursor 有无，不含明文码/cursor 值。
+            summary = state.instance_status_summary(item.id)
+            pairing = summary.get("pairing") or "none"
+            pairing_detail = state.get_pairing_status(item.id)
+            expires = pairing_detail.get("expires_at") or ""
+            expires_label = f" expires={expires}" if pairing == "pending" and expires else ""
+            print(
+                f"{item.id} platform={item.platform} enabled={enabled} "
+                f"credential={cred} owner={summary.get('owner', '(unpaired)')} "
+                f"pairing={pairing}{expires_label} cursor={summary.get('cursor', 'empty')} "
+                f"workspace={item.workspace_root}"
+            )
+    finally:
+        state.close()
+    return 0
+
+
+def _gateway_pair(instance_id: str | None) -> int:
+    """重新签发一次性配对码（仅打印一次，不落明文）。"""
+    from haagent.app.assistant_context import AssistantContext
+    from haagent.app.channel_usecases import AssistantChannels
+    from haagent.models.gateway_registry import gateway_from_profile
+    from haagent.runtime.session.agent import AgentSession
+
+    config_dir = user_config_dir()
+    target = (instance_id or "").strip()
+    if not target:
+        from haagent.channels.settings import load_channel_settings
+
+        settings = load_channel_settings(config_dir / "channels.json")
+        enabled = [i for i in settings.instances if i.enabled]
+        if len(enabled) == 1:
+            target = enabled[0].id
+        elif not enabled:
+            print("error: no channel instances; configure via TUI /channels")
+            return 1
+        else:
+            print("error: multiple instances; pass --instance-id")
+            return 2
+    context = AssistantContext(
+        workspace_root=Path.cwd(),
+        runs_root=Path.cwd() / ".runs",
+        environ={},
+        gateway_factory=gateway_from_profile,
+        session_factory=AgentSession,
+        max_turns=8,
+        enable_web=False,
+        initial_resume=None,
+        initial_continue=False,
+    )
+    channels = AssistantChannels(
+        context,
+        config_dir=config_dir,
+        credential_store=_resolve_gateway_store(),
+    )
+    try:
+        code = channels.issue_pairing_code(target)
+    except Exception as error:
+        print(f"error: {error}")
+        return 1
+    print(f"instance={target}")
+    print(f"pairing_code={code}")
+    print("send in chat: /pair " + code)
+    print("(code shown once; expires in 10 minutes)")
+    return 0
+
+
+def _gateway_run(workspace_root: Path) -> int:
+    from haagent.channels.settings import load_channel_settings
+
+    config_dir = user_config_dir()
+    config_path = config_dir / "channels.json"
+    state_path = config_dir / "channels.sqlite3"
+    settings = load_channel_settings(config_path)
+    enabled = [item for item in settings.instances if item.enabled]
+    if not enabled:
+        print("error: no enabled channel instances; configure via TUI /channels")
+        return 1
+
+    lock = GatewayInstanceLock(config_dir / "gateway.lock")
+    if not lock.acquire():
+        print("error: channel gateway is already running")
+        return 1
+
+    try:
+        return _gateway_run_with_lock(
+            workspace_root=workspace_root,
+            config_path=config_path,
+            state_path=state_path,
+        )
+    finally:
+        # 文件锁必须覆盖 preflight、Adapter 构建和完整异步生命周期。
+        lock.release()
+
+
+def _gateway_run_with_lock(
+    *, workspace_root: Path, config_path: Path, state_path: Path
+) -> int:
+    import asyncio
+
+    from haagent.channels.runtime import ChannelGatewayRuntime
+
+    # 有启用渠道后再做模型 preflight，避免空配置时误导成模型错误。
+    ok, preflight_msg = _gateway_model_preflight(workspace_root)
+    if not ok:
+        print(f"error: {preflight_msg}")
+        return 1
+
+    def service_factory(root: Path) -> AssistantService:
+        return AssistantService(workspace_root=root)
+
+    store = _resolve_gateway_store()
+    # 组合根负责装载 settings/state/adapters，CLI 只做前台生命周期。
+    runtime = ChannelGatewayRuntime(
+        config_path=config_path,
+        state_path=state_path,
+        default_workspace_root=workspace_root,
+        service_factory=service_factory,
+        credential_store=store,
+        adapter_factories=_gateway_adapter_factories or None,
+    )
+    try:
+        adapters = runtime.build_adapters()
+    except Exception as error:
+        print(f"error: {error}")
+        return 1
+    if not adapters:
+        print("error: no adapters built; check platform support and credentials")
+        return 1
+
+    async def _main() -> int:
+        assert runtime.manager is not None
+        try:
+            for adapter in adapters:
+                await runtime.manager.attach_adapter(adapter)
+                print(f"started instance={adapter.instance_id} platform={adapter.platform}")
+        except BaseException:
+            # 部分启动失败必须停止已 attach 的 Adapter 并关闭 SQLite，再保留原异常。
+            await runtime.stop()
+            raise
+        print(f"gateway running instances={len(adapters)}; Ctrl+C to stop")
+        # 周期性同步 adapter 状态；auth_expired 时打印提示。
+        return await _run_gateway_until_cancelled(runtime)
+
+    try:
+        return asyncio.run(_main())
+    except KeyboardInterrupt:
+        try:
+            stop_errors = asyncio.run(runtime.stop())
+            for item in stop_errors or []:
+                print(f"warning: gateway stop: {item}")
+        except Exception as error:
+            print(f"warning: gateway stop failed: {error}")
+        print("gateway stopped")
+        return 0
+
+
+def _resolve_gateway_store() -> Any:
+    if _gateway_credential_store is None:
+        return KeyringCredentialStore()
+    if callable(_gateway_credential_store) and not hasattr(_gateway_credential_store, "get_password"):
+        return _gateway_credential_store()
+    return _gateway_credential_store
+
+
+async def _run_gateway_until_cancelled(runtime: Any, stop_event: Any = None) -> int:
+    import asyncio
+    import signal
+
+    loop = asyncio.get_running_loop()
+    stop = stop_event or asyncio.Event()
+    warned_auth: set[str] = set()
+    warned_health: set[tuple[str, str, str]] = set()
+
+    def _request_stop() -> None:
+        stop.set()
+
+    async def _watch_adapter_health() -> None:
+        # 轮询 adapter 状态，auth_expired 时明确提示重新登录。
+        while not stop.is_set():
+            manager = getattr(runtime, "manager", None)
+            if manager is not None:
+                await manager.sync_adapter_states()
+                for item in manager.status():
+                    instance_id = str(item["instance_id"])
+                    state = str(item.get("state") or "")
+                    if state == "auth_expired" and instance_id not in warned_auth:
+                        warned_auth.add(instance_id)
+                        print(
+                            f"error: instance={instance_id} auth_expired; "
+                            "re-login via TUI /channels then restart gateway"
+                        )
+                    elif state in {"reconnecting", "failed"}:
+                        from haagent.runtime.execution.command import redact_secret_like_text
+
+                        error_text, _ = redact_secret_like_text(str(item.get("last_error") or "unknown error"))
+                        error_text = error_text[:200]
+                        warning_key = (instance_id, state, error_text)
+                        if warning_key not in warned_health:
+                            warned_health.add(warning_key)
+                            print(f"warning: instance={instance_id} state={state} error={error_text}")
+                    elif state == "connected":
+                        # 恢复后允许相同错误再次出现时重新提示。
+                        warned_health.difference_update(key for key in warned_health if key[0] == instance_id)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
+
+    watch_task = asyncio.create_task(_watch_adapter_health())
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _request_stop)
+            except (NotImplementedError, RuntimeError, ValueError):
+                # Windows 上 signal handler 受限；依赖 KeyboardInterrupt。
+                pass
+        await stop.wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        stop.set()
+        watch_task.cancel()
+        try:
+            await watch_task
+        except asyncio.CancelledError:
+            pass
+        stop_errors = await runtime.stop()
+        for item in stop_errors or []:
+            # 关闭失败可见，避免静默吞掉 adapter 异常。
+            print(f"warning: gateway stop: {item}")
+        print("gateway stopped")
+    return 0
 
 
 def handle_sandbox(args) -> int:
