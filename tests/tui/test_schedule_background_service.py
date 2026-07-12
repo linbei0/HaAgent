@@ -21,21 +21,22 @@ from tests.tui.support import FakeAssistantService, FakeSchedules, _all_text
 def test_background_state_render_labels() -> None:
     for state, label_hint in [
         ("not_installed", "未安装"),
-        ("stopped", "已停止"),
+        ("stopped", "已安装"),
         ("running", "运行中"),
         ("error", "异常"),
     ]:
         status = BackgroundServiceStatus(
             state=state,
-            host_type="windows_task",
+            host_type="windows_task_scheduler",
             detail=f"detail-{state}",
             executable="C:/haagent.exe",
             last_heartbeat_utc=datetime(2026, 7, 12, 0, 0, tzinfo=timezone.utc),
         )
         text = ScheduleBackgroundState(status=status).render()
         assert label_hint in text or state in text
-        assert "windows" in text.lower() or "host" in text.lower() or "Task" in text or "任务" in text
+        assert "Windows 任务计划程序" in text or "任务" in text or "Host" in text
         assert "安装" in text or "卸载" in text or "诊断" in text
+        assert "TUI Host" in text or "系统后台" in text or "两种执行通道" in text
 
 
 def test_background_empty_and_unsupported() -> None:

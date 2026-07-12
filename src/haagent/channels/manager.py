@@ -209,11 +209,17 @@ class ChannelManager:
             self._commit_receipt_only(instance_id, message.message_id)
             return "control"
         # 3) 普通文本进入 Actor；仅 accepted/queued 后写 receipt。
-        actor = await self._get_or_create_actor(message)
-        result = await actor.submit(
-            message,
-            permission_mode=self._effective_permission_mode(message),
-        )
+        try:
+            actor = await self._get_or_create_actor(message)
+            result = await actor.submit(
+                message,
+                permission_mode=self._effective_permission_mode(message),
+            )
+        except Exception as error:
+            # 单条失败不得阻断整批 cursor；写 receipt 防止毒消息死循环。
+            await self._reply(message, f"处理失败：{type(error).__name__}")
+            self._commit_receipt_only(instance_id, message.message_id)
+            return "accepted"
         if result.status in _ACCEPT_OUTCOMES:
             self._commit_receipt_only(instance_id, message.message_id)
             return result.status

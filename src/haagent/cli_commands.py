@@ -375,7 +375,11 @@ async def _run_gateway_until_cancelled(runtime: Any, stop_event: Any = None) -> 
                     elif state in {"reconnecting", "failed"}:
                         from haagent.runtime.execution.command import redact_secret_like_text
 
-                        error_text, _ = redact_secret_like_text(str(item.get("last_error") or "unknown error"))
+                        raw_error = str(item.get("last_error") or "").strip()
+                        # reconnecting + 无 last_error 是启动/会话建立中的正常态，不告警。
+                        if state == "reconnecting" and not raw_error:
+                            continue
+                        error_text, _ = redact_secret_like_text(raw_error or "unknown error")
                         error_text = error_text[:200]
                         warning_key = (instance_id, state, error_text)
                         if warning_key not in warned_health:

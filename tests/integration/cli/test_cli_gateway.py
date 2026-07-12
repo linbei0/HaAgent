@@ -284,6 +284,39 @@ def test_gateway_run_reports_reconnecting_adapter_error(capsys) -> None:
     assert "temporary upstream error" in out
 
 
+def test_gateway_run_skips_reconnecting_without_error(capsys) -> None:
+    from haagent import cli_commands
+
+    async def _run() -> None:
+        stop = asyncio.Event()
+
+        class _Manager:
+            async def sync_adapter_states(self) -> None:
+                stop.set()
+
+            def status(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "instance_id": "wx-1",
+                        "state": "reconnecting",
+                        "last_error": "",
+                    }
+                ]
+
+        class _Runtime:
+            manager = _Manager()
+
+            async def stop(self) -> list[str]:
+                return []
+
+        await cli_commands._run_gateway_until_cancelled(_Runtime(), stop_event=stop)
+
+    asyncio.run(_run())
+    out = capsys.readouterr().out
+    assert "warning:" not in out
+    assert "unknown error" not in out
+
+
 def test_gateway_status_lists_configured_instances(tmp_path: Path, monkeypatch, capsys) -> None:
     home = tmp_path / "home"
     config_dir = home / ".haagent"

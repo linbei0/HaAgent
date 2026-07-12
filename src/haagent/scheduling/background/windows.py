@@ -7,6 +7,8 @@ haagent/scheduling/background/windows.py - Windows Task Scheduler 后台 adapter
 from __future__ import annotations
 
 import getpass
+import locale
+import re
 import subprocess
 import sys
 
@@ -18,6 +20,31 @@ from haagent.scheduling.background.base import (
 )
 
 TASK_NAME = "HaAgentScheduler"
+
+# 未安装时不向 UI 透传 schtasks 原始错误（中文系统常为 GBK，误用 UTF-8 会乱码）
+_DETAIL_NOT_INSTALLED = f"尚未安装计划任务 {TASK_NAME}（登录后自动运行 schedule-worker）"
+_DETAIL_INSTALLED = f"已安装计划任务 {TASK_NAME}，登录后保持 worker 可用"
+_DETAIL_RUNNING = f"计划任务 {TASK_NAME} 正在运行"
+_DETAIL_ACCESS_DENIED = "查询任务计划失败：权限不足（拒绝访问）"
+
+
+def _console_encoding() -> str:
+    """schtasks 输出跟随系统 ANSI/OEM 代码页，不能强制 utf-8。"""
+    if sys.platform == "win32":
+        preferred = locale.getpreferredencoding(False) or ""
+        if preferred and preferred.lower() not in {"utf-8", "utf8", "ascii"}:
+            return preferred
+        return "gbk"
+    return "utf-8"
+
+
+def _normalize_console_text(text: str) -> str:
+    """去掉控制符与异常替换字符，避免 UI 显示乱码菱形。"""
+    cleaned = (text or "").replace("\x00", " ")
+    # UTF-8 误解码残留的 U+FFFD
+    cleaned = cleaned.replace("\ufffd", "")
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", cleaned)
+    return " ".join(cleaned.split())
 
 
 class WindowsBackgroundAdapter:
@@ -51,31 +78,28 @@ class WindowsBackgroundAdapter:
                 )
             )
             if access_denied and not not_found:
+                raw = _normalize_console_text(result.stderr or result.stdout or "")
                 return BackgroundServiceStatus(
                     state="error",
                     host_type="windows_task_scheduler",
-                    detail=bounded_detail(result.stderr or result.stdout or "access denied"),
+                    detail=bounded_detail(raw or _DETAIL_ACCESS_DENIED),
                     executable=sys.executable,
                 )
             return BackgroundServiceStatus(
                 state="not_installed",
                 host_type="windows_task_scheduler",
-                detail=bounded_detail(result.stderr or result.stdout or "not found"),
+                detail=_DETAIL_NOT_INSTALLED,
                 executable=sys.executable,
             )
-        detail = bounded_detail(result.stdout or "installed")
         # 中英文状态列：Running / 正在运行
         stdout = result.stdout or ""
         running_markers = ("Running", "正在运行", "running")
-        state = (
-            "running"
-            if any(marker in stdout for marker in running_markers)
-            else "stopped"
-        )
+        is_running = any(marker in stdout for marker in running_markers)
+        state = "running" if is_running else "stopped"
         return BackgroundServiceStatus(
-            state=state if state in {"running", "stopped"} else "installed",
+            state=state,
             host_type="windows_task_scheduler",
-            detail=detail,
+            detail=_DETAIL_RUNNING if is_running else _DETAIL_INSTALLED,
             executable=sys.executable,
         )
 
@@ -102,9 +126,8 @@ class WindowsBackgroundAdapter:
             ]
         )
         if create.returncode != 0:
-            raise BackgroundServiceError(
-                bounded_detail(create.stderr or create.stdout or "schtasks create failed")
-            )
+            raw = _normalize_console_text(create.stderr or create.stdout or "")
+            raise BackgroundServiceError(bounded_detail(raw or "创建计划任务失败"))
         # 安装后必须能查询到；查询失败/权限错误不得伪装 installed
         st = self.status()
         if st.state == "not_installed":
@@ -117,7 +140,7 @@ class WindowsBackgroundAdapter:
             return BackgroundServiceStatus(
                 state="installed" if st.state == "stopped" else st.state,
                 host_type="windows_task_scheduler",
-                detail=st.detail,
+                detail=st.detail or _DETAIL_INSTALLED,
                 executable=sys.executable,
             )
         return st
@@ -138,13 +161,14 @@ class WindowsBackgroundAdapter:
                 )
             )
             if not not_found:
+                raw = _normalize_console_text(result.stderr or result.stdout or "")
                 raise BackgroundServiceError(
-                    bounded_detail(result.stderr or result.stdout or "schtasks delete failed")
+                    bounded_detail(raw or "删除计划任务失败")
                 )
         return BackgroundServiceStatus(
             state="not_installed",
             host_type="windows_task_scheduler",
-            detail="uninstalled",
+            detail=_DETAIL_NOT_INSTALLED,
             executable=sys.executable,
         )
 
@@ -158,13 +182,20 @@ class WindowsBackgroundAdapter:
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(
+            # 中文 Windows 下 schtasks 默认系统代码页；强制 utf-8 会把“错误:”等变成乱码
+            result = subprocess.run(
                 args,
                 capture_output=True,
                 text=True,
-                encoding="utf-8",
+                encoding=_console_encoding(),
                 errors="replace",
                 check=False,
+            )
+            return subprocess.CompletedProcess(
+                args=list(args),
+                returncode=int(getattr(result, "returncode", 1)),
+                stdout=_normalize_console_text(getattr(result, "stdout", None) or ""),
+                stderr=_normalize_console_text(getattr(result, "stderr", None) or ""),
             )
         except FileNotFoundError as error:
             raise BackgroundServiceError("schtasks.exe 不可用") from error

@@ -553,3 +553,43 @@ def test_actor_resume_from_persisted_binding(tmp_path: Path) -> None:
         await actor2.close()
 
     asyncio.run(_run())
+
+
+def test_missing_session_package_falls_back_to_create(tmp_path: Path) -> None:
+    """binding 指向已删除的 session package 时，必须 create 新会话而不是整批卡死。"""
+
+    async def _run() -> None:
+        actor, svc, adp, state = _make_actor(tmp_path)
+        addr = actor.address
+        state.upsert_binding(
+            binding_key=addr.binding_key(),
+            instance_id=addr.instance_id,
+            platform=addr.platform,
+            conversation_kind=addr.conversation_kind,
+            conversation_id=addr.conversation_id,
+            thread_id=addr.thread_id,
+            workspace_root=str(actor.workspace_root),
+            session_id="session-missing",
+            owner_sender_id="owner-1",
+        )
+
+        def boom_resume(session: str) -> FakeSessionStatus:
+            raise RuntimeError(f"session package missing: {session}")
+
+        svc._resume = boom_resume  # type: ignore[method-assign]
+        await adp.start(lambda m: None)
+        result = await actor.submit(_message("hello after wipe", message_id="m-miss"))
+        assert result.status == "accepted"
+        deadline = time.time() + 2
+        while svc.turn_count < 1 and time.time() < deadline:
+            await asyncio.sleep(0.01)
+        assert svc.created_count == 1
+        assert svc.prompts == ["hello after wipe"]
+        binding = state.get_binding(addr.binding_key())
+        assert binding is not None
+        assert binding.session_id == svc.session_id
+        assert binding.session_id != "session-missing"
+        await actor.close()
+        state.close()
+
+    asyncio.run(_run())

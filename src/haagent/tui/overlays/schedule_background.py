@@ -13,10 +13,19 @@ from haagent.tui.design.utils import safe_summary
 
 _STATE_LABELS = {
     "not_installed": "未安装",
-    "stopped": "已停止",
+    "stopped": "已安装（待命）",
     "running": "运行中",
+    "installed": "已安装",
     "error": "状态异常",
     "unsupported": "不支持",
+}
+
+_HOST_TYPE_LABELS = {
+    "windows_task_scheduler": "Windows 任务计划程序",
+    "windows_task": "Windows 任务计划程序",
+    "systemd_user": "systemd 用户服务",
+    "launchd": "launchd 用户代理",
+    "none": "无",
 }
 
 
@@ -28,7 +37,10 @@ class ScheduleBackgroundState:
     def render(self) -> str:
         lines = [
             "后台服务",
-            "系统后台 worker 在 TUI 关闭后仍可触发计划；安装会写入 OS 任务。",
+            "两种执行通道：",
+            "1) TUI Host：本窗口内嵌 worker，打开 haagent 时即可触发到期计划。",
+            "2) 系统后台：写入 OS 任务（Windows/schtasks、Linux/systemd、macOS/launchd），",
+            "   关闭 TUI 后仍可按时刻自动跑 schedule-worker。",
             "",
         ]
         # TUI 内嵌 host：死亡/致命错误必须可见，禁止静默
@@ -43,7 +55,7 @@ class ScheduleBackgroundState:
                 host_label = "异常退出"
             lines.append(f"TUI Host: {host_label}")
             if owner:
-                lines.append(f"Host Owner: {safe_summary(owner, 40)}")
+                lines.append(f"Host 标识: {safe_summary(owner, 40)}")
             if last_error:
                 lines.append(f"Host 错误: {safe_summary(last_error, 90)}")
             lines.append("")
@@ -54,20 +66,25 @@ class ScheduleBackgroundState:
             state = str(getattr(status, "state", "unknown"))
             label = _STATE_LABELS.get(state, state)
             host_type = str(getattr(status, "host_type", "-"))
-            detail = str(getattr(status, "detail", "") or "")
+            host_label = _HOST_TYPE_LABELS.get(host_type, host_type)
+            detail = str(getattr(status, "detail", "") or "").replace("\ufffd", "")
             executable = getattr(status, "executable", None)
             heartbeat = getattr(status, "last_heartbeat_utc", None)
-            lines.append(f"系统后台: {label} ({state})")
-            lines.append(f"Host 类型: {host_type}")
+            lines.append(f"系统后台: {label}")
+            lines.append(f"安装方式: {host_label}")
             if detail:
-                lines.append(f"说明: {safe_summary(detail, 80)}")
+                lines.append(f"说明: {safe_summary(detail, 90)}")
             if executable:
-                lines.append(f"可执行文件: {safe_summary(str(executable), 70)}")
+                lines.append(f"Worker 可执行文件: {safe_summary(str(executable), 70)}")
             if heartbeat is not None:
                 lines.append(f"最近心跳: {str(heartbeat)[:19]}")
             if state == "unsupported":
                 lines.append("")
                 lines.append("当前平台不支持自动安装后台服务。")
+            elif state == "not_installed":
+                lines.append("")
+                lines.append("提示: 仅在需要「关闭 haagent 后仍定时执行」时安装系统后台。")
+                lines.append("日常开着 TUI 用计划任务时，TUI Host 已足够。")
         lines.extend(
             [
                 "",

@@ -112,6 +112,39 @@ def test_status_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     status = WindowsBackgroundAdapter().status()
     assert status.state == "not_installed"
     assert status.host_type == "windows_task_scheduler"
+    # 未安装说明必须是稳定中文，禁止透传 schtasks 乱码 stderr
+    assert "尚未安装" in (status.detail or "")
+    assert "\ufffd" not in (status.detail or "")
+
+
+def test_status_uses_system_console_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """中文 Windows 下 schtasks 走系统代码页，不得强制 utf-8。"""
+    seen: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        seen["encoding"] = kwargs.get("encoding")
+        return FakeCompleted(1, stderr="ERROR: The system cannot find the file specified.")
+
+    monkeypatch.setattr("haagent.scheduling.background.windows.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "haagent.scheduling.background.windows._console_encoding",
+        lambda: "gbk",
+    )
+    WindowsBackgroundAdapter().status()
+    assert seen["encoding"] == "gbk"
+
+
+def test_status_running_uses_chinese_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(args, **kwargs):
+        return FakeCompleted(
+            0,
+            stdout="TaskName: HaAgentScheduler\nStatus: Running\n",
+        )
+
+    monkeypatch.setattr("haagent.scheduling.background.windows.subprocess.run", fake_run)
+    status = WindowsBackgroundAdapter().status()
+    assert status.state == "running"
+    assert "运行" in (status.detail or "")
 
 
 def test_uninstall_deletes_task(monkeypatch: pytest.MonkeyPatch) -> None:

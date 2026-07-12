@@ -278,10 +278,16 @@ class ChannelSessionActor:
             return
         binding = self._state.get_binding(self.binding_key)
         # 空 session_id 或缺失 binding 时创建新会话，不 resume 无效 id。
+        resumed = False
         if binding is not None and binding.session_id and binding.session_id not in {"", "__new__"}:
-            status = self._service.sessions.resume(binding.session_id)
-            self._session_id = status.session_id
-        else:
+            try:
+                status = self._service.sessions.resume(binding.session_id)
+                self._session_id = status.session_id
+                resumed = True
+            except Exception:
+                # session package 被删/损坏时回退 create，避免入站批处理永久卡死。
+                resumed = False
+        if not resumed:
             status = self._service.sessions.create()
             self._session_id = status.session_id
             self._state.upsert_binding(
