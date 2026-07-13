@@ -103,7 +103,9 @@ class RecordingSession:
         model_base_url: str | None = None,
         max_turns: int | None,
         enable_web: bool = False,
+        **_kwargs,
     ) -> None:
+        # 忽略 AssistantService 注入的 cache services（RecordingSession 不执行真实 turn）。
         self.session_id = "session-from-default-registry"
         self.workspace_root = workspace_root
         self.runs_root = runs_root

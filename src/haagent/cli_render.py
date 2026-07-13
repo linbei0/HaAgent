@@ -62,6 +62,20 @@ def print_check_summary(report: dict[str, Any]) -> None:
             continue
         print(f"failure_case={result.get('case_path')}")
         print(f"failure_reason={summary_value(str(result.get('failure_reason', '')))}")
+    latency = report.get("interactive_latency")
+    if isinstance(latency, dict):
+        print(f"latency_total={latency.get('total', 0)}")
+        print(f"latency_passed={latency.get('passed', 0)}")
+        print(f"latency_failed={latency.get('failed', 0)}")
+        for gate in latency.get("gates", []):
+            if not isinstance(gate, dict) or gate.get("status") == "passed":
+                continue
+            # 失败输出：指标、阈值、实际值
+            print(
+                "latency_failure="
+                f"{gate.get('name')} metric={gate.get('metric')} "
+                f"threshold={gate.get('threshold')} actual={gate.get('actual')}"
+            )
     pytest_report = report.get("pytest")
     if isinstance(pytest_report, dict):
         print(f"pytest_exit_code={pytest_report['exit_code']}")

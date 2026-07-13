@@ -10,6 +10,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from haagent.models.model_connections import user_settings_path
 from haagent.runtime.execution.retry import RetryPolicy
@@ -24,6 +25,8 @@ DEFAULT_RUN_MAX_TURNS = 3
 DEFAULT_SMOKE_MAX_TURNS = 12
 DEFAULT_DOGFOOD_MAX_TURNS = 16
 DEFAULT_CHECK_EVAL_MAX_TURNS = 5
+DEFAULT_PROGRESS_GUARD_MODE: Literal["off", "warn", "block"] = "warn"
+_PROGRESS_GUARD_MODES = frozenset({"off", "warn", "block"})
 
 
 class RuntimeSettingsError(ValueError):
@@ -35,6 +38,7 @@ class RuntimeSettings:
     interactive_max_turns: int = DEFAULT_INTERACTIVE_MAX_TURNS
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     model_retry: RetryPolicy = field(default_factory=RetryPolicy)
+    progress_guard_mode: Literal["off", "warn", "block"] = DEFAULT_PROGRESS_GUARD_MODE
 
 
 def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings:
@@ -51,6 +55,7 @@ def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings
         interactive_max_turns=_positive_int(value, "interactive_max_turns"),
         sandbox=sandbox,
         model_retry=_load_model_retry(raw.get("model_retry")),
+        progress_guard_mode=_load_progress_guard_mode(raw.get("progress_guard_mode")),
     )
 
 
@@ -100,6 +105,17 @@ def _positive_int(value: object, field_name: str) -> int:
     if value <= 0:
         raise RuntimeSettingsError(f"{field_name} must be a positive integer")
     return value
+
+
+def _load_progress_guard_mode(raw: object) -> Literal["off", "warn", "block"]:
+    if raw is None:
+        return DEFAULT_PROGRESS_GUARD_MODE
+    if not isinstance(raw, str) or raw not in _PROGRESS_GUARD_MODES:
+        # 非法值显式失败，禁止静默回退到 warn
+        raise RuntimeSettingsError(
+            "progress_guard_mode must be one of: off, warn, block",
+        )
+    return raw  # type: ignore[return-value]
 
 
 def _load_model_retry(raw: object) -> RetryPolicy:

@@ -6,6 +6,11 @@ haagent/skills/__init__.py - Skills 系统公开接口
 
 from __future__ import annotations
 
+from haagent.skills.catalog import (
+    SkillCatalogKey,
+    SkillCatalogService,
+    SkillCatalogSnapshot,
+)
 from haagent.skills.loader import discover_project_skill_dirs, get_user_skill_dirs, load_skill_registry
 from haagent.skills.registry import SkillRegistry
 from haagent.skills.settings import (
@@ -22,6 +27,9 @@ from haagent.skills.types import SkillDefinition, SkillMetadata
 
 
 __all__ = [
+    "SkillCatalogKey",
+    "SkillCatalogService",
+    "SkillCatalogSnapshot",
     "SkillDefinition",
     "SkillMetadata",
     "SkillRegistry",

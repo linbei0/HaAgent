@@ -31,7 +31,11 @@ class AssistantSkills:
         self._marketplace_results: dict[str, MarketplaceSkillCard] = {}
 
     def list(self) -> AssistantSkillList:
-        result = skill_list({}, self._context.workspace_root)
+        result = skill_list(
+            {},
+            self._context.workspace_root,
+            skill_catalog=self._context.skill_catalog,
+        )
         if result.get("status") != "success":
             error = result.get("error") if isinstance(result.get("error"), dict) else {}
             raise AssistantServiceError(str(error.get("message", "failed to list skills")))
@@ -44,14 +48,21 @@ class AssistantSkills:
 
     def trust_project(self) -> AssistantSkillList:
         trust_project_root(self._context.workspace_root)
+        self._invalidate_skill_catalog()
         return self.list()
 
     def untrust_project(self) -> AssistantSkillList:
         untrust_project_root(self._context.workspace_root)
+        self._invalidate_skill_catalog()
         return self.list()
 
     def read_for_user(self, name: str) -> AssistantSkillContent:
-        result = skill_read({"name": name}, self._context.workspace_root, user_invoked=True)
+        result = skill_read(
+            {"name": name},
+            self._context.workspace_root,
+            skill_catalog=self._context.skill_catalog,
+            user_invoked=True,
+        )
         if result.get("status") != "success":
             error = result.get("error") if isinstance(result.get("error"), dict) else {}
             raise AssistantServiceError(str(error.get("message", f"skill not found: {name}")))
@@ -88,6 +99,7 @@ class AssistantSkills:
             installed = install_marketplace_skill_card(card)
         except MarketplaceError as error:
             raise AssistantServiceError(str(error)) from error
+        self._invalidate_skill_catalog()
         return AssistantMarketplaceInstall(
             name=installed.name,
             command_name=installed.command_name,
@@ -95,6 +107,9 @@ class AssistantSkills:
             skill_file=installed.skill_file,
             source_url=installed.source_url,
         )
+
+    def _invalidate_skill_catalog(self) -> None:
+        self._context.skill_catalog.invalidate_workspace(self._context.workspace_root)
 
 
 def _marketplace_skill(card: MarketplaceSkillCard) -> AssistantMarketplaceSkill:

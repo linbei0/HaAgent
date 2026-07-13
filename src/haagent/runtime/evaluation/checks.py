@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from haagent.models.types import ModelGateway
+from haagent.runtime.evaluation.latency_gates import (
+    latency_gates_check_summary,
+    run_interactive_latency_gates,
+)
 from haagent.runtime.evaluation.runner import run_eval_path
 from haagent.runtime.settings import DEFAULT_CHECK_EVAL_MAX_TURNS
 
@@ -50,6 +54,7 @@ def run_quality_checks(
     run_pytest: bool = False,
     pytest_command: Sequence[str] | None = None,
     cwd: Path | None = None,
+    run_latency_gates: bool = True,
 ) -> dict[str, Any]:
     started_at = _now_iso()
     eval_report = run_eval_path(
@@ -59,6 +64,12 @@ def run_quality_checks(
         max_turns=DEFAULT_CHECK_EVAL_MAX_TURNS,
     )
     checks = [_eval_check_summary(eval_report)]
+    latency_report = None
+    # 确定性交互延迟门禁：无外网、可重复；失败输出含 metric/threshold/actual。
+    if run_latency_gates:
+        latency_results = run_interactive_latency_gates()
+        latency_report = latency_gates_check_summary(latency_results)
+        checks.append(latency_report)
     pytest_result = None
     if run_pytest:
         command = list(pytest_command or DEFAULT_PYTEST_COMMAND)
@@ -72,6 +83,8 @@ def run_quality_checks(
         "checks": checks,
         "eval_report": eval_report,
     }
+    if latency_report is not None:
+        report["interactive_latency"] = latency_report
     if pytest_result is not None:
         report["pytest"] = pytest_result.to_dict()
     return report

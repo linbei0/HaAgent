@@ -9,9 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Protocol
 
+from haagent.models.capabilities import ModelCapabilities
+from haagent.models.telemetry import ModelTransportEvent
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.retry import RetryEvent, RetryFailure
-from haagent.models.capabilities import ModelCapabilities
 
 
 ModelFailureCategory = Literal[
@@ -109,6 +110,7 @@ class ModelGateway(Protocol):
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
+        telemetry_sink: Callable[[ModelTransportEvent], None] | None = None,
     ) -> ModelResponse:
         """Generate a model response given a conversation messages list."""
 

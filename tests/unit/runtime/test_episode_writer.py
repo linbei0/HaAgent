@@ -8,6 +8,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from haagent.models.types import ModelGatewayMetadata, ModelUsage
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
@@ -234,6 +236,43 @@ def test_episode_writer_appends_tool_calls_with_instance_write_lock(tmp_path: Pa
         for line in (episode_path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert sorted(record["args"]["index"] for record in records) == list(range(80))
+
+
+def test_episode_writer_writes_performance_artifact(tmp_path: Path) -> None:
+    writer = create_writer(tmp_path)
+    payload = {
+        "performance_schema_version": "1.0",
+        "submit_to_run_start_ms": None,
+        "run_setup_ms": 1.5,
+        "context_build_ms": 1.5,
+        "model_turns": [],
+        "tools": [],
+        "postprocess_ms": None,
+        "total_turn_ms": None,
+        "status": "completed",
+        "dropped": {"model_attempts": 0, "tools": 0},
+    }
+
+    writer.write_performance(payload)
+
+    written = json.loads((writer.path / "performance.json").read_text(encoding="utf-8"))
+    assert written == payload
+
+
+def test_episode_writer_write_performance_failure_exposes_artifact_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = create_writer(tmp_path)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    # EpisodeWriter 为 frozen dataclass，不能 setattr 实例方法；改写 Path.write_text。
+    monkeypatch.setattr(Path, "write_text", boom)
+
+    with pytest.raises(RuntimeError, match="performance.json"):
+        writer.write_performance({"performance_schema_version": "1.0"})
 
 
 def create_writer(tmp_path: Path) -> EpisodeWriter:

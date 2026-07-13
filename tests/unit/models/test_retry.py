@@ -4,14 +4,12 @@ tests/unit/models/test_retry.py - 统一重试内核测试
 验证唯一重试控制器的分类、取消、流式提交与模型失败适配边界。
 """
 
-import io
-from email.message import Message
-import socket
-import urllib.error
-
+import httpx
 import pytest
 
 from haagent.models import transport
+from haagent.models.http_transport import ModelHttpTransport
+from haagent.models.transport import _invoke_transport
 from haagent.models.types import ModelFailureDetails
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.retry import (
@@ -23,6 +21,28 @@ from haagent.runtime.execution.retry import (
     RetryPolicy,
     StreamAttemptState,
 )
+
+
+def test_provider_transport_internal_type_error_is_not_reinvoked() -> None:
+    calls = 0
+
+    def broken_transport(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise TypeError("internal parser bug")
+
+    with pytest.raises(TypeError, match="internal parser bug"):
+        _invoke_transport(
+            broken_transport,
+            broken_transport,
+            {},
+            "key",
+            on_delta=None,
+            attempt=1,
+            telemetry_sink=None,
+        )
+
+    assert calls == 1
 
 
 def test_retries_rate_limit_with_jittered_delay() -> None:
@@ -328,97 +348,48 @@ def test_model_failure_details_adapt_without_losing_safe_facts() -> None:
     )
 
 
-def _http_error(
-    status_code: int,
-    *,
-    headers: dict[str, str] | None = None,
-    body: str = "",
-) -> urllib.error.HTTPError:
-    message = Message()
-    for name, value in (headers or {}).items():
-        message[name] = value
-    return urllib.error.HTTPError(
-        "https://provider.example/v1/models",
-        status_code,
-        "provider error",
-        message,
-        io.BytesIO(body.encode("utf-8")),
-    )
+def _failing_http_transport(status_code: int = 503, content: bytes = b"{}") -> ModelHttpTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            content=content,
+            headers={"content-type": "application/json", "Authorization": "Bearer secret"},
+            request=request,
+        )
 
-
-def test_http_429_uses_retry_after_without_exposing_authorization() -> None:
-    failure = transport._model_error_from_http_error(
-        "OpenAI",
-        _http_error(
-            429,
-            headers={
-                "Retry-After": "4",
-                "Authorization": "Bearer secret",
-                "x-request-id": "req_123",
-            },
-        ),
-    )
-
-    assert failure.details is not None
-    assert failure.details.category == "rate_limited"
-    assert failure.details.retry_after_seconds == 4
-    assert failure.details.request_id == "req_123"
-    assert "secret" not in str(failure)
-
-
-def test_http_401_and_quota_429_are_not_retryable() -> None:
-    unauthorized = transport._model_error_from_http_error("OpenAI", _http_error(401))
-    quota = transport._model_error_from_http_error(
-        "OpenAI",
-        _http_error(429, body='{"error":{"code":"insufficient_quota"}}'),
-    )
-
-    assert unauthorized.details is not None
-    assert unauthorized.details.retryable is False
-    assert quota.details is not None
-    assert quota.details.category == "quota_exhausted"
-    assert quota.details.retryable is False
-
-
-@pytest.mark.parametrize(
-    ("error", "category"),
-    [(urllib.error.URLError("unreachable"), "network"), (socket.timeout(), "timeout")],
-)
-def test_network_errors_are_structured_and_retryable(
-    error: Exception,
-    category: str,
-) -> None:
-    failure = transport._model_error_from_network_error(error)
-
-    assert failure.details is not None
-    assert failure.details.category == category
-    assert failure.details.retryable is True
+    return ModelHttpTransport(client=httpx.Client(transport=httpx.MockTransport(handler)))
 
 
 @pytest.mark.parametrize(
     "call_transport",
     [
-        lambda: transport._responses_transport({}, "secret"),
-        lambda: transport._chat_completions_transport({}, "secret"),
-        lambda: transport._anthropic_transport({}, "secret"),
-        lambda: transport._google_gemini_transport({}, "secret", "https://gemini.example"),
-        lambda: transport._responses_stream_transport({}, "secret", "https://openai.example", lambda _: None),
-        lambda: transport._chat_completions_stream_transport({}, "secret", "https://openai.example", lambda _: None),
-        lambda: transport._anthropic_stream_transport({}, "secret", "https://anthropic.example", lambda _: None),
-        lambda: transport._google_gemini_stream_transport({}, "secret", "https://gemini.example", lambda _: None),
+        lambda http: transport._responses_transport({}, "secret", http_transport=http),
+        lambda http: transport._chat_completions_transport({}, "secret", http_transport=http),
+        lambda http: transport._anthropic_transport({}, "secret", http_transport=http),
+        lambda http: transport._google_gemini_transport(
+            {}, "secret", "https://gemini.example", http_transport=http
+        ),
+        lambda http: transport._responses_stream_transport(
+            {}, "secret", "https://openai.example", lambda _: None, http_transport=http
+        ),
+        lambda http: transport._chat_completions_stream_transport(
+            {}, "secret", "https://openai.example", lambda _: None, http_transport=http
+        ),
+        lambda http: transport._anthropic_stream_transport(
+            {}, "secret", "https://anthropic.example", lambda _: None, http_transport=http
+        ),
+        lambda http: transport._google_gemini_stream_transport(
+            {}, "secret", "https://gemini.example", lambda _: None, http_transport=http
+        ),
     ],
 )
-def test_all_transport_entrypoints_preserve_structured_http_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    call_transport,
-) -> None:
-    def fail_request(request, timeout):
-        raise _http_error(503, headers={"Authorization": "Bearer secret"})
-
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fail_request)
-
-    with pytest.raises(transport.ModelCallError) as raised:
-        call_transport()
+def test_all_transport_entrypoints_preserve_structured_http_failure(call_transport) -> None:
+    http = _failing_http_transport(503)
+    try:
+        with pytest.raises(transport.ModelCallError) as raised:
+            call_transport(http)
+    finally:
+        http.close()
 
     assert isinstance(raised.value, transport.ModelCallError)
     assert raised.value.details is not None
@@ -427,23 +398,13 @@ def test_all_transport_entrypoints_preserve_structured_http_failure(
     assert "secret" not in str(raised.value)
 
 
-def test_transport_marks_invalid_json_as_non_retryable_response_parse_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Response:
-        def read(self) -> bytes:
-            return b"not-json"
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args) -> None:
-            return None
-
-    monkeypatch.setattr(transport.urllib.request, "urlopen", lambda request, timeout: Response())
-
-    with pytest.raises(transport.ModelCallError) as raised:
-        transport._responses_transport({}, "secret")
+def test_transport_marks_invalid_json_as_non_retryable_response_parse_error() -> None:
+    http = _failing_http_transport(200, content=b"not-json")
+    try:
+        with pytest.raises(transport.ModelCallError) as raised:
+            transport._responses_transport({}, "secret", http_transport=http)
+    finally:
+        http.close()
 
     assert raised.value.details is not None
     assert raised.value.details.category == "response_parse"

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from haagent.models.types import ModelResponse
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.session.turn import ChatTurnRequest, ChatTurnRunner
 from haagent.runtime.execution.path_policy import default_path_policy
 from haagent.runtime.orchestration.preparation import prepare_initial_messages
@@ -35,6 +36,7 @@ class _Orchestrator:
 
 def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
+    performance_trace = PerformanceTrace.start()
 
     result = ChatTurnRunner().run(
         ChatTurnRequest(
@@ -54,6 +56,7 @@ def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> 
             interaction_handler=None,
             cancellation_token=CancellationToken(),
             orchestrator_factory=lambda **kwargs: _Orchestrator(captured, **kwargs),
+            performance_trace=performance_trace,
         ),
     )
 
@@ -69,6 +72,7 @@ def test_chat_turn_runner_writes_task_and_calls_orchestrator(tmp_path: Path) -> 
     assert "web_search" in task.allowed_tools
     assert captured["session_summary"] == "summary"
     assert captured["historical_tool_compression_count"] == 2
+    assert captured["performance_trace"] is performance_trace
     assert result.status == RunStatus.COMPLETED
 
 

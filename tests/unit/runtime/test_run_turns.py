@@ -5,14 +5,20 @@ tests/unit/runtime/test_run_turns.py - 单轮工具执行循环测试
 """
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import threading
 import time
 
-from haagent.models.types import ToolCall
+import pytest
+
+from haagent.models.gateway_retry import execute_model_request
+from haagent.models.types import ModelCallError, ModelFailureDetails, ModelUsage, ToolCall
 from haagent.models.types import ModelResponse
+from haagent.runtime.execution.retry import RetryController, RetryPolicy
+from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.turns import (
     TurnLoopDependencies,
@@ -21,6 +27,7 @@ from haagent.runtime.orchestration.turns import (
     _run_tool_calls,
     run_turn_loop,
 )
+from haagent.runtime.performance import PerformanceTrace
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 
 
@@ -30,8 +37,8 @@ class _FakeRouter:
         self.waited_task_ids: list[str] = []
         self.skipped: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
 
-    def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None) -> dict[str, Any]:
-        del tool_name, args, interaction_handler
+    def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None, *, turn=None) -> dict[str, Any]:
+        del tool_name, args, interaction_handler, turn
         return dict(self.result)
 
     def record_skipped(
@@ -106,7 +113,8 @@ class _PerToolRouter:
         self.call_starts: dict[str, float] = {}
         self.call_ends: dict[str, float] = {}
 
-    def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None) -> dict[str, Any]:
+    def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None, *, turn=None) -> dict[str, Any]:
+        del turn
         with self._lock:
             self.calls.append(tool_name)
             self.start_order.append(tool_name)
@@ -902,7 +910,6 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
         compress_historical_tool_messages=lambda messages, writer, turn, emit_event: None,
         interaction_handler=None,
         interaction_resolver=SimpleNamespace(),
-        safety_guard=SimpleNamespace(check=lambda name, args, result: None),
         interaction_bridge_factory=lambda turn, resolver: None,
         record_guardrail=lambda violation, turn: None,
         record_suggestion=lambda turn, suggestion: None,
@@ -1181,6 +1188,240 @@ def test_turn_loop_allows_unlimited_max_turns(tmp_path: Path) -> None:
     assert finish_statuses == [RunStatus.COMPLETED]
 
 
+def test_orchestrator_writes_performance_json_for_tool_success(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    (tmp_path / "alpha.txt").write_text("needle appears here", encoding="utf-8")
+    task_path.write_text(
+        """
+goal: Read a file and finish
+constraints: []
+allowed_tools:
+  - file_read
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class _Gateway:
+        provider_name = "performance-tool"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(
+            self,
+            messages,
+            tool_schemas,
+            event_sink=None,
+            cancellation_token=None,
+            retry_event_sink=None,
+            retry_exhausted_sink=None,
+            telemetry_sink=None,
+        ):
+            del tool_schemas, event_sink, cancellation_token, retry_event_sink, retry_exhausted_sink
+            self.calls += 1
+            if telemetry_sink is not None:
+                telemetry_sink(
+                    __import__("haagent.models.telemetry", fromlist=["ModelTransportEvent"]).ModelTransportEvent(
+                        kind="attempt_started",
+                        attempt=1,
+                        elapsed_ms=0.0,
+                    ),
+                )
+                telemetry_sink(
+                    __import__("haagent.models.telemetry", fromlist=["ModelTransportEvent"]).ModelTransportEvent(
+                        kind="attempt_finished",
+                        attempt=1,
+                        elapsed_ms=5.0,
+                    ),
+                )
+            if self.calls == 1:
+                return ModelResponse(
+                    "",
+                    [ToolCall("file_read", {"path": "alpha.txt"})],
+                    usage=ModelUsage(input_tokens=120, output_tokens=4, total_tokens=124, raw_source="test"),
+                )
+            return ModelResponse("done", [], usage=ModelUsage(input_tokens=80, output_tokens=2, total_tokens=82, raw_source="test"))
+
+        def metadata(self):
+            return SimpleNamespace(provider="performance-tool", model="m", endpoint=None, base_url=None, profile_name=None)
+
+        def capabilities(self):
+            from haagent.models.capabilities import ModelCapabilities
+
+            return ModelCapabilities(
+                tools="supported",
+                streaming="supported",
+                vision="unknown",
+                reasoning="unknown",
+                tools_mode="native",
+                protocols=frozenset({"chat_completions"}),
+            )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=_Gateway(),
+        max_turns=3,
+    ).run(task_path)
+
+    performance_path = result.episode_path / "performance.json"
+    assert performance_path.exists()
+    performance = json.loads(performance_path.read_text(encoding="utf-8"))
+    assert performance["performance_schema_version"] == "1.0"
+    assert performance["status"] == "completed"
+    assert performance["model_turns"][0]["turn"] == 1
+    assert performance["model_turns"][0]["input_tokens"] == 120
+    prefix = performance["model_turns"][0]["stable_prefix_fingerprint"]
+    assert prefix.startswith("sha256:")
+    assert prefix != "sha256:" + ("0" * 64)
+    assert performance["cache_diagnostics"]["tool_schema"]["status"] in {"hit", "miss"}
+    assert performance["tools"][0]["tool_name"] == "file_read"
+    assert performance["tools"][0]["status"] == "success"
+
+
+def test_orchestrator_writes_performance_json_after_retry_failure(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Fail after retry
+constraints: []
+allowed_tools:
+  - file_read
+acceptance_criteria: []
+verification_commands: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    class _RetryThenFailGateway:
+        provider_name = "performance-retry-fail"
+
+        def __init__(self) -> None:
+            self._retry_controller = RetryController(
+                RetryPolicy(max_attempts=2, minimum_delay_seconds=0, base_delay_seconds=0),
+                sleep=lambda _: None,
+            )
+            self._attempts = 0
+
+        def generate(
+            self,
+            messages,
+            tool_schemas,
+            event_sink=None,
+            cancellation_token=None,
+            retry_event_sink=None,
+            retry_exhausted_sink=None,
+            telemetry_sink=None,
+        ):
+            del messages, tool_schemas
+
+            def invoke(on_delta: Callable[[str], None] | None, attempt: int) -> ModelResponse:
+                del on_delta
+                self._attempts = attempt
+                raise ModelCallError(
+                    "temporary upstream failure",
+                    details=ModelFailureDetails(category="server", status_code=500, retryable=True),
+                )
+
+            return execute_model_request(
+                self._retry_controller,
+                provider=self.provider_name,
+                invoke=invoke,
+                event_sink=event_sink,
+                cancellation_token=cancellation_token,
+                retry_event_sink=retry_event_sink,
+                retry_exhausted_sink=retry_exhausted_sink,
+                telemetry_sink=telemetry_sink,
+            )
+
+        def metadata(self):
+            return SimpleNamespace(provider=self.provider_name, model="m", endpoint=None, base_url=None, profile_name=None)
+
+        def capabilities(self):
+            from haagent.models.capabilities import ModelCapabilities
+
+            return ModelCapabilities(
+                tools="supported",
+                streaming="supported",
+                vision="unknown",
+                reasoning="unknown",
+                tools_mode="native",
+                protocols=frozenset({"chat_completions"}),
+            )
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=_RetryThenFailGateway(),
+        max_turns=1,
+    ).run(task_path)
+
+    performance = json.loads((result.episode_path / "performance.json").read_text(encoding="utf-8"))
+    assert result.status is RunStatus.FAILED
+    assert performance["status"] == "failed"
+    assert performance["model_turns"][0]["turn"] == 1
+    assert performance["model_turns"][0]["attempt_count"] == 2
+    assert [item["attempt"] for item in performance["model_turns"][0]["attempts"]] == [1, 2]
+    assert performance["model_turns"][0]["attempts"][0]["status"] == "failed"
+    assert performance["model_turns"][0]["attempts"][1]["status"] == "failed"
+
+
+def test_turn_loop_records_tool_performance_via_router_sink(tmp_path: Path) -> None:
+    trace = PerformanceTrace.start()
+    recorded: list[tuple[int, str, float, str, str]] = []
+
+    class _Router:
+        def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None, *, turn=None):
+            del args, interaction_handler
+            assert turn == 1
+            recorded.append((turn, tool_name, 3.0, "read_only", "success"))
+            trace.record_tool(turn, tool_name, 3.0, "read_only", "success")
+            return {"status": "success", "content": "ok"}
+
+        def raise_for_error(self, result: dict[str, Any]) -> None:
+            del result
+
+        def record_skipped(self, tool_name, args, result):
+            return result
+
+        def wait_for_agent_task(self, task_id: str, timeout: float | None = None):
+            raise AssertionError(f"unexpected wait {task_id}")
+
+    class _Gateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas, telemetry_sink=None):
+            del messages, tool_schemas, telemetry_sink
+            return ModelResponse(
+                "",
+                [ToolCall(name="file_read", args={"path": "README.md"})],
+                usage=ModelUsage(input_tokens=120, output_tokens=1, total_tokens=121, raw_source="test"),
+            )
+
+    finish_statuses: list[object] = []
+    deps = _deps(
+        router=_Router(),  # type: ignore[arg-type]
+        writer=_FakeWriter(tmp_path / "episode"),
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.PLANNING],
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _Gateway())
+    deps = _replace_dep(deps, "performance_trace", trace)
+    deps = _replace_dep(deps, "max_turns", 1)
+    deps = _replace_dep(deps, "tool_error_is_terminal", lambda result: False)
+
+    # first generate returns tool call; second would be needed for completion — force terminal via max_turns
+    result = run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+
+    assert result is not None
+    assert recorded and recorded[0][1] == "file_read"
+    assert trace.to_dict()["tools"][0]["tool_name"] == "file_read"
+    assert trace.to_dict()["model_turns"][0]["input_tokens"] == 120
+
+
 def _deps(
     *,
     router: _FakeRouter,
@@ -1217,7 +1458,6 @@ def _deps(
         compress_historical_tool_messages=lambda messages, writer, turn, emit_event: None,
         interaction_handler=None,
         interaction_resolver=SimpleNamespace(),
-        safety_guard=SimpleNamespace(check=lambda name, args, result: None),
         interaction_bridge_factory=lambda turn, resolver: None,
         record_guardrail=lambda violation, turn: None,
         record_suggestion=lambda turn, suggestion: None,
@@ -1236,4 +1476,152 @@ def _replace_dep(deps: TurnLoopDependencies, field_name: str, value: Any) -> Tur
     values = {name: getattr(deps, name) for name in deps.__dataclass_fields__}
     values[field_name] = value
     return TurnLoopDependencies(**values)
+
+
+def test_progress_guard_warn_injects_single_suggestion() -> None:
+    from haagent.runtime.execution.progress_guard import ProgressGuard
+
+    guard = ProgressGuard()
+    writer = _FakeWriter()
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(
+        router=_FakeRouter({"status": "success", "model_visible": {"content": "same"}}),
+        writer=writer,
+    )
+    deps = _replace_dep(deps, "progress_guard", guard)
+    deps = _replace_dep(deps, "progress_guard_mode", "warn")
+    tool_calls = [ToolCall(name="file_read", args={"path": "a.md"}, id="c1")]
+    for turn in range(1, 4):
+        _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls, state=state, deps=deps)
+    suggestion_msgs = [
+        message for message in state.messages if str(message.get("content", "")).startswith("[Suggestion] ProgressGuard")
+    ]
+    assert len(suggestion_msgs) == 1
+    assert any(item.get("event") == "progress_guard_warning" for item in writer.transcript)
+    # 第 4 次同模式在 warn 模式下不 block，也不重复刷屏
+    _run_tool_calls(turn=4, tool_calls_with_ids=tool_calls, state=state, deps=deps)
+    suggestion_msgs = [
+        message for message in state.messages if str(message.get("content", "")).startswith("[Suggestion] ProgressGuard")
+    ]
+    assert len(suggestion_msgs) == 1
+
+
+def test_progress_guard_block_continue_recovers() -> None:
+    from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+    from haagent.runtime.execution.progress_guard import ProgressGuard
+
+    guard = ProgressGuard()
+    blocked_states: list[object] = []
+    finish_statuses: list[object] = []
+    answers = iter(["continue"])
+
+    def handler(request: HumanInteractionRequest) -> HumanInteractionResponse:
+        assert request.tool_name == "progress_guard"
+        assert request.args_summary.get("choices") == ["continue", "replan", "stop"]
+        return HumanInteractionResponse(approved=True, answer=next(answers))
+
+    writer = _FakeWriter()
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(
+        router=_FakeRouter({"status": "success", "model_visible": {"content": "loop"}}),
+        writer=writer,
+        recorder=SimpleNamespace(
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status),
+            state_history=[RunStatus.EXECUTING],
+        ),
+    )
+    deps = _replace_dep(deps, "progress_guard", guard)
+    deps = _replace_dep(deps, "progress_guard_mode", "block")
+    deps = _replace_dep(deps, "interaction_handler", handler)
+    deps = _replace_dep(deps, "interaction_bridge_factory", lambda turn, resolver: handler)
+    deps = _replace_dep(
+        deps,
+        "on_progress_blocked",
+        lambda turn, decision: blocked_states.append((turn, decision.pattern)),
+    )
+    tool_calls = [ToolCall(name="file_read", args={"path": "x.md"}, id="c1")]
+    for turn in range(1, 5):
+        result = _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls, state=state, deps=deps)
+        assert result is None
+    assert blocked_states
+    assert any(item.get("event") == "progress_guard_recovered" for item in writer.transcript)
+    assert finish_statuses == []
+
+
+def test_progress_guard_block_without_handler_fails_loop_limit() -> None:
+    from haagent.runtime.execution.progress_guard import ProgressGuard
+
+    guard = ProgressGuard()
+    finish_statuses: list[object] = []
+    writer = _FakeWriter()
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(
+        router=_FakeRouter({"status": "success", "model_visible": {"content": "loop"}}),
+        writer=writer,
+        recorder=SimpleNamespace(
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status),
+            state_history=[RunStatus.EXECUTING],
+        ),
+    )
+    deps = _replace_dep(deps, "progress_guard", guard)
+    deps = _replace_dep(deps, "progress_guard_mode", "block")
+    tool_calls = [ToolCall(name="file_read", args={"path": "x.md"}, id="c1")]
+    result = None
+    for turn in range(1, 5):
+        result = _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls, state=state, deps=deps)
+        if result is not None:
+            break
+    assert result is not None
+    assert finish_statuses == [RunStatus.FAILED]
+    assert any(item.get("event") == "progress_guard_blocked" for item in writer.transcript)
+    assert writer.failure_records
+    assert writer.failure_records[-1]["category"] == "Loop Limit Failure"
+
+
+def test_progress_block_callback_persists_recoverable_working_state() -> None:
+    from haagent.runtime.execution.progress_guard import ProgressDecision
+    from haagent.runtime.orchestration.orchestrator import _record_progress_block_working_state
+
+    persisted: list[dict[str, object]] = []
+    orchestrator = object.__new__(RunOrchestrator)
+    orchestrator._working_state = None
+    orchestrator._working_state_sink = lambda value: persisted.append(value)
+
+    _record_progress_block_working_state(
+        orchestrator,
+        turn=4,
+        decision=ProgressDecision(level="block", reason="same observation", pattern="identical_pair"),
+    )
+
+    assert persisted
+    assert persisted[0]["last_updated_turn"] == 4
+    assert "progress_guard blocked" in persisted[0]["next_steps"][0]
+
+
+def test_progress_guard_skips_running_pending_tools() -> None:
+    from haagent.runtime.execution.progress_guard import ProgressGuard
+
+    guard = ProgressGuard()
+    writer = _FakeWriter()
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(
+        router=_FakeRouter(
+            {
+                "status": "running",
+                "execution_state": "running",
+                "task_id": "task-1",
+                "model_visible": {"status": "running"},
+            }
+        ),
+        writer=writer,
+    )
+    deps = _replace_dep(deps, "progress_guard", guard)
+    deps = _replace_dep(deps, "progress_guard_mode", "block")
+    tool_calls = [ToolCall(name="agent", args={"prompt": "explore"}, id="c1")]
+    for turn in range(1, 6):
+        _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls, state=state, deps=deps)
+    assert not any(item.get("event") == "progress_guard_warning" for item in writer.transcript)
+    assert not any(item.get("event") == "progress_guard_blocked" for item in writer.transcript)
 

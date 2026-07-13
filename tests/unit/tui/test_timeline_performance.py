@@ -168,6 +168,21 @@ def test_assistant_delta_updates_are_batched_until_flush() -> None:
     assert timeline.synced_items == [timeline._items[0].item_id]
 
 
+def test_many_assistant_deltas_batch_below_delta_count() -> None:
+    """100 个 delta 只调度一次批 flush；周期必须落在 16–50ms。"""
+    timeline = InstrumentedTimeline()
+    for index in range(100):
+        timeline.update_assistant_delta(1, f"d{index}")
+
+    assert timeline.scheduled_delta_flush_count == 1
+    assert timeline.synced_items == []
+    assert 16 <= timeline_module.MARKDOWN_DELTA_FLUSH_INTERVAL_MS <= 50
+
+    timeline.flush_pending_assistant_delta()
+    assert timeline.synced_items == [timeline._items[0].item_id]
+    assert len(timeline.synced_items) < 100
+
+
 def test_assistant_delta_flush_waits_while_interaction_is_paused() -> None:
     timeline = InstrumentedTimeline()
     timeline.pause_interactive_updates()

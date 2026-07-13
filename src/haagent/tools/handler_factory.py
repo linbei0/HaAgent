@@ -13,6 +13,7 @@ from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.path_policy import PathPolicy
 from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.skills import SkillSettings
+from haagent.skills.catalog import SkillCatalogService
 from haagent.tools.base import ToolHandler
 from haagent.tools.code_run import code_run
 from haagent.tools.file_tools import apply_patch, apply_patch_set, file_list, file_read, file_write, grep
@@ -32,6 +33,7 @@ def build_static_tool_handlers(
     mcp_runtime: Any | None,
     sandbox_backend: SandboxBackend | None,
     router_handlers: dict[str, ToolHandler],
+    skill_catalog: SkillCatalogService | None = None,
 ) -> dict[str, ToolHandler]:
     """组合静态工具 handler；策略、审批和审计仍由 router 负责。"""
     return {
@@ -48,8 +50,18 @@ def build_static_tool_handlers(
         "file_read": lambda args: file_read(args, workspace_root, path_policy),
         "request_user_input": router_handlers["request_user_input"],
         "start_memory_update": router_handlers["start_memory_update"],
-        "skill_list": lambda args: skill_list(args, workspace_root, skill_settings),
-        "skill_read": lambda args: skill_read(args, workspace_root, skill_settings),
+        "skill_list": lambda args: skill_list(
+            args,
+            workspace_root,
+            skill_settings,
+            skill_catalog=skill_catalog,
+        ),
+        "skill_read": lambda args: skill_read(
+            args,
+            workspace_root,
+            skill_settings,
+            skill_catalog=skill_catalog,
+        ),
         "skill_market_search": skill_market_search,
         "web_search": web_search,
         "web_fetch": web_fetch,

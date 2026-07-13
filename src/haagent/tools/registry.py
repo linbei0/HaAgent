@@ -6,7 +6,9 @@ haagent/tools/registry.py - 工具注册表组合入口
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from haagent.runtime.execution.retry import ReplaySafety
@@ -63,6 +65,11 @@ def merge_tool_registry_fragments(
 class ToolRuntimeRegistry:
     static_tools: dict[str, ToolDefinition]
     dynamic_tools: dict[str, ToolDefinition]
+    _schema_version: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # registry 在构造后按只读 snapshot 使用；version 只序列化一次。
+        object.__setattr__(self, "_schema_version", self._compute_schema_version())
 
     def get(self, name: str) -> ToolDefinition:
         if name in self.dynamic_tools:
@@ -77,6 +84,26 @@ class ToolRuntimeRegistry:
 
     def allowed_definitions(self, names: list[str]) -> list[ToolDefinition]:
         return [self.get(name) for name in names]
+
+    @property
+    def schema_version(self) -> str:
+        """静态/动态工具 name/description/parameters 的 canonical JSON hash。"""
+
+        return self._schema_version
+
+    def _compute_schema_version(self) -> str:
+        items: list[dict[str, Any]] = []
+        for name in sorted(set(self.static_tools) | set(self.dynamic_tools)):
+            definition = self.get(name)
+            items.append(
+                {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "parameters": definition.parameters,
+                }
+            )
+        raw = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 from haagent.tools.registry_fragments.agent import AGENT_TOOL_REGISTRY
@@ -162,8 +189,13 @@ def allowed_tool_definitions(
 def export_tool_schemas(
     names: list[str],
     registry: ToolRuntimeRegistry | None = None,
+    *,
+    cache: Any | None = None,
+    diagnostics_sink: Any | None = None,
 ) -> list[dict[str, Any]]:
-    return [
-        definition.to_model_schema()
-        for definition in allowed_tool_definitions(names, registry=registry)
-    ]
+    runtime_registry = registry or default_tool_runtime_registry()
+    if cache is None:
+        from haagent.tools.schema_cache import default_tool_schema_cache
+
+        cache = default_tool_schema_cache()
+    return cache.export(names, runtime_registry, diagnostics_sink=diagnostics_sink)

@@ -7,156 +7,53 @@ src/haagent/models/transport.py - 模型网关 HTTP/SSE 传输与共享解析
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
-import http.client
+import inspect
 import json
 from pathlib import Path
-import socket
 from collections.abc import Iterator
-from typing import Any, Callable, Mapping, TypeVar
+from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
-import urllib.error
-import urllib.request
 
 from haagent.models.types import ModelCallError, ModelFailureDetails, ModelUsage
+
+
+def _supports_transport_observability(callback: Callable[..., object]) -> bool:
+    """调用前判断 transport 是否接受 attempt/telemetry，避免捕获执行期 TypeError 后重复请求。"""
+
+    try:
+        parameters = inspect.signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    names = {parameter.name for parameter in parameters}
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return True
+    return {"attempt", "telemetry_sink"}.issubset(names)
+
+
+def _invoke_transport(
+    transport: Callable[..., dict[str, object]],
+    stream_transport: Callable[..., dict[str, object]],
+    *args: object,
+    on_delta: Callable[[str], None] | None,
+    attempt: int,
+    telemetry_sink: object,
+) -> dict[str, object]:
+    """兼容旧注入签名，并确保执行期 TypeError 不会触发第二次模型请求。"""
+
+    callback = stream_transport if on_delta is not None else transport
+    call_args = (*args, on_delta) if on_delta is not None else args
+    if _supports_transport_observability(callback):
+        return callback(
+            *call_args,
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    return callback(*call_args)
 
 DEFAULT_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
 DEFAULT_CHAT_COMPLETIONS_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT = "https://api.anthropic.com/v1/messages"
 DEFAULT_GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-RETRYABLE_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
-_RESPONSE_BODY_EXCERPT_LENGTH = 4096
-
-ResponseT = TypeVar("ResponseT")
-
-
-def _model_error_from_http_error(provider: str, error: urllib.error.HTTPError) -> ModelCallError:
-    """将 HTTP 失败转为脱敏的模型错误，不暴露响应正文和认证头。"""
-
-    body = error.read(_RESPONSE_BODY_EXCERPT_LENGTH).decode("utf-8", errors="replace")
-    details = _http_details(error.code, error.headers or {}, body)
-    return ModelCallError(
-        f"{provider} request failed with HTTP {error.code}",
-        details=details,
-    )
-
-
-def _model_error_from_network_error(error: Exception) -> ModelCallError:
-    """保留网络失败类别，避免把连接和超时错误压扁成字符串。"""
-
-    category = "timeout" if isinstance(error, (socket.timeout, TimeoutError)) else "network"
-    return ModelCallError(
-        f"model request {category} failure",
-        details=ModelFailureDetails(category=category, retryable=True),
-    )
-
-
-def _http_details(
-    status_code: int,
-    headers: Mapping[str, str],
-    body: str,
-) -> ModelFailureDetails:
-    provider_code = _safe_provider_code(body)
-    if status_code in {401, 403}:
-        category = "auth"
-    elif status_code == 429:
-        category = "rate_limited"
-    elif status_code >= 500:
-        category = "server"
-    elif status_code == 408:
-        category = "timeout"
-    else:
-        category = "client"
-    if status_code == 429 and provider_code == "insufficient_quota":
-        category = "quota_exhausted"
-    retryable = status_code in RETRYABLE_STATUS_CODES and category not in {
-        "auth",
-        "quota_exhausted",
-    }
-    return ModelFailureDetails(
-        category=category,
-        status_code=status_code,
-        provider_code=provider_code,
-        retry_after_seconds=_retry_after_seconds(headers),
-        request_id=_request_id(headers),
-        retryable=retryable,
-    )
-
-
-def _safe_provider_code(body: str) -> str | None:
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    error = parsed.get("error")
-    if isinstance(error, dict) and isinstance(error.get("code"), str):
-        return error["code"]
-    return parsed.get("code") if isinstance(parsed.get("code"), str) else None
-
-
-def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
-    value = _header_value(headers, "retry-after")
-    if value:
-        try:
-            seconds = float(value)
-        except ValueError:
-            try:
-                retry_at = parsedate_to_datetime(value)
-            except (TypeError, ValueError, IndexError, OverflowError):
-                retry_at = None
-            if retry_at is not None:
-                if retry_at.tzinfo is None:
-                    retry_at = retry_at.replace(tzinfo=UTC)
-                seconds = (retry_at - datetime.now(UTC)).total_seconds()
-            else:
-                seconds = None
-        if seconds is not None:
-            return seconds if seconds > 0 else None
-    rate_limit_reset = _header_value(headers, "x-ratelimit-reset-requests")
-    if rate_limit_reset and rate_limit_reset.endswith("s"):
-        try:
-            seconds = float(rate_limit_reset[:-1])
-        except ValueError:
-            return None
-        return seconds if seconds > 0 else None
-    return None
-
-
-def _request_id(headers: Mapping[str, str]) -> str | None:
-    return _header_value(headers, "x-request-id") or _header_value(headers, "request-id")
-
-
-def _header_value(headers: Mapping[str, str], name: str) -> str | None:
-    for header_name, value in headers.items():
-        if header_name.lower() == name and isinstance(value, str):
-            return value
-    return None
-
-
-def _with_urlopen(request: urllib.request.Request, provider: str, parse: Callable[[object], ResponseT]) -> ResponseT:
-    """所有 provider transport 共用失败分类边界，禁止在此处重试。"""
-
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return parse(response)
-    except urllib.error.HTTPError as error:
-        raise _model_error_from_http_error(provider, error) from error
-    except (
-        urllib.error.URLError,
-        socket.timeout,
-        TimeoutError,
-        ConnectionError,
-        http.client.HTTPException,
-    ) as error:
-        raise _model_error_from_network_error(error) from error
-    except json.JSONDecodeError as error:
-        raise ModelCallError(
-            f"{provider} response is not valid JSON",
-            details=ModelFailureDetails(category="response_parse", retryable=False),
-        ) from error
 
 
 def _parse_tool_arguments(arguments: str) -> dict[str, Any]:
@@ -298,93 +195,138 @@ def _normalize_gemini_generate_content_endpoint(base_url: str | None, model: str
     if base.endswith(":generateContent"):
         return base
     return f"{base}/{model_path}:generateContent"
+def _bearer_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _anthropic_headers(api_key: str) -> dict[str, str]:
+    return {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+
+def _json_headers() -> dict[str, str]:
+    return {"Content-Type": "application/json"}
+
+
+def _http_transport_or_default(http_transport):
+    """生产默认使用共享 ModelHttpTransport；调用方负责生命周期时注入实例。"""
+
+    from haagent.models.http_transport import ModelHttpTransport
+
+    if http_transport is not None:
+        return http_transport, False
+    return ModelHttpTransport(), True
+
+
 def _responses_transport(
     payload: dict[str, object],
     api_key: str,
     endpoint: str = DEFAULT_RESPONSES_ENDPOINT,
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
     """执行真实 HTTP 请求；保持为函数便于测试注入替身 transport。"""
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "OpenAI",
-        lambda response: json.loads(response.read().decode("utf-8")),
-    )
+
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.request_json(
+            "OpenAI",
+            endpoint,
+            payload,
+            _bearer_headers(api_key),
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _chat_completions_transport(
     payload: dict[str, object],
     api_key: str,
     endpoint: str = DEFAULT_CHAT_COMPLETIONS_ENDPOINT,
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
     """执行真实 Chat Completions HTTP 请求；测试中通过 transport 注入替身。"""
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "OpenAI chat",
-        lambda response: json.loads(response.read().decode("utf-8")),
-    )
+
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.request_json(
+            "OpenAI chat",
+            endpoint,
+            payload,
+            _bearer_headers(api_key),
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _anthropic_transport(
     payload: dict[str, object],
     api_key: str,
     endpoint: str = DEFAULT_ANTHROPIC_MESSAGES_ENDPOINT,
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
     """执行真实 Anthropic Messages HTTP 请求；测试中通过 transport 注入替身。"""
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "Anthropic",
-        lambda response: json.loads(response.read().decode("utf-8")),
-    )
+
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.request_json(
+            "Anthropic",
+            endpoint,
+            payload,
+            _anthropic_headers(api_key),
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _google_gemini_transport(
     payload: dict[str, object],
     api_key: str,
     endpoint: str,
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
     """执行真实 Gemini generateContent HTTP 请求；测试中通过 transport 注入替身。"""
+
     separator = "&" if "?" in endpoint else "?"
-    request = urllib.request.Request(
-        f"{endpoint}{separator}key={api_key}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "Gemini",
-        lambda response: json.loads(response.read().decode("utf-8")),
-    )
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.request_json(
+            "Gemini",
+            f"{endpoint}{separator}key={api_key}",
+            payload,
+            _json_headers(),
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _responses_stream_transport(
@@ -392,21 +334,26 @@ def _responses_stream_transport(
     api_key: str,
     endpoint: str,
     on_delta: Callable[[str], None],
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "OpenAI",
-        lambda response: _parse_openai_responses_stream(response, on_delta),
-    )
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.stream_json(
+            "OpenAI",
+            endpoint,
+            payload,
+            _bearer_headers(api_key),
+            parser=_parse_openai_responses_sse,
+            on_delta=on_delta,
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _chat_completions_stream_transport(
@@ -414,21 +361,26 @@ def _chat_completions_stream_transport(
     api_key: str,
     endpoint: str,
     on_delta: Callable[[str], None],
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "OpenAI chat",
-        lambda response: _parse_openai_chat_stream(response, on_delta),
-    )
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.stream_json(
+            "OpenAI chat",
+            endpoint,
+            payload,
+            _bearer_headers(api_key),
+            parser=_parse_openai_chat_sse,
+            on_delta=on_delta,
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _anthropic_stream_transport(
@@ -436,22 +388,26 @@ def _anthropic_stream_transport(
     api_key: str,
     endpoint: str,
     on_delta: Callable[[str], None],
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
-    request = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "Anthropic",
-        lambda response: _parse_anthropic_stream(response, on_delta),
-    )
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.stream_json(
+            "Anthropic",
+            endpoint,
+            payload,
+            _anthropic_headers(api_key),
+            parser=_parse_anthropic_sse,
+            on_delta=on_delta,
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _google_gemini_stream_transport(
@@ -459,78 +415,58 @@ def _google_gemini_stream_transport(
     api_key: str,
     endpoint: str,
     on_delta: Callable[[str], None],
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
 ) -> dict[str, object]:
     stream_endpoint = endpoint.replace(":generateContent", ":streamGenerateContent")
     separator = "&" if "?" in stream_endpoint else "?"
-    request = urllib.request.Request(
-        f"{stream_endpoint}{separator}alt=sse&key={api_key}",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    return _with_urlopen(
-        request,
-        "Gemini",
-        lambda response: _parse_gemini_stream(response, on_delta),
-    )
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.stream_json(
+            "Gemini",
+            f"{stream_endpoint}{separator}alt=sse&key={api_key}",
+            payload,
+            _json_headers(),
+            parser=_parse_gemini_sse,
+            on_delta=on_delta,
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
 
 
 def _iter_sse_events(response) -> Iterator[dict[str, object]]:
-    """逐条 yield 完整 SSE event；禁止先收集成 list，否则首字延迟=整次生成时间。
+    """逐条 yield 完整 SSE JSON object；禁止先收集成 list，否则首字延迟=整次生成时间。
 
-    HTTP 常把 `data: ...\\n\\n` 作为一整块交付；必须按行拆分并保留空行事件边界，
-    不能对整块 `.strip()`，否则会吞掉分隔空行并把多个 event 拼进同一次 json.loads。
+    使用 IncrementalSseDecoder 处理 \\n\\n / \\r\\r / \\r\\n\\r\\n、跨 chunk UTF-8 与 [DONE]。
     """
 
-    event_lines: list[str] = []
-    pending = ""
+    from haagent.models.http_transport import IncrementalSseDecoder
+
+    decoder = IncrementalSseDecoder()
     for raw_chunk in response:
         if isinstance(raw_chunk, bytes):
-            pending += raw_chunk.decode("utf-8")
+            chunk = raw_chunk
         else:
-            pending += str(raw_chunk)
-        while True:
-            newline_at = pending.find("\n")
-            if newline_at < 0:
-                break
-            line = pending[:newline_at]
-            pending = pending[newline_at + 1 :]
-            if line.endswith("\r"):
-                line = line[:-1]
-            if not line:
-                event = _sse_event_from_lines(event_lines)
-                event_lines = []
-                if event is not None:
-                    yield event
-                continue
-            event_lines.append(line)
-    if pending:
-        line = pending[:-1] if pending.endswith("\r") else pending
-        if line:
-            event_lines.append(line)
-    event = _sse_event_from_lines(event_lines)
-    if event is not None:
-        yield event
+            chunk = str(raw_chunk).encode("utf-8")
+        for event in decoder.feed(chunk):
+            yield _sse_event_json(event.data)
+    for event in decoder.finish():
+        yield _sse_event_json(event.data)
 
 
-def _sse_event_from_lines(event_lines: list[str]) -> dict[str, object] | None:
-    if not event_lines:
-        return None
-    # SSE: 字段名后最多去掉一个前导空格；多 data 行用 \n 拼接。
-    data_chunks: list[str] = []
-    for part in event_lines:
-        if not part.startswith("data:"):
-            continue
-        value = part[5:]
-        if value.startswith(" "):
-            value = value[1:]
-        data_chunks.append(value)
-    if not data_chunks:
-        return None
-    data = "\n".join(data_chunks)
-    if data == "[DONE]":
-        return None
-    parsed = json.loads(data)
+def _sse_event_json(data: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(data)
+    except json.JSONDecodeError as error:
+        raise ModelCallError(
+            "provider response is not valid SSE JSON",
+            details=ModelFailureDetails(category="response_parse", retryable=False),
+        ) from error
     if not isinstance(parsed, dict):
         raise ModelCallError(
             "SSE event data must be a JSON object",
@@ -539,11 +475,56 @@ def _sse_event_from_lines(event_lines: list[str]) -> dict[str, object] | None:
     return parsed
 
 
+def _sse_event_dicts(events) -> Iterator[dict[str, object]]:
+    """把已完成 SseEvent 转成 provider 归并使用的 JSON object 流。"""
+
+    for event in events:
+        data = event.data if hasattr(event, "data") else event
+        if not isinstance(data, str):
+            continue
+        yield _sse_event_json(data)
+
+
+def _parse_openai_chat_sse(events, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_openai_chat_events(_sse_event_dicts(events), on_delta)
+
+
+def _parse_openai_responses_sse(events, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_openai_responses_events(_sse_event_dicts(events), on_delta)
+
+
+def _parse_anthropic_sse(events, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_anthropic_events(_sse_event_dicts(events), on_delta)
+
+
+def _parse_gemini_sse(events, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_gemini_events(_sse_event_dicts(events), on_delta)
+
+
 def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_openai_chat_events(_iter_sse_events(response), on_delta)
+
+
+def _parse_openai_responses_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_openai_responses_events(_iter_sse_events(response), on_delta)
+
+
+def _parse_anthropic_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_anthropic_events(_iter_sse_events(response), on_delta)
+
+
+def _parse_gemini_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+    return _merge_gemini_events(_iter_sse_events(response), on_delta)
+
+
+def _merge_openai_chat_events(
+    events: Iterator[dict[str, object]],
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
     content_parts: list[str] = []
     tool_calls: dict[int, dict[str, object]] = {}
     usage: dict[str, object] | None = None
-    for event in _iter_sse_events(response):
+    for event in events:
         raw_usage = event.get("usage")
         if isinstance(raw_usage, dict):
             usage = raw_usage
@@ -596,10 +577,13 @@ def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict
     return parsed
 
 
-def _parse_openai_responses_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+def _merge_openai_responses_events(
+    events: Iterator[dict[str, object]],
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
     output_text_parts: list[str] = []
     final_response: dict[str, object] | None = None
-    for event in _iter_sse_events(response):
+    for event in events:
         event_type = event.get("type")
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
@@ -617,12 +601,15 @@ def _parse_openai_responses_stream(response, on_delta: Callable[[str], None]) ->
     return final_response
 
 
-def _parse_anthropic_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+def _merge_anthropic_events(
+    events: Iterator[dict[str, object]],
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
     text_parts: list[str] = []
     content_blocks: list[dict[str, object]] = []
     current_tool_block: dict[str, object] | None = None
     usage: dict[str, object] | None = None
-    for event in _iter_sse_events(response):
+    for event in events:
         event_type = event.get("type")
         if event_type == "content_block_start":
             block = event.get("content_block")
@@ -668,12 +655,15 @@ def _parse_anthropic_stream(response, on_delta: Callable[[str], None]) -> dict[s
     return parsed
 
 
-def _parse_gemini_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:
+def _merge_gemini_events(
+    events: Iterator[dict[str, object]],
+    on_delta: Callable[[str], None],
+) -> dict[str, object]:
     parts: list[dict[str, object]] = []
     text_parts: list[str] = []
     function_calls: list[dict[str, object]] = []
     usage_metadata: dict[str, object] | None = None
-    for event in _iter_sse_events(response):
+    for event in events:
         raw_usage = event.get("usageMetadata")
         if isinstance(raw_usage, dict):
             usage_metadata = raw_usage

@@ -6,6 +6,7 @@ src/haagent/runtime/orchestration/turns.py - Run 单轮执行流程
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -21,18 +22,21 @@ from haagent.context.messages import (
     build_tool_result_message,
     generate_tool_call_id,
 )
+from haagent.models.telemetry import ModelTransportEvent
 from haagent.models.types import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.cancellation import RunCancelled
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import check_assistant_output, guardrail_evidence
-from haagent.runtime.execution.human_interaction import HumanInteractionHandler
-from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
-from haagent.runtime.orchestration.loop_guidance import (
-    safety_violation_observation,
-    suggestion_for_observation,
+from haagent.runtime.execution.human_interaction import (
+    HumanInteractionHandler,
+    HumanInteractionRequest,
+    HumanInteractionResponse,
 )
+from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
+from haagent.runtime.execution.progress_guard import ProgressDecision, ProgressFrame, ProgressGuard
+from haagent.runtime.orchestration.loop_guidance import suggestion_for_observation
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.events.bus import (
@@ -51,8 +55,10 @@ from haagent.runtime.orchestration.task_progress import (
     task_budget_warning_event,
     task_checkpoint_saved_event,
     task_recovery_suggested_event,
+    task_step_blocked_event,
     task_step_progress_event,
 )
+from haagent.runtime.performance import PerformanceTrace
 from haagent.tools.base import tool_error
 from haagent.tools.registry import ToolRuntimeRegistry, export_tool_schemas
 from haagent.tools.router import ToolRouter
@@ -71,6 +77,7 @@ class TurnLoopState:
     changed_files: list[dict[str, object]] = field(default_factory=list)
     verification_engine: VerificationEngine | None = None
     pending_worker_task_ids: list[str] = field(default_factory=list)
+    progress_warn_emitted: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,7 +100,6 @@ class TurnLoopDependencies:
     ]
     interaction_handler: HumanInteractionHandler | None
     interaction_resolver: HumanInteractionResolver
-    safety_guard: object
     interaction_bridge_factory: Callable[[int, HumanInteractionResolver], HumanInteractionHandler]
     record_guardrail: Callable[[object, int | None], None]
     record_suggestion: Callable[[int, object], None]
@@ -108,6 +114,12 @@ class TurnLoopDependencies:
     task_step_title: str = ""
     cancellation_token: CancellationToken | None = None
     max_parallel_read_tools: int = 4
+    performance_trace: PerformanceTrace | None = None
+    persist_performance: Callable[[], None] | None = None
+    tool_schema_cache: object | None = None
+    progress_guard: ProgressGuard | None = None
+    progress_guard_mode: str = "warn"
+    on_progress_blocked: Callable[[int, ProgressDecision], None] | None = None
 
 
 def run_turn_loop(
@@ -128,11 +140,32 @@ def run_turn_loop(
                 },
             )
             state.messages.append(_build_worker_notifications_message(notifications))
+        def record_schema_cache(value: dict[str, object]) -> None:
+            if deps.performance_trace is not None:
+                deps.performance_trace.record_cache_diagnostic("tool_schema", value)
+
         tool_schemas = [] if state.final_response_requested else export_tool_schemas(
             deps.allowed_tools,
             registry=deps.tool_registry,
+            cache=deps.tool_schema_cache,
+            diagnostics_sink=record_schema_cache,
         )
         deps.compress_historical_tool_messages(state.messages, deps.writer, turn, deps.emit_event)
+
+        schema_bytes = len(
+            json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+        if deps.performance_trace is not None:
+            deps.performance_trace.begin_model_turn(
+                turn=turn,
+                message_count=len(state.messages),
+                visible_tool_count=len(tool_schemas),
+                schema_bytes=schema_bytes,
+                stable_prefix_fingerprint=_stable_prefix_fingerprint(
+                    state.messages,
+                    tool_schemas,
+                ),
+            )
 
         max_attempts = _retry_max_attempts(deps.model_gateway)
         model_attempt = 1
@@ -222,6 +255,8 @@ def run_turn_loop(
                         "goal": deps.task_goal,
                     },
                 )
+                if deps.persist_performance is not None:
+                    deps.persist_performance()
             generate_kwargs["retry_event_sink"] = emit_retry
         if _supports_generate_parameter(deps.model_gateway, "retry_exhausted_sink"):
             def emit_retry_exhausted(failure, attempt: int) -> None:
@@ -247,11 +282,33 @@ def run_turn_loop(
                 }
                 deps.writer.append_transcript(retry_record)
                 deps.emit_event({"event_type": "model_retry_exhausted", **{key: value for key, value in retry_record.items() if key != "event"}})
+                if deps.persist_performance is not None:
+                    deps.persist_performance()
             generate_kwargs["retry_exhausted_sink"] = emit_retry_exhausted
         if _supports_generate_parameter(deps.model_gateway, "cancellation_token"):
             generate_kwargs["cancellation_token"] = deps.cancellation_token
+        if deps.performance_trace is not None and _supports_generate_parameter(
+            deps.model_gateway,
+            "telemetry_sink",
+        ):
+            def emit_transport(event: ModelTransportEvent) -> None:
+                assert deps.performance_trace is not None
+                deps.performance_trace.record_transport_event(event)
+                # attempt 边界写盘；首个 SSE/text 只更新内存，避免逐 token I/O。
+                if event.kind in {
+                    "attempt_started",
+                    "attempt_finished",
+                    "attempt_failed",
+                } and deps.persist_performance is not None:
+                    deps.persist_performance()
+
+            generate_kwargs["telemetry_sink"] = emit_transport
         model_response = deps.model_gateway.generate(**generate_kwargs)
         deps.raise_if_cancelled()
+        if deps.performance_trace is not None:
+            deps.performance_trace.record_model_usage(turn, model_response.usage)
+            if deps.persist_performance is not None:
+                deps.persist_performance()
         model_metadata = _gateway_metadata(deps.model_gateway)
         deps.writer.append_model_usage(
             turn=turn,
@@ -485,6 +542,7 @@ def _run_tool_calls(
     pending_suggestion_messages: list[str] = []
     visible_result_fingerprints: set[str] = set()
     terminal_error: dict[str, object] | None = None
+    verification_count_before = len(state.passed_verification_commands)
     tool_results = _dispatch_tool_calls(turn=turn, tool_calls=tool_calls_with_ids, deps=deps)
     for tool_call, tool_result in zip(tool_calls_with_ids, tool_results):
         deps.raise_if_cancelled()
@@ -549,39 +607,11 @@ def _run_tool_calls(
             if task_id:
                 state.pending_worker_task_ids.append(task_id)
 
-        violation = deps.safety_guard.check(tool_call.name, tool_call.args, tool_result)
-        if violation is not None and violation.should_abort:
-            abort_obs = safety_violation_observation(violation.message, violation.recovery_suggestion)
-            deps.writer.append_transcript({"event": "safety_abort", "turn": turn, **abort_obs})
-            deps.emit_event(
-                coerce_bus_event(
-                    {
-                        "event_type": "safety_abort",
-                        "turn": turn,
-                        "violation_type": violation.type,
-                        "message": violation.message,
-                    },
-                ),
-            )
-            deps.recorder.transition(RunStatus.FAILED)
-            deps.writer.write_failure_attribution(
-                {
-                    "stage": "executing",
-                    "category": FailureCategory.LOOP_LIMIT.value,
-                    "evidence": violation.message,
-                }
-            )
-            return deps.recorder.finish(RunStatus.FAILED)
-
         if tool_result.get("status") == "error":
             if deps.tool_error_is_terminal(tool_result):
                 terminal_error = terminal_error or tool_result
             suggestion = suggestion_for_observation(observation)
-            if violation is not None:
-                safety_obs = safety_violation_observation(violation.message, violation.recovery_suggestion)
-                deps.writer.append_transcript({"event": "safety_warning", "turn": turn, **safety_obs})
-                pending_suggestion_messages.append(str(safety_obs.get("result", {}).get("message", "")))
-            elif suggestion is not None:
+            if suggestion is not None:
                 deps.record_suggestion(turn, suggestion)
                 pending_suggestion_messages.append(suggestion.message)
             turn_broke_early = True
@@ -634,6 +664,17 @@ def _run_tool_calls(
             ),
         )
 
+    progress_result = _apply_progress_guard(
+        turn=turn,
+        tool_calls=tool_calls_with_ids,
+        tool_results=tool_results,
+        state=state,
+        deps=deps,
+        verification_count_before=verification_count_before,
+    )
+    if progress_result is not None:
+        return progress_result
+
     if terminal_error is not None:
         deps.router.raise_for_error(terminal_error)
 
@@ -651,6 +692,247 @@ def _run_tool_calls(
         state.final_response_requested = True
         state.messages.append(build_final_response_request_message())
     return None
+
+
+def _apply_progress_guard(
+    *,
+    turn: int,
+    tool_calls: list[ToolCall],
+    tool_results: list[dict[str, Any]],
+    state: TurnLoopState,
+    deps: TurnLoopDependencies,
+    verification_count_before: int,
+) -> RunResult | None:
+    """完整工具 batch 后观察 ProgressGuard；mode 控制 warn/block 行为。"""
+    guard = deps.progress_guard
+    if guard is None:
+        return None
+    mode = deps.progress_guard_mode or "warn"
+    frame = _build_progress_frame(
+        tool_calls=tool_calls,
+        tool_results=tool_results,
+        state=state,
+        verification_count_before=verification_count_before,
+    )
+    decision = guard.observe(frame)
+    if frame.workspace_changed or frame.verification_progressed:
+        state.progress_warn_emitted = False
+
+    effective = _effective_progress_level(decision.level, mode=mode)
+    if effective == "none":
+        return None
+    if effective == "warn":
+        if not state.progress_warn_emitted:
+            suggestion = (
+                f"ProgressGuard ({decision.pattern or 'unknown'}): {decision.reason} "
+                "请更换策略，避免重复相同 action/observation。"
+            )
+            state.messages.append(build_suggestion_message(suggestion))
+            state.progress_warn_emitted = True
+            deps.writer.append_transcript(
+                {
+                    "event": "progress_guard_warning",
+                    "turn": turn,
+                    "pattern": decision.pattern,
+                    "reason": decision.reason,
+                },
+            )
+        return None
+    # block：可恢复交互
+    if deps.on_progress_blocked is not None:
+        deps.on_progress_blocked(turn, decision)
+    deps.emit_event(
+        coerce_bus_event(
+            task_step_blocked_event(
+                step_id=deps.task_step_id,
+                title=_task_step_title(deps),
+                category=decision.pattern or "progress_guard",
+                reason=decision.reason,
+                suggested_action="continue, replan, or stop",
+            ),
+        ),
+    )
+    deps.writer.append_transcript(
+        {
+            "event": "progress_guard_blocked",
+            "turn": turn,
+            "pattern": decision.pattern,
+            "reason": decision.reason,
+        },
+    )
+    return _resolve_progress_block(turn=turn, decision=decision, state=state, deps=deps)
+
+
+def _effective_progress_level(level: str, *, mode: str) -> str:
+    if mode == "off":
+        return "none"
+    if mode == "warn" and level == "block":
+        # warn 模式不进入可恢复 block，只提示
+        return "warn"
+    return level
+
+
+def _resolve_progress_block(
+    *,
+    turn: int,
+    decision: ProgressDecision,
+    state: TurnLoopState,
+    deps: TurnLoopDependencies,
+) -> RunResult | None:
+    handler = _interaction_handler_for_turn(turn, deps)
+    if handler is None:
+        return _fail_progress_block(
+            turn=turn,
+            deps=deps,
+            evidence=f"progress_guard blocked ({decision.pattern}): no interaction handler; {decision.reason}",
+        )
+    request = HumanInteractionRequest(
+        interaction_type="user_input",
+        tool_name="progress_guard",
+        question="检测到任务可能陷入重复。请输入 continue、replan 或 stop。",
+        reason=decision.reason,
+        args_summary={"choices": ["continue", "replan", "stop"], "pattern": decision.pattern},
+    )
+    try:
+        response = handler(request)
+    except Exception as error:
+        return _fail_progress_block(
+            turn=turn,
+            deps=deps,
+            evidence=f"progress_guard blocked interaction failed: {error}",
+        )
+    if not isinstance(response, HumanInteractionResponse):
+        return _fail_progress_block(
+            turn=turn,
+            deps=deps,
+            evidence="progress_guard blocked: invalid interaction response",
+        )
+    choice = _normalize_progress_choice(response.answer)
+    if choice in {"continue", "replan"} and deps.progress_guard is not None:
+        deps.progress_guard.reset()
+        state.progress_warn_emitted = False
+        deps.writer.append_transcript(
+            {
+                "event": "progress_guard_recovered",
+                "turn": turn,
+                "choice": choice,
+                "pattern": decision.pattern,
+            },
+        )
+        if choice == "replan":
+            state.messages.append(
+                build_suggestion_message(
+                    "用户要求 replan：请更换策略与工具路径，不要重复相同 action/observation。",
+                ),
+            )
+        return None
+    return _fail_progress_block(
+        turn=turn,
+        deps=deps,
+        evidence=(
+            f"progress_guard blocked ({decision.pattern}): user chose stop or empty; "
+            f"{decision.reason}"
+        ),
+    )
+
+
+def _fail_progress_block(*, turn: int, deps: TurnLoopDependencies, evidence: str) -> RunResult:
+    deps.recorder.transition(RunStatus.FAILED)
+    deps.writer.write_failure_attribution(
+        {
+            "stage": "executing",
+            "category": FailureCategory.LOOP_LIMIT.value,
+            "evidence": evidence,
+        },
+    )
+    return deps.recorder.finish(RunStatus.FAILED)
+
+
+def _normalize_progress_choice(answer: str) -> str:
+    text = " ".join(str(answer or "").strip().lower().split())
+    if text in {"continue", "replan", "stop"}:
+        return text
+    if text.startswith("continue"):
+        return "continue"
+    if text.startswith("replan"):
+        return "replan"
+    if text.startswith("stop"):
+        return "stop"
+    return ""
+
+
+def _build_progress_frame(
+    *,
+    tool_calls: list[ToolCall],
+    tool_results: list[dict[str, Any]],
+    state: TurnLoopState,
+    verification_count_before: int,
+) -> ProgressFrame:
+    pairs: list[tuple[str, dict[str, Any], str, str]] = []
+    has_running_tool = False
+    waiting_approval = False
+    waiting_user_input = False
+    workspace_changed = False
+    for tool_call, tool_result in zip(tool_calls, tool_results):
+        status = str(tool_result.get("status") or "success")
+        execution_state = str(tool_result.get("execution_state") or "")
+        if status == "running" or execution_state in {"running", "pending", "not_started"}:
+            has_running_tool = True
+        if execution_state in {"awaiting_approval", "approval_required"} or tool_result.get("approval_required"):
+            waiting_approval = True
+        if tool_call.name == "request_user_input":
+            waiting_user_input = True
+        pair_status = "error" if status == "error" else "success"
+        pairs.append(
+            (
+                tool_call.name,
+                dict(tool_call.args),
+                _model_visible_observation(tool_result),
+                pair_status,
+            ),
+        )
+        if status != "error" and tool_call.name in {"apply_patch", "apply_patch_set", "file_write"}:
+            workspace_changed = True
+        if status != "error" and tool_result.get("changed_files"):
+            workspace_changed = True
+    verification_progressed = len(state.passed_verification_commands) > verification_count_before
+    return ProgressFrame(
+        pairs=tuple(pairs),
+        workspace_changed=workspace_changed,
+        verification_progressed=verification_progressed,
+        context_chars=_estimate_context_chars(state.messages),
+        has_running_tool=has_running_tool,
+        has_running_worker=bool(state.pending_worker_task_ids),
+        waiting_approval=waiting_approval,
+        waiting_user_input=waiting_user_input,
+    )
+
+
+def _model_visible_observation(result: dict[str, Any]) -> str:
+    visible = result.get("model_visible")
+    if visible is not None:
+        return json.dumps(visible, ensure_ascii=False, sort_keys=True, default=str)
+    skip = {
+        "duration_ms",
+        "duration",
+        "episode_path",
+        "tool_call_id",
+        "response_id",
+        "timestamp",
+    }
+    cleaned = {key: value for key, value in result.items() if key not in skip}
+    return json.dumps(cleaned, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _estimate_context_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        else:
+            total += len(json.dumps(content, ensure_ascii=False, default=str))
+    return total
 
 
 def _dispatch_tool_calls(
@@ -713,7 +995,7 @@ def _dispatch_tool_calls(
         # 串行屏障：写入、外部副作用、交互、高风险与未知工具独占执行
         deps.raise_if_cancelled()
         deps.emit_event(_tool_started_event(turn, tool_call))
-        result = _dispatch_tool_call(tool_call, deps, interaction_handler)
+        result = _dispatch_tool_call(tool_call, deps, interaction_handler, turn=turn)
         results[index] = result
         if result.get("status") == "error":
             stop_remaining = True
@@ -789,7 +1071,7 @@ def _run_read_batch(
         index = batch_indices[0]
         deps.raise_if_cancelled()
         deps.emit_event(_tool_started_event(turn, tool_calls[index]))
-        results[index] = _dispatch_tool_call(tool_calls[index], deps, interaction_handler)
+        results[index] = _dispatch_tool_call(tool_calls[index], deps, interaction_handler, turn=turn)
         return results[index].get("status") == "error"
 
     max_workers = min(deps.max_parallel_read_tools, len(batch_indices))
@@ -818,6 +1100,7 @@ def _run_read_batch(
                     tool_calls[index],
                     deps,
                     interaction_handler,
+                    turn=turn,
                 )
                 in_flight[future] = index
 
@@ -880,12 +1163,15 @@ def _dispatch_tool_call(
     tool_call: ToolCall,
     deps: TurnLoopDependencies,
     interaction_handler: HumanInteractionHandler | None,
+    *,
+    turn: int,
 ) -> dict[str, Any]:
     try:
         return deps.router.dispatch(
             tool_call.name,
             tool_call.args,
             interaction_handler=interaction_handler,
+            turn=turn,
         )
     except RunCancelled:
         raise
@@ -1060,6 +1346,27 @@ def _usage_record(usage: ModelUsage | None) -> dict[str, object] | None:
         "total_tokens": usage.total_tokens,
         "raw_usage_source": usage.raw_source,
     }
+
+
+def _stable_prefix_fingerprint(
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+) -> str:
+    """哈希请求的稳定 system 前缀与工具 schema，不纳入动态历史和运行 ID。"""
+
+    system_prefix: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") != "system":
+            break
+        system_prefix.append(message)
+    payload = json.dumps(
+        {"system_messages": system_prefix, "tool_schemas": tool_schemas},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _gateway_metadata(model_gateway: ModelGateway) -> dict[str, object]:

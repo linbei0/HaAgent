@@ -12,6 +12,7 @@ from dataclasses import replace
 from haagent.models.anthropic import AnthropicMessagesGateway
 from haagent.models.catalog import ModelCatalogProvider
 from haagent.models.google import GoogleGeminiGateway
+from haagent.models.http_transport import ModelHttpTransport, close_model_gateway
 from haagent.models.model_connections import ProviderProfile, ProviderProfileError
 from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models.openai_responses import OpenAIResponsesGateway
@@ -65,29 +66,32 @@ def gateway_from_profile(
     profile: ProviderProfile,
     *,
     retry_controller: RetryController | None = None,
+    http_transport: ModelHttpTransport | None = None,
 ) -> ModelGateway:
     # 空字符串与未配置等价，便于 CLI 临时 profile 回落到环境变量默认值。
-    gateway_kwargs = {
+    gateway_kwargs: dict[str, object] = {
         "api_key": profile.api_key or None,
         "model": profile.model,
         "base_url": profile.base_url or None,
     }
     if retry_controller is not None:
         gateway_kwargs["retry_controller"] = retry_controller
+    if http_transport is not None:
+        gateway_kwargs["http_transport"] = http_transport
     if profile.provider == "openai":
         return OpenAIResponsesGateway(
-            **gateway_kwargs,
+            **gateway_kwargs,  # type: ignore[arg-type]
             require_api_key=profile.runtime_kind == "remote",
         )
     if profile.provider == "openai-chat":
         return OpenAIChatCompletionsGateway(
-            **gateway_kwargs,
+            **gateway_kwargs,  # type: ignore[arg-type]
             require_api_key=profile.runtime_kind == "remote",
         )
     if profile.provider == "anthropic":
-        return AnthropicMessagesGateway(**gateway_kwargs)
+        return AnthropicMessagesGateway(**gateway_kwargs)  # type: ignore[arg-type]
     if profile.provider == "google":
-        return GoogleGeminiGateway(**gateway_kwargs)
+        return GoogleGeminiGateway(**gateway_kwargs)  # type: ignore[arg-type]
     raise GatewayRegistryError(f"unsupported provider in profile: {profile.provider}")
 
 
@@ -98,16 +102,28 @@ def gateway_from_route(
     cloud_fallback_consent: bool = False,
     retry_controller: RetryController | None = None,
     route_event_sink=None,
+    http_transport: ModelHttpTransport | None = None,
 ) -> ModelGateway:
-    """从 settings route 构造协商网关；显式 profile 调用仍使用 gateway_from_profile。"""
+    """从 settings route 构造协商网关；同一 route 共享一个 ModelHttpTransport。"""
+    # route 级共享 transport：primary / chat fallback / model fallback 复用连接池。
+    shared_transport = http_transport or ModelHttpTransport()
+    owns_shared = http_transport is None
     primary = _with_discovered_capabilities(
-        gateway_from_profile(primary_profile, retry_controller=retry_controller),
+        gateway_from_profile(
+            primary_profile,
+            retry_controller=retry_controller,
+            http_transport=shared_transport,
+        ),
         primary_profile,
         protocol="responses" if primary_profile.provider == "openai" else None,
     )
     fallback = (
         _with_discovered_capabilities(
-            gateway_from_profile(fallback_profile, retry_controller=retry_controller),
+            gateway_from_profile(
+                fallback_profile,
+                retry_controller=retry_controller,
+                http_transport=shared_transport,
+            ),
             fallback_profile,
             protocol="responses" if fallback_profile.provider == "openai" else None,
         )
@@ -116,13 +132,18 @@ def gateway_from_route(
     )
     primary_chat = None
     if primary_profile.provider == "openai":
-        primary_chat = _with_discovered_capabilities(OpenAIChatCompletionsGateway(
-            api_key=primary_profile.api_key or None,
-            model=primary_profile.model,
-            base_url=primary_profile.base_url,
-            retry_controller=retry_controller,
-            require_api_key=primary_profile.runtime_kind == "remote",
-        ), primary_profile, protocol="chat_completions")
+        primary_chat = _with_discovered_capabilities(
+            OpenAIChatCompletionsGateway(
+                api_key=primary_profile.api_key or None,
+                model=primary_profile.model,
+                base_url=primary_profile.base_url,
+                retry_controller=retry_controller,
+                require_api_key=primary_profile.runtime_kind == "remote",
+                http_transport=shared_transport,
+            ),
+            primary_profile,
+            protocol="chat_completions",
+        )
     return NegotiatingModelGateway(
         primary=primary,
         primary_chat=primary_chat,
@@ -133,6 +154,7 @@ def gateway_from_route(
         route_event_sink=route_event_sink,
         primary_connection=primary_profile.name.split(":", 1)[0],
         fallback_connection=(fallback_profile.name.split(":", 1)[0] if fallback_profile else None),
+        http_transport=shared_transport if owns_shared else None,
     )
 
 
@@ -150,6 +172,10 @@ class _CapabilityOverrideGateway:
 
     def generate(self, *args, **kwargs):
         return self._gateway.generate(*args, **kwargs)
+
+    def close(self) -> None:
+        # 包装层转发 close，确保 route 关闭时底层 provider gateway 也能释放资源。
+        close_model_gateway(self._gateway)
 
 
 def _with_discovered_capabilities(

@@ -90,6 +90,7 @@ from haagent.context.compression.session_memory import (
 )
 from haagent.runtime.session.working_state import (
     update_working_state,
+    working_state_from_dict,
     write_working_state,
 )
 from haagent.runtime.session.task_ledger import (
@@ -146,6 +147,9 @@ class AgentSession:
         mcp_runtime: Any | None = None,
         worker_context: dict[str, object] | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
+        skill_catalog: Any | None = None,
+        instruction_cache: Any | None = None,
+        tool_schema_cache: Any | None = None,
     ) -> None:
         state = build_create_state(
             workspace_root=workspace_root,
@@ -167,6 +171,10 @@ class AgentSession:
             worker_permission_requester=worker_permission_requester,
         )
         apply_state(self, state)
+        # cache services 不属于 session package，由 AssistantService 注入并跨 turn 复用。
+        self._skill_catalog = skill_catalog
+        self._instruction_cache = instruction_cache
+        self._tool_schema_cache = tool_schema_cache
         self._write_session_metadata()
         self._write_working_state()
         self._write_task_ledger()
@@ -189,6 +197,9 @@ class AgentSession:
         mcp_settings: Any | None = None,
         mcp_tool_names: list[str] | None = None,
         owns_mcp_runtime: bool | None = None,
+        skill_catalog: Any | None = None,
+        instruction_cache: Any | None = None,
+        tool_schema_cache: Any | None = None,
     ) -> "AgentSession":
         state = build_resume_state(
             session,
@@ -208,6 +219,9 @@ class AgentSession:
         )
         instance = cls.__new__(cls)
         apply_state(instance, state)
+        instance._skill_catalog = skill_catalog
+        instance._instruction_cache = instruction_cache
+        instance._tool_schema_cache = tool_schema_cache
         return instance
 
     def reload(
@@ -226,11 +240,13 @@ class AgentSession:
         """把磁盘 session package 装入当前实例，复用 MCP/tool registry（可选换 gateway）。"""
         if self._current_cancellation_token is not None:
             raise ChatSessionError("current task is running")
+        previous_gateway = self.model_gateway
         # 未显式传入的字段保持当前 live session 值，避免误清 max_turns/web。
+        next_gateway = self.model_gateway if model_gateway is None else model_gateway
         state = build_resume_state(
             session,
             runs_root=self.runs_root if runs_root is None else runs_root,
-            model_gateway=self.model_gateway if model_gateway is None else model_gateway,
+            model_gateway=next_gateway,
             model_profile_name=self.model_profile_name if model_profile_name is None else model_profile_name,
             model_connection_id=self.model_connection_id if model_connection_id is None else model_connection_id,
             model_name=self.model_name if model_name is None else model_name,
@@ -244,6 +260,11 @@ class AgentSession:
             owns_mcp_runtime=self._owns_mcp_runtime,
         )
         apply_state(self, state)
+        # profile 变更时关闭旧 route；复用同一 gateway 时不关闭。
+        if previous_gateway is not None and previous_gateway is not next_gateway:
+            from haagent.models.http_transport import close_model_gateway
+
+            close_model_gateway(previous_gateway)
 
     def set_max_turns(self, max_turns: int | None) -> None:
         self.max_turns = max_turns
@@ -317,6 +338,10 @@ class AgentSession:
         if started_event is not None:
             on_runtime_event(started_event)
         try:
+            # prompt 接收点建立单一 trace，覆盖 submit_to_run_start。
+            from haagent.runtime.performance import PerformanceTrace
+
+            performance_trace = PerformanceTrace.start()
             result = ChatTurnRunner().run(
                 ChatTurnRequest(
                     prompt=clean_prompt,
@@ -348,6 +373,11 @@ class AgentSession:
                     attachments=prompt_attachments,
                     image_attachment_history=self._image_attachment_history,
                     session_interaction_state=self._session_interaction_state,
+                    performance_trace=performance_trace,
+                    skill_catalog=self._skill_catalog,
+                    instruction_cache=self._instruction_cache,
+                    tool_schema_cache=self._tool_schema_cache,
+                    working_state_sink=self._persist_progress_working_state,
                 ),
             )
         except Exception:
@@ -490,12 +520,40 @@ class AgentSession:
     ) -> None:
         if self._current_cancellation_token is not None:
             raise ChatSessionError("current task is running")
+        # 仅在成功安装新 gateway 后关闭旧 route，安装失败时保留旧连接可用。
+        previous = self.model_gateway
+        previous_selection = (
+            self.model_profile_name,
+            self.model_connection_id,
+            self.model_name,
+            self.model_base_url,
+        )
         self.model_gateway = gateway
         self.model_profile_name = profile_name
         self.model_connection_id = model_connection_id
         self.model_name = model
         self.model_base_url = base_url
-        self._write_session_metadata()
+        try:
+            self._write_session_metadata()
+        except Exception as error:
+            self.model_gateway = previous
+            (
+                self.model_profile_name,
+                self.model_connection_id,
+                self.model_name,
+                self.model_base_url,
+            ) = previous_selection
+            from haagent.models.http_transport import close_model_gateway
+
+            try:
+                close_model_gateway(gateway)
+            except Exception as close_error:
+                error.add_note(f"failed to close rejected model gateway: {close_error}")
+            raise
+        if previous is not None and previous is not gateway:
+            from haagent.models.http_transport import close_model_gateway
+
+            close_model_gateway(previous)
 
     def add_external_root(self, path: Path, access: PathAccess) -> None:
         self.path_policy = with_external_root_added(self.path_policy, self.workspace_root, path, access)
@@ -633,11 +691,17 @@ class AgentSession:
         write_task_ledger(self.session_path / "task-ledger.json", self._task_ledger)
 
     def close(self) -> None:
+        # 先取消 active run，再幂等关闭 gateway/MCP，避免关闭后仍有请求占用连接。
+        self.cancel_current_run()
         try:
             store = TeamStore(user_config_dir() / "teams")
             for team in store.list_teams_for_leader(self.session_id):
                 store.mark_inactive(team.team_id)
         finally:
+            from haagent.models.http_transport import close_model_gateway
+
+            if self.model_gateway is not None:
+                close_model_gateway(self.model_gateway)
             if self._owns_mcp_runtime:
                 self._mcp_runtime.close()
 
@@ -789,6 +853,12 @@ class AgentSession:
     def _write_working_state(self) -> None:
         self.session_path.mkdir(parents=True, exist_ok=True)
         write_working_state(self.session_path / "working_state.json", self._working_state)
+
+    def _persist_progress_working_state(self, value: dict[str, object]) -> None:
+        """ProgressGuard 进入等待前同步写 session working state，保证中断后可恢复。"""
+
+        self._working_state = working_state_from_dict(value)
+        self._write_working_state()
 
     def _write_session_metadata(self) -> None:
         first_request = "none"

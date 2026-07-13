@@ -98,17 +98,26 @@ def test_parse_openai_chat_stream_calls_on_delta_before_response_ends() -> None:
 
 
 def test_iter_sse_events_skips_done_and_parses_multi_data_lines() -> None:
-    response = [
+    # 多 data 行按 SSE 规范用 \n 拼接；拼后必须仍是合法 JSON 对象。
+    multi_data = [
         b'data: {"a": 1}\n',
         b"\n",
-        b"data: [DONE]\n",
-        b"\n",
-        # 多 data 行按 SSE 规范用 \n 拼接；拼后必须仍是合法 JSON 对象。
         b'data: {"text": "line1",\n',
         b'data: "num": 2}\n',
         b"\n",
     ]
-    assert list(transport._iter_sse_events(response)) == [{"a": 1}, {"text": "line1", "num": 2}]
+    assert list(transport._iter_sse_events(multi_data)) == [{"a": 1}, {"text": "line1", "num": 2}]
+
+    # [DONE] 终止后续消费，不再 yield 之后的事件。
+    with_done = [
+        b'data: {"a": 1}\n',
+        b"\n",
+        b"data: [DONE]\n",
+        b"\n",
+        b'data: {"late": true}\n',
+        b"\n",
+    ]
+    assert list(transport._iter_sse_events(with_done)) == [{"a": 1}]
 
 
 def test_iter_sse_events_handles_chunk_that_includes_event_separator() -> None:
@@ -122,3 +131,19 @@ def test_iter_sse_events_handles_chunk_that_includes_event_separator() -> None:
         {"choices": [{"delta": {"content": "Hi"}}]},
         {"choices": [{"delta": {"content": "!"}}]},
     ]
+
+
+def test_iter_sse_events_supports_cr_only_separator() -> None:
+    """SSE 允许 \\r\\r 作为 event 边界；旧实现只认 \\n 会吞掉事件。"""
+
+    response = [b'data: {"id": "cr"}\r\r']
+    assert list(transport._iter_sse_events(response)) == [{"id": "cr"}]
+
+
+def test_iter_sse_events_supports_utf8_split_across_chunks() -> None:
+    """跨 chunk 切开的 UTF-8 多字节字符必须增量解码，不能整块 .decode 失败。"""
+
+    payload = 'data: {"text": "中"}\n\n'.encode("utf-8")
+    split_at = payload.index(b"\xe4") + 1
+    response = [payload[:split_at], payload[split_at:]]
+    assert list(transport._iter_sse_events(response)) == [{"text": "中"}]

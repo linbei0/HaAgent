@@ -192,6 +192,22 @@ def test_runtime_ui_event_handler_updates_assistant_stream() -> None:
 
 def test_assistant_delta_does_not_trigger_full_refresh() -> None:
     app = FakeRuntimeEventApp()
+    status_calls = 0
+    keyring_calls = 0
+
+    def _status() -> None:
+        nonlocal status_calls
+        status_calls += 1
+        raise AssertionError("workspace.status must not run on AssistantDeltaEvent")
+
+    def _keyring(*_args, **_kwargs):
+        nonlocal keyring_calls
+        keyring_calls += 1
+        raise AssertionError("keyring must not run on AssistantDeltaEvent")
+
+    # 热路径负面断言：handler 不得读 status/keyring；只调度 streaming refresh。
+    app.service = type("Svc", (), {"workspace": type("Ws", (), {"status": staticmethod(_status)})()})()
+    app.get_password = _keyring
 
     handle_runtime_ui_event(app, AssistantDeltaEvent("session-1", 1, 1, "a"))
     handle_runtime_ui_event(app, AssistantDeltaEvent("session-1", 1, 1, "b"))
@@ -199,6 +215,8 @@ def test_assistant_delta_does_not_trigger_full_refresh() -> None:
     assert app.assistant_deltas == [(1, "a"), (1, "b")]
     assert app.refreshes == 0
     assert app.streaming_refresh_schedules == 2
+    assert status_calls == 0
+    assert keyring_calls == 0
 
 
 def test_runtime_ui_event_handler_routes_intermediate_assistant_message() -> None:

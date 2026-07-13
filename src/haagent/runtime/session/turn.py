@@ -20,9 +20,12 @@ from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, serialize_path_policy
 from haagent.runtime.orchestration.recorder import RunResult
+from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.session.chat_task_contract import build_chat_task_contract
 from haagent.skills import load_skill_registry
+from haagent.skills.catalog import SkillCatalogService
+from haagent.skills.settings import load_skill_settings
 from haagent.tools.registry import ToolRuntimeRegistry
 from haagent.tools.presentation import summarize_tool_args, summarize_tool_result
 
@@ -70,6 +73,11 @@ class OrchestratorFactory(Protocol):
         leader_session_id: str | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
         session_interaction_state: SessionInteractionState | None = None,
+        performance_trace: PerformanceTrace | None = None,
+        skill_catalog: SkillCatalogService | None = None,
+        instruction_cache: object | None = None,
+        tool_schema_cache: object | None = None,
+        working_state_sink: Callable[[dict[str, object]], None] | None = None,
     ):
         ...
 
@@ -106,6 +114,11 @@ class ChatTurnRequest:
     attachments: list[ImageAttachment] = field(default_factory=list)
     image_attachment_history: list[ImageAttachment] = field(default_factory=list)
     session_interaction_state: SessionInteractionState | None = None
+    performance_trace: PerformanceTrace | None = None
+    skill_catalog: SkillCatalogService | None = None
+    instruction_cache: object | None = None
+    tool_schema_cache: object | None = None
+    working_state_sink: Callable[[dict[str, object]], None] | None = None
 
 
 class ChatTurnRunner:
@@ -132,6 +145,7 @@ class ChatTurnRunner:
                 worker_context=request.worker_context,
                 attachments=request.attachments,
                 image_attachment_history=request.image_attachment_history,
+                skill_catalog=request.skill_catalog,
             )
             orchestrator = request.orchestrator_factory(
                 runs_root=request.runs_root,
@@ -150,6 +164,11 @@ class ChatTurnRunner:
                 leader_session_id=request.leader_session_id,
                 worker_permission_requester=request.worker_permission_requester,
                 session_interaction_state=request.session_interaction_state,
+                performance_trace=request.performance_trace,
+                skill_catalog=request.skill_catalog,
+                instruction_cache=request.instruction_cache,
+                tool_schema_cache=request.tool_schema_cache,
+                working_state_sink=request.working_state_sink,
             )
             return orchestrator.run(task_path)
 
@@ -170,6 +189,7 @@ def write_chat_task_yaml(
     worker_context: dict[str, object] | None = None,
     attachments: list[ImageAttachment] | None = None,
     image_attachment_history: list[ImageAttachment] | None = None,
+    skill_catalog: SkillCatalogService | None = None,
 ) -> None:
     mcp_tools = list(mcp_tool_names or [])
     if allowed_tools_override is None:
@@ -178,7 +198,11 @@ def write_chat_task_yaml(
             allowed_tools.append("load_image_attachment")
         if enable_web:
             allowed_tools.extend(CHAT_WEB_TOOLS)
-        if load_skill_registry(workspace_root=workspace_root).list_skills():
+        if skill_catalog is not None:
+            has_skills = bool(skill_catalog.snapshot(workspace_root, load_skill_settings()).skills)
+        else:
+            has_skills = bool(load_skill_registry(workspace_root=workspace_root).list_skills())
+        if has_skills:
             allowed_tools.extend(CHAT_SKILL_TOOLS)
         if mcp_tools:
             allowed_tools.extend(mcp_tools)

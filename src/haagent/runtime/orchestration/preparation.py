@@ -36,6 +36,7 @@ class RunSetup:
 class PreparedMessages:
     context_id: str
     messages: list[dict[str, Any]]
+    cache_diagnostics: dict[str, dict[str, object]]
 
 
 def prepare_run_setup(
@@ -103,6 +104,8 @@ def prepare_initial_messages(
     interaction_resolver: HumanInteractionResolver,
     task_ledger: dict[str, object] | None = None,
     tool_registry: ToolRuntimeRegistry | None = None,
+    instruction_cache: object | None = None,
+    skill_catalog: object | None = None,
 ) -> PreparedMessages:
     writer.write_environment(
         workspace_root,
@@ -126,6 +129,8 @@ def prepare_initial_messages(
             derive_compression_budget(_gateway_metadata(model_gateway, provider_name)),
         ),
         tool_registry=tool_registry,
+        instruction_cache=instruction_cache,
+        skill_catalog=skill_catalog,
     ).build()
     if context.manifest.full_compact_contract is not None:
         writer.append_transcript(
@@ -162,7 +167,14 @@ def prepare_initial_messages(
             )
         write_full_compact_manifest_result(writer, context.context_id, full_compact_result.manifest)
         messages = full_compact_result.messages
-    return PreparedMessages(context_id=context.context_id, messages=messages)
+    source_diagnostics = getattr(context.manifest, "source_diagnostics", {})
+    raw_cache = source_diagnostics.get("cache", {}) if isinstance(source_diagnostics, dict) else {}
+    cache_diagnostics = raw_cache if isinstance(raw_cache, dict) else {}
+    return PreparedMessages(
+        context_id=context.context_id,
+        messages=messages,
+        cache_diagnostics=cache_diagnostics,
+    )
 
 
 def _gateway_metadata(model_gateway: ModelGateway, provider_name: str):

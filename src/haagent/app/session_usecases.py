@@ -145,6 +145,9 @@ class AssistantSessions:
                     model_base_url=profile.base_url,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
+                    skill_catalog=self._context.skill_catalog,
+                    instruction_cache=self._context.instruction_cache,
+                    tool_schema_cache=self._context.tool_schema_cache,
                 )
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
@@ -182,6 +185,9 @@ class AssistantSessions:
                     model_base_url=profile.base_url,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
+                    skill_catalog=self._context.skill_catalog,
+                    instruction_cache=self._context.instruction_cache,
+                    tool_schema_cache=self._context.tool_schema_cache,
                 )
         except Exception as error:
             raise AssistantServiceError(str(error)) from error

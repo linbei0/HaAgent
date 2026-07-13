@@ -6,8 +6,10 @@ src/haagent/models/gateway_retry.py - 模型网关重试适配
 
 from __future__ import annotations
 
+import time
 from typing import Callable, TypeVar
 
+from haagent.models.telemetry import ModelTransportEvent
 from haagent.models.types import ModelCallError, ModelFailureDetails
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.retry import (
@@ -34,20 +36,60 @@ def execute_model_request(
     controller: RetryController,
     *,
     provider: str,
-    invoke: Callable[[Callable[[str], None] | None], ResultT],
+    invoke: Callable[[Callable[[str], None] | None, int], ResultT],
     event_sink: Callable[[str], None] | None,
     cancellation_token: CancellationToken | None,
     retry_event_sink: Callable[[RetryEvent], None] | None,
     retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
+    telemetry_sink: Callable[[ModelTransportEvent], None] | None = None,
 ) -> ResultT:
     """执行一次模型请求；流式首个 delta 后将失败标记为不可重放。"""
 
+    # 控制器持有同一对象；attempt 间只重置 committed，避免重放已展示文本。
     stream_state = StreamAttemptState() if event_sink is not None else None
+    attempt = 0
+    attempt_started_at = 0.0
+    first_text_emitted = False
+
+    def publish(kind: str, *, request_payload_bytes: int | None = None) -> None:
+        if telemetry_sink is None:
+            return
+        elapsed_ms = max(0.0, (time.perf_counter() - attempt_started_at) * 1000.0)
+        telemetry_sink(
+            ModelTransportEvent(
+                kind=kind,  # type: ignore[arg-type]
+                attempt=attempt,
+                elapsed_ms=elapsed_ms,
+                request_payload_bytes=request_payload_bytes,
+            ),
+        )
 
     def invoke_attempt() -> ResultT:
-        if event_sink is None or stream_state is None:
-            return invoke(None)
-        return invoke(stream_delta_sink(stream_state, event_sink))
+        nonlocal attempt, attempt_started_at, first_text_emitted
+        attempt += 1
+        attempt_started_at = time.perf_counter()
+        first_text_emitted = False
+        if stream_state is not None:
+            stream_state.committed = False
+        publish("attempt_started")
+        try:
+            if event_sink is None or stream_state is None:
+                result = invoke(None, attempt)
+            else:
+                def on_delta(delta: str) -> None:
+                    nonlocal first_text_emitted
+                    if delta and not first_text_emitted:
+                        first_text_emitted = True
+                        publish("first_text")
+                    assert stream_state is not None
+                    stream_state.emit(delta, event_sink)
+
+                result = invoke(on_delta, attempt)
+        except Exception:
+            publish("attempt_failed")
+            raise
+        publish("attempt_finished")
+        return result
 
     scheduled_attempts = 0
 

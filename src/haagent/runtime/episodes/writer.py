@@ -69,6 +69,14 @@ class EpisodeWriter:
     def write_plan(self, plan: dict[str, Any]) -> None:
         self._write_json("plan.json", plan)
 
+    def write_performance(self, value: dict[str, Any]) -> None:
+        """写入可选 performance.json；失败必须显式暴露 artifact 名称。"""
+
+        try:
+            self._write_json("performance.json", value)
+        except OSError as error:
+            raise RuntimeError(f"failed to write performance.json: {error}") from error
+
     def write_episode_metadata(
         self,
         status: str,

@@ -1044,3 +1044,104 @@ def test_load_validated_episode_package_returns_parsed_jsonl_lists(tmp_path: Pat
     assert all(isinstance(record, dict) for record in package_view.tool_calls)
     assert isinstance(package_view.verification_commands, list)
     assert all(isinstance(record, dict) for record in package_view.verification_commands)
+
+
+def _valid_performance_payload() -> dict[str, object]:
+    return {
+        "performance_schema_version": "1.0",
+        "submit_to_run_start_ms": None,
+        "run_setup_ms": 1.0,
+        "context_build_ms": 1.0,
+        "model_turns": [
+            {
+                "turn": 1,
+                "message_count": 1,
+                "visible_tool_count": 0,
+                "tool_schema_bytes": 0,
+                "stable_prefix_fingerprint": "sha256:" + ("0" * 64),
+                "input_tokens": None,
+                "attempt_count": 1,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "request_payload_bytes": 0,
+                        "request_to_headers_ms": None,
+                        "time_to_first_sse_ms": None,
+                        "time_to_first_text_ms": None,
+                        "stream_duration_ms": None,
+                        "total_model_call_ms": 0.0,
+                        "status": "completed",
+                    }
+                ],
+            }
+        ],
+        "tools": [],
+        "cache_diagnostics": {
+            "skills": {
+                "status": "hit",
+                "count": 1,
+                "chars": 20,
+                "fingerprint": "sha256:" + ("a" * 64),
+            }
+        },
+        "postprocess_ms": 0.5,
+        "total_turn_ms": 2.0,
+        "status": "completed",
+        "dropped": {"model_turns": 0, "model_attempts": 0, "tools": 0},
+    }
+
+
+def test_package_validator_accepts_optional_performance_json(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    write_json(result.episode_path / "performance.json", _valid_performance_payload())
+
+    validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_performance_with_sensitive_fields(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    payload = _valid_performance_payload()
+    payload["prompt"] = "secret user text"
+    write_json(result.episode_path / "performance.json", payload)
+
+    with pytest.raises(EpisodeValidationError, match="performance.json contains forbidden field: prompt"):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_performance_negative_duration(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    payload = _valid_performance_payload()
+    payload["run_setup_ms"] = -1.0
+    write_json(result.episode_path / "performance.json", payload)
+
+    with pytest.raises(EpisodeValidationError, match="run_setup_ms must be a non-negative"):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_rejects_invalid_cache_diagnostic_status(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    payload = _valid_performance_payload()
+    payload["cache_diagnostics"]["skills"]["status"] = "stale"
+    write_json(result.episode_path / "performance.json", payload)
+
+    with pytest.raises(EpisodeValidationError, match="cache_diagnostics.skills.status"):
+        validate_episode_package(result.episode_path)
+
+
+def test_package_validator_allows_missing_performance_json(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    write_task(task_path)
+    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
+    performance_path = result.episode_path / "performance.json"
+    # orchestrator 现在会写入 performance.json；校验器仍须接受历史缺失 artifact
+    if performance_path.exists():
+        performance_path.unlink()
+    validate_episode_package(result.episode_path)

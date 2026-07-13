@@ -10,12 +10,14 @@ import os
 from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
+from haagent.models.http_transport import ModelHttpTransport
 from haagent.models.transport import (
     _anthropic_stream_transport,
     _anthropic_transport,
     _endpoint_base_url,
     _image_base64,
     _image_mime_type,
+    _invoke_transport,
     _normalize_anthropic_messages_endpoint,
     _parse_tool_arguments,
     _redact_url,
@@ -33,6 +35,7 @@ from haagent.models.types import (
 from haagent.models.capabilities import ModelCapabilities
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
+
 
 def _anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
     system_parts: list[str] = []
@@ -228,13 +231,56 @@ class AnthropicMessagesGateway:
         transport: AnthropicTransport | None = None,
         stream_transport: AnthropicStreamTransport | None = None,
         retry_controller: RetryController | None = None,
+        http_transport: ModelHttpTransport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._model = model
         self._messages_endpoint = _normalize_anthropic_messages_endpoint(base_url)
-        self._transport = transport or _anthropic_transport
-        self._stream_transport = stream_transport or _anthropic_stream_transport
+        # 仅在需要默认 HTTP path 时创建/绑定 transport；外部注入不越权关闭。
+        self._owns_http_transport = False
+        self._http_transport: ModelHttpTransport | None = http_transport
+        needs_default_http = transport is None or stream_transport is None
+        if needs_default_http and self._http_transport is None:
+            self._http_transport = ModelHttpTransport()
+            self._owns_http_transport = True
+        bound = self._http_transport
+        if transport is None:
+            self._transport = (
+                lambda payload, api_key, endpoint, *, attempt=1, telemetry_sink=None: _anthropic_transport(
+                    payload,
+                    api_key,
+                    endpoint,
+                    http_transport=bound,
+                    attempt=attempt,
+                    telemetry_sink=telemetry_sink,
+                )
+            )
+        else:
+            self._transport = transport
+        if stream_transport is None:
+            self._stream_transport = (
+                lambda payload, api_key, endpoint, on_delta, *, attempt=1, telemetry_sink=None: (
+                    _anthropic_stream_transport(
+                        payload,
+                        api_key,
+                        endpoint,
+                        on_delta,
+                        http_transport=bound,
+                        attempt=attempt,
+                        telemetry_sink=telemetry_sink,
+                    )
+                )
+            )
+        else:
+            self._stream_transport = stream_transport
         self._retry_controller = default_retry_controller(retry_controller)
+
+    def close(self) -> None:
+        """仅关闭自身创建的共享 transport；注入资源保持外部所有权。"""
+
+        if self._owns_http_transport and self._http_transport is not None:
+            self._http_transport.close()
+            self._owns_http_transport = False
 
     @property
     def messages_endpoint(self) -> str:
@@ -257,6 +303,7 @@ class AnthropicMessagesGateway:
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
+        telemetry_sink=None,
     ) -> ModelResponse:
         """调用 Anthropic Messages API，并归一化为统一 ModelResponse。"""
         if not self._api_key:
@@ -278,15 +325,21 @@ class AnthropicMessagesGateway:
             response = execute_model_request(
                 self._retry_controller,
                 provider=self.provider_name,
-                invoke=lambda on_delta: (
-                    self._stream_transport(payload, self._api_key, self._messages_endpoint, on_delta)
-                    if on_delta is not None
-                    else self._transport(payload, self._api_key, self._messages_endpoint)
+                invoke=lambda on_delta, attempt: _invoke_transport(
+                    self._transport,
+                    self._stream_transport,
+                    payload,
+                    self._api_key,
+                    self._messages_endpoint,
+                    on_delta=on_delta,
+                    attempt=attempt,
+                    telemetry_sink=telemetry_sink,
                 ),
                 event_sink=event_sink,
                 cancellation_token=cancellation_token,
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
+                telemetry_sink=telemetry_sink,
             )
         except ModelCallError:
             raise

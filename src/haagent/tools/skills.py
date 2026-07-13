@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.skills import SkillSettings, discover_project_skill_dirs, is_project_root_trusted, load_skill_registry
+from haagent.skills.catalog import SkillCatalogService
 from haagent.skills.settings import load_skill_settings
 from haagent.tools.base import tool_error
 
@@ -18,14 +19,19 @@ def skill_list(
     args: dict[str, Any],
     workspace_root: Path,
     skill_settings: SkillSettings | None = None,
+    *,
+    skill_catalog: SkillCatalogService | None = None,
 ) -> dict[str, Any]:
     query = str(args.get("query", "")).strip().lower()
     source_filter = str(args.get("source", "")).strip()
     max_results = _max_results(args.get("max_results"))
     settings = skill_settings or load_skill_settings()
-    registry = load_skill_registry(workspace_root=workspace_root, settings=settings)
+    if skill_catalog is not None:
+        skills_iter = skill_catalog.snapshot(workspace_root, settings).skills
+    else:
+        skills_iter = load_skill_registry(workspace_root=workspace_root, settings=settings).list_skills()
     skills = []
-    for skill in registry.list_skills():
+    for skill in skills_iter:
         if source_filter and skill.source != source_filter:
             continue
         haystack = f"{skill.name}\n{skill.description}\n{skill.command_name or ''}".lower()
@@ -55,13 +61,17 @@ def skill_read(
     workspace_root: Path,
     skill_settings: SkillSettings | None = None,
     *,
+    skill_catalog: SkillCatalogService | None = None,
     user_invoked: bool = False,
 ) -> dict[str, Any]:
     name = str(args.get("name", "")).strip()
     if not name:
         return tool_error("skill_name_required", "skill name is required")
     settings = skill_settings or load_skill_settings()
-    registry = load_skill_registry(workspace_root=workspace_root, settings=settings)
+    if skill_catalog is not None:
+        registry = skill_catalog.snapshot(workspace_root, settings).as_registry()
+    else:
+        registry = load_skill_registry(workspace_root=workspace_root, settings=settings)
     skill = registry.get(name)
     if skill is None:
         return tool_error("skill_not_found", f"skill not found: {name}")

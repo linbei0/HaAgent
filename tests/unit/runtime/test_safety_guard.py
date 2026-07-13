@@ -19,15 +19,12 @@ def _error(tool_name: str, args: dict, error_type: str = "tool_error") -> dict:
 
 # --- 死循环检测 ---
 
-def test_identical_calls_three_times_aborts() -> None:
+def test_identical_calls_no_longer_abort() -> None:
+    """相同参数循环终止已迁至 ProgressGuard，SafetyGuard 不再 abort。"""
     guard = SafetyGuard()
-    for i in range(2):
+    for _ in range(5):
         violation = guard.check("file_read", {"path": "README.md"}, _success("file_read", {}))
         assert violation is None
-    violation = guard.check("file_read", {"path": "README.md"}, _success("file_read", {}))
-    assert violation is not None
-    assert violation.type == "tool_loop"
-    assert violation.should_abort is True
 
 
 def test_different_paths_not_flagged_as_loop() -> None:

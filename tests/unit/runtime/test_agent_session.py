@@ -414,3 +414,43 @@ def test_edit_diff_session_always_persists_on_resume_not_new_session(
     assert session._session_interaction_state.edit_diff_session_always is False
     new_meta = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
     assert new_meta.get("edit_diff_session_always") is False
+def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_gateway() -> None:
+    class Gateway:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    previous = Gateway()
+    rejected = Gateway()
+    session = object.__new__(AgentSession)
+    session._current_cancellation_token = None
+    session.model_gateway = previous
+    session.model_profile_name = "old-profile"
+    session.model_connection_id = "old-connection"
+    session.model_name = "old-model"
+    session.model_base_url = "https://old.invalid"
+
+    def fail_metadata_write() -> None:
+        raise OSError("disk full")
+
+    session._write_session_metadata = fail_metadata_write
+
+    with pytest.raises(OSError, match="disk full"):
+        session.switch_model_gateway(
+            profile_name="new-profile",
+            model_connection_id="new-connection",
+            provider="openai",
+            model="new-model",
+            base_url="https://new.invalid",
+            gateway=rejected,
+        )
+
+    assert session.model_gateway is previous
+    assert session.model_profile_name == "old-profile"
+    assert session.model_connection_id == "old-connection"
+    assert session.model_name == "old-model"
+    assert session.model_base_url == "https://old.invalid"
+    assert rejected.closed is True
+    assert previous.closed is False

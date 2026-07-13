@@ -31,6 +31,7 @@ from haagent.runtime.execution.policy import (
 from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
+from haagent.skills.catalog import SkillCatalogService
 from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
 from haagent.tools.file_tools import apply_patch, apply_patch_set, file_write
 from haagent.tools.handler_factory import build_static_tool_handlers
@@ -42,6 +43,9 @@ from haagent.tools.registry import (
     default_tool_runtime_registry,
     validate_tool_registry,
 )
+
+# turn, tool_name, duration_ms, execution_effect, status — 不进入 model-visible result。
+ToolPerformanceSink = Callable[[int, str, float, str, str], None]
 
 
 class ToolRouter:
@@ -62,6 +66,8 @@ class ToolRouter:
         sandbox_backend: SandboxBackend | None = None,
         image_attachment_history: list[ImageAttachment] | None = None,
         retry_controller: RetryController | None = None,
+        performance_sink: ToolPerformanceSink | None = None,
+        skill_catalog: SkillCatalogService | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -76,6 +82,7 @@ class ToolRouter:
         self._agent_runtime = agent_runtime
         self._worker_permission_requester = worker_permission_requester
         self._sandbox_backend = sandbox_backend
+        self._performance_sink = performance_sink
         self._image_attachment_history = {
             attachment.id: attachment
             for attachment in image_attachment_history or []
@@ -88,6 +95,7 @@ class ToolRouter:
             cancellation_token=self._cancellation_token,
             mcp_runtime=self._mcp_runtime,
             sandbox_backend=self._sandbox_backend,
+            skill_catalog=skill_catalog,
             router_handlers={
                 "fake_tool": self._fake_tool,
                 "load_image_attachment": self._load_image_attachment,
@@ -116,6 +124,8 @@ class ToolRouter:
         tool_name: str,
         args: dict[str, Any],
         interaction_handler: HumanInteractionHandler | None = None,
+        *,
+        turn: int | None = None,
     ) -> dict[str, Any]:
         """执行工具并保证每次调用都写入 tool-calls.jsonl。"""
         started = time.perf_counter()
@@ -169,13 +179,29 @@ class ToolRouter:
                     )
         except RunCancelled as error:
             result = tool_error(type(error).__name__, str(error))
-            self._write_trace(tool_name, args, result, started, policy_decision, guardrail_result)
+            self._write_trace(
+                tool_name,
+                args,
+                result,
+                started,
+                policy_decision,
+                guardrail_result,
+                turn=turn,
+            )
             raise
         except Exception as error:
             result = tool_error(type(error).__name__, str(error))
 
         result = self._prepare_model_visible_result(tool_name, result)
-        self._write_trace(tool_name, args, result, started, policy_decision, guardrail_result)
+        self._write_trace(
+            tool_name,
+            args,
+            result,
+            started,
+            policy_decision,
+            guardrail_result,
+            turn=turn,
+        )
         return result
 
     def raise_for_error(self, result: dict[str, Any]) -> None:
@@ -212,6 +238,7 @@ class ToolRouter:
             policy_decision=None,
             guardrail_result=None,
             duration_seconds=0.0,
+            turn=None,
         )
         return result
 
@@ -492,6 +519,7 @@ class ToolRouter:
         policy_decision: PolicyDecision | None,
         guardrail_result: GuardrailResult | None,
         duration_seconds: float | None = None,
+        turn: int | None = None,
     ) -> None:
         trace_result = _result_for_trace(result)
         # 未启动调用强制 duration=0；真实 dispatch 仍用 wall-clock
@@ -517,6 +545,18 @@ class ToolRouter:
                 "duration_seconds": measured,
             },
         )
+        # 仅 orchestrator 传入 turn 时记 model-turn 性能；不改 model-visible result。
+        if self._performance_sink is not None and turn is not None:
+            execution_effect = "unknown"
+            if self._tool_registry.has(tool_name):
+                execution_effect = self._tool_registry.get(tool_name).execution_effect
+            self._performance_sink(
+                turn,
+                tool_name,
+                measured * 1000.0,
+                execution_effect,
+                str(result.get("status", "unknown")),
+            )
 
 
 def _validate_args(

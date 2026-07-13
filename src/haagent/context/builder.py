@@ -55,7 +55,9 @@ from haagent.runtime.session.task_ledger import (
     TaskLedgerError,
     format_task_ledger_for_model,
 )
+from haagent.context.instruction_cache import InstructionCache
 from haagent.skills import discover_project_skill_dirs, is_project_root_trusted, load_skill_registry, load_skill_settings
+from haagent.skills.catalog import SkillCatalogService
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 
 
@@ -118,6 +120,8 @@ class ContextBuilder:
         interaction_state: list[dict] | None = None,
         compaction_budget: ContextBudget | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
+        instruction_cache: InstructionCache | None = None,
+        skill_catalog: SkillCatalogService | None = None,
     ) -> None:
         self._task = task
         self._workspace_root = workspace_root
@@ -133,6 +137,10 @@ class ContextBuilder:
         self._compaction_budget = compaction_budget or ContextBudget()
         self._selection_budget = selection_budget_for_initial_audit(self._compaction_budget)
         self._tool_registry = tool_registry or default_tool_runtime_registry()
+        # 未注入时使用 builder 私有实例，保证 advanced/CI 入口仍可工作。
+        self._instruction_cache = instruction_cache or InstructionCache()
+        self._skill_catalog = skill_catalog
+        self._cache_diagnostics: dict[str, dict[str, object]] = {}
 
     def build(self) -> BuiltContext:
         """构建初始对话消息（system + task），写入 contexts/ 快照。"""
@@ -196,6 +204,15 @@ class ContextBuilder:
             summary_count=_session_trigger_count(self._session_summary, self._session_compaction),
             recent_microcompact=self._historical_tool_compression_count > 0,
         )
+        source_diagnostics = _source_diagnostics(
+            session_summary=self._session_summary,
+            memory_manifest=self._memory_manifest(),
+            memory_navigation_diagnostics=self._memory_navigation_result().diagnostics,
+            compaction=compaction,
+            observation_records=_compact_observation_records(self._observations),
+            skills_manifest=self._skills_manifest(),
+        )
+        source_diagnostics["cache"] = dict(self._cache_diagnostics)
         manifest = ContextManifest(
             context_id=context_id,
             provider=self._provider_name,
@@ -206,14 +223,7 @@ class ContextBuilder:
             task_chars=task_chars,
             memory=self._memory_manifest(),
             compaction=_compaction_manifest(compaction),
-            source_diagnostics=_source_diagnostics(
-                session_summary=self._session_summary,
-                memory_manifest=self._memory_manifest(),
-                memory_navigation_diagnostics=self._memory_navigation_result().diagnostics,
-                compaction=compaction,
-                observation_records=_compact_observation_records(self._observations),
-                skills_manifest=self._skills_manifest(),
-            ),
+            source_diagnostics=source_diagnostics,
             selection=selection.to_manifest_dict(),
             compact_readiness=compact_readiness,
             auto_compact_trigger=auto_compact_trigger,
@@ -258,13 +268,10 @@ class ContextBuilder:
         return f"{int(existing[-1]) + 1:04d}"
 
     def _read_project_instructions(self) -> str | None:
-        path = self._workspace_root / "AGENTS.md"
-        if not path.exists():
-            return None
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError as error:
-            raise ContextBuildError(f"failed to read AGENTS.md: {error}") from error
+        return self._instruction_cache.load(
+            self._workspace_root,
+            diagnostics_sink=lambda value: self._cache_diagnostics.__setitem__("instructions", value),
+        ).content
 
     def _read_plan(self) -> dict:
         path = self._episode_writer.path / "plan.json"
@@ -432,8 +439,25 @@ class ContextBuilder:
             }
             return self._cached_skills_manifest
         settings = load_skill_settings()
-        registry = load_skill_registry(workspace_root=self._workspace_root, settings=settings)
-        skills = registry.list_skills()
+        if self._skill_catalog is not None:
+            snapshot = self._skill_catalog.snapshot(
+                self._workspace_root,
+                settings,
+                diagnostics_sink=lambda value: self._cache_diagnostics.__setitem__("skills", value),
+            )
+            skills = list(snapshot.skills)
+        else:
+            registry = load_skill_registry(workspace_root=self._workspace_root, settings=settings)
+            skills = registry.list_skills()
+            self._cache_diagnostics["skills"] = {
+                "status": "uncached",
+                "count": len(skills),
+                "chars": sum(
+                    len(skill.name) + len(skill.source) + len(skill.description)
+                    for skill in skills
+                ),
+                "fingerprint": "",
+            }
         blocked_roots = [] if is_project_root_trusted(self._workspace_root, settings) else [
             str(path) for path in discover_project_skill_dirs(self._workspace_root)
         ]

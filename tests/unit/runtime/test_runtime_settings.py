@@ -12,6 +12,7 @@ import pytest
 
 from haagent.runtime.settings import (
     DEFAULT_INTERACTIVE_MAX_TURNS,
+    DEFAULT_PROGRESS_GUARD_MODE,
     RuntimeSettingsError,
     load_runtime_settings,
     set_interactive_max_turns,
@@ -22,6 +23,31 @@ def test_missing_runtime_settings_uses_interactive_default(tmp_path) -> None:
     settings = load_runtime_settings(config_path=tmp_path / "missing.json")
 
     assert settings.interactive_max_turns == DEFAULT_INTERACTIVE_MAX_TURNS
+    assert settings.progress_guard_mode == DEFAULT_PROGRESS_GUARD_MODE
+
+
+def test_runtime_settings_reads_progress_guard_mode(tmp_path) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"progress_guard_mode": "block"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path=settings_path)
+
+    assert settings.progress_guard_mode == "block"
+
+
+@pytest.mark.parametrize("raw_value", ["quiet", 1, True, "WARN", ""])
+def test_runtime_settings_rejects_invalid_progress_guard_mode(tmp_path, raw_value) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"progress_guard_mode": raw_value}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeSettingsError, match="progress_guard_mode"):
+        load_runtime_settings(config_path=settings_path)
 
 
 def test_setting_interactive_max_turns_preserves_active_model(tmp_path) -> None:

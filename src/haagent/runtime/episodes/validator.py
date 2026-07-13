@@ -132,6 +132,9 @@ def _read_validated_episode_package(
     _validate_sandbox(sandbox)
     if workspace_preflight:
         _validate_workspace_preflight(workspace_preflight)
+    performance = _read_optional_json(episode_path / "performance.json")
+    if performance is not None:
+        _validate_performance(performance)
     _validate_plan(plan)
     _validate_tool_calls(tool_calls)
     _validate_verification_commands(verification_commands)
@@ -585,6 +588,128 @@ def _validate_cost(cost: dict[str, Any]) -> None:
         raise EpisodeValidationError("cost.json totals.model_call_count must be an integer")
     for field_name in ["input_tokens", "output_tokens", "total_tokens"]:
         _validate_token_or_null(totals.get(field_name), f"cost.json totals.{field_name}")
+
+
+def _validate_performance(performance: dict[str, Any]) -> None:
+    """可选 performance.json：版本、非负耗时、有界列表，并拒绝敏感字段名。"""
+
+    _reject_secret_like_metadata(performance, "performance.json")
+    _reject_performance_sensitive_keys(performance)
+    if performance.get("performance_schema_version") != "1.0":
+        raise EpisodeValidationError("performance.json performance_schema_version must be '1.0'")
+    for field_name in (
+        "submit_to_run_start_ms",
+        "run_setup_ms",
+        "context_build_ms",
+        "postprocess_ms",
+        "total_turn_ms",
+    ):
+        _validate_optional_non_negative_number(performance.get(field_name), f"performance.json {field_name}")
+    model_turns = performance.get("model_turns")
+    if not isinstance(model_turns, list):
+        raise EpisodeValidationError("performance.json model_turns must be a list")
+    if len(model_turns) > 256:
+        raise EpisodeValidationError("performance.json model_turns exceeds bound")
+    for index, turn in enumerate(model_turns):
+        if not isinstance(turn, dict):
+            raise EpisodeValidationError(f"performance.json model_turns[{index}] must be an object")
+        attempts = turn.get("attempts")
+        if not isinstance(attempts, list):
+            raise EpisodeValidationError(f"performance.json model_turns[{index}].attempts must be a list")
+        if len(attempts) > 64:
+            raise EpisodeValidationError(f"performance.json model_turns[{index}].attempts exceeds bound")
+        for attempt_index, attempt in enumerate(attempts):
+            if not isinstance(attempt, dict):
+                raise EpisodeValidationError(
+                    f"performance.json model_turns[{index}].attempts[{attempt_index}] must be an object",
+                )
+            for field_name in (
+                "request_to_headers_ms",
+                "time_to_first_sse_ms",
+                "time_to_first_text_ms",
+                "stream_duration_ms",
+                "total_model_call_ms",
+            ):
+                _validate_optional_non_negative_number(
+                    attempt.get(field_name),
+                    f"performance.json model_turns[{index}].attempts[{attempt_index}].{field_name}",
+                )
+    tools = performance.get("tools")
+    if not isinstance(tools, list):
+        raise EpisodeValidationError("performance.json tools must be a list")
+    if len(tools) > 256:
+        raise EpisodeValidationError("performance.json tools exceeds bound")
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            raise EpisodeValidationError(f"performance.json tools[{index}] must be an object")
+        _validate_optional_non_negative_number(
+            tool.get("duration_ms"),
+            f"performance.json tools[{index}].duration_ms",
+        )
+    cache_diagnostics = performance.get("cache_diagnostics", {})
+    if not isinstance(cache_diagnostics, dict):
+        raise EpisodeValidationError("performance.json cache_diagnostics must be an object")
+    for component, diagnostic in cache_diagnostics.items():
+        if component not in {"instructions", "skills", "tool_schema"}:
+            raise EpisodeValidationError(
+                f"performance.json cache_diagnostics contains unknown component: {component}",
+            )
+        if not isinstance(diagnostic, dict):
+            raise EpisodeValidationError(
+                f"performance.json cache_diagnostics.{component} must be an object",
+            )
+        status = diagnostic.get("status")
+        if status not in {"hit", "miss", "reload", "uncached"}:
+            raise EpisodeValidationError(
+                f"performance.json cache_diagnostics.{component}.status is invalid",
+            )
+        for field_name in ("count", "chars", "bytes"):
+            if field_name not in diagnostic:
+                continue
+            value = diagnostic[field_name]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise EpisodeValidationError(
+                    f"performance.json cache_diagnostics.{component}.{field_name} "
+                    "must be a non-negative integer",
+                )
+        fingerprint = diagnostic.get("fingerprint")
+        if fingerprint not in {None, ""} and (
+            not isinstance(fingerprint, str)
+            or not fingerprint.startswith("sha256:")
+            or len(fingerprint) != 71
+        ):
+            raise EpisodeValidationError(
+                f"performance.json cache_diagnostics.{component}.fingerprint is invalid",
+            )
+    dropped = performance.get("dropped")
+    if not isinstance(dropped, dict):
+        raise EpisodeValidationError("performance.json dropped must be an object")
+    for field_name in ("model_turns", "model_attempts", "tools"):
+        value = dropped.get(field_name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise EpisodeValidationError(f"performance.json dropped.{field_name} must be a non-negative integer")
+
+
+def _validate_optional_non_negative_number(value: Any, label: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        raise EpisodeValidationError(f"{label} must be a non-negative number or null")
+
+
+def _reject_performance_sensitive_keys(value: Any) -> None:
+    """performance artifact 禁止 prompt 正文、完整参数、响应正文等字段名。"""
+
+    forbidden = {"prompt", "arguments", "response_body", "api_key", "authorization"}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in forbidden:
+                raise EpisodeValidationError(f"performance.json contains forbidden field: {key}")
+            _reject_performance_sensitive_keys(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_performance_sensitive_keys(item)
 
 
 def _validate_sandbox(sandbox: dict[str, Any]) -> None:

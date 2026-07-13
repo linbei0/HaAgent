@@ -46,11 +46,10 @@ from haagent.runtime.execution.human_interaction_resolver import (
 )
 from haagent.runtime.orchestration.loop_guidance import (
     ToolSuggestion,
-    safety_violation_observation,
     suggestion_for_observation,
     suggestion_observation,
 )
-from haagent.runtime.execution.safety_guard import SafetyGuard
+from haagent.runtime.execution.progress_guard import ProgressDecision, ProgressGuard
 from haagent.runtime.orchestration.preparation import prepare_initial_messages, prepare_run_setup
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
@@ -59,6 +58,7 @@ from haagent.runtime.orchestration.task_progress import task_plan_created_event
 from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
 from haagent.runtime.events.bus import RuntimeBusEvent, coerce_bus_event
 from haagent.runtime.orchestration.turns import TurnLoopDependencies, TurnLoopState, run_turn_loop
+from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.sandbox import SandboxBackend, create_sandbox_backend
 from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS, load_runtime_settings
 from haagent.runtime.contracts.task import TaskLoadError
@@ -87,6 +87,11 @@ class RunOrchestrator:
         leader_session_id: str | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
         session_interaction_state: SessionInteractionState | None = None,
+        performance_trace: PerformanceTrace | None = None,
+        skill_catalog: object | None = None,
+        instruction_cache: object | None = None,
+        tool_schema_cache: object | None = None,
+        working_state_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -105,6 +110,12 @@ class RunOrchestrator:
         self._worker_permission_requester = worker_permission_requester
         # 跨 turn 共享；always 写回此对象，由 AgentSession 持久化
         self._session_interaction_state = session_interaction_state or SessionInteractionState()
+        # 普通交互由 session 注入；advanced/CI 直接 run 时在入口补建。
+        self._performance_trace = performance_trace
+        self._skill_catalog = skill_catalog
+        self._instruction_cache = instruction_cache
+        self._tool_schema_cache = tool_schema_cache
+        self._working_state_sink = working_state_sink
 
     def _emit_event(self, event: RuntimeBusEvent | dict[str, object]) -> None:
         # 兼容仍发 raw dict 的 multi_agent / compression / task_progress 路径。
@@ -117,8 +128,10 @@ class RunOrchestrator:
 
     def run(self, task_path: Path) -> RunResult:
         """执行一次 run，并把所有阶段变化写入 transcript.jsonl。"""
+        performance_trace = self._performance_trace or PerformanceTrace.start()
+        performance_trace.mark_run_start()
         writer = EpisodeWriter.create(self._runs_root, task_path)
-        recorder = RunRecorder(writer)
+        recorder = RunRecorder(writer, performance_trace=performance_trace)
         transition = recorder.transition
 
         transition(RunStatus.CREATED)
@@ -157,6 +170,22 @@ class RunOrchestrator:
                 )
                 return recorder.finish(RunStatus.FAILED)
 
+            def tool_performance_sink(
+                turn: int,
+                tool_name: str,
+                duration_ms: float,
+                execution_effect: str,
+                status: str,
+            ) -> None:
+                performance_trace.record_tool(
+                    turn,
+                    tool_name,
+                    duration_ms,
+                    execution_effect,
+                    status,
+                )
+                recorder.persist_performance()
+
             router = ToolRouter(
                 task.allowed_tools,
                 writer,
@@ -187,18 +216,21 @@ class RunOrchestrator:
                 worker_permission_requester=self._worker_permission_requester,
                 sandbox_backend=sandbox_backend,
                 image_attachment_history=task.image_attachment_history,
+                performance_sink=tool_performance_sink,
+                skill_catalog=self._skill_catalog,
             )
             verification_engine: VerificationEngine | None = None
             passed_verification_commands: set[str] = set()
             has_file_change = False
             has_shell_verification = False
-            safety_guard = SafetyGuard()
+            progress_guard = ProgressGuard()
             # permission_mode 控制 edit_diff 自动跳过；session always 来自跨 turn 状态
             interaction_resolver = HumanInteractionResolver(
                 permission_mode=path_policy.permission_mode,
                 session_interaction_state=self._session_interaction_state,
             )
 
+            performance_trace.mark_context_build_start()
             prepared_messages = prepare_initial_messages(
                 context_builder_cls=ContextBuilder,
                 task=task,
@@ -213,7 +245,13 @@ class RunOrchestrator:
                 task_ledger=self._task_ledger,
                 interaction_resolver=interaction_resolver,
                 tool_registry=self._tool_registry,
+                instruction_cache=self._instruction_cache,
+                skill_catalog=self._skill_catalog,
             )
+            performance_trace.mark_context_built()
+            for component, diagnostic in prepared_messages.cache_diagnostics.items():
+                if isinstance(diagnostic, dict):
+                    performance_trace.record_cache_diagnostic(component, diagnostic)
             worker_notifications = _worker_notification_context(self._leader_session_id)
             if worker_notifications:
                 prepared_messages.messages.append(
@@ -259,7 +297,6 @@ class RunOrchestrator:
                     ),
                     interaction_handler=self._interaction_handler,
                     interaction_resolver=interaction_resolver,
-                    safety_guard=safety_guard,
                     interaction_bridge_factory=lambda turn, resolver: _interaction_bridge(
                         self,
                         writer,
@@ -288,6 +325,16 @@ class RunOrchestrator:
                     task_step_id=task_step_id,
                     task_step_title=task.goal,
                     cancellation_token=self._cancellation_token,
+                    performance_trace=performance_trace,
+                    persist_performance=recorder.persist_performance,
+                    tool_schema_cache=self._tool_schema_cache,
+                    progress_guard=progress_guard,
+                    progress_guard_mode=runtime_settings.progress_guard_mode,
+                    on_progress_blocked=lambda turn, decision: _record_progress_block_working_state(
+                        self,
+                        turn=turn,
+                        decision=decision,
+                    ),
                 ),
             )
             if turn_result is not None:
@@ -516,6 +563,40 @@ def _record_guardrail(
         event["turn"] = turn
     writer.append_transcript({"event": "guardrail_triggered", **_transcript_event(event)})
     emit_event(event)
+
+
+def _record_progress_block_working_state(
+    orchestrator: RunOrchestrator,
+    *,
+    turn: int,
+    decision: ProgressDecision,
+) -> None:
+    """block 时写入可恢复 working state 摘要，不复制 episode 证据。"""
+    current = orchestrator._working_state
+    if not isinstance(current, dict):
+        current = {
+            "current_goal": "",
+            "key_findings": [],
+            "completed_actions": [],
+            "next_steps": [],
+            "last_updated_turn": 0,
+        }
+        orchestrator._working_state = current
+    next_steps = list(current.get("next_steps") or [])
+    recovery = f"progress_guard blocked ({decision.pattern}): continue/replan/stop"
+    if recovery not in next_steps:
+        next_steps.insert(0, recovery)
+    current["next_steps"] = next_steps[:5]
+    current["last_updated_turn"] = int(turn)
+    findings = list(current.get("key_findings") or [])
+    reason = f"progress_guard:{decision.pattern}:{decision.reason}"[:240]
+    if reason and reason not in findings:
+        findings.append(reason)
+    current["key_findings"] = findings[-5:]
+    sink = getattr(orchestrator, "_working_state_sink", None)
+    if sink is not None:
+        # 必须在进入 user-input 等待前持久化，不能只依赖 run 结束后的 session flush。
+        sink(dict(current))
 
 
 def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:

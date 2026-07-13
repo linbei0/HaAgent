@@ -14,6 +14,7 @@ from haagent.models.capabilities import (
     build_model_requirements,
     missing_capabilities,
 )
+from haagent.models.http_transport import ModelHttpTransport, close_model_gateway
 from haagent.models.types import (
     ModelCallError,
     ModelGateway,
@@ -57,6 +58,7 @@ class NegotiatingModelGateway:
         fallback_runtime_kind: str = "remote",
         cloud_fallback_consent: bool = False,
         route_event_sink: Callable[[RouteFallbackEvent], None] | None = None,
+        http_transport: ModelHttpTransport | None = None,
     ) -> None:
         self._primary = primary
         self._primary_chat = primary_chat
@@ -68,10 +70,26 @@ class NegotiatingModelGateway:
         self._cloud_fallback_consent = cloud_fallback_consent
         self._route_event_sink = route_event_sink
         self._active = primary
+        # 仅当 route factory 把共享 transport 所有权交给本 gateway 时非 None。
+        self._http_transport = http_transport
+        self._closed = False
 
     def set_route_event_sink(self, sink: Callable[[RouteFallbackEvent], None] | None) -> None:
         """由每轮 orchestrator 绑定事件 sink，避免 gateway 绕过 runtime bus。"""
         self._route_event_sink = sink
+
+    def close(self) -> None:
+        """幂等关闭：先关 route 共享 transport，再关有独立资源的子 gateway。"""
+
+        if self._closed:
+            return
+        self._closed = True
+        if self._http_transport is not None:
+            self._http_transport.close()
+            self._http_transport = None
+        for gateway in (self._primary, self._primary_chat, self._fallback):
+            if gateway is not None:
+                close_model_gateway(gateway)
 
     def capabilities(self) -> ModelCapabilities:
         return _capabilities(self._active)
@@ -87,7 +105,14 @@ class NegotiatingModelGateway:
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
+        telemetry_sink=None,
     ) -> ModelResponse:
+        if self._closed:
+            # 关闭后拒绝新请求，避免复用已释放连接池。
+            raise ModelCallError(
+                "model gateway is closed",
+                details=None,
+            )
         requirements = build_model_requirements(
             messages=messages,
             tool_schemas=tool_schemas,
@@ -107,6 +132,7 @@ class NegotiatingModelGateway:
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
                 requirements=requirements,
+                telemetry_sink=telemetry_sink,
             )
 
         emitted = False
@@ -131,6 +157,7 @@ class NegotiatingModelGateway:
                 cancellation_token,
                 retry_event_sink,
                 retry_exhausted_sink,
+                telemetry_sink,
             )
         except RunCancelled:
             raise
@@ -151,6 +178,7 @@ class NegotiatingModelGateway:
                         cancellation_token,
                         retry_event_sink,
                         retry_exhausted_sink,
+                        telemetry_sink,
                     )
                 except RunCancelled:
                     raise
@@ -169,6 +197,7 @@ class NegotiatingModelGateway:
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
                 requirements=requirements,
+                telemetry_sink=telemetry_sink,
             )
 
     def _protocol_gateway_for_capabilities(self, required: tuple[str, ...]) -> ModelGateway:
@@ -190,6 +219,7 @@ class NegotiatingModelGateway:
         retry_event_sink: Callable[[RetryEvent], None] | None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
         requirements: object,
+        telemetry_sink=None,
     ) -> ModelResponse:
         if self._fallback is None:
             if primary_missing:
@@ -232,6 +262,7 @@ class NegotiatingModelGateway:
             cancellation_token,
             retry_event_sink,
             retry_exhausted_sink,
+            telemetry_sink,
         )
 
     def _emit_protocol_event(self, reason: str, required: tuple[str, ...]) -> None:
@@ -264,6 +295,7 @@ class NegotiatingModelGateway:
         cancellation_token: CancellationToken | None,
         retry_event_sink: Callable[[RetryEvent], None] | None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
+        telemetry_sink=None,
     ) -> ModelResponse:
         return gateway.generate(
             messages,
@@ -272,6 +304,7 @@ class NegotiatingModelGateway:
             cancellation_token=cancellation_token,
             retry_event_sink=retry_event_sink,
             retry_exhausted_sink=retry_exhausted_sink,
+            telemetry_sink=telemetry_sink,
         )
 
 

@@ -12,7 +12,8 @@ def test_runtime_top_level_contains_only_package_entrypoint() -> None:
 
     top_level_modules = sorted(path.name for path in runtime_root.glob("*.py"))
 
-    assert top_level_modules == ["__init__.py"]
+    # performance.py 是交互延迟轨迹的 runtime 级 DTO，允许保留在顶层。
+    assert top_level_modules == ["__init__.py", "performance.py"]
 
 
 def test_runtime_top_level_packages_are_named_by_responsibility() -> None:

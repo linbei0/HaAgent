@@ -1,7 +1,8 @@
 """
-src/haagent/runtime/execution/safety_guard.py - 安全防护层
+src/haagent/runtime/execution/safety_guard.py - 安全防护层（迁移残留）
 
-只检测真正的异常（死循环、连续失败），不猜测任务意图。
+ProgressGuard 已接管循环/停滞检测。本模块仅保留连续失败警告能力，
+供尚未迁移的调用方与单元测试使用；不再对相同参数调用强制 abort。
 """
 
 from __future__ import annotations
@@ -25,9 +26,8 @@ class SafetyGuardState:
 
 
 class SafetyGuard:
-    """检测死循环和连续失败，不干预正常的探索行为。"""
+    """检测连续失败；相同参数循环终止已迁至 ProgressGuard。"""
 
-    IDENTICAL_CALL_ABORT_THRESHOLD = 3
     CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
 
     def __init__(self) -> None:
@@ -44,10 +44,10 @@ class SafetyGuard:
         result: dict[str, Any],
     ) -> SafetyViolation | None:
         signature = _call_signature(tool_name, args)
+        self._state.recent_tool_signatures.append(signature)
 
         if result.get("status") == "error":
             self._state.consecutive_failures += 1
-            self._state.recent_tool_signatures.append(signature)
             if self._state.consecutive_failures >= self.CONSECUTIVE_FAILURE_WARN_THRESHOLD:
                 return SafetyViolation(
                     type="repeated_failure",
@@ -65,26 +65,7 @@ class SafetyGuard:
             return None
 
         self._state.consecutive_failures = 0
-        self._state.recent_tool_signatures.append(signature)
-
-        # 检测完全相同参数的连续重复调用
-        recent = self._state.recent_tool_signatures
-        threshold = self.IDENTICAL_CALL_ABORT_THRESHOLD
-        if len(recent) >= threshold and len(set(recent[-threshold:])) == 1:
-            return SafetyViolation(
-                type="tool_loop",
-                message=(
-                    f"Detected infinite loop: {tool_name} called with identical "
-                    f"arguments {threshold} times in a row."
-                ),
-                should_abort=True,
-                recovery_suggestion=(
-                    "This appears to be a stuck loop. Try a different tool, inspect "
-                    "current state with file_read/file_list, or ask the user with "
-                    "request_user_input."
-                ),
-            )
-
+        # 相同参数循环终止已由 ProgressGuard 基于 action+observation 处理
         return None
 
 

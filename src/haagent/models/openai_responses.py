@@ -11,9 +11,11 @@ from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.capabilities import ModelCapabilities
+from haagent.models.http_transport import ModelHttpTransport
 from haagent.models.transport import (
     _endpoint_base_url,
     _image_data_url,
+    _invoke_transport,
     _normalize_responses_endpoint,
     _parse_tool_arguments,
     _redact_url,
@@ -32,6 +34,7 @@ from haagent.models.types import (
 )
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
+
 
 def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
     output = response.get("output")
@@ -132,6 +135,7 @@ class OpenAIResponsesGateway:
         stream_transport: StreamTransport | None = None,
         retry_controller: RetryController | None = None,
         require_api_key: bool = True,
+        http_transport: ModelHttpTransport | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._require_api_key = require_api_key
@@ -142,22 +146,51 @@ class OpenAIResponsesGateway:
             else os.environ.get("OPENAI_BASE_URL")
         )
         self._responses_endpoint = _normalize_responses_endpoint(configured_base_url)
-        self._transport = transport or (
-            lambda payload, api_key: _responses_transport(
-                payload,
-                api_key,
-                self._responses_endpoint,
+        # 仅在需要默认 HTTP path 时创建/绑定 transport；外部注入不越权关闭。
+        self._owns_http_transport = False
+        self._http_transport: ModelHttpTransport | None = http_transport
+        needs_default_http = transport is None or stream_transport is None
+        if needs_default_http and self._http_transport is None:
+            self._http_transport = ModelHttpTransport()
+            self._owns_http_transport = True
+        bound = self._http_transport
+        if transport is None:
+            self._transport = (
+                lambda payload, api_key, *, attempt=1, telemetry_sink=None: _responses_transport(
+                    payload,
+                    api_key,
+                    self._responses_endpoint,
+                    http_transport=bound,
+                    attempt=attempt,
+                    telemetry_sink=telemetry_sink,
+                )
             )
-        )
-        self._stream_transport = stream_transport or (
-            lambda payload, api_key, on_delta: _responses_stream_transport(
-                payload,
-                api_key,
-                self._responses_endpoint,
-                on_delta,
+        else:
+            self._transport = transport
+        if stream_transport is None:
+            self._stream_transport = (
+                lambda payload, api_key, on_delta, *, attempt=1, telemetry_sink=None: (
+                    _responses_stream_transport(
+                        payload,
+                        api_key,
+                        self._responses_endpoint,
+                        on_delta,
+                        http_transport=bound,
+                        attempt=attempt,
+                        telemetry_sink=telemetry_sink,
+                    )
+                )
             )
-        )
+        else:
+            self._stream_transport = stream_transport
         self._retry_controller = default_retry_controller(retry_controller)
+
+    def close(self) -> None:
+        """仅关闭自身创建的共享 transport；注入资源保持外部所有权。"""
+
+        if self._owns_http_transport and self._http_transport is not None:
+            self._http_transport.close()
+            self._owns_http_transport = False
 
     @property
     def responses_endpoint(self) -> str:
@@ -190,6 +223,7 @@ class OpenAIResponsesGateway:
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
+        telemetry_sink=None,
     ) -> ModelResponse:
         """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
         if self._require_api_key and not self._api_key:
@@ -209,15 +243,20 @@ class OpenAIResponsesGateway:
             response = execute_model_request(
                 self._retry_controller,
                 provider=self.provider_name,
-                invoke=lambda on_delta: (
-                    self._stream_transport(payload, self._api_key or "", on_delta)
-                    if on_delta is not None
-                    else self._transport(payload, self._api_key or "")
+                invoke=lambda on_delta, attempt: _invoke_transport(
+                    self._transport,
+                    self._stream_transport,
+                    payload,
+                    self._api_key or "",
+                    on_delta=on_delta,
+                    attempt=attempt,
+                    telemetry_sink=telemetry_sink,
                 ),
                 event_sink=event_sink,
                 cancellation_token=cancellation_token,
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
+                telemetry_sink=telemetry_sink,
             )
         except ModelCallError:
             raise
