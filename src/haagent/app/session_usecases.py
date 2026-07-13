@@ -149,6 +149,7 @@ class AssistantSessions:
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
         assert self._context.session is not None
+        self._context.status_generation += 1
         return session_status(self._context.session)
 
     def resume(self, session: str | Path) -> AssistantSessionStatus:
@@ -185,6 +186,7 @@ class AssistantSessions:
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
         assert self._context.session is not None
+        self._context.status_generation += 1
         return session_status(self._context.session)
 
     def continue_latest(self) -> AssistantSessionStatus:

@@ -178,6 +178,7 @@ class TimelineBlock(Vertical):
                 self._markdown_stream_content = ""
             delta = content[len(self._markdown_stream_content) :]
             if delta:
+                # write 不可 exclusive：否则新 delta 会取消未完成 write，中间字丢失。
                 self.run_worker(
                     self._markdown_stream.write(delta),
                     group="markdown-stream",
@@ -186,9 +187,18 @@ class TimelineBlock(Vertical):
                 self._markdown_stream_content = content
                 self.call_after_refresh(self._scroll_timeline_to_end)
             return
-        self._stop_markdown_stream()
-        if body.source != content:
-            self._queue_markdown_update(body, content)
+        # finalize exclusive：取消未完成 write，await stop 后再 update 权威全文，避免「。。」。
+        stream = self._markdown_stream
+        self._markdown_stream = None
+        self._markdown_stream_content = ""
+        self._markdown_update_version += 1
+        version = self._markdown_update_version
+        self.run_worker(
+            self._finalize_markdown_content(body, content, version, stream),
+            group="markdown-stream",
+            exclusive=True,
+            exit_on_error=False,
+        )
 
     def _queue_markdown_update(self, body: Markdown, content: str) -> None:
         self._markdown_update_version += 1
@@ -202,6 +212,25 @@ class TimelineBlock(Vertical):
     async def _update_markdown_content(self, body: Markdown, content: str, version: int) -> None:
         if version != self._markdown_update_version:
             return
+        await body.update(content)
+        self._scroll_timeline_to_end()
+        self.call_after_refresh(self._scroll_timeline_to_end)
+        self.call_after_refresh(lambda: self.call_after_refresh(self._scroll_timeline_to_end))
+
+    async def _finalize_markdown_content(
+        self,
+        body: Markdown,
+        content: str,
+        version: int,
+        stream: Any | None,
+    ) -> None:
+        # Textual MarkdownStream.stop 取消时仍会 append 未刷完的 pending；
+        # 必须先等 stop 完成，再用 update 覆盖成权威全文，否则末尾会重复一字。
+        if stream is not None:
+            await stream.stop()
+        if version != self._markdown_update_version:
+            return
+        # 即使 source 看似相同也 update：stop 尾刷可能刚叠出重复尾字。
         await body.update(content)
         self._scroll_timeline_to_end()
         self.call_after_refresh(self._scroll_timeline_to_end)

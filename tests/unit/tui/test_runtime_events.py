@@ -95,6 +95,7 @@ class FakeRuntimeEventApp:
         self.memory_loads = 0
         self.finalized_streams = 0
         self.refreshes = 0
+        self.streaming_refresh_schedules = 0
         self._conversation = _FakeConversation(self)
         self.memory_flow = _FakeMemoryFlow(self)
 
@@ -103,6 +104,10 @@ class FakeRuntimeEventApp:
 
     def _refresh(self) -> None:
         self.refreshes += 1
+
+    def _schedule_streaming_refresh(self) -> None:
+        # 真实 App 会 16～50ms 批量刷新 timeline；测试只统计调度次数。
+        self.streaming_refresh_schedules += 1
 
     def set_progress_status(self, status) -> None:
         self.progress_status_text = status.text
@@ -175,11 +180,25 @@ def test_runtime_ui_event_handler_updates_assistant_stream() -> None:
     app = FakeRuntimeEventApp()
 
     handle_runtime_ui_event(app, AssistantDeltaEvent("session-1", 2, 1, "半句"))
+    handle_runtime_ui_event(app, AssistantDeltaEvent("session-1", 2, 1, "续写"))
     handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 2, 1, "整句"))
 
-    assert app.assistant_deltas == [(2, "半句")]
+    assert app.assistant_deltas == [(2, "半句"), (2, "续写")]
     assert app.assistant_messages == [(2, "整句")]
-    assert app.refreshes == 2
+    # delta 热路径禁止全量 _refresh（会打 status/keyring）；只调度批量 timeline 刷新。
+    assert app.refreshes == 1
+    assert app.streaming_refresh_schedules == 2
+
+
+def test_assistant_delta_does_not_trigger_full_refresh() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(app, AssistantDeltaEvent("session-1", 1, 1, "a"))
+    handle_runtime_ui_event(app, AssistantDeltaEvent("session-1", 1, 1, "b"))
+
+    assert app.assistant_deltas == [(1, "a"), (1, "b")]
+    assert app.refreshes == 0
+    assert app.streaming_refresh_schedules == 2
 
 
 def test_runtime_ui_event_handler_routes_intermediate_assistant_message() -> None:

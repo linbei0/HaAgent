@@ -206,6 +206,8 @@ class AssistantModels:
             _save_default_selection_if_missing(selection)
             if self._context.session is None:
                 self._context.pending_model_selection = selection
+                # 无 session 时 status 读 active selection；抬 generation 避免凭据/默认模型旧缓存。
+                self._context.status_generation += 1
                 return AssistantSessionStatus(
                     session_id="pending",
                     workspace_root=self._context.workspace_root,
@@ -230,6 +232,7 @@ class AssistantModels:
                 base_url=profile.base_url,
                 gateway=gateway,
             )
+            self._context.status_generation += 1
         except (ProviderProfileError, ChatSessionError) as error:
             raise AssistantServiceError(str(error)) from error
         from haagent.app.session_usecases import session_status

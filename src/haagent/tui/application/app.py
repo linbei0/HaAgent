@@ -109,6 +109,8 @@ class HaAgentTuiApp(App[None]):
         self._file_ref_index: FileReferenceIndex | None = None
         self.is_wide_external_root = path_authorization.is_wide_external_root
         self.permission_mode_label = _permission_mode_label
+        # delta 热路径只调度批量 timeline 刷新，禁止每 token 全量 _refresh。
+        self._streaming_refresh_scheduled = False
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -662,6 +664,18 @@ class HaAgentTuiApp(App[None]):
         self._refresh_conversation()
         self.query_one("#footer-bar", FooterBar).update_footer(footer_text(self._help_context()))
         self._apply_focus_classes()
+
+    def _schedule_streaming_refresh(self) -> None:
+        """AssistantDelta 热路径：16～50ms 批量刷新 timeline，绝不查询 status/keyring。"""
+
+        if self._streaming_refresh_scheduled:
+            return
+        self._streaming_refresh_scheduled = True
+        self.set_timer(0.033, self._flush_streaming_refresh, name="streaming-refresh")
+
+    def _flush_streaming_refresh(self) -> None:
+        self._streaming_refresh_scheduled = False
+        self._refresh_conversation()
 
     def _refresh_conversation(self) -> None:
         conversation = self._timeline()

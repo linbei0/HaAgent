@@ -13,6 +13,7 @@ import http.client
 import json
 from pathlib import Path
 import socket
+from collections.abc import Iterator
 from typing import Any, Callable, Mapping, TypeVar
 from urllib.parse import urlsplit, urlunsplit
 import urllib.error
@@ -243,28 +244,6 @@ def _endpoint_base_url(endpoint: str | None) -> str | None:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
-def _iter_sse_events(response) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
-    event_lines: list[str] = []
-    for raw_line in response:
-        line = raw_line.decode("utf-8").strip()
-        if not line:
-            if event_lines:
-                data_chunks = [part[5:].strip() for part in event_lines if part.startswith("data:")]
-                if data_chunks:
-                    data = "\n".join(data_chunks)
-                    if data != "[DONE]":
-                        events.append(json.loads(data))
-                event_lines = []
-            continue
-        event_lines.append(line)
-    if event_lines:
-        data_chunks = [part[5:].strip() for part in event_lines if part.startswith("data:")]
-        if data_chunks:
-            data = "\n".join(data_chunks)
-            if data != "[DONE]":
-                events.append(json.loads(data))
-    return events
 def _normalize_responses_endpoint(base_url: str | None) -> str:
     """把裸域名或 /v1 base URL 规范化为 Responses API endpoint。"""
     if base_url is None or not base_url.strip():
@@ -496,28 +475,68 @@ def _google_gemini_stream_transport(
     )
 
 
-def _iter_sse_events(response) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
+def _iter_sse_events(response) -> Iterator[dict[str, object]]:
+    """逐条 yield 完整 SSE event；禁止先收集成 list，否则首字延迟=整次生成时间。
+
+    HTTP 常把 `data: ...\\n\\n` 作为一整块交付；必须按行拆分并保留空行事件边界，
+    不能对整块 `.strip()`，否则会吞掉分隔空行并把多个 event 拼进同一次 json.loads。
+    """
+
     event_lines: list[str] = []
-    for raw_line in response:
-        line = raw_line.decode("utf-8").strip()
-        if not line:
-            if event_lines:
-                data_chunks = [part[5:].strip() for part in event_lines if part.startswith("data:")]
-                if data_chunks:
-                    data = "\n".join(data_chunks)
-                    if data != "[DONE]":
-                        events.append(json.loads(data))
+    pending = ""
+    for raw_chunk in response:
+        if isinstance(raw_chunk, bytes):
+            pending += raw_chunk.decode("utf-8")
+        else:
+            pending += str(raw_chunk)
+        while True:
+            newline_at = pending.find("\n")
+            if newline_at < 0:
+                break
+            line = pending[:newline_at]
+            pending = pending[newline_at + 1 :]
+            if line.endswith("\r"):
+                line = line[:-1]
+            if not line:
+                event = _sse_event_from_lines(event_lines)
                 event_lines = []
+                if event is not None:
+                    yield event
+                continue
+            event_lines.append(line)
+    if pending:
+        line = pending[:-1] if pending.endswith("\r") else pending
+        if line:
+            event_lines.append(line)
+    event = _sse_event_from_lines(event_lines)
+    if event is not None:
+        yield event
+
+
+def _sse_event_from_lines(event_lines: list[str]) -> dict[str, object] | None:
+    if not event_lines:
+        return None
+    # SSE: 字段名后最多去掉一个前导空格；多 data 行用 \n 拼接。
+    data_chunks: list[str] = []
+    for part in event_lines:
+        if not part.startswith("data:"):
             continue
-        event_lines.append(line)
-    if event_lines:
-        data_chunks = [part[5:].strip() for part in event_lines if part.startswith("data:")]
-        if data_chunks:
-            data = "\n".join(data_chunks)
-            if data != "[DONE]":
-                events.append(json.loads(data))
-    return events
+        value = part[5:]
+        if value.startswith(" "):
+            value = value[1:]
+        data_chunks.append(value)
+    if not data_chunks:
+        return None
+    data = "\n".join(data_chunks)
+    if data == "[DONE]":
+        return None
+    parsed = json.loads(data)
+    if not isinstance(parsed, dict):
+        raise ModelCallError(
+            "SSE event data must be a JSON object",
+            details=ModelFailureDetails(category="response_parse", retryable=False),
+        )
+    return parsed
 
 
 def _parse_openai_chat_stream(response, on_delta: Callable[[str], None]) -> dict[str, object]:

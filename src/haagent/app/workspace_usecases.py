@@ -67,6 +67,16 @@ class AssistantWorkspace:
     def __init__(self, context: AssistantContext) -> None:
         self._context = context
         self.sandbox = AssistantSandbox(context)
+        # token 热路径会频繁读 status；缓存后避免每次打 keyring / 重读 providers。
+        self._status_cache: AssistantWorkspaceStatus | None = None
+        self._status_cache_key: tuple[object, ...] | None = None
+
+    def invalidate_status_cache(self) -> None:
+        """session/模型/凭据/配置变化后必须显式失效，禁止热路径静默读到旧状态。"""
+
+        self._context.status_generation += 1
+        self._status_cache = None
+        self._status_cache_key = None
 
     def mcp_status(self) -> dict[str, object]:
         if self._context.session is None:
@@ -113,6 +123,7 @@ class AssistantWorkspace:
         self._context.enable_web = enabled
         if self._context.session is not None:
             self._context.session.enable_web = enabled
+        self.invalidate_status_cache()
         return self.status()
 
     def turn_limit_status(self) -> AssistantTurnLimitStatus:
@@ -146,6 +157,56 @@ class AssistantWorkspace:
         return session_status(self._context.session)
 
     def status(self) -> AssistantWorkspaceStatus:
+        cache_key = self._status_cache_key_for_current()
+        if self._status_cache is not None and self._status_cache_key == cache_key:
+            return self._status_cache
+        status = self._build_status()
+        self._status_cache = status
+        self._status_cache_key = cache_key
+        return status
+
+    def _status_cache_key_for_current(self) -> tuple[object, ...]:
+        """本地可观察字段 + generation；凭据文件变化靠 invalidate 抬 generation。"""
+
+        session = self._context.session
+        policy = getattr(session, "path_policy", None) if session is not None else None
+        external = ()
+        permission = None
+        if policy is not None:
+            permission = getattr(policy, "permission_mode", None)
+            roots = getattr(policy, "external_roots", ()) or ()
+            external = tuple(
+                (str(getattr(root, "path", "")), getattr(root, "access", ""), getattr(root, "source", ""))
+                for root in roots
+            )
+        if session is None:
+            return (
+                self._context.status_generation,
+                None,
+                None,
+                None,
+                None,
+                permission,
+                external,
+                self._context.enable_web,
+                self._context.workspace_root,
+                self._context.runs_root,
+            )
+        return (
+            self._context.status_generation,
+            session.session_id,
+            session.turn_count,
+            getattr(session, "model_connection_id", None),
+            getattr(session, "model_name", None),
+            permission,
+            external,
+            self._context.enable_web,
+            self._context.workspace_root,
+            self._context.runs_root,
+            id(session),
+        )
+
+    def _build_status(self) -> AssistantWorkspaceStatus:
         session = self.current_session()
         override = (
             ModelSelection(connection_id=session.model_connection_id, model=session.model or "")

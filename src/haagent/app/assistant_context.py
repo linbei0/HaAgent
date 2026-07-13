@@ -36,3 +36,5 @@ class AssistantContext:
     schedule_db_path: Path | None = None
     schedule_store_factory: Callable[[], ScheduleStore] | None = None
     background_adapter_factory: Callable[[], object] | None = None
+    # workspace.status 缓存世代；session/模型/权限/凭据变化时 +1。
+    status_generation: int = 0

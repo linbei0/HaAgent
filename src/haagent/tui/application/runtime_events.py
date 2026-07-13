@@ -44,12 +44,21 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
     if handler is None:
         raise TypeError(f"unsupported RuntimeUiEvent: {type(event).__name__}")
     handler(app, event)
+    # AssistantDelta 走批量 timeline 刷新；全量 _refresh 会读 workspace.status / keyring。
+    if isinstance(event, AssistantDeltaEvent):
+        return
     app._refresh()
 
 
 def _handle_assistant_delta(app, event: RuntimeUiEvent) -> None:
     typed = _as_event(event, AssistantDeltaEvent)
     app._conversation.merge_assistant_delta(typed.turn_index, typed.model_turn, typed.delta)
+    # timeline 自身已有 ~33ms markdown 批同步；这里只调度轻量 stick/scroll，不触 status。
+    schedule = getattr(app, "_schedule_streaming_refresh", None)
+    if callable(schedule):
+        schedule()
+    else:
+        app._refresh_conversation()
 
 
 def _handle_assistant_message(app, event: RuntimeUiEvent) -> None:
