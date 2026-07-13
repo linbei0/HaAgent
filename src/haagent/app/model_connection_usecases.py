@@ -227,7 +227,6 @@ class AssistantModels:
             self._context.session.switch_model_gateway(
                 profile_name=profile.name,
                 model_connection_id=selection.connection_id,
-                provider=profile.provider,
                 model=profile.model,
                 base_url=profile.base_url,
                 gateway=gateway,

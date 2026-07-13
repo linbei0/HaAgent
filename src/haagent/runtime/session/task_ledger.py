@@ -11,8 +11,6 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-
 TASK_LEDGER_SCHEMA_VERSION = 1
 TASK_LEDGER_TEXT_FIELD_LIMIT = 240
 TASK_LEDGER_MODEL_CHAR_LIMIT = 2400

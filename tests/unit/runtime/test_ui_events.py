@@ -62,7 +62,6 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "guardrail_triggered",
         "compression_diagnostic",
         "loop_suggestion_added",
-        "safety_abort",
         "interaction_reused",
         "failure",
         "worker_started",
@@ -341,33 +340,6 @@ def test_runtime_ui_event_mapper_groups_loop_suggestion_as_warning() -> None:
             "trigger": "tool_argument_invalid",
             "tool_name": "file_read",
             "message": "请改用相对路径重试。",
-        },
-    )
-
-
-def test_runtime_ui_event_mapper_groups_safety_abort_as_warning() -> None:
-    event = RuntimeUiEventMapper.to_ui_event(
-        {
-            "event_type": "safety_abort",
-            "turn": 3,
-            "violation_type": "workspace_boundary",
-            "message": "blocked outside workspace",
-        },
-        session_id="session-1",
-        turn_index=1,
-    )
-
-    assert event == WarningNoticeEvent(
-        session_id="session-1",
-        turn_index=1,
-        title="Safety abort",
-        message="blocked outside workspace",
-        notice_kind="safety_abort",
-        surface="timeline",
-        details={
-            "turn": 3,
-            "violation_type": "workspace_boundary",
-            "message": "blocked outside workspace",
         },
     )
 

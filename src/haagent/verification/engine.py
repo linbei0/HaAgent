@@ -11,8 +11,6 @@ import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
-
 from haagent.runtime.execution.command import run_command
 from haagent.runtime.episodes.writer import EpisodeWriter
 
@@ -59,7 +57,7 @@ class VerificationEngine:
         """逐条执行验证命令，任一命令失败即返回 failed。"""
         for command in commands:
             record = self._run_command(command)
-            self._append_record(record)
+            self._append_jsonl(self._commands_log, record)
             if record["exit_code"] != 0:
                 return VerificationResult(
                     status="failed",
@@ -72,7 +70,7 @@ class VerificationEngine:
                 )
         for change in _latest_workspace_changes(changed_files or [], self._workspace_root):
             record = self._file_evidence(change)
-            self._append_file_record(record)
+            self._append_jsonl(self._files_log, record)
             if record["status"] != "success":
                 return VerificationResult(
                     status="failed",
@@ -115,54 +113,30 @@ class VerificationEngine:
         }
 
     def _run_command(self, command: str) -> dict[str, object]:
-        command_result = run_command(command, self._workspace_root, self._timeout_seconds).to_dict()
-        redacted_command, _command_redacted = _redact(str(command_result["command"]))
-        stdout = str(command_result["stdout"])
-        stderr = str(command_result["stderr"])
-        stdout_excerpt = _build_excerpt(stdout)
-        stderr_excerpt = _build_excerpt(stderr)
+        command_result = run_command(command, self._workspace_root, self._timeout_seconds)
+        redacted_command, command_redacted = _redact(command_result.command)
+        safe_stdout, stdout_redacted = _redact(command_result.stdout)
+        safe_stderr, stderr_redacted = _redact(command_result.stderr)
         return {
-            **command_result,
             "command": redacted_command,
-            "stdout": stdout_excerpt.text,
-            "stderr": stderr_excerpt.text,
-            "timeout": command_result["status"] == "timeout",
-            "stdout_excerpt": stdout_excerpt.excerpt,
-            "stderr_excerpt": stderr_excerpt.excerpt,
-            "stdout_truncated": stdout_excerpt.truncated,
-            "stderr_truncated": stderr_excerpt.truncated,
-            "stdout_original_length": stdout_excerpt.original_length,
-            "stderr_original_length": stderr_excerpt.original_length,
-            "redacted": stdout_excerpt.redacted or stderr_excerpt.redacted,
+            "status": command_result.status,
+            "exit_code": command_result.exit_code,
+            "timeout": command_result.timeout,
+            "stdout_excerpt": safe_stdout[:EXCERPT_LIMIT],
+            "stderr_excerpt": safe_stderr[:EXCERPT_LIMIT],
+            "stdout_truncated": len(safe_stdout) > EXCERPT_LIMIT,
+            "stderr_truncated": len(safe_stderr) > EXCERPT_LIMIT,
+            "stdout_original_length": len(command_result.stdout),
+            "stderr_original_length": len(command_result.stderr),
+            "redacted": command_redacted or stdout_redacted or stderr_redacted or command_result.redacted,
+            "duration_seconds": command_result.duration_seconds,
+            "timeout_seconds": command_result.timeout_seconds,
         }
 
-    def _append_record(self, record: dict[str, object]) -> None:
-        with self._commands_log.open("a", encoding="utf-8") as file:
+    @staticmethod
+    def _append_jsonl(path: Path, record: dict[str, object]) -> None:
+        with path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    def _append_file_record(self, record: dict[str, object]) -> None:
-        with self._files_log.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-@dataclass(frozen=True)
-class Excerpt:
-    text: str
-    excerpt: str
-    truncated: bool
-    original_length: int
-    redacted: bool
-
-
-def _build_excerpt(text: str) -> Excerpt:
-    redacted_text, redacted = _redact(text)
-    return Excerpt(
-        text=redacted_text,
-        excerpt=redacted_text[:EXCERPT_LIMIT],
-        truncated=len(redacted_text) > EXCERPT_LIMIT,
-        original_length=len(text),
-        redacted=redacted,
-    )
 
 
 def _redact(text: str) -> tuple[str, bool]:

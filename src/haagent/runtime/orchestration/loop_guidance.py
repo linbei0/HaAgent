@@ -70,18 +70,6 @@ def suggestion_observation(suggestion: ToolSuggestion) -> dict[str, object]:
     }
 
 
-def safety_violation_observation(violation_message: str, recovery_suggestion: str) -> dict[str, object]:
-    return {
-        "tool_name": "safety_warning",
-        "args": {},
-        "result": {
-            "status": "warning",
-            "message": violation_message,
-            "recovery_suggestion": recovery_suggestion,
-        },
-    }
-
-
 def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str | None:
     if tool_name == "grep":
         path = _first_match_path(result)

@@ -135,7 +135,8 @@ def test_agent_session_turn_summaries_keep_legacy_records_compatible(tmp_path: P
         encoding="utf-8",
     )
 
-    [turn] = session.turn_summaries()
+    resumed = AgentSession.resume(session.session_path, model_gateway=None)
+    [turn] = resumed.turn_summaries()
 
     assert turn.request == "旧问题"
     assert turn.assistant_display_text is None
@@ -441,7 +442,6 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
         session.switch_model_gateway(
             profile_name="new-profile",
             model_connection_id="new-connection",
-            provider="openai",
             model="new-model",
             base_url="https://new.invalid",
             gateway=rejected,

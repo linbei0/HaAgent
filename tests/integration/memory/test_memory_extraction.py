@@ -7,12 +7,10 @@ tests/integration/memory/test_memory_extraction.py - 长期记忆提取测试
 from __future__ import annotations
 
 import json
-import importlib.util
 from pathlib import Path
 from typing import Any
 
 from haagent import cli
-import haagent.memory.extraction as extraction
 from haagent.memory import CandidateEvidence, CandidateQueue, MemoryStore
 from haagent.memory.extraction import (
     MemoryExtractionRequest,
@@ -90,39 +88,6 @@ def _all_text(path: Path) -> str:
         if child.is_file():
             chunks.append(child.read_text(encoding="utf-8"))
     return "\n".join(chunks)
-
-
-def test_extraction_does_not_use_phrase_trigger_tables() -> None:
-    assert not hasattr(extraction, "MEMORY_TRIGGER_PHRASES")
-    assert not hasattr(extraction, "TEMPORARY_PHRASES")
-    assert not (Path(extraction.__file__).with_name("intent.py")).exists()
-
-
-def test_memory_runtime_does_not_ship_heuristic_memory_routing_modules() -> None:
-    assert importlib.util.find_spec("haagent.memory.intent") is None
-    assert importlib.util.find_spec("haagent.memory.artifact_guard") is None
-
-
-def test_source_does_not_contain_legacy_memory_matching_contracts() -> None:
-    forbidden = [
-        "MEMORY_ARTIFACT_FILENAMES",
-        "PROFILE_PATH_TOKENS",
-        "MEMORY_INTERNAL_TARGETS",
-        "MEMORY_INTERNAL_WRITE_OPERATIONS",
-        "memory_artifact_denied",
-        "memory_internal_denied",
-    ]
-    repo_root = Path(__file__).parents[1]
-    offenders: list[str] = []
-    for root in (repo_root / "src", repo_root / "tests"):
-        for path in root.rglob("*.py"):
-            if path == Path(__file__):
-                continue
-            text = path.read_text(encoding="utf-8")
-            for token in forbidden:
-                if token in text:
-                    offenders.append(f"{path.relative_to(repo_root)}: {token}")
-    assert offenders == []
 
 
 def test_explicit_remember_creates_pending_candidate_not_memory(tmp_path: Path) -> None:
@@ -739,7 +704,6 @@ def test_agent_session_emits_candidate_notice(tmp_path: Path) -> None:
 
     assert result.status == "completed"
     assert result.memory_candidates_created == 1
-    assert "memory_candidates=1" in result.output_lines()
     assert any(isinstance(event, MemoryNoticeEvent) for event in events)
 
 

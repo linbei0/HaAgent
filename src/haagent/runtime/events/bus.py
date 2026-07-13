@@ -130,18 +130,6 @@ RuntimeBusEvent: TypeAlias = (
     | LegacyRawBusEvent
 )
 
-_SLICE_EVENT_TYPES = frozenset(
-    {
-        "assistant_delta",
-        "assistant_intermediate_message",
-        "assistant_message",
-        "tool_started",
-        "tool_finished",
-        "tool_failed",
-    }
-)
-
-
 def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, object]:
     """边界序列化：episode / UI mapper / 兼容消费者使用 dict 形态。"""
     if isinstance(event, dict):
@@ -300,14 +288,6 @@ def coerce_bus_event(event: RuntimeBusEvent | dict[str, object]) -> RuntimeBusEv
     if isinstance(event, dict):
         return bus_event_from_dict(event)
     return event
-
-
-def is_slice_bus_event(event: RuntimeBusEvent | dict[str, object]) -> bool:
-    if isinstance(event, dict):
-        return str(event.get("event_type", "")) in _SLICE_EVENT_TYPES
-    if isinstance(event, LegacyRawBusEvent):
-        return False
-    return event.event_type in _SLICE_EVENT_TYPES
 
 
 def _optional_string(value: object) -> str | None:

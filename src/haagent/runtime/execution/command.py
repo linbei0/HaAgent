@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,10 +51,6 @@ class CommandResult:
     redacted: bool
     duration_seconds: float
     timeout_seconds: float
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
-
 
 def run_command(
     command: str,
@@ -291,14 +287,6 @@ def redact_secret_like_text(text: str) -> tuple[str, bool]:
     for value in _secret_environment_values():
         redacted = redacted.replace(value, REDACTED_SECRET)
     return redacted, redacted != text
-
-
-def _decode_timeout_output(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
 
 
 def _excerpt(value: str) -> tuple[str, bool]:

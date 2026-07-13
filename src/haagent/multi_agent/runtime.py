@@ -29,12 +29,10 @@ from haagent.multi_agent.backends import BACKEND_REGISTRY, WorkerBackend
 from haagent.multi_agent.messages import WorkerMessage, WorkerNotification, WorkerPermissionRequest
 from haagent.multi_agent.permissions import WorkerType, worker_tool_policy
 from haagent.multi_agent.profiles import WorkerProfileRuntime, resolve_worker_profile
-from haagent.multi_agent.team_store import MailboxMessage, TeamStore, WorkerRecord
+from haagent.multi_agent.team_store import TeamStore, WorkerRecord
 from haagent.multi_agent.worktree import WorktreeLease, create_worktree
-from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.human_interaction import interaction_args_summary
-from haagent.runtime.execution.policy import PolicyDecision
 from haagent.runtime.execution.path_policy import PathPolicy
 from haagent.runtime.orchestration.task_progress import map_failure_to_recovery
 from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
@@ -55,7 +53,6 @@ class _WorkerTask:
     session: Any
     backend: str = "in_process"
     process: Any | None = None
-    worktree_lease: WorktreeLease | None = None
     thread: threading.Thread | None = None
     done: threading.Event = field(default_factory=threading.Event)
     notification: dict[str, Any] | None = None
@@ -205,7 +202,6 @@ class MultiAgentRuntime:
             team_id=team.team_id,
             session=session,
             backend=backend.backend_type,
-            worktree_lease=worktree_lease,
             parent_step_id=self.parent_task_step_id,
         )
         with self._lock:
@@ -249,15 +245,6 @@ class MultiAgentRuntime:
             worker.thread.join(timeout=1)
             if worker.thread.is_alive():
                 return {"is_error": True, "error": f"agent {to} is still finishing"}
-        self.store.write_mailbox(
-            worker.team_id,
-            worker.agent_id,
-            MailboxMessage.user_message(
-                sender="coordinator",
-                recipient=worker.agent_id,
-                content=message,
-            ),
-        )
         worker.done.clear()
         worker.notification = None
         worker.restart_count += 1
@@ -453,26 +440,6 @@ class MultiAgentRuntime:
         if worker.thread is not None and worker.done.is_set():
             worker.thread.join(timeout=1)
         return worker.notification or {}
-
-    def list_workers(self) -> list[dict[str, Any]]:
-        teams = self.store.list_teams_for_leader(self.leader_session_id)
-        result: list[dict[str, Any]] = []
-        for team in teams:
-            for worker in team.agents:
-                result.append(
-                    {
-                        "team_id": team.team_id,
-                        "agent_id": worker.agent_id,
-                        "task_id": worker.task_id,
-                        "subagent_type": worker.subagent_type,
-                        "description": worker.description,
-                        "status": worker.status,
-                        "episode_path": worker.episode_path,
-                        "restart_count": worker.restart_count,
-                        "status_note": worker.status_note,
-                    },
-                )
-        return result
 
     def task_get(self, task_id: str) -> dict[str, Any]:
         found = self._worker_record_by_task_id(task_id)

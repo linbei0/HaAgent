@@ -125,7 +125,6 @@ class AssistantSessions:
                     existing.switch_model_gateway(
                         profile_name=profile.name,
                         model_connection_id=self._current_connection_id(),
-                        provider=profile.provider,
                         model=profile.model,
                         base_url=profile.base_url or "",
                         gateway=self._gateway_for_profile(profile),

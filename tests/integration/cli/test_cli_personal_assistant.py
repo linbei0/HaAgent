@@ -358,7 +358,6 @@ def test_session_metadata_records_model_profile_without_api_key(tmp_path: Path) 
     )
     session.switch_model_gateway(
         profile_name="requesty",
-        provider="openai-chat",
         model="openai/gpt-5.2",
         base_url="https://router.requesty.ai/v1",
         gateway=RecordingGateway(),

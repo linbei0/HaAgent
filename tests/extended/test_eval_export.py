@@ -187,7 +187,6 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
         "content": "Fake model observed tool results.",
         "tool_call_count": 0,
     }
-    assert eval_case["next_actions"] == []
 
 
 def test_failed_episode_exports_failure_information(tmp_path: Path) -> None:
@@ -715,4 +714,3 @@ def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None
         },
     ]
     assert eval_case["final_response"] is None
-    assert eval_case["next_actions"] == []

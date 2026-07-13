@@ -35,29 +35,6 @@ class ChatTurnResult:
     memory_extraction_status: str = "skipped"
     memory_extraction_reason: str = ""
 
-    def output_lines(self) -> list[str]:
-        lines = [
-            f"status={self.status}",
-            f"episode_path={self.episode_path}",
-            f"provider={self.provider}",
-            f"final_response={summary_value(self.final_response)}",
-            f"verification={self.verification_status}",
-        ]
-        if self.summary_error is not None:
-            lines.append(f"summary_error={summary_value(self.summary_error)}")
-        if self.memory_candidates_created:
-            lines.append(f"memory_candidates={self.memory_candidates_created}")
-        if self.status != "completed":
-            lines.extend(
-                [
-                    f"failed_stage={summary_value(self.failed_stage)}",
-                    f"failure_category={summary_value(self.failure_category)}",
-                    f"reason={summary_value(self.reason)}",
-                ],
-            )
-        return lines
-
-
 def build_turn_result(
     *,
     session_id: str,

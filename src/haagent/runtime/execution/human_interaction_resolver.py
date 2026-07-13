@@ -84,18 +84,6 @@ class HumanInteractionResolver:
         self._resolutions: dict[str, HumanInteractionResolution] = {}
         self._ordered_signatures: list[str] = []
 
-    @property
-    def edit_diff_session_always(self) -> bool:
-        return self._session_state.edit_diff_session_always
-
-    @property
-    def permission_mode(self) -> PermissionMode:
-        return self._permission_mode
-
-    @property
-    def session_interaction_state(self) -> SessionInteractionState:
-        return self._session_state
-
     def resolve(self, request: HumanInteractionRequest) -> HumanInteractionResolution | None:
         # edit_diff：先看 permission_mode / session always，再看完整签名（once 复用）
         if request.interaction_type == "edit_diff":

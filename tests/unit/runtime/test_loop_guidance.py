@@ -214,7 +214,7 @@ def test_unknown_execution_suggests_inspection_before_any_retry() -> None:
 
 
 def test_error_without_specific_handler_returns_none() -> None:
-    """没有专门处理逻辑的错误不应该产生建议，让 SafetyGuard 处理。"""
+    """没有专门处理逻辑的错误不应伪造恢复建议。"""
     suggestion = suggestion_for_observation(
         _obs(
             "shell",

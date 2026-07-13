@@ -40,11 +40,11 @@ def test_verification_engine_records_each_command(tmp_path: Path) -> None:
     assert record["status"] == "success"
     assert record["exit_code"] == 0
     assert record["timeout"] is False
-    assert "verified" in record["stdout"]
+    assert "stdout" not in record
     assert record["stdout_excerpt"] == "verified\n"
     assert record["stdout_truncated"] is False
     assert record["stdout_original_length"] == len("verified\n")
-    assert record["stderr"] == ""
+    assert "stderr" not in record
     assert record["stderr_excerpt"] == ""
     assert record["stderr_truncated"] is False
     assert record["stderr_original_length"] == 0
@@ -125,10 +125,10 @@ def test_verification_engine_redacts_sensitive_output(tmp_path: Path) -> None:
 
     record = json.loads((writer.path / "verification" / "commands.jsonl").read_text(encoding="utf-8"))
     assert result.status == "failed"
-    assert raw_key not in record["stdout"]
     assert raw_key not in record["stdout_excerpt"]
-    assert raw_token not in record["stderr"]
     assert raw_token not in record["stderr_excerpt"]
+    assert raw_key not in json.dumps(record, ensure_ascii=False)
+    assert raw_token not in json.dumps(record, ensure_ascii=False)
     assert record["stdout_excerpt"] == "OPENAI_API_KEY=[REDACTED]\n"
     assert record["stderr_excerpt"] == "[REDACTED_TOKEN]\n"
     assert record["redacted"] is True
@@ -154,8 +154,8 @@ def test_verification_engine_records_timeout(tmp_path: Path) -> None:
     assert record["status"] == "timeout"
     assert record["exit_code"] is None
     assert record["timeout"] is True
-    assert "stdout" in record
-    assert "stderr" in record
+    assert "stdout" not in record
+    assert "stderr" not in record
     assert "stdout_excerpt" in record
     assert "stderr_excerpt" in record
     assert record["duration_seconds"] >= 0

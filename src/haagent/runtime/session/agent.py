@@ -31,14 +31,10 @@ from haagent.runtime.session.lifecycle import (
 )
 from haagent.runtime.session.package import (
     ChatSessionError,
-    SessionSummary,
     SessionTurnSummary,
     append_turn_record,
-    find_latest_session,
-    list_sessions,
     manual_compaction_summary_text,
     merge_image_attachment_history,
-    read_session_turns,
     session_turn_summary,
     write_manual_compaction_state,
     write_session_metadata,
@@ -62,7 +58,6 @@ from haagent.runtime.session.turn_completion import (
     turn_summary,
     with_in_band_verification,
 )
-from haagent.runtime.events import RuntimeUiEvent
 from haagent.runtime.session.ui_events import (
     RuntimeUiEventSink,
     emit_runtime_ui_event,
@@ -109,10 +104,7 @@ __all__ = [
     "ChatSessionError",
     "ChatTurnResult",
     "SessionCompactResult",
-    "SessionSummary",
     "SessionTurnSummary",
-    "find_latest_session",
-    "list_sessions",
 ]
 
 
@@ -513,7 +505,6 @@ class AgentSession:
         *,
         profile_name: str,
         model_connection_id: str | None = None,
-        provider: str,
         model: str,
         base_url: str,
         gateway: ModelGateway,
@@ -667,7 +658,7 @@ class AgentSession:
             session_id=self.session_id,
             turn_count=self.turn_count,
             summaries=list(self._summaries),
-            turn_records=list(getattr(self, "_turn_records", [])),
+            turn_records=list(self._turn_records),
             manual_compaction_summary=self._manual_compaction_summary,
             manual_compaction_turn_count=self._manual_compaction_turn_count,
             next_turn_target_paths=list(self._next_turn_target_paths),
@@ -705,23 +696,9 @@ class AgentSession:
             if self._owns_mcp_runtime:
                 self._mcp_runtime.close()
 
-    def summary_text(self) -> str | None:
-        return self._session_memory().summary_text
-
     def turn_summaries(self) -> list[SessionTurnSummary]:
-        """返回当前 session 已记录轮次；优先复用内存缓存，避免重复读盘。"""
-        records = getattr(self, "_turn_records", None)
-        if records is None:
-            # 兼容旧测试/手写实例：无缓存时回退读盘并补齐缓存。
-            records = read_session_turns(self.session_path)
-            self._turn_records = list(records)
-        elif not records:
-            # 空缓存可能是新建会话，也可能是外部直接写了 turns.jsonl（兼容旧路径）。
-            disk_records = read_session_turns(self.session_path)
-            if disk_records:
-                self._turn_records = list(disk_records)
-                records = self._turn_records
-        return [session_turn_summary(turn) for turn in records]
+        """返回 lifecycle 已装载并随 turn 同步更新的会话摘要。"""
+        return [session_turn_summary(turn) for turn in self._turn_records]
 
     def compact_current_session(self) -> SessionCompactResult:
         if self.model_gateway is None:
@@ -798,20 +775,6 @@ class AgentSession:
         compacted_count = min(max(self._manual_compaction_turn_count, 0), len(self._summaries))
         return [self._manual_compaction_summary, *self._summaries[compacted_count:]]
 
-    def session_started_event(self) -> RuntimeUiEvent:
-        return build_session_started_event(
-            session_id=self.session_id,
-            turn_index=self.turn_count,
-            details=self.status(),
-        )
-
-    def session_finished_event(self) -> RuntimeUiEvent:
-        return build_session_finished_event(
-            session_id=self.session_id,
-            turn_index=self.turn_count,
-            details={"turn_count": self.turn_count},
-        )
-
     def _build_turn_result(self, prompt: str, result) -> ChatTurnResult:
         del prompt
         return build_turn_result(
@@ -845,8 +808,6 @@ class AgentSession:
             "verification_status": result.verification_status,
             "assistant_display_text": assistant_display_text(result.final_response),
         }
-        if not hasattr(self, "_turn_records") or self._turn_records is None:
-            self._turn_records = []
         self._turn_records.append(record)
         self._write_session_metadata()
 
@@ -862,9 +823,8 @@ class AgentSession:
 
     def _write_session_metadata(self) -> None:
         first_request = "none"
-        records = getattr(self, "_turn_records", None) or []
-        if records:
-            request = records[0].get("request")
+        if self._turn_records:
+            request = self._turn_records[0].get("request")
             if isinstance(request, str) and request:
                 first_request = request
         write_session_metadata(

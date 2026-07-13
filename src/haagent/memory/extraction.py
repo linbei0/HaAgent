@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
-
 from haagent.memory.candidates import CandidateQueue
 from haagent.memory.governance import (
     MemoryGovernanceError,

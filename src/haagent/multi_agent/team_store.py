@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
-import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +17,6 @@ from haagent.multi_agent.messages import WorkerMessage, WorkerPermissionRequest
 
 
 WorkerStatus = Literal["queued", "running", "idle", "awaiting_approval", "completed", "failed", "stopped"]
-MessageType = Literal["user_message", "shutdown_request"]
 
 
 @dataclass(frozen=True)
@@ -48,28 +45,6 @@ class TeamRecord:
     agents: list[WorkerRecord] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
-
-
-@dataclass(frozen=True)
-class MailboxMessage:
-    id: str
-    type: MessageType
-    sender: str
-    recipient: str
-    payload: dict[str, Any]
-    timestamp: float
-    read: bool = False
-
-    @classmethod
-    def user_message(cls, *, sender: str, recipient: str, content: str) -> "MailboxMessage":
-        return cls(
-            id=uuid.uuid4().hex,
-            type="user_message",
-            sender=sender,
-            recipient=recipient,
-            payload={"content": content},
-            timestamp=time.time(),
-        )
 
 
 class TeamStore:
@@ -199,12 +174,6 @@ class TeamStore:
                 updated_at=datetime.now(UTC).isoformat(),
             ),
         )
-
-    def write_mailbox(self, team_id: str, agent_id: str, message: MailboxMessage) -> Path:
-        inbox = self._team_dir(team_id) / "agents" / agent_id / "inbox"
-        inbox.mkdir(parents=True, exist_ok=True)
-        filename = f"{message.timestamp:.6f}_{message.id}.json"
-        return _atomic_write_json(inbox / filename, asdict(message))
 
     def write_worker_message(self, team_id: str, agent_id: str, message: WorkerMessage) -> Path:
         payload = message.to_dict()

@@ -7,14 +7,10 @@ tests/unit/multi_agent/test_team_store.py - 多智能体 team 存储测试
 import json
 from pathlib import Path
 
-from haagent.multi_agent.team_store import (
-    MailboxMessage,
-    TeamStore,
-    WorkerRecord,
-)
+from haagent.multi_agent.team_store import TeamStore, WorkerRecord
 
 
-def test_team_store_writes_team_mailbox_and_notifications(tmp_path: Path) -> None:
+def test_team_store_writes_team_and_notifications(tmp_path: Path) -> None:
     store = TeamStore(tmp_path / ".haagent" / "teams")
     team = store.ensure_team(
         team_id="team-demo",
@@ -30,15 +26,6 @@ def test_team_store_writes_team_mailbox_and_notifications(tmp_path: Path) -> Non
     )
 
     store.upsert_worker(team.team_id, worker)
-    store.write_mailbox(
-        team.team_id,
-        worker.agent_id,
-        MailboxMessage.user_message(
-            sender="leader",
-            recipient=worker.agent_id,
-            content="Please summarize README",
-        ),
-    )
     store.append_notification(
         team.team_id,
         {
@@ -57,14 +44,6 @@ def test_team_store_writes_team_mailbox_and_notifications(tmp_path: Path) -> Non
     saved_team = json.loads(team_file.read_text(encoding="utf-8"))
     assert saved_team["team_id"] == "team-demo"
     assert saved_team["agents"][0]["agent_id"] == "explorer-abc123"
-
-    inbox_files = list(
-        (tmp_path / ".haagent" / "teams" / "team-demo" / "agents" / "explorer-abc123" / "inbox").glob("*.json")
-    )
-    assert len(inbox_files) == 1
-    saved_message = json.loads(inbox_files[0].read_text(encoding="utf-8"))
-    assert saved_message["type"] == "user_message"
-    assert saved_message["payload"]["content"] == "Please summarize README"
 
     notification_lines = (
         tmp_path / ".haagent" / "teams" / "team-demo" / "notifications.jsonl"

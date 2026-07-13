@@ -142,7 +142,6 @@ def test_edit_diff_always_reuses_for_different_files_same_session() -> None:
 
     resolver.record(first, HumanInteractionResponse(approved=True, answer="always"), turn=1)
 
-    assert resolver.edit_diff_session_always is True
     reused_b = resolver.resolve(second)
     reused_c = resolver.resolve(third)
     assert reused_b is not None
@@ -176,10 +175,7 @@ def test_new_resolver_does_not_inherit_edit_diff_always() -> None:
         HumanInteractionResponse(approved=True, answer="always"),
         turn=1,
     )
-    assert previous.edit_diff_session_always is True
-
     fresh = HumanInteractionResolver(permission_mode="request_approval")
-    assert fresh.edit_diff_session_always is False
     assert fresh.resolve(_edit_diff_request("b.txt")) is None
 
 

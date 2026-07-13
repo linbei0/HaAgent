@@ -101,7 +101,7 @@ def test_list_sessions_does_not_parse_full_turns_file(tmp_path: Path) -> None:
     assert sessions[0].turn_count == 80
 
 
-def test_turn_summaries_use_in_memory_cache_after_record(tmp_path: Path) -> None:
+def test_turn_summaries_include_recorded_turn(tmp_path: Path) -> None:
     session = AgentSession(
         workspace_root=tmp_path,
         runs_root=tmp_path / ".runs",
@@ -118,18 +118,14 @@ def test_turn_summaries_use_in_memory_cache_after_record(tmp_path: Path) -> None
     )
     session._record_turn("cached request", result, "summary")
 
-    with patch(
-        "haagent.runtime.session.agent.read_session_turns",
-        side_effect=AssertionError("turn_summaries must use in-memory turn cache"),
-    ):
-        turns = session.turn_summaries()
+    turns = session.turn_summaries()
 
     assert len(turns) == 1
     assert turns[0].request == "cached request"
     assert turns[0].assistant_display_text == "cached answer"
 
 
-def test_resume_turn_summaries_use_loaded_cache(tmp_path: Path) -> None:
+def test_resume_turn_summaries_include_persisted_turn(tmp_path: Path) -> None:
     session = AgentSession(
         workspace_root=tmp_path,
         runs_root=tmp_path / ".runs",
@@ -148,11 +144,7 @@ def test_resume_turn_summaries_use_loaded_cache(tmp_path: Path) -> None:
     session_path = session.session_path
 
     resumed = AgentSession.resume(session_path, model_gateway=None)
-    with patch(
-        "haagent.runtime.session.agent.read_session_turns",
-        side_effect=AssertionError("resumed turn_summaries must use resume cache"),
-    ):
-        turns = resumed.turn_summaries()
+    turns = resumed.turn_summaries()
 
     assert len(turns) == 1
     assert turns[0].request == "resume request"

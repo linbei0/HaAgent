@@ -123,7 +123,6 @@ class RecordingSession:
         *,
         profile_name: str,
         model_connection_id: str | None = None,
-        provider: str,
         model: str,
         base_url: str,
         gateway,

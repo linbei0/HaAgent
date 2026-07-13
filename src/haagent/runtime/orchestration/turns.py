@@ -782,7 +782,6 @@ def _resolve_progress_block(
     handler = _interaction_handler_for_turn(turn, deps)
     if handler is None:
         return _fail_progress_block(
-            turn=turn,
             deps=deps,
             evidence=f"progress_guard blocked ({decision.pattern}): no interaction handler; {decision.reason}",
         )
@@ -797,13 +796,11 @@ def _resolve_progress_block(
         response = handler(request)
     except Exception as error:
         return _fail_progress_block(
-            turn=turn,
             deps=deps,
             evidence=f"progress_guard blocked interaction failed: {error}",
         )
     if not isinstance(response, HumanInteractionResponse):
         return _fail_progress_block(
-            turn=turn,
             deps=deps,
             evidence="progress_guard blocked: invalid interaction response",
         )
@@ -827,7 +824,6 @@ def _resolve_progress_block(
             )
         return None
     return _fail_progress_block(
-        turn=turn,
         deps=deps,
         evidence=(
             f"progress_guard blocked ({decision.pattern}): user chose stop or empty; "
@@ -836,7 +832,7 @@ def _resolve_progress_block(
     )
 
 
-def _fail_progress_block(*, turn: int, deps: TurnLoopDependencies, evidence: str) -> RunResult:
+def _fail_progress_block(*, deps: TurnLoopDependencies, evidence: str) -> RunResult:
     deps.recorder.transition(RunStatus.FAILED)
     deps.writer.write_failure_attribution(
         {
@@ -1310,10 +1306,6 @@ def _tool_visible_result_fingerprint(tool_name: str, args: dict[str, Any], resul
         sort_keys=True,
         default=str,
     )
-
-
-def _supports_event_sink(model_gateway: ModelGateway) -> bool:
-    return _supports_generate_parameter(model_gateway, "event_sink")
 
 
 def _supports_generate_parameter(model_gateway: ModelGateway, parameter: str) -> bool:

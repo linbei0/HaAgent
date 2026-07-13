@@ -6,7 +6,6 @@ src/haagent/runtime/evaluation/export.py - Eval Case 导出器
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +49,6 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "approval_summary": _approval_summary(package_view.tool_calls),
         "human_interactions": _human_interactions_summary(package_view.transcript),
         "final_response": _final_response_summary(package_view.transcript),
-        "next_actions": _next_actions_summary(episode_path, package_view.context_manifest),
     }
 
 
@@ -257,14 +255,3 @@ def _last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | N
         if record.get("event") == "model_response":
             return record
     return None
-
-
-def _next_actions_summary(episode_path: Path, context_manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    return []
-
-
-def _read_context_json(path: Path) -> dict[str, Any]:
-    context = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(context, dict):
-        raise TypeError(f"{path} must contain a JSON object")
-    return context

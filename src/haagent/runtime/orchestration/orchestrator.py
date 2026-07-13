@@ -7,22 +7,14 @@ src/haagent/runtime/orchestration/orchestrator.py - Run Orchestrator 状态机
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Callable
 
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.messages import compress_historical_tool_messages
 from haagent.context.builder import ContextBuildError, ContextBuilder
-from haagent.context.messages import (
-    build_assistant_message,
-    build_final_response_request_message,
-    build_suggestion_message,
-    build_tool_result_message,
-    generate_tool_call_id,
-)
 from haagent.models.fake import FakeModelGateway
-from haagent.models.types import ModelCallError, ModelGateway, ToolCall
+from haagent.models.types import ModelCallError, ModelGateway
 from haagent.models.model_connections import user_config_dir
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
@@ -30,7 +22,6 @@ from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import (
     GuardrailResult,
-    check_assistant_output,
     check_user_input,
     guardrail_evidence,
 )
@@ -44,11 +35,7 @@ from haagent.runtime.execution.human_interaction_resolver import (
     HumanInteractionResolver,
     SessionInteractionState,
 )
-from haagent.runtime.orchestration.loop_guidance import (
-    ToolSuggestion,
-    suggestion_for_observation,
-    suggestion_observation,
-)
+from haagent.runtime.orchestration.loop_guidance import ToolSuggestion
 from haagent.runtime.execution.progress_guard import ProgressDecision, ProgressGuard
 from haagent.runtime.orchestration.preparation import prepare_initial_messages, prepare_run_setup
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
@@ -62,7 +49,7 @@ from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.sandbox import SandboxBackend, create_sandbox_backend
 from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS, load_runtime_settings
 from haagent.runtime.contracts.task import TaskLoadError
-from haagent.tools.base import ToolRoutingError, tool_error
+from haagent.tools.base import ToolRoutingError
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
 from haagent.verification.engine import DEFAULT_COMMAND_TIMEOUT_SECONDS, VerificationEngine
@@ -458,45 +445,6 @@ def _verification_evidence(verification_result) -> str:
     return "\n".join(lines)
 
 
-def _full_compact_eligibility_from_manifest(contract: dict[str, Any]) -> FullCompactEligibility:
-    return FullCompactEligibility(
-        eligible=contract.get("eligible") is True,
-        reason=str(contract.get("reason", "unknown")),
-        trigger_kind=contract.get("trigger_kind") if isinstance(contract.get("trigger_kind"), str) else None,
-        required_preserve_recent=_full_compact_preserve_recent(contract),
-    )
-
-
-def _full_compact_preserve_recent(contract: dict[str, Any]) -> int:
-    preserve_recent = contract.get("required_preserve_recent", 6)
-    return preserve_recent if isinstance(preserve_recent, int) else 6
-
-
-def _full_compact_event_fields(result: FullCompactResult) -> dict[str, object]:
-    return {
-        "applied": result.applied,
-        "reason": result.reason,
-        "pre_message_count": result.pre_message_count,
-        "post_message_count": result.post_message_count,
-        "older_message_count": result.older_message_count,
-        "preserved_recent_count": result.preserved_recent_count,
-        "summary_chars": result.summary_chars,
-    }
-
-
-def _write_full_compact_manifest_result(
-    writer: EpisodeWriter,
-    context_id: str,
-    full_compact: dict[str, Any],
-) -> None:
-    manifest_path = writer.path / "contexts" / f"{context_id}-manifest.json"
-    if not manifest_path.exists():
-        return
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["full_compact"] = full_compact
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _compression_budget_for_gateway(model_gateway: ModelGateway):
     metadata = None
     metadata_fn = getattr(model_gateway, "metadata", None)
@@ -786,13 +734,6 @@ def _tool_failure_category(error: ToolRoutingError) -> FailureCategory:
     if error.error_type in {"invalid_tool_arguments", "tool_argument_invalid"}:
         return FailureCategory.TOOL_ARGUMENT
     return FailureCategory.TOOL_INTERFACE
-
-
-def _workspace_root_candidate(raw_root: str | None, task_path: Path) -> Path:
-    candidate = task_path.parent if raw_root is None else Path(raw_root)
-    if raw_root is not None and not candidate.is_absolute():
-        candidate = task_path.parent / candidate
-    return candidate.resolve(strict=False)
 
 
 def _current_task_step_id(task_ledger: dict[str, object] | None) -> str:

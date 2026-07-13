@@ -386,18 +386,6 @@ def _loop_suggestion_event(event: dict[str, object], context: RawRuntimeUiEventC
     )
 
 
-def _safety_abort_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
-    return WarningNoticeEvent(
-        session_id=context.session_id,
-        turn_index=context.turn_index,
-        title="Safety abort",
-        message=summary_value(str(event.get("message", ""))),
-        notice_kind="safety_abort",
-        surface="timeline",
-        details=without_event_type(event),
-    )
-
-
 def _interaction_reused_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
     interaction_type = str(event.get("interaction_type", "interaction"))
     name = tool_name(event)
@@ -478,7 +466,6 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("model_fallback", WarningNoticeEvent, _model_route_fallback_event),
     _spec("compression_diagnostic", WarningNoticeEvent, _compression_diagnostic_event),
     _spec("loop_suggestion_added", WarningNoticeEvent, _loop_suggestion_event),
-    _spec("safety_abort", WarningNoticeEvent, _safety_abort_event),
     _spec("interaction_reused", WarningNoticeEvent, _interaction_reused_event),
     _spec("failure", FailureNoticeEvent, _failure_event),
     _spec("task_plan_created", TaskProgressEvent, _task_progress_event),
