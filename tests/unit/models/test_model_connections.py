@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from haagent.models.credentials import FakeCredentialStore
+from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.model_connections import (
     ModelRoute,
     ModelSelection,

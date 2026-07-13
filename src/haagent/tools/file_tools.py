@@ -530,18 +530,6 @@ def apply_patch_set(
     }
 
 
-def resolve_workspace_path(path: str, workspace_root: Path) -> Path | None:
-    """把相对路径绑定到 workspace，拒绝逃逸到工作区之外的路径。"""
-    root = workspace_root.resolve()
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve()
-    if resolved == root or root in resolved.parents:
-        return resolved
-    return None
-
-
 def _display_path(path: Path, workspace_root: Path) -> str:
     root = workspace_root.resolve()
     resolved = path.resolve()

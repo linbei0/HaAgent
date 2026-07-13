@@ -30,18 +30,13 @@ def _def(name: str, description: str = "d") -> ToolDefinition:
 def test_schema_cache_exports_once_per_version_and_names() -> None:
     registry = ToolRuntimeRegistry(static_tools={"file_read": _def("file_read")}, dynamic_tools={})
     cache = ToolSchemaCache()
-    calls = {"count": 0}
-    original = registry.get("file_read").to_model_schema
-    # wrap definition method via subclassing call count on cache path
     first = cache.export(["file_read"], registry)
     second = cache.export(["file_read"], registry)
     assert first == second
-    assert first is not second
     first[0]["parameters"]["properties"].clear()
     third = cache.export(["file_read"], registry)
     assert third[0]["parameters"]["properties"]
     assert "path" in third[0]["parameters"]["properties"]
-    del calls
 
 
 def test_schema_version_stable_under_dict_insertion_order() -> None:

@@ -11,7 +11,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from haagent.context.compression.budget import CompressionBudget, estimate_message_tokens
 from haagent.models.types import ModelCallError, ModelGateway
 
 DEFAULT_FULL_COMPACT_PRESERVE_RECENT = 6
@@ -63,35 +62,6 @@ class FullCompactResult:
     summary_chars: int
     messages: list[dict[str, Any]]
     manifest: dict[str, Any]
-
-
-def assess_full_compact_need(
-    messages: list[dict[str, Any]],
-    budget: CompressionBudget,
-    diagnostics: list[object],
-) -> FullCompactEligibility:
-    del diagnostics
-    message_tokens = estimate_message_tokens(messages)
-    if message_tokens < int(budget.available_input_tokens * 0.90):
-        return FullCompactEligibility(
-            eligible=False,
-            reason="deterministic_context_sufficient",
-            trigger_kind=None,
-            required_preserve_recent=budget.full_compact_preserve_recent,
-        )
-    if len(messages) <= budget.full_compact_preserve_recent:
-        return FullCompactEligibility(
-            eligible=False,
-            reason="insufficient_compressible_history",
-            trigger_kind=None,
-            required_preserve_recent=budget.full_compact_preserve_recent,
-        )
-    return FullCompactEligibility(
-        eligible=True,
-        reason="high_pressure_after_deterministic_compression",
-        trigger_kind="auto_full_compact",
-        required_preserve_recent=budget.full_compact_preserve_recent,
-    )
 
 
 def assess_full_compact_eligibility(

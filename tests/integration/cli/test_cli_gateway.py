@@ -18,7 +18,8 @@ from haagent.channels.manager import ChannelManager
 from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.state import ChannelStateStore
-from haagent.models.credentials import KEYRING_SERVICE_NAME, FakeCredentialStore
+from haagent.models.credentials import KEYRING_SERVICE_NAME
+from tests.support.model_credentials import FakeCredentialStore
 
 
 def test_gateway_status_without_instances(tmp_path: Path, monkeypatch, capsys) -> None:

@@ -21,7 +21,7 @@ from haagent.app.assistant_types import (
     ModelSelectionRequest,
 )
 from haagent.models.catalog import ModelCatalogProvider
-from haagent.models.credentials import FakeCredentialStore
+from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.types import ModelResponse
 from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models import model_connections

@@ -93,36 +93,6 @@ class KeyringCredentialStore:
             raise CredentialError(str(error)) from error
 
 
-class FakeCredentialStore:
-    """测试用内存凭据库，不触碰真实系统 keyring。"""
-
-    def __init__(
-        self,
-        values: Mapping[str, str] | None = None,
-        *,
-        available: bool = True,
-        error: str = "credential store unavailable",
-    ) -> None:
-        self.values = dict(values or {})
-        self.available = available
-        self.error = error
-
-    def get_password(self, service_name: str, username: str) -> str | None:
-        if not self.available:
-            raise CredentialError(self.error)
-        return self.values.get(username)
-
-    def set_password(self, service_name: str, username: str, password: str) -> None:
-        if not self.available:
-            raise CredentialError(self.error)
-        self.values[username] = password
-
-    def delete_password(self, service_name: str, username: str) -> None:
-        if not self.available:
-            raise CredentialError(self.error)
-        self.values.pop(username, None)
-
-
 def resolve_api_key(
     record: CredentialRecord,
     *,
@@ -171,18 +141,6 @@ def credential_status(
     )
 
 
-def save_keyring_api_key(
-    profile_name: str,
-    api_key: str,
-    *,
-    credential_store: CredentialStore | None = None,
-) -> None:
-    if not api_key.strip():
-        raise CredentialError("API key is required")
-    store = credential_store or KeyringCredentialStore()
-    store.set_password(KEYRING_SERVICE_NAME, _credential_username(profile_name), api_key)
-
-
 def save_connection_keyring_api_key(
     connection_id: str,
     api_key: str,
@@ -193,17 +151,6 @@ def save_connection_keyring_api_key(
         raise CredentialError("API key is required")
     store = credential_store or KeyringCredentialStore()
     store.set_password(KEYRING_SERVICE_NAME, _connection_credential_username(connection_id), api_key)
-
-
-def save_insecure_api_key(profile_name: str, api_key: str, *, config_dir: Path) -> Path:
-    if not api_key.strip():
-        raise CredentialError("API key is required")
-    config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / INSECURE_CREDENTIALS_FILE
-    data = _read_insecure_credentials(path) if path.exists() else {}
-    data[_credential_username(profile_name)] = api_key
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path
 
 
 def save_connection_insecure_api_key(connection_id: str, api_key: str, *, config_dir: Path) -> Path:

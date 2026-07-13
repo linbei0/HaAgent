@@ -24,7 +24,8 @@ from haagent.channels.interactions import InteractionBroker
 from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.types import ChannelAddress
-from haagent.models.credentials import KEYRING_SERVICE_NAME, CredentialError, FakeCredentialStore
+from haagent.models.credentials import KEYRING_SERVICE_NAME, CredentialError
+from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 from haagent.runtime.session.agent import AgentSession

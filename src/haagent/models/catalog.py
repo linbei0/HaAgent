@@ -1,7 +1,7 @@
 """
 src/haagent/models/catalog.py - 模型目录发现与缓存
 
-负责从 Models.dev 读取公开 provider/model 元数据，并提供非敏感的搜索结果。
+负责从 Models.dev 读取公开 provider/model 元数据并维护本地缓存。
 """
 
 from __future__ import annotations
@@ -114,28 +114,6 @@ def fetch_model_catalog(
     )
 
 
-def search_catalog(result: CatalogFetchResult, query: str) -> list[ModelCatalogProvider]:
-    tokens = [token for token in _normalize(query).split() if token]
-    if not tokens:
-        return []
-    matches: list[ModelCatalogProvider] = []
-    for provider in result.providers:
-        haystack = " ".join(
-            [
-                provider.id,
-                provider.name,
-                provider.provider_package or "",
-                provider.documentation_url or "",
-                " ".join(provider.env_names),
-                " ".join(_provider_model_search_text(model) for model in provider.models),
-            ],
-        )
-        haystack_text = _normalize(haystack)
-        if all(token in haystack_text for token in tokens):
-            matches.append(provider)
-    return matches
-
-
 def _default_transport() -> dict[str, object]:
     request = Request(
         MODELS_DEV_URL,
@@ -232,18 +210,6 @@ def _parse_model(model_id: str, payload: dict[str, object]) -> ModelCatalogModel
     )
 
 
-def _provider_model_search_text(model: ModelCatalogModel) -> str:
-    return " ".join(
-        [
-            model.id,
-            model.name,
-            model.family or "",
-            model.release_date or "",
-            model.last_updated or "",
-        ],
-    )
-
-
 def _write_cache(path: Path, raw: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -289,20 +255,10 @@ def _cache_is_fresh(fetched_at: datetime | None, max_age: timedelta) -> bool:
     return datetime.now(tz=UTC) - fetched_at <= max_age
 
 
-def _object_dict(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        return {}
-    return value
-
-
 def _optional_string(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     return value
-
-
-def _normalize(text: str) -> str:
-    return " ".join(text.lower().split())
 
 
 def _now_iso() -> str:

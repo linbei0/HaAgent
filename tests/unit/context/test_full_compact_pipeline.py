@@ -7,10 +7,8 @@ tests/unit/context/test_full_compact_pipeline.py - 统一 full compact 流水线
 import copy
 import json
 
-from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.full import (
     FullCompactEligibility,
-    assess_full_compact_need,
     maybe_full_compact_messages,
 )
 from haagent.models.types import ModelCallError, ModelResponse
@@ -28,24 +26,6 @@ class RecordingGateway:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
-
-
-def test_deterministic_compression_under_threshold_skips_full_compact() -> None:
-    messages = [{"role": "user", "content": "short"}]
-    eligibility = assess_full_compact_need(messages, derive_compression_budget(None), diagnostics=[])
-
-    assert eligibility.eligible is False
-    assert eligibility.reason == "deterministic_context_sufficient"
-
-
-def test_high_pressure_after_deterministic_compression_triggers_full_compact() -> None:
-    messages = [{"role": "user", "content": "x" * 10_000} for _ in range(8)]
-    budget = derive_compression_budget(None, fallback_context_window=1_000)
-
-    eligibility = assess_full_compact_need(messages, budget, diagnostics=[])
-
-    assert eligibility.eligible is True
-    assert eligibility.reason == "high_pressure_after_deterministic_compression"
 
 
 def test_full_compact_failure_records_reason_and_returns_original_messages() -> None:

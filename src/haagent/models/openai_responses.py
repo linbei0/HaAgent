@@ -192,11 +192,6 @@ class OpenAIResponsesGateway:
             self._http_transport.close()
             self._owns_http_transport = False
 
-    @property
-    def responses_endpoint(self) -> str:
-        """返回本次 gateway 会请求的 Responses API endpoint，便于审计和测试。"""
-        return self._responses_endpoint
-
     def metadata(self) -> ModelGatewayMetadata:
         return ModelGatewayMetadata(
             provider=self.provider_name,

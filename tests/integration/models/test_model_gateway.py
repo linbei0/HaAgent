@@ -19,7 +19,7 @@ from haagent.models.google import GoogleGeminiGateway
 from haagent.models.types import ModelCallError, ModelFailureDetails, ModelResponse, ModelUsage, ToolCall
 from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models.openai_responses import OpenAIResponsesGateway
-from haagent.models.credentials import FakeCredentialStore
+from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.gateway_registry import (
     catalog_provider_capability,
     gateway_from_profile,
@@ -1321,7 +1321,7 @@ def test_openai_gateway_defaults_to_official_responses_endpoint() -> None:
         transport=lambda payload, api_key: {"output_text": "ok"},
     )
 
-    assert gateway.responses_endpoint == DEFAULT_RESPONSES_ENDPOINT
+    assert gateway.metadata().endpoint == DEFAULT_RESPONSES_ENDPOINT
 
 
 def test_openai_gateway_reads_base_url_from_environment(monkeypatch) -> None:
@@ -1332,7 +1332,7 @@ def test_openai_gateway_reads_base_url_from_environment(monkeypatch) -> None:
         transport=lambda payload, api_key: {"output_text": "ok"},
     )
 
-    assert gateway.responses_endpoint == "https://compatible.example/v1/responses"
+    assert gateway.metadata().endpoint == "https://compatible.example/v1/responses"
 
 
 @pytest.mark.parametrize(
@@ -1351,7 +1351,7 @@ def test_openai_gateway_normalizes_base_url(base_url: str, expected_endpoint: st
         transport=lambda payload, api_key: {"output_text": "ok"},
     )
 
-    assert gateway.responses_endpoint == expected_endpoint
+    assert gateway.metadata().endpoint == expected_endpoint
 
 
 @pytest.mark.parametrize(
@@ -1379,7 +1379,7 @@ def test_openai_chat_gateway_normalizes_endpoint(
         },
     )
 
-    assert gateway.chat_completions_endpoint == expected_endpoint
+    assert gateway.metadata().endpoint == expected_endpoint
 
 
 def test_openai_chat_gateway_text_only_response_uses_messages_payload() -> None:

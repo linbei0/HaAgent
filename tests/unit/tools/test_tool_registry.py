@@ -13,7 +13,6 @@ from haagent.tools.registry import (
     allowed_tool_definitions,
     default_tool_runtime_registry,
     export_tool_schemas,
-    get_tool_definition,
     merge_tool_registry_fragments,
     validate_tool_registry,
 )
@@ -367,9 +366,6 @@ def test_apply_patch_set_schema_describes_atomic_replacements() -> None:
 
 
 def test_tool_registry_rejects_unknown_tool() -> None:
-    with pytest.raises(KeyError, match="unknown tool: mystery_tool"):
-        get_tool_definition("mystery_tool")
-
     with pytest.raises(KeyError, match="unknown tool: mystery_tool"):
         export_tool_schemas(["fake_tool", "mystery_tool"])
 

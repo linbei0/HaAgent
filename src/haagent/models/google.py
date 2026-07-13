@@ -289,11 +289,6 @@ class GoogleGeminiGateway:
             self._http_transport.close()
             self._owns_http_transport = False
 
-    @property
-    def generate_content_endpoint(self) -> str:
-        """返回本次 gateway 会请求的 Gemini generateContent endpoint，便于审计和测试。"""
-        return self._endpoint
-
     def metadata(self) -> ModelGatewayMetadata:
         return ModelGatewayMetadata(
             provider=self.provider_name,

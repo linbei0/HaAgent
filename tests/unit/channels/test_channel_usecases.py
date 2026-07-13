@@ -25,7 +25,8 @@ from haagent.channels.settings import (
     save_channel_settings,
 )
 from haagent.channels.state import ChannelStateStore
-from haagent.models.credentials import KEYRING_SERVICE_NAME, FakeCredentialStore
+from haagent.models.credentials import KEYRING_SERVICE_NAME
+from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.runtime.session.agent import AgentSession
 

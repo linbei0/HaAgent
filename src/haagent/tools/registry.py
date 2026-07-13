@@ -170,14 +170,6 @@ def _validate_parameters_schema(tool_name: str, schema: dict[str, Any]) -> None:
             )
 
 
-def get_tool_definition(name: str) -> ToolDefinition:
-    """按名称读取工具定义；未知工具必须显式失败，避免静默漏导 schema。"""
-    try:
-        return TOOL_REGISTRY[name]
-    except KeyError as error:
-        raise KeyError(f"unknown tool: {name}") from error
-
-
 def allowed_tool_definitions(
     names: list[str],
     registry: ToolRuntimeRegistry | None = None,

@@ -28,7 +28,6 @@ from haagent.channels.session_actor import ChannelSessionActor
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.state import ChannelStateStore
 from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
-from haagent.models.credentials import FakeCredentialStore
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.runtime.events.types import (
     AssistantMessageEvent,
@@ -37,6 +36,7 @@ from haagent.runtime.events.types import (
     ToolActivityEvent,
 )
 from haagent.runtime.session.agent import AgentSession
+from tests.support.model_credentials import FakeCredentialStore
 
 
 # ---- helpers ----
@@ -326,7 +326,7 @@ def test_gateway_preflight_fails_without_model_key(tmp_path: Path, monkeypatch, 
     from haagent import cli
     from haagent import cli_commands
     from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
-    from haagent.models.credentials import KEYRING_SERVICE_NAME, FakeCredentialStore
+    from haagent.models.credentials import KEYRING_SERVICE_NAME
 
     home = tmp_path / "home"
     config_dir = home / ".haagent"
@@ -380,8 +380,6 @@ def test_gateway_preflight_fails_without_model_key(tmp_path: Path, monkeypatch, 
 def test_runtime_builds_fake_adapter_from_settings(tmp_path: Path) -> None:
     from haagent.channels.runtime import ChannelGatewayRuntime
     from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
-    from haagent.models.credentials import FakeCredentialStore
-
     workspace = tmp_path / "ws"
     workspace.mkdir()
     config = tmp_path / "channels.json"

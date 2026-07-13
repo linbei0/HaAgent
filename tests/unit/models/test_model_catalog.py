@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from haagent.models import catalog as catalog_module
-from haagent.models.catalog import ModelCatalogError, fetch_model_catalog, search_catalog
+from haagent.models.catalog import ModelCatalogError, fetch_model_catalog
 
 
 def test_models_dev_catalog_parses_provider_model_and_cache(tmp_path: Path) -> None:
@@ -58,11 +58,7 @@ def test_models_dev_catalog_parses_provider_model_and_cache(tmp_path: Path) -> N
     assert provider.models[0].id == "openai/gpt-5.2-chat"
     assert provider.models[0].supports_tool_call is True
 
-    matches = search_catalog(result, "gpt 5.2")
-    assert [item.id for item in matches] == ["requesty"]
-
-
-def test_default_models_dev_transport_sends_json_request_headers(monkeypatch) -> None:
+def test_default_models_dev_transport_sends_json_request_headers(monkeypatch, tmp_path: Path) -> None:
     captured = {}
 
     class FakeResponse:
@@ -84,14 +80,14 @@ def test_default_models_dev_transport_sends_json_request_headers(monkeypatch) ->
 
     monkeypatch.setattr(catalog_module, "urlopen", fake_urlopen)
 
-    result = catalog_module._default_transport()
+    result = fetch_model_catalog(cache_path=tmp_path / "catalog.json")
 
     request = captured["request"]
     assert captured["timeout"] == 30
     assert request.full_url == "https://models.dev/api.json"
     assert request.get_header("User-agent").startswith("HaAgent/")
     assert request.get_header("Accept") == "application/json"
-    assert result["openai"]["name"] == "OpenAI"
+    assert result.providers[0].name == "OpenAI"
 
 
 def test_model_catalog_uses_cache_when_refresh_fails(tmp_path: Path) -> None:

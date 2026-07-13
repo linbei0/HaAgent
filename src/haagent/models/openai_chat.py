@@ -206,11 +206,6 @@ class OpenAIChatCompletionsGateway:
             self._http_transport.close()
             self._owns_http_transport = False
 
-    @property
-    def chat_completions_endpoint(self) -> str:
-        """返回本次 gateway 会请求的 Chat Completions endpoint，便于审计和测试。"""
-        return self._chat_completions_endpoint
-
     def metadata(self) -> ModelGatewayMetadata:
         return ModelGatewayMetadata(
             provider=self.provider_name,

@@ -82,9 +82,10 @@ def test_agent_tool_starts_worker_and_records_trace(tmp_path: Path) -> None:
         mcp_runtime=None,
         team_root=tmp_path / ".haagent" / "teams",
     )
+    writer = _writer(tmp_path)
     router = ToolRouter(
         ["agent", "send_message", "task_stop"],
-        _writer(tmp_path),
+        writer,
         workspace_root=tmp_path,
         path_policy=default_path_policy(tmp_path),
         agent_runtime=runtime,
@@ -112,7 +113,7 @@ def test_agent_tool_starts_worker_and_records_trace(tmp_path: Path) -> None:
     assert payloads[0]["agent_id"] == result["agent_id"]
     assert payloads[1]["status"] == "completed"
 
-    trace_lines = (router.episode_writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
+    trace_lines = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(trace_lines[0])["tool_name"] == "agent"
 
 

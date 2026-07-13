@@ -282,11 +282,6 @@ class AnthropicMessagesGateway:
             self._http_transport.close()
             self._owns_http_transport = False
 
-    @property
-    def messages_endpoint(self) -> str:
-        """返回本次 gateway 会请求的 Anthropic Messages endpoint，便于审计和测试。"""
-        return self._messages_endpoint
-
     def metadata(self) -> ModelGatewayMetadata:
         return ModelGatewayMetadata(
             provider=self.provider_name,

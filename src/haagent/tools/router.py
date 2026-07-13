@@ -115,10 +115,6 @@ class ToolRouter:
             raise ToolRoutingError(str(error), error_type="tool_registry_invalid") from error
         self._assert_registry_alignment()
 
-    @property
-    def episode_writer(self) -> EpisodeWriter:
-        return self._episode_writer
-
     def dispatch(
         self,
         tool_name: str,
