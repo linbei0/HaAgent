@@ -37,6 +37,7 @@ from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.events.bus import (
     AssistantDeltaBusEvent,
+    AssistantIntermediateBusEvent,
     AssistantMessageBusEvent,
     RuntimeBusEvent,
     ToolFailedBusEvent,
@@ -315,6 +316,12 @@ def run_turn_loop(
         if deps.recorder.state_history[-1] is not RunStatus.EXECUTING:
             deps.recorder.transition(RunStatus.EXECUTING)
 
+        terminal_memory_response = _is_terminal_memory_settlement_response(model_response)
+        # 普通工具轮次的 assistant 文本作为过程展示；记忆结算是回答后的收尾动作，
+        # 不能把已经完成的用户答案降级成过程并强制模型再生成一次短总结。
+        if model_response.content.strip() and not terminal_memory_response:
+            deps.emit_event(AssistantIntermediateBusEvent(turn=turn, content=model_response.content))
+
         tool_calls_with_ids = _ensure_tool_call_ids(model_response.tool_calls)
         assistant_tool_calls = [
             {
@@ -332,6 +339,11 @@ def run_turn_loop(
         result = _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls_with_ids, state=state, deps=deps)
         if result is not None:
             return result
+        if terminal_memory_response:
+            result = _handle_no_tool_response(turn=turn, model_response=model_response, state=state, deps=deps)
+            if result is not None:
+                return result
+            continue
     else:
         deps.recorder.transition(RunStatus.FAILED)
         deps.writer.write_failure_attribution(
@@ -989,6 +1001,13 @@ def _ensure_tool_call_ids(tool_calls: list[ToolCall]) -> list[ToolCall]:
         else:
             tool_calls_with_ids.append(ToolCall(name=tc.name, args=tc.args, id=generate_tool_call_id()))
     return tool_calls_with_ids
+
+
+def _is_terminal_memory_settlement_response(model_response) -> bool:
+    """仅记忆结算工具伴随非空回答时，该回答就是本轮最终用户输出。"""
+    return bool(model_response.content.strip()) and bool(model_response.tool_calls) and all(
+        tool_call.name == "start_memory_update" for tool_call in model_response.tool_calls
+    )
 
 
 def _tool_visible_result_fingerprint(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str:

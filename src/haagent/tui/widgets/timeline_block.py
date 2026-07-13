@@ -270,7 +270,7 @@ def _timeline_item_classes(item: TimelineItem) -> str:
 
 
 def _is_process_item(item: TimelineItem) -> bool:
-    return item.role in {"activity", "effect"}
+    return item.role in {"activity", "effect", "process"}
 
 
 def _is_clickable_item(item: TimelineItem) -> bool:

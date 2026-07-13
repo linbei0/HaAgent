@@ -9,6 +9,7 @@ from __future__ import annotations
 from haagent.runtime.events import (
     ApprovalStateEvent,
     AssistantDeltaEvent,
+    AssistantIntermediateEvent,
     AssistantMessageEvent,
     FailureNoticeEvent,
     MemoryNoticeEvent,
@@ -32,10 +33,15 @@ class _FakeConversation:
     def __init__(self, app: "FakeRuntimeEventApp") -> None:
         self._app = app
 
-    def merge_assistant_delta(self, turn_index: int, delta: str) -> None:
+    def merge_assistant_delta(self, turn_index: int, model_turn: int | None, delta: str) -> None:
+        del model_turn
         self._app.assistant_deltas.append((turn_index, delta))
 
-    def finalize_assistant_message(self, turn_index: int, content: str) -> None:
+    def finalize_intermediate_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
+        self._app.assistant_intermediates.append((turn_index, model_turn, content))
+
+    def finalize_assistant_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
+        del model_turn
         self._app.assistant_messages.append((turn_index, content))
         self._app.presentation_texts.append(f"助手\n{content}")
 
@@ -74,6 +80,7 @@ class FakeRuntimeEventApp:
         self._sandbox_status = None
         self._active_turn_index = 0
         self.assistant_deltas: list[tuple[int, str]] = []
+        self.assistant_intermediates: list[tuple[int, int | None, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
         self.tool_activities: list[tuple[int, str, str, str]] = []
         self.tool_diagnostics: list[tuple[int, str, str]] = []
@@ -137,7 +144,8 @@ class TimelineRuntimeEventApp(FakeRuntimeEventApp):
         self.timeline = ConversationTimeline()
 
         class _TimelineConversation(_FakeConversation):
-            def finalize_assistant_message(self, turn_index: int, content: str) -> None:
+            def finalize_assistant_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
+                del model_turn
                 self._app.assistant_messages.append((turn_index, content))
                 self._app.timeline._items.append(
                     TimelineItem(
@@ -172,6 +180,18 @@ def test_runtime_ui_event_handler_updates_assistant_stream() -> None:
     assert app.assistant_deltas == [(2, "半句")]
     assert app.assistant_messages == [(2, "整句")]
     assert app.refreshes == 2
+
+
+def test_runtime_ui_event_handler_routes_intermediate_assistant_message() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        AssistantIntermediateEvent("session-1", 2, 3, "完整审查报告"),
+    )
+
+    assert app.assistant_intermediates == [(2, 3, "完整审查报告")]
+    assert app.refreshes == 1
 
 
 def test_runtime_ui_event_handler_does_not_persist_read_tool_activity() -> None:

@@ -12,6 +12,7 @@ from haagent.runtime.events import (
     RUNTIME_UI_EVENT_TYPES,
     ApprovalStateEvent,
     AssistantDeltaEvent,
+    AssistantIntermediateEvent,
     AssistantMessageEvent,
     FailureNoticeEvent,
     MemoryNoticeEvent,
@@ -48,13 +49,22 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
 
 def _handle_assistant_delta(app, event: RuntimeUiEvent) -> None:
     typed = _as_event(event, AssistantDeltaEvent)
-    app._conversation.merge_assistant_delta(typed.turn_index, typed.delta)
+    app._conversation.merge_assistant_delta(typed.turn_index, typed.model_turn, typed.delta)
 
 
 def _handle_assistant_message(app, event: RuntimeUiEvent) -> None:
     typed = _as_event(event, AssistantMessageEvent)
-    app._conversation.finalize_assistant_message(typed.turn_index, typed.content)
+    app._conversation.finalize_assistant_message(typed.turn_index, typed.model_turn, typed.content)
     app.clear_progress_status()
+
+
+def _handle_assistant_intermediate(app, event: RuntimeUiEvent) -> None:
+    typed = _as_event(event, AssistantIntermediateEvent)
+    app._conversation.finalize_intermediate_message(
+        typed.turn_index,
+        typed.model_turn,
+        typed.content,
+    )
 
 
 def _handle_tool_activity(app, event: ToolActivityEvent) -> None:
@@ -255,6 +265,7 @@ def _task_problem_action(value: str) -> str:
 
 RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {
     AssistantDeltaEvent: _handle_assistant_delta,
+    AssistantIntermediateEvent: _handle_assistant_intermediate,
     AssistantMessageEvent: _handle_assistant_message,
     ToolActivityEvent: _handle_tool_activity,
     ApprovalStateEvent: _handle_approval_state,

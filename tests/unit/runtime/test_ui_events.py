@@ -7,6 +7,7 @@ tests/unit/runtime/test_ui_events.py - Runtime-TUI 事件协议测试
 from haagent.runtime.events import (
     ApprovalStateEvent,
     AssistantDeltaEvent,
+    AssistantIntermediateEvent,
     FailureNoticeEvent,
     RAW_RUNTIME_UI_EVENT_REGISTRY,
     RuntimeUiEventMapper,
@@ -45,6 +46,7 @@ def test_model_retry_bus_events_round_trip_with_safe_fields() -> None:
 def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
     assert set(RAW_RUNTIME_UI_EVENT_REGISTRY) == {
         "assistant_delta",
+        "assistant_intermediate_message",
         "assistant_message",
         "tool_started",
         "tool_finished",
@@ -93,6 +95,25 @@ def test_runtime_ui_event_mapper_groups_assistant_delta() -> None:
         turn_index=1,
         model_turn=2,
         delta="正在整理",
+    )
+
+
+def test_runtime_ui_event_mapper_preserves_intermediate_model_turn() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "assistant_intermediate_message",
+            "turn": 3,
+            "content": "完整审查报告",
+        },
+        session_id="session-1",
+        turn_index=1,
+    )
+
+    assert event == AssistantIntermediateEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=3,
+        content="完整审查报告",
     )
 
 

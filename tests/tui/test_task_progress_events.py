@@ -65,6 +65,25 @@ class TimelineClickTestApp(App[None]):
         )
 
 
+def test_intermediate_assistant_output_remains_after_final_message() -> None:
+    timeline = ConversationTimeline()
+
+    timeline.start_assistant_response(turn_index=1)
+    timeline.finalize_intermediate(1, 1, "完整审查报告")
+    timeline.finalize_assistant(1, "最终总结")
+
+    assert "最终总结" in timeline.plain_text
+    process_items = [item for item in timeline._items if item.role == "process"]
+    assert len(process_items) == 1
+    assert process_items[0].content == "完整审查报告"
+    assert process_items[0].detail_lines == []
+    assert process_items[0].detail_id is None
+    assert "完整审查报告" in timeline.plain_text
+    assert "详情：点击" not in timeline.plain_text
+    assert timeline.toggle_process_group(1) is True
+    assert "完整审查报告" not in timeline.plain_text
+
+
 def test_plain_task_progress_projection_does_not_add_timeline_item() -> None:
     timeline = ConversationTimeline()
     event = TaskProgressEvent(

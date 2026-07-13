@@ -23,7 +23,7 @@ class ConversationController:
         self.lines: list[str] = []
         self.placeholder_rendered = False
         self.stick_to_bottom = True
-        self.streaming_turn: int | None = None
+        self.streaming_key: tuple[int, int | None] | None = None
         self.streaming_text = ""
 
     # ── 基础写入 ─────────────────────────────────────────────────────────
@@ -50,40 +50,54 @@ class ConversationController:
     def start_assistant(self, turn_index: int) -> None:
         self._timeline().start_assistant_response(turn_index=turn_index)
         # 首个 delta 前失败时也必须能结束 timeline 的 streaming 指示器。
-        self.streaming_turn = turn_index
+        self.streaming_key = (turn_index, None)
         self.streaming_text = ""
 
-    def merge_assistant_delta(self, turn_index: int, delta: str) -> None:
+    def merge_assistant_delta(self, turn_index: int, model_turn: int | None, delta: str) -> None:
         if not delta:
             return
+        key = (turn_index, model_turn)
         self._timeline().update_assistant_delta(turn_index, delta)
-        if self.streaming_turn != turn_index:
-            self.streaming_turn = turn_index
+        if self.streaming_key not in {key, (turn_index, None)}:
+            self.streaming_key = key
             self.streaming_text = delta
             return
+        self.streaming_key = key
         self.streaming_text += delta
 
-    def finalize_assistant_message(self, turn_index: int, content: str) -> None:
-        if self.streaming_turn == turn_index:
+    def finalize_intermediate_message(
+        self,
+        turn_index: int,
+        model_turn: int | None,
+        content: str,
+    ) -> None:
+        resolved = content or self.streaming_text
+        self._timeline().finalize_intermediate(turn_index, model_turn, resolved)
+        if self.streaming_key in {(turn_index, model_turn), (turn_index, None)}:
+            self.streaming_key = None
+            self.streaming_text = ""
+
+    def finalize_assistant_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
+        if self.streaming_key in {(turn_index, model_turn), (turn_index, None)}:
             self._timeline().finalize_assistant(turn_index, content or self.streaming_text)
         else:
-            if self.streaming_turn is not None:
-                self._timeline().finalize_assistant(self.streaming_turn, self.streaming_text)
+            if self.streaming_key is not None:
+                self._timeline().finalize_assistant(self.streaming_key[0], self.streaming_text)
             self._timeline().finalize_assistant(turn_index, content)
-        self.streaming_turn = None
+        self.streaming_key = None
         self.streaming_text = ""
 
     def finalize_streaming_if_needed(self) -> None:
-        if self.streaming_turn is None:
+        if self.streaming_key is None:
             return
-        self._timeline().finalize_assistant(self.streaming_turn, self.streaming_text)
-        self.streaming_turn = None
+        self._timeline().finalize_assistant(self.streaming_key[0], self.streaming_text)
+        self.streaming_key = None
         self.streaming_text = ""
 
     def reset_streaming_state(self) -> None:
         self.lines = []
         self.placeholder_rendered = False
-        self.streaming_turn = None
+        self.streaming_key = None
         self.streaming_text = ""
 
     # ── 工具活动 ─────────────────────────────────────────────────────────

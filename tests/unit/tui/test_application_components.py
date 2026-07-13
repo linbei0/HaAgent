@@ -54,8 +54,10 @@ def test_conversation_controller_wraps_timeline_public_operations() -> None:
 
     controller.append_block("You", "你好", turn_index=1)
     controller.start_assistant(turn_index=1)
-    controller.merge_assistant_delta(1, "半句")
-    controller.finalize_assistant_message(1, "整句")
+    controller.merge_assistant_delta(1, 1, "完整审查报告")
+    controller.finalize_intermediate_message(1, 1, "完整审查报告")
+    controller.merge_assistant_delta(1, 2, "最终")
+    controller.finalize_assistant_message(1, 2, "最终总结")
     controller.record_tool_activity(1, "shell", "finished", "完成")
     controller.record_tool_diagnostic(1, "shell", "诊断")
     controller.set_tool_details(True)
@@ -63,8 +65,10 @@ def test_conversation_controller_wraps_timeline_public_operations() -> None:
     assert app.timeline.calls == [
         ("user", "你好", 1),
         ("start", "", 1),
-        ("delta", "半句", 1),
-        ("final", "整句", 1),
+        ("delta", "完整审查报告", 1),
+        ("intermediate", "完整审查报告", 1),
+        ("delta", "最终", 1),
+        ("final", "最终总结", 1),
         ("tool", "shell:done:完成", 1),
         ("diagnostic", "shell:诊断", 1),
         ("details", "True", 0),
@@ -167,6 +171,10 @@ class _ConversationTimeline:
 
     def finalize_assistant(self, turn_index: int, content: str) -> None:
         self.calls.append(("final", content, turn_index))
+
+    def finalize_intermediate(self, turn_index: int, model_turn: int | None, content: str) -> None:
+        del model_turn
+        self.calls.append(("intermediate", content, turn_index))
 
     def add_tool_activity(self, activity) -> None:
         self.calls.append(("tool", f"{activity.tool_name}:{activity.status}:{activity.summary}", activity.turn_index))

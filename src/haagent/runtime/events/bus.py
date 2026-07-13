@@ -26,6 +26,15 @@ class AssistantMessageBusEvent:
 
 
 @dataclass(frozen=True)
+class AssistantIntermediateBusEvent:
+    """带工具调用的模型轮次中，面向用户的普通 assistant 文本。"""
+
+    turn: int
+    content: str
+    event_type: str = field(default="assistant_intermediate_message", init=False)
+
+
+@dataclass(frozen=True)
 class ToolStartedBusEvent:
     turn: int
     tool_name: str
@@ -110,6 +119,7 @@ class LegacyRawBusEvent:
 
 RuntimeBusEvent: TypeAlias = (
     AssistantDeltaBusEvent
+    | AssistantIntermediateBusEvent
     | AssistantMessageBusEvent
     | ToolStartedBusEvent
     | ToolFinishedBusEvent
@@ -123,6 +133,7 @@ RuntimeBusEvent: TypeAlias = (
 _SLICE_EVENT_TYPES = frozenset(
     {
         "assistant_delta",
+        "assistant_intermediate_message",
         "assistant_message",
         "tool_started",
         "tool_finished",
@@ -139,6 +150,8 @@ def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, o
         return dict(event.payload)
     if isinstance(event, AssistantDeltaBusEvent):
         return {"event_type": "assistant_delta", "turn": event.turn, "delta": event.delta}
+    if isinstance(event, AssistantIntermediateBusEvent):
+        return {"event_type": "assistant_intermediate_message", "turn": event.turn, "content": event.content}
     if isinstance(event, AssistantMessageBusEvent):
         return {"event_type": "assistant_message", "turn": event.turn, "content": event.content}
     if isinstance(event, ToolStartedBusEvent):
@@ -208,6 +221,11 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
     event_type = str(payload.get("event_type", ""))
     if event_type == "assistant_delta":
         return AssistantDeltaBusEvent(turn=int(payload.get("turn", 0) or 0), delta=str(payload.get("delta", "")))
+    if event_type == "assistant_intermediate_message":
+        return AssistantIntermediateBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            content=str(payload.get("content", "")),
+        )
     if event_type == "assistant_message":
         return AssistantMessageBusEvent(
             turn=int(payload.get("turn", 0) or 0),

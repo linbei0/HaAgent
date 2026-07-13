@@ -71,6 +71,7 @@ class ConversationTimeline(VerticalScroll):
         self._mouse_down_location: tuple[float, float] | None = None
         self._selection_dragging = False
         self._expanded_process_turns: set[int] = set()
+        self._collapsed_process_turns: set[int] = set()
         # None 表示尾窗；非 None 时是用户正在回看的完整可见投影起点。
         self._window_start: int | None = None
         self._window_shift_in_progress = False
@@ -128,6 +129,7 @@ class ConversationTimeline(VerticalScroll):
         self._mouse_down_location = None
         self._selection_dragging = False
         self._expanded_process_turns.clear()
+        self._collapsed_process_turns.clear()
         self._window_start = None
         self._window_shift_in_progress = False
         self._remove_singletons()
@@ -306,10 +308,12 @@ class ConversationTimeline(VerticalScroll):
             return False
         if turn_index in self._expanded_process_turns:
             self._expanded_process_turns.remove(turn_index)
+            self._collapsed_process_turns.add(turn_index)
             for item in process_items:
                 item.expanded = False
         else:
             self._expanded_process_turns.add(turn_index)
+            self._collapsed_process_turns.discard(turn_index)
         self._invalidate_visible_items()
         self._render_or_mark_dirty()
         return True
@@ -344,6 +348,21 @@ class ConversationTimeline(VerticalScroll):
         else:
             self._sync_block(item)
         self._mark_plain_text_dirty()
+
+    def finalize_intermediate(self, turn_index: int, model_turn: int | None, content: str) -> None:
+        """把当前 provisional assistant 项固化为可折叠过程，释放最终回复槽位。"""
+        self.flush_pending_assistant_delta()
+        item = self._assistant_item(turn_index)
+        resolved = content or item.content
+        self._unindex_item(item)
+        item.role = "process"
+        item.status = "done"
+        item.title = "过程"
+        item.content = resolved
+        item.detail_id = None
+        item.detail_lines = []
+        self._index_item(item)
+        self._render_or_mark_dirty()
 
     def add_tool_activity(self, activity: ToolActivity) -> None:
         item = self._assistant_item(activity.turn_index)
@@ -391,7 +410,11 @@ class ConversationTimeline(VerticalScroll):
         if item.role == "assistant":
             self._assistant_items_by_turn[item.turn_index] = item
         if _is_process_item(item):
-            self._process_items_by_turn.setdefault(item.turn_index, []).append(item)
+            process_items = self._process_items_by_turn.setdefault(item.turn_index, [])
+            process_items.append(item)
+            # 只自动展开模型主动输出的过程文本；工具/审批/文件效果继续默认折叠。
+            if item.role == "process" and item.turn_index not in self._collapsed_process_turns:
+                self._expanded_process_turns.add(item.turn_index)
 
     def _unindex_item(self, item: TimelineItem) -> None:
         if self._items_by_id.get(item.item_id) is item:

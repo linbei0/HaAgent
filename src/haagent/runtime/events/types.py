@@ -29,6 +29,14 @@ class AssistantMessageEvent:
 
 
 @dataclass(frozen=True)
+class AssistantIntermediateEvent:
+    session_id: str
+    turn_index: int
+    model_turn: int | None
+    content: str
+
+
+@dataclass(frozen=True)
 class ToolActivityEvent:
     session_id: str
     turn_index: int
@@ -134,6 +142,7 @@ class SessionLifecycleEvent:
 
 RuntimeUiEvent: TypeAlias = (
     AssistantDeltaEvent
+    | AssistantIntermediateEvent
     | AssistantMessageEvent
     | ToolActivityEvent
     | ApprovalStateEvent
@@ -147,6 +156,7 @@ RuntimeUiEvent: TypeAlias = (
 
 RuntimeUiEventType: TypeAlias = (
     type[AssistantDeltaEvent]
+    | type[AssistantIntermediateEvent]
     | type[AssistantMessageEvent]
     | type[ToolActivityEvent]
     | type[ApprovalStateEvent]
@@ -160,6 +170,7 @@ RuntimeUiEventType: TypeAlias = (
 
 RUNTIME_UI_EVENT_TYPES: tuple[RuntimeUiEventType, ...] = (
     AssistantDeltaEvent,
+    AssistantIntermediateEvent,
     AssistantMessageEvent,
     ToolActivityEvent,
     ApprovalStateEvent,

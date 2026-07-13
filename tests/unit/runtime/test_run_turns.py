@@ -479,6 +479,179 @@ def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
     assert progress_events[0]["step_id"] == "step-001"
 
 
+def test_turn_loop_emits_intermediate_assistant_content_before_tool_followup(tmp_path: Path) -> None:
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    emitted_events: list[object] = []
+    intermediate_content = "阶段分析\n\n## 发现\n- 事件映射保留完整内容\n- 工具调用后还需继续验证"
+    responses = iter(
+        [
+            ModelResponse(
+                content=intermediate_content,
+                tool_calls=[ToolCall(name="file_read", args={"path": "README.md"})],
+            ),
+            ModelResponse(content="最终总结", tool_calls=[]),
+        ],
+    )
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas):
+            del messages, tool_schemas
+            return next(responses)
+
+    state_history = [RunStatus.PLANNING]
+
+    def transition(status: RunStatus) -> None:
+        state_history.append(status)
+
+    deps = _deps(
+        router=_FakeRouter({"status": "success", "content": "read"}),
+        writer=_FakeWriter(tmp_path / "episode"),
+        emit_event=emitted_events.append,
+        recorder=SimpleNamespace(
+            state_history=state_history,
+            transition=transition,
+            finish=lambda status: SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+
+    result = run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+
+    assert result is not None
+    assistant_events = [
+        bus_event_to_dict(event)
+        for event in emitted_events
+        if bus_event_to_dict(event).get("event_type")
+        in {"assistant_intermediate_message", "assistant_message"}
+    ]
+    assert assistant_events == [
+        {
+            "event_type": "assistant_intermediate_message",
+            "turn": 1,
+            "content": intermediate_content,
+        },
+        {
+            "event_type": "assistant_message",
+            "turn": 2,
+            "content": "最终总结",
+        },
+    ]
+
+
+def test_turn_loop_preserves_short_tool_narration_as_process_output(tmp_path: Path) -> None:
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    emitted_events: list[object] = []
+    responses = iter(
+        [
+            ModelResponse(
+                content="现在让我继续读取关键文件：",
+                tool_calls=[ToolCall(name="file_read", args={"path": "README.md"})],
+            ),
+            ModelResponse(content="最终总结", tool_calls=[]),
+        ],
+    )
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas):
+            del messages, tool_schemas
+            return next(responses)
+
+    state_history = [RunStatus.PLANNING]
+
+    def transition(status: RunStatus) -> None:
+        state_history.append(status)
+
+    deps = _deps(
+        router=_FakeRouter({"status": "success", "content": "read"}),
+        writer=_FakeWriter(tmp_path / "episode"),
+        emit_event=emitted_events.append,
+        recorder=SimpleNamespace(
+            state_history=state_history,
+            transition=transition,
+            finish=lambda status: SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+
+    result = run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+
+    assert result is not None
+    event_types = [bus_event_to_dict(event).get("event_type") for event in emitted_events]
+    assert "assistant_intermediate_message" in event_types
+    assert "assistant_message" in event_types
+
+
+def test_turn_loop_keeps_full_response_final_when_only_memory_settlement_tool_is_called(tmp_path: Path) -> None:
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    emitted_events: list[object] = []
+    model_calls = 0
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, *, messages, tool_schemas):
+            nonlocal model_calls
+            del messages, tool_schemas
+            model_calls += 1
+            if model_calls > 1:
+                raise AssertionError("memory settlement must not force a redundant final model turn")
+            return ModelResponse(
+                content="完整审查报告\n\n## 结论\n应优先修复事件链路。",
+                tool_calls=[ToolCall(name="start_memory_update", args={"reason": "记录审查结论"})],
+            )
+
+    state_history = [RunStatus.PLANNING]
+
+    def transition(status: RunStatus) -> None:
+        state_history.append(status)
+
+    deps = _deps(
+        router=_FakeRouter(
+            {
+                "status": "success",
+                "memory_update_requested": True,
+                "reason": "记录审查结论",
+            },
+        ),
+        writer=_FakeWriter(tmp_path / "episode"),
+        emit_event=emitted_events.append,
+        recorder=SimpleNamespace(
+            state_history=state_history,
+            transition=transition,
+            finish=lambda status: SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+
+    result = run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+
+    assert result is not None
+    assert model_calls == 1
+    assistant_events = [
+        bus_event_to_dict(event)
+        for event in emitted_events
+        if bus_event_to_dict(event).get("event_type").startswith("assistant_")
+        and bus_event_to_dict(event).get("event_type") != "assistant_delta"
+    ]
+    assert assistant_events == [
+        {
+            "event_type": "assistant_message",
+            "turn": 1,
+            "content": "完整审查报告\n\n## 结论\n应优先修复事件链路。",
+        },
+    ]
+
+
 def test_tool_not_allowed_does_not_abort_turn_as_terminal() -> None:
     """误调未授权工具名应写入 observation 并继续，而不是 raise_for_error 终态失败。"""
     from haagent.runtime.orchestration.orchestrator import _tool_error_is_terminal

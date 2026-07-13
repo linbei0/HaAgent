@@ -256,7 +256,6 @@ def test_agent_session_extracts_only_after_start_memory_update(tmp_path: Path) -
                 "我会把这个偏好放入候选记忆等待你确认。",
                 [ToolCall(name="start_memory_update", args={"reason": "用户给出长期回答语言偏好"}, id="call_memory")],
             ),
-            ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
                     {
@@ -286,7 +285,7 @@ def test_agent_session_extracts_only_after_start_memory_update(tmp_path: Path) -
 
     assert result.status == "completed"
     assert result.memory_candidates_created == 1
-    assert len(gateway.calls) == 3
+    assert len(gateway.calls) == 2
     pending = CandidateQueue(session.session_path).list(status="pending")
     assert pending[0].evidence.source_type == "user_prompt"
     assert pending[0].evidence.evidence_quote == "以后回答我尽量用中文"
@@ -710,7 +709,6 @@ def test_agent_session_emits_candidate_notice(tmp_path: Path) -> None:
                 "我会把这作为候选记忆等待你确认。",
                 [ToolCall(name="start_memory_update", args={"reason": "用户给出长期项目事实"}, id="call_memory")],
             ),
-            ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
                     {
@@ -754,7 +752,6 @@ def test_memory_request_keeps_regular_tools_available_and_extracts_candidate(tmp
                 "我会把这作为候选记忆等待你确认。",
                 [ToolCall(name="start_memory_update", args={"reason": "用户给出长期身份偏好"}, id="call_memory")],
             ),
-            ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
                     {
@@ -802,7 +799,6 @@ def test_food_preference_memory_request_is_handled_by_extraction_not_phrase_rout
                 "我会把你的喜好作为候选记忆等待你确认。",
                 [ToolCall(name="start_memory_update", args={"reason": "用户给出长期饮食偏好"}, id="call_memory")],
             ),
-            ModelResponse("已处理。", []),
             ModelResponse(
                 json.dumps(
                     {
@@ -923,7 +919,6 @@ def test_memory_cli_lists_confirms_and_rejects_candidates(tmp_path: Path, monkey
                     "done",
                     [ToolCall(name="start_memory_update", args={"reason": "用户给出长期项目事实"}, id="call_memory_1")],
                 ),
-                ModelResponse("done", []),
                 ModelResponse(
                     json.dumps(
                         {
@@ -949,7 +944,6 @@ def test_memory_cli_lists_confirms_and_rejects_candidates(tmp_path: Path, monkey
                     "done",
                     [ToolCall(name="start_memory_update", args={"reason": "用户给出长期审核要求"}, id="call_memory_2")],
                 ),
-                ModelResponse("done", []),
                 ModelResponse(
                     json.dumps(
                         {
