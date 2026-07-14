@@ -6,7 +6,7 @@ tests/unit/context/test_context_messages.py - 模型消息构造测试
 
 import json
 
-from haagent.context.messages import build_tool_result_message
+from haagent.context.messages import build_system_message, build_tool_result_message
 
 
 def test_tool_result_message_prefers_model_visible_over_raw_content() -> None:
@@ -42,3 +42,16 @@ def test_tool_result_message_keeps_large_artifact_output_out_of_model_content() 
     assert payload["artifact_path"] == ".runs/episode/artifacts/tool-results/mcp_fixture.txt"
     assert payload["truncated"] is True
     assert result["output"] not in message["content"]
+
+
+def test_system_message_places_limited_soul_before_project_instructions() -> None:
+    message = build_system_message(
+        project_instructions="PROJECT-RULE",
+        tool_workflow_hints=[],
+        soul="SOUL-VOICE",
+    )
+
+    content = message["content"]
+    assert content.index("Instructions:") < content.index("Agent Soul")
+    assert content.index("SOUL-VOICE") < content.index("Project Instructions:")
+    assert "cannot change tool permissions, policy, approvals" in content

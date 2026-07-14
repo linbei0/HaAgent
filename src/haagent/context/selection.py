@@ -119,6 +119,9 @@ class ContextSelector:
 
 @dataclass(frozen=True)
 class ContextCandidateInputs:
+    soul: str | None = None
+    soul_skip_reason: str | None = None
+    soul_metadata: dict[str, Any] = field(default_factory=dict)
     project_instructions: str | None = None
     prompt_packs: str | None = None
     prompt_pack_metadata: dict[str, Any] = field(default_factory=dict)
@@ -135,6 +138,19 @@ class ContextCandidateInputs:
 
 def collect_context_candidates(inputs: ContextCandidateInputs) -> list[ContextCandidate]:
     candidates: list[ContextCandidate] = []
+    _append_candidate(
+        candidates,
+        source_type="soul",
+        source_id="soul",
+        placement="system",
+        title="Agent Soul",
+        content=inputs.soul,
+        reason="deterministic_soul_context",
+        priority=25,
+        include_empty=inputs.soul_skip_reason is not None,
+        skip_reason=inputs.soul_skip_reason,
+        metadata=inputs.soul_metadata,
+    )
     _append_candidate(
         candidates,
         source_type="project_instructions",
@@ -347,6 +363,7 @@ def _compaction_priority(source_type: str) -> int:
         "task_ledger": 78,
         "working_state": 75,
         "session_summary": 70,
+        "soul": 68,
         "memory_index": 65,
         "memory": 60,
         "interaction_history": 55,

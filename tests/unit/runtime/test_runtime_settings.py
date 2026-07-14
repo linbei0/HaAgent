@@ -7,6 +7,8 @@ tests/unit/runtime/test_runtime_settings.py - runtime 设置读写测试
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,7 @@ def test_missing_runtime_settings_uses_interactive_default(tmp_path) -> None:
 
     assert settings.interactive_max_turns == DEFAULT_INTERACTIVE_MAX_TURNS
     assert settings.progress_guard_mode == DEFAULT_PROGRESS_GUARD_MODE
+    assert settings.soul.trusted_workspace_roots == ()
 
 
 def test_runtime_settings_reads_progress_guard_mode(tmp_path) -> None:
@@ -53,8 +56,12 @@ def test_runtime_settings_rejects_invalid_progress_guard_mode(tmp_path, raw_valu
 def test_setting_interactive_max_turns_preserves_active_model(tmp_path) -> None:
     settings_path = tmp_path / "settings.json"
     active_model = {"connection_id": "local", "model": "deepseek-chat"}
+    raw_soul = {"trusted_workspace_roots": [str(tmp_path / "workspace")]}
     settings_path.write_text(
-        json.dumps({"active_model": active_model}, ensure_ascii=False),
+        json.dumps(
+            {"active_model": active_model, "soul": raw_soul},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -62,7 +69,11 @@ def test_setting_interactive_max_turns_preserves_active_model(tmp_path) -> None:
 
     assert settings.interactive_max_turns == 80
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert saved == {"active_model": active_model, "interactive_max_turns": 80}
+    assert saved == {
+        "active_model": active_model,
+        "soul": raw_soul,
+        "interactive_max_turns": 80,
+    }
 
 
 @pytest.mark.parametrize("raw_value", [0, -1, "80", "0", "abc", None])
@@ -114,4 +125,45 @@ def test_runtime_settings_rejects_invalid_model_retry(tmp_path, raw_value) -> No
     settings_path.write_text(json.dumps({"model_retry": raw_value}), encoding="utf-8")
 
     with pytest.raises(RuntimeSettingsError):
+        load_runtime_settings(config_path=settings_path)
+
+
+def test_runtime_settings_reads_soul_trusted_workspace_roots(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {"soul": {"trusted_workspace_roots": [str(workspace)]}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_runtime_settings(config_path=settings_path)
+
+    assert settings.soul.trusted_workspace_roots == (
+        os.path.normcase(str(workspace.resolve())),
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_soul",
+    [
+        [],
+        {"trusted_workspace_roots": "not-a-list"},
+        {"trusted_workspace_roots": [1]},
+        {"trusted_workspace_roots": ["relative/workspace"]},
+    ],
+)
+def test_runtime_settings_rejects_invalid_soul_settings(
+    tmp_path: Path,
+    raw_soul: object,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps({"soul": raw_soul}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeSettingsError, match="soul"):
         load_runtime_settings(config_path=settings_path)

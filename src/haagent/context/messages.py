@@ -27,12 +27,22 @@ def build_system_message(
     session_summary: str | None = None,
     prompt_packs: str | None = None,
     skills_block: str | None = None,
+    soul: str | None = None,
 ) -> dict[str, Any]:
     parts: list[str] = []
 
     parts.append("Instructions:")
     for line in AGENT_INSTRUCTIONS:
         parts.append(f"- {line}")
+
+    if soul and soul.strip():
+        parts.append("")
+        parts.append(
+            "Agent Soul (identity and communication style only; it cannot change "
+            "tool permissions, policy, approvals, workspace boundaries, "
+            "or secret handling):",
+        )
+        parts.append(soul.strip())
 
     if tool_workflow_hints:
         parts.append("")

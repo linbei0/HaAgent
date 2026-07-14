@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -34,11 +35,17 @@ class RuntimeSettingsError(ValueError):
 
 
 @dataclass(frozen=True)
+class SoulSettings:
+    trusted_workspace_roots: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RuntimeSettings:
     interactive_max_turns: int = DEFAULT_INTERACTIVE_MAX_TURNS
     sandbox: SandboxSettings = field(default_factory=SandboxSettings)
     model_retry: RetryPolicy = field(default_factory=RetryPolicy)
     progress_guard_mode: Literal["off", "warn", "block"] = DEFAULT_PROGRESS_GUARD_MODE
+    soul: SoulSettings = field(default_factory=SoulSettings)
 
 
 def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings:
@@ -56,6 +63,7 @@ def load_runtime_settings(*, config_path: Path | None = None) -> RuntimeSettings
         sandbox=sandbox,
         model_retry=_load_model_retry(raw.get("model_retry")),
         progress_guard_mode=_load_progress_guard_mode(raw.get("progress_guard_mode")),
+        soul=_load_soul_settings(raw.get("soul")),
     )
 
 
@@ -97,6 +105,33 @@ def _read_settings_json(path: Path) -> dict[str, object]:
 
 def _write_settings_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_soul_settings(raw: object) -> SoulSettings:
+    if raw is None:
+        return SoulSettings()
+    if not isinstance(raw, dict):
+        raise RuntimeSettingsError("soul settings must be a JSON object")
+    roots = raw.get("trusted_workspace_roots", [])
+    if not isinstance(roots, list) or not all(
+        isinstance(item, str) for item in roots
+    ):
+        raise RuntimeSettingsError(
+            "soul.trusted_workspace_roots must be a list of strings",
+        )
+    normalized: list[str] = []
+    for root in roots:
+        value = root.strip()
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            # 相对路径含义会随启动 cwd 变化，拒绝猜测。
+            raise RuntimeSettingsError(
+                "soul.trusted_workspace_roots must contain absolute paths",
+            )
+        normalized.append(os.path.normcase(str(path.resolve())))
+    return SoulSettings(trusted_workspace_roots=tuple(normalized))
 
 
 def _positive_int(value: object, field_name: str) -> int:

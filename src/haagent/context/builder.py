@@ -36,6 +36,8 @@ from haagent.context.selection import (
     compaction_sections_from_selection,
     selection_budget_for_initial_audit,
 )
+from haagent.context.soul import SoulLoadError, SoulLoadResult, load_soul
+from haagent.runtime.settings import RuntimeSettingsError, load_runtime_settings
 from haagent.memory.navigation import MemoryNavigationBudget, build_memory_navigation
 from haagent.memory.retrieval import (
     MemoryRetrievalRequest,
@@ -145,12 +147,13 @@ class ContextBuilder:
         """构建初始对话消息（system + task），写入 contexts/ 快照。"""
         self._validate_tools()
         project_instructions = self._read_project_instructions()
+        soul = self._read_soul()
         plan = self._read_plan()
         context_id = self._next_context_id()
         contexts_dir = self._episode_writer.path / "contexts"
         contexts_dir.mkdir(parents=True, exist_ok=True)
 
-        candidates = self._build_context_candidates(project_instructions)
+        candidates = self._build_context_candidates(project_instructions, soul)
         selection = ContextSelector(self._selection_budget).select(candidates)
         compaction = compact_context_sections(
             compaction_sections_from_selection(selection),
@@ -164,6 +167,7 @@ class ContextBuilder:
             session_summary=selected_sections.get("session_summary") or None,
             prompt_packs=selected_sections.get("prompt_pack") or None,
             skills_block=selected_sections.get("skills") or None,
+            soul=selected_sections.get("soul") or None,
         )
         task_msg = build_task_message(
             task=self._task,
@@ -271,6 +275,19 @@ class ContextBuilder:
             self._workspace_root,
             diagnostics_sink=lambda value: self._cache_diagnostics.__setitem__("instructions", value),
         ).content
+
+    def _read_soul(self) -> SoulLoadResult:
+        if self._task.worker_context is not None:
+            # Worker 使用独立 profile；读取前跳过，避免继承主 Agent 人格。
+            return SoulLoadResult(
+                content=None,
+                skip_reason="worker_context",
+            )
+        try:
+            return load_soul(self._workspace_root, load_runtime_settings().soul)
+        except (RuntimeSettingsError, SoulLoadError) as error:
+            # Soul 是 system prompt 来源；读取或配置损坏必须显式暴露。
+            raise ContextBuildError(f"cannot build Soul context: {error}") from error
 
     def _read_plan(self) -> dict:
         path = self._episode_writer.path / "plan.json"
@@ -382,10 +399,17 @@ class ContextBuilder:
     def _format_interaction_state(self) -> list[str]:
         return [f"- {_interaction_state_summary(r)}" for r in self._interaction_state[-8:]]
 
-    def _build_context_candidates(self, project_instructions: str | None):
+    def _build_context_candidates(
+        self,
+        project_instructions: str | None,
+        soul: SoulLoadResult,
+    ):
         prompt_packs_block, prompt_pack_metadata = self._prompt_packs_block()
         return collect_context_candidates(
             ContextCandidateInputs(
+                soul=soul.content,
+                soul_skip_reason=soul.skip_reason,
+                soul_metadata=soul.metadata,
                 project_instructions=(project_instructions or "").strip()[:PROJECT_INSTRUCTIONS_CHAR_LIMIT],
                 prompt_packs=prompt_packs_block,
                 prompt_pack_metadata=prompt_pack_metadata,

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from haagent.context.selection import ContextSelector, ContextSelectionBudget
+from haagent.context.selection import (
+    ContextCandidateInputs,
+    ContextSelector,
+    ContextSelectionBudget,
+    collect_context_candidates,
+)
 from haagent.context.sources import ContextCandidate
 
 
@@ -100,3 +105,80 @@ def test_selection_manifest_records_selected_skipped_and_budget() -> None:
     assert manifest["skipped"][0]["source_id"] == "session"
     assert manifest["skipped"][0]["skip_reason"] == "over_budget"
     assert result.skipped[0].metadata["truncated"] is True
+
+
+def test_soul_candidate_is_selected_as_audited_system_source() -> None:
+    candidates = collect_context_candidates(
+        ContextCandidateInputs(
+            soul="Global Soul (baseline):\nBe calm.",
+            soul_metadata={"sources": [{"scope": "global", "status": "loaded"}]},
+            project_instructions="PROJECT-RULE",
+        ),
+    )
+
+    result = ContextSelector().select(candidates)
+
+    soul_section = next(
+        section for section in result.system_sections if section.key == "soul"
+    )
+    project_section = next(
+        section
+        for section in result.system_sections
+        if section.key == "project_instructions"
+    )
+    soul_decision = next(
+        decision for decision in result.selected if decision.source_type == "soul"
+    )
+    assert soul_section.placement == "system"
+    assert result.system_sections.index(project_section) < result.system_sections.index(
+        soul_section,
+    )
+    assert project_section.priority > soul_section.priority
+    assert soul_decision.reason == "deterministic_soul_context"
+    assert soul_decision.metadata["sources"][0]["scope"] == "global"
+
+
+def test_untrusted_soul_candidate_is_recorded_as_skipped() -> None:
+    candidates = collect_context_candidates(
+        ContextCandidateInputs(
+            soul_skip_reason="workspace_untrusted",
+            soul_metadata={
+                "sources": [{"scope": "workspace", "status": "skipped_untrusted"}],
+            },
+        ),
+    )
+
+    result = ContextSelector().select(candidates)
+
+    soul_decision = next(
+        decision for decision in result.skipped if decision.source_type == "soul"
+    )
+    assert soul_decision.skip_reason == "workspace_untrusted"
+    assert soul_decision.metadata["sources"][0]["status"] == "skipped_untrusted"
+
+
+def test_soul_reuses_the_existing_per_source_character_budget() -> None:
+    candidates = collect_context_candidates(
+        ContextCandidateInputs(soul="H" + ("x" * 100) + "T"),
+    )
+    selector = ContextSelector(
+        ContextSelectionBudget(
+            max_system_chars=100,
+            max_task_chars=100,
+            max_source_chars=20,
+            collapse_head_chars=10,
+            collapse_tail_chars=5,
+        ),
+    )
+
+    result = selector.select(candidates)
+
+    soul_section = next(
+        section for section in result.system_sections if section.key == "soul"
+    )
+    soul_decision = next(
+        decision for decision in result.selected if decision.source_type == "soul"
+    )
+    assert soul_decision.metadata["truncated"] is True
+    assert soul_decision.metadata["original_chars"] == 102
+    assert len(soul_section.content) < soul_decision.metadata["original_chars"]
