@@ -16,6 +16,7 @@ from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
     AssistantSessionSummary,
+    AssistantSessionTurn,
     AssistantWorkspaceStatus,
     SandboxDoctorReport,
 )
@@ -137,11 +138,13 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             sessions=sessions,
             session_histories={
                 "session-beta": [
-                    SimpleNamespace(
+                    AssistantSessionTurn(
                         turn_index=1,
                         request="分析 CSV",
                         summary="用户要分析 sales.csv，助手已说明会检查列名和异常值。",
                         status="completed",
+                        episode_path=tmp_path / ".runs" / "episode-1",
+                        verification_status="success",
                     ),
                 ],
             },
@@ -275,11 +278,13 @@ def test_tui_restored_session_renders_final_response_not_raw_turn_summary(tmp_pa
         sessions=sessions,
         session_histories={
             "session-raw": [
-                SimpleNamespace(
+                AssistantSessionTurn(
                     turn_index=1,
                     request="恢复旧会话",
                     summary=raw_summary,
                     status="completed",
+                    episode_path=tmp_path / ".runs" / "episode-1",
+                    verification_status="success",
                 ),
             ],
         },
@@ -321,11 +326,13 @@ def test_tui_restored_session_prefers_assistant_display_text(tmp_path: Path) -> 
         sessions=sessions,
         session_histories={
             "session-display": [
-                SimpleNamespace(
+                AssistantSessionTurn(
                     turn_index=1,
                     request="恢复长回答",
                     summary=raw_summary,
                     status="completed",
+                    episode_path=tmp_path / ".runs" / "episode-1",
+                    verification_status="success",
                     assistant_display_text=full_display_text,
                 ),
             ],

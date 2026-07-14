@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from haagent.app.assistant_types import (
+    AssistantMarketplaceInstall,
+    AssistantMarketplaceSearch,
+    AssistantMarketplaceSkill,
+    AssistantSkillList,
+)
 from haagent.tui.overlays.modals import ConfirmModal
 from haagent.tui.overlays.skill_picker import SkillPickerOverlay
 from haagent.tui.widgets import PromptInput
@@ -112,12 +118,12 @@ def open_skill_picker(app: "HaAgentTuiApp", *, mode: str) -> None:
         app._conversation.append_block("Skills warning", f"读取 skills 失败：{error}")
         app._refresh()
         return
-    skills = list(getattr(summary, "skills", []) or [])
+    skills = summary.skills
     if not skills:
         app._conversation.append_block("Skills", "暂无可用 skills。")
         app._refresh()
         return
-    blocked_roots = list(getattr(summary, "blocked_project_skill_roots", []) or [])
+    blocked_roots = summary.blocked_project_skill_roots
     if mode == "manage":
         app.push_screen(
             SkillPickerOverlay(
@@ -152,9 +158,9 @@ def handle_skill_picker_result(app: "HaAgentTuiApp", skill: dict[str, object] | 
     app.set_timer(0.01, app._restore_prompt_focus)
 
 
-def skills_summary_text(summary) -> str:
+def skills_summary_text(summary: AssistantSkillList) -> str:
     lines: list[str] = []
-    skills = list(getattr(summary, "skills", []) or [])
+    skills = summary.skills
     if skills:
         for item in skills:
             name = str(item.get("name", "unknown"))
@@ -164,7 +170,7 @@ def skills_summary_text(summary) -> str:
             lines.append(f"- {name} [{source}]: {description}{suffix}".rstrip())
     else:
         lines.append("暂无可用 skills。")
-    blocked = list(getattr(summary, "blocked_project_skill_roots", []) or [])
+    blocked = summary.blocked_project_skill_roots
     if blocked:
         lines.append("")
         lines.append("项目 skills 未信任：")
@@ -187,12 +193,12 @@ def skills_usage_text() -> str:
     )
 
 
-def skill_marketplace_summary_text(result) -> str:
+def skill_marketplace_summary_text(result: AssistantMarketplaceSearch) -> str:
     lines = [
-        f"查询：{getattr(result, 'query', '')}",
-        f"状态：{getattr(result, 'status', 'unknown')}",
+        f"查询：{result.query}",
+        f"状态：{result.status}",
     ]
-    results = list(getattr(result, "results", []) or [])
+    results = result.results
     if results:
         lines.append("")
         lines.append("结果：")
@@ -201,7 +207,7 @@ def skill_marketplace_summary_text(result) -> str:
     else:
         lines.append("")
         lines.append("未找到 marketplace skills。")
-    warnings = list(getattr(result, "warnings", []) or [])
+    warnings = result.warnings
     if warnings:
         lines.append("")
         lines.append("警告：")
@@ -210,15 +216,15 @@ def skill_marketplace_summary_text(result) -> str:
     return "\n".join(lines)
 
 
-def skill_marketplace_result_line(item) -> str:
-    result_id = str(getattr(item, "result_id", "unknown"))
-    provider = str(getattr(item, "provider", "unknown"))
-    name = str(getattr(item, "name", "unknown"))
-    source = str(getattr(item, "source", ""))
-    summary = str(getattr(item, "summary", ""))
-    detail_url = str(getattr(item, "detail_url", ""))
-    install_state = "可安装" if bool(getattr(item, "installable", False)) else "暂不支持直接安装"
-    quality = skill_marketplace_quality_text(getattr(item, "quality", {}) or {})
+def skill_marketplace_result_line(item: AssistantMarketplaceSkill) -> str:
+    result_id = item.result_id
+    provider = item.provider
+    name = item.name
+    source = item.source
+    summary = item.summary
+    detail_url = item.detail_url
+    install_state = "可安装" if item.installable else "暂不支持直接安装"
+    quality = skill_marketplace_quality_text(item.quality)
     pieces = [f"- {result_id} [{provider}] {name}"]
     if source:
         pieces.append(f"by {source}")
@@ -232,19 +238,19 @@ def skill_marketplace_result_line(item) -> str:
     return " ".join(pieces)
 
 
-def skill_marketplace_quality_text(quality) -> str:
-    if not isinstance(quality, dict) or not quality:
+def skill_marketplace_quality_text(quality: dict[str, int | float | str]) -> str:
+    if not quality:
         return ""
     pairs = [f"{key}={value}" for key, value in sorted(quality.items())]
     return "[" + ", ".join(pairs) + "]"
 
 
-def skill_marketplace_install_text(installed) -> str:
+def skill_marketplace_install_text(installed: AssistantMarketplaceInstall) -> str:
     lines = [
-        f"已安装 marketplace skill：{getattr(installed, 'name', 'unknown')}",
-        f"命令：${getattr(installed, 'command_name', 'unknown')}",
-        f"目录：{getattr(installed, 'skill_dir', '')}",
-        f"来源：{getattr(installed, 'source_url', '')}",
+        f"已安装 marketplace skill：{installed.name}",
+        f"命令：${installed.command_name}",
+        f"目录：{installed.skill_dir}",
+        f"来源：{installed.source_url}",
         "远端内容已作为外部引用写入；使用前请审阅来源页面。",
     ]
     return "\n".join(lines)

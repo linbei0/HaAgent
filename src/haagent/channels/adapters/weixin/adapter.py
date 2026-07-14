@@ -7,10 +7,8 @@ haagent/channels/adapters/weixin/adapter.py - 微信 iLink ChannelAdapter
 from __future__ import annotations
 
 import asyncio
-import inspect
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
 from typing import Any, Literal
 
 from haagent.channels.adapter import InboundMessageHandler
@@ -23,7 +21,6 @@ from haagent.channels.adapters.weixin.types import (
 )
 from haagent.channels.types import (
     ChannelAddress,
-    ChannelCapabilities,
     ChannelReplyHandle,
     InboundChannelMessage,
     SendResult,
@@ -48,15 +45,6 @@ class WeixinAdapter:
     ) -> None:
         self.instance_id = instance_id
         self.platform = "weixin"
-        self.capabilities = ChannelCapabilities(
-            message_editing=False,
-            native_streaming=False,
-            typing=True,
-            buttons=False,
-            threads=False,
-            inbound_media=frozenset(),
-            outbound_media=frozenset(),
-        )
         self._protocol = protocol
         self._poll_interval = poll_interval
         self._cursor = initial_cursor
@@ -71,10 +59,6 @@ class WeixinAdapter:
         self._on_cursor_persist = on_cursor_persist
         self._session_recovery_attempts = 0
         self._server_session_ready = False
-
-    @property
-    def cursor(self) -> str:
-        return self._cursor
 
     async def start(self, on_message: InboundMessageHandler) -> None:
         self._on_message = on_message
@@ -94,11 +78,7 @@ class WeixinAdapter:
                 pass
             self._task = None
         await self._notify_stop()
-        if hasattr(self._protocol, "aclose"):
-            try:
-                await self._protocol.aclose()
-            except Exception:
-                pass
+        await self._protocol.aclose()
 
     async def send_text(
         self,
@@ -106,9 +86,7 @@ class WeixinAdapter:
         text: str,
         *,
         reply_handle: ChannelReplyHandle | None = None,
-        reply_to_message_id: str | None = None,
     ) -> SendResult:
-        del reply_to_message_id
         payload = _payload(reply_handle)
         context_token = str(payload.get("context_token") or "")
         to_user_id = str(payload.get("to_user_id") or address.conversation_id)
@@ -118,17 +96,13 @@ class WeixinAdapter:
         chunks = split_weixin_text(text, limit=3000)
         if not chunks:
             return SendResult(ok=False, error="empty_text")
-        last_id: str | None = None
         for chunk in chunks:
-            result = await self._protocol.send_text(
+            await self._protocol.send_text(
                 to_user_id=to_user_id,
                 text=chunk,
                 context_token=context_token,
             )
-            if not getattr(result, "ok", False):
-                return SendResult(ok=False, error=getattr(result, "error", "send_failed"))
-            last_id = getattr(result, "message_id", None) or last_id
-        return SendResult(ok=True, message_id=last_id)
+        return SendResult(ok=True)
 
     async def set_typing(
         self,
@@ -245,19 +219,12 @@ class WeixinAdapter:
             await asyncio.sleep(self._poll_interval)
 
     async def _notify_start(self) -> None:
-        notify = getattr(self._protocol, "notify_start", None)
-        if not callable(notify):
-            self._server_session_ready = True
-            return
-        await notify()
+        await self._protocol.notify_start()
         self._server_session_ready = True
 
     async def _notify_stop(self) -> None:
-        notify = getattr(self._protocol, "notify_stop", None)
-        if not callable(notify):
-            return
         try:
-            await notify()
+            await self._protocol.notify_stop()
             self._server_session_ready = False
         except asyncio.CancelledError:
             raise
@@ -274,16 +241,13 @@ class WeixinAdapter:
         """
         if self._on_message is None:
             return not messages
-        deliverable = [m for m in messages if self._to_inbound(m) is not None]
+        deliverable = [inbound for msg in messages if (inbound := self._to_inbound(msg)) is not None]
         if messages and not deliverable:
             # 全是系统/空消息：可推进 cursor 跳过。
             return True
         if not deliverable:
             return True
-        for msg in deliverable:
-            inbound = self._to_inbound(msg)
-            if inbound is None:
-                continue
+        for inbound in deliverable:
             outcome = await self._invoke_handler(inbound)
             if outcome not in _CURSOR_OK_OUTCOMES:
                 # busy/rejected：整批不推进，等待平台重投。
@@ -292,9 +256,7 @@ class WeixinAdapter:
 
     async def _invoke_handler(self, inbound: InboundChannelMessage) -> str | None:
         assert self._on_message is not None
-        result = self._on_message(inbound)
-        if inspect.isawaitable(result):
-            result = await result
+        result = await self._on_message(inbound)
         if result is None:
             return None
         return str(result)
@@ -340,7 +302,6 @@ class WeixinAdapter:
             message_id=msg.message_id,
             sender_id=msg.from_user_id,
             text=(msg.text or "").strip(),
-            received_at=datetime.now(timezone.utc),
             reply_handle=handle,
         )
 

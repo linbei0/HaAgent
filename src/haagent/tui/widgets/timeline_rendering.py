@@ -1,7 +1,7 @@
 """
 src/haagent/tui/widgets/timeline_rendering.py - 对话时间线纯渲染函数
 
-把 timeline item 转为文本摘要，并计算渲染体量指标。
+把 timeline item 转为文本摘要。
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from haagent.tui.widgets.timeline_models import (
     TOOL_DETAIL_VISIBLE_LIMIT,
     TOOL_DIAGNOSTIC_VISIBLE_LIMIT,
     TimelineItem,
-    TimelineRenderMetrics,
     TimelineRole,
     TimelineStatus,
     ToolActivity,
@@ -53,22 +52,6 @@ def bounded_detail_line(line: str) -> str:
     if len(value) <= PRESENTATION_DETAIL_LINE_LIMIT:
         return value
     return value[: PRESENTATION_DETAIL_LINE_LIMIT - 3].rstrip() + "..."
-
-
-def timeline_render_metrics(items: list[TimelineItem], *, show_tool_details: bool) -> TimelineRenderMetrics:
-    rendered_items = [render_timeline_item(item, show_tool_details=show_tool_details) for item in items]
-    tool_count = sum(len(item.tools) for item in items)
-    diagnostic_count = sum(len(tool.diagnostics) for item in items for tool in item.tools)
-    detail_line_count = 0
-    if show_tool_details:
-        detail_line_count = sum(len(render_tool_summary(item.tools, show_details=True)) for item in items if item.tools)
-    return TimelineRenderMetrics(
-        item_count=len(items),
-        tool_count=tool_count,
-        diagnostic_count=diagnostic_count,
-        detail_line_count=detail_line_count,
-        rendered_character_count=sum(len(item) for item in rendered_items),
-    )
 
 
 def render_tool_summary(tools: list[ToolActivity], *, show_details: bool) -> list[str]:

@@ -36,10 +36,8 @@ from haagent.models.model_connections import user_config_dir
 ProtocolFactory = Callable[..., Any]
 
 
-def channel_credential_username(platform: str, instance_id: str) -> str:
-    if platform == "weixin":
-        return f"channel:weixin:{instance_id}:bot_token"
-    return f"channel:{platform}:{instance_id}:token"
+def _weixin_credential_username(instance_id: str) -> str:
+    return f"channel:weixin:{instance_id}:bot_token"
 
 
 class AssistantChannels:
@@ -183,13 +181,13 @@ class AssistantChannels:
                 instance_id=instance_id,
                 message=str(error),
             )
-        if status.status in {"expired", "failed"}:
+        if status.status == "expired":
             # 终态：清理 client，避免泄漏。
             await self.cancel_weixin_qr_login(instance_id)
             return AssistantChannelQrPoll(
                 status=status.status,
                 instance_id=instance_id,
-                message=getattr(status, "message", "") or f"登录状态：{status.status}",
+                message=f"登录状态：{status.status}",
             )
         if status.status != "confirmed":
             return AssistantChannelQrPoll(status=status.status, instance_id=instance_id)
@@ -211,7 +209,7 @@ class AssistantChannels:
                 or (old_user_id and status.ilink_user_id and old_user_id != status.ilink_user_id)
             )
         )
-        username = channel_credential_username("weixin", instance_id)
+        username = _weixin_credential_username(instance_id)
         previous_token = self._credential_store.get_password(KEYRING_SERVICE_NAME, username)
         try:
             # token 只进 keyring，永不写入 channels.json / snapshot。
@@ -322,12 +320,6 @@ class AssistantChannels:
         inst = next((item for item in settings.instances if item.id == instance_id), None)
         if inst is None:
             raise AssistantServiceError(f"channel instance not found: {instance_id}")
-        if inst.platform != "weixin":
-            return AssistantChannelTestResult(
-                ok=False,
-                instance_id=instance_id,
-                message=f"platform {inst.platform} not implemented for test",
-            )
         token = self._credential_store.get_password(KEYRING_SERVICE_NAME, inst.credential_username)
         if not token:
             return AssistantChannelTestResult(

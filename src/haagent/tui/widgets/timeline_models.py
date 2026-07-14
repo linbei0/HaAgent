@@ -46,12 +46,3 @@ class TimelineItem:
     detail_id: str | None = None
     detail_lines: list[str] = field(default_factory=list)
     expanded: bool = False
-
-
-@dataclass(frozen=True)
-class TimelineRenderMetrics:
-    item_count: int
-    tool_count: int
-    diagnostic_count: int
-    detail_line_count: int
-    rendered_character_count: int

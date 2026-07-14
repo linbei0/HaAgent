@@ -7,8 +7,7 @@ haagent/tui/overlays/schedules.py - 计划任务管理 overlay shell
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from textual import events
 from textual.app import ComposeResult, ScreenStackError
@@ -17,6 +16,11 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from haagent.app.assistant_types import (
+    AssistantSchedule,
+    AssistantScheduleRun,
+    AssistantScheduleSummary,
+)
 from haagent.tui.design.utils import safe_summary, workspace_label
 from haagent.tui.overlays.schedule_background import ScheduleBackgroundState
 from haagent.tui.overlays.schedule_runs import ScheduleRunsState, filter_runs
@@ -83,19 +87,19 @@ def _fmt_dt(value: object | None) -> str:
 
 @dataclass(frozen=True)
 class SchedulesOverlayState:
-    schedules: list[Any]
-    runs: list[Any]
+    schedules: list[AssistantScheduleSummary]
+    runs: list[AssistantScheduleRun]
     selected_index: int = 0
     scroll_offset: int = 0
     wide: bool = True
     tab: SchedulesTab = "plans"
-    detail: Any | None = None
+    detail: AssistantSchedule | AssistantScheduleSummary | None = None
     run_state: ScheduleRunsState | None = None
     background: ScheduleBackgroundState | None = None
     message: str = ""
 
     @property
-    def selected_schedule(self) -> Any | None:
+    def selected_schedule(self) -> AssistantScheduleSummary | None:
         if not self.schedules:
             return None
         index = min(max(self.selected_index, 0), len(self.schedules) - 1)
@@ -172,11 +176,10 @@ class SchedulesOverlayState:
         if not recent:
             run_lines.append("  （暂无）")
         for run in recent:
-            unread = "*" if getattr(run, "unread", False) else " "
+            unread = "*" if run.unread else " "
             run_lines.append(
-                f"  {unread}{getattr(run, 'id', '?')[:10]} "
-                f"{getattr(run, 'status', '?')} "
-                f"{safe_summary(str(getattr(run, 'summary', '') or ''), 24)}"
+                f"  {unread}{run.id[:10]} {run.status} "
+                f"{safe_summary(run.summary, 24)}"
             )
         # 三栏用分隔拼接，窄宽都能读
         lines.append("── 列表 ──")
@@ -212,16 +215,12 @@ class SchedulesOverlayState:
         for offset, item in enumerate(window):
             index = scroll_offset + offset
             marker = ">" if index == min(self.selected_index, total - 1) else " "
-            name = safe_summary(str(getattr(item, "name", "?")), 16)
-            status = str(getattr(item, "status", "?"))
-            rule = _rule_summary(getattr(item, "rrule", None))
-            next_run = _fmt_dt(getattr(item, "next_run_at_utc", None))
-            last_run = _fmt_dt(getattr(item, "last_run_at_utc", None))
-            root = getattr(item, "workspace_root", None)
-            if isinstance(root, Path):
-                ws = workspace_label(root, 12)
-            else:
-                ws = safe_summary(str(root or "?"), 12)
+            name = safe_summary(item.name, 16)
+            status = item.status
+            rule = _rule_summary(item.rrule)
+            next_run = _fmt_dt(item.next_run_at_utc)
+            last_run = _fmt_dt(item.last_run_at_utc)
+            ws = workspace_label(item.workspace_root, 12)
             lines.append(
                 f"{marker} {name:<16} {status:<9} {rule:<8} next:{next_run} last:{last_run} ws:{ws}"
             )
@@ -232,16 +231,16 @@ class SchedulesOverlayState:
         if detail is None:
             return ["（未选择计划）"]
         lines = [
-            f"名称: {getattr(detail, 'name', '-')}",
-            f"状态: {getattr(detail, 'status', '-')}",
-            f"规则: {_rule_summary(getattr(detail, 'rrule', None))} ({getattr(detail, 'rrule', None) or 'once'})",
-            f"时区: {getattr(detail, 'timezone', '-')}",
-            f"Workspace: {getattr(detail, 'workspace_root', '-')}",
-            f"模型: {getattr(detail, 'connection_id', '-')}/{getattr(detail, 'model', '-')}",
-            f"下次: {_fmt_dt(getattr(detail, 'next_run_at_utc', None))}",
-            f"上次: {_fmt_dt(getattr(detail, 'last_run_at_utc', None))}",
+            f"名称: {detail.name}",
+            f"状态: {detail.status}",
+            f"规则: {_rule_summary(detail.rrule)} ({detail.rrule or 'once'})",
+            f"时区: {detail.timezone}",
+            f"Workspace: {detail.workspace_root}",
+            f"模型: {detail.connection_id}/{detail.model}",
+            f"下次: {_fmt_dt(detail.next_run_at_utc)}",
+            f"上次: {_fmt_dt(detail.last_run_at_utc)}",
         ]
-        prompt = getattr(detail, "prompt", None)
+        prompt = detail.prompt if isinstance(detail, AssistantSchedule) else None
         if prompt:
             lines.append(f"Prompt: {safe_summary(str(prompt), 70)}")
         return lines
@@ -321,7 +320,7 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
             self._safe_dismiss(SchedulesOverlayResult(action="create"))
             return
         selected = self.state.selected_schedule
-        sid = str(getattr(selected, "id", "")) if selected is not None else None
+        sid = selected.id if selected is not None else None
         if ch == "e" and sid:
             event.stop()
             self._safe_dismiss(SchedulesOverlayResult(action="edit", schedule_id=sid))
@@ -372,8 +371,8 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
             )
             return
         selected = run_state.selected
-        rid = str(getattr(selected, "id", "")) if selected is not None else None
-        sid = str(getattr(selected, "schedule_id", "")) if selected is not None else None
+        rid = selected.id if selected is not None else None
+        sid = selected.schedule_id if selected is not None else None
         if key == "enter" and rid:
             event.stop()
             # 原地打开完整详情，并标记已读；不 dismiss，避免 stack 错乱
@@ -423,28 +422,13 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
             return
 
     def _mark_run_read_inplace(self, run_id: str) -> None:
-        schedules = getattr(getattr(self.app, "service", None), "schedules", None)
-        if schedules is None:
-            return
         try:
-            schedules.mark_run_read(run_id)
-        except Exception:
+            self.app.service.schedules.mark_run_read(run_id)
+        except Exception as error:
+            self._set_state(replace(self.state, message=f"标记已读失败：{error}"))
             return
         run_state = self.state.run_state or ScheduleRunsState(runs=self.state.runs)
-        updated: list[Any] = []
-        for run in run_state.runs:
-            if str(getattr(run, "id", "")) == run_id and hasattr(run, "__dataclass_fields__"):
-                try:
-                    updated.append(replace(run, unread=False))
-                    continue
-                except Exception:
-                    pass
-            if str(getattr(run, "id", "")) == run_id:
-                try:
-                    object.__setattr__(run, "unread", False)
-                except Exception:
-                    pass
-            updated.append(run)
+        updated = [replace(run, unread=False) if run.id == run_id else run for run in run_state.runs]
         self._set_state(
             replace(
                 self.state,
@@ -452,35 +436,16 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
                 run_state=run_state.with_runs(updated),
             )
         )
-        refresh_badge = getattr(getattr(self.app, "schedule_flow", None), "refresh_badge", None)
-        if callable(refresh_badge):
-            try:
-                refresh_badge()
-            except Exception:
-                pass
+        self.app.schedule_flow.refresh_badge()
 
     def _mark_all_read_inplace(self) -> None:
-        schedules = getattr(getattr(self.app, "service", None), "schedules", None)
-        if schedules is None:
-            return
         try:
-            schedules.mark_all_runs_read()
-        except Exception:
+            self.app.service.schedules.mark_all_runs_read()
+        except Exception as error:
+            self._set_state(replace(self.state, message=f"全部标记已读失败：{error}"))
             return
         run_state = self.state.run_state or ScheduleRunsState(runs=self.state.runs)
-        updated: list[Any] = []
-        for run in run_state.runs:
-            if hasattr(run, "__dataclass_fields__"):
-                try:
-                    updated.append(replace(run, unread=False))
-                    continue
-                except Exception:
-                    pass
-            try:
-                object.__setattr__(run, "unread", False)
-            except Exception:
-                pass
-            updated.append(run)
+        updated = [replace(run, unread=False) for run in run_state.runs]
         self._set_state(
             replace(
                 self.state,
@@ -488,29 +453,18 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
                 run_state=run_state.with_runs(updated),
             )
         )
-        refresh_badge = getattr(getattr(self.app, "schedule_flow", None), "refresh_badge", None)
-        if callable(refresh_badge):
-            try:
-                refresh_badge()
-            except Exception:
-                pass
+        self.app.schedule_flow.refresh_badge()
 
     def _refresh_background_inplace(self) -> None:
-        schedules = getattr(getattr(self.app, "service", None), "schedules", None)
-        if schedules is None:
-            return
         try:
+            schedules = self.app.service.schedules
             status = schedules.background_status()
-        except Exception:
+            host = schedules.host_status()
+        except Exception as error:
+            self._set_state(replace(self.state, message=f"后台状态刷新失败：{error}"))
             return
-        host = None
-        try:
-            if hasattr(schedules, "host_status"):
-                host = schedules.host_status()
-        except Exception:
-            host = None
         bg = ScheduleBackgroundState(status=status, host=host)
-        self._set_state(replace(self.state, background=bg))
+        self._set_state(replace(self.state, background=bg, message="后台状态已刷新"))
 
     def _safe_dismiss(self, result: SchedulesOverlayResult | None) -> None:
         # 焦点恢复/重复 Esc：仅在当前 screen 是自己时 dismiss，吞掉 stack 错误

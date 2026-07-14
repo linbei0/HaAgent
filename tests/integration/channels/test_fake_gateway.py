@@ -7,11 +7,9 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from haagent.channels.adapters.fake import FakeAdapter
 from haagent.channels.interactions import InteractionBroker
 from haagent.channels.manager import ChannelManager
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, load_channel_settings, save_channel_settings
@@ -19,6 +17,7 @@ from haagent.channels.state import ChannelStateStore
 from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
 from haagent.runtime.events.types import AssistantMessageEvent, SessionLifecycleEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
+from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
 
 
 @dataclass
@@ -41,6 +40,7 @@ class FakeCancelResult:
 class FakeSessions:
     def __init__(self, service: "FakeAssistantService") -> None:
         self._service = service
+        self.permissions = self
         self.permission_modes: list[str] = []
 
     def create(self) -> FakeSessionStatus:
@@ -49,7 +49,7 @@ class FakeSessions:
     def resume(self, session: str | Path) -> FakeSessionStatus:
         return self._service._resume(str(session))
 
-    def set_permission_mode(self, mode: str) -> None:
+    def set_mode(self, mode: str) -> None:
         self.permission_modes.append(mode)
 
     def run_prompt_events(
@@ -149,7 +149,7 @@ def _msg(
     conv = conversation_id or sender_id
     address = ChannelAddress(
         instance_id=instance_id,
-        platform="fake",
+        platform="weixin",
         conversation_kind="dm",
         conversation_id=conv,
     )
@@ -158,8 +158,7 @@ def _msg(
         message_id=message_id,
         sender_id=sender_id,
         text=text,
-        received_at=datetime.now(timezone.utc),
-        reply_handle=ChannelReplyHandle(platform="fake", payload={"token": "secret-token"}),
+        reply_handle=ChannelReplyHandle(platform="weixin", payload={"token": "secret-token"}),
     )
 
 
@@ -172,7 +171,7 @@ def _make_manager(
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     state = ChannelStateStore(tmp_path / "channels.sqlite3")
-    adapter = FakeAdapter("fake-1", platform="fake")
+    adapter = FakeAdapter("fake-1", platform="weixin")
     services: list[FakeAssistantService] = []
 
     def factory(root: Path) -> FakeAssistantService:
@@ -313,10 +312,10 @@ def test_permanent_auto_approve_requires_owner_confirmation_and_safe_clears_it(t
                 instances=[
                     ChannelInstanceConfig(
                         id="fake-1",
-                        platform="fake",
+                        platform="weixin",
                         enabled=True,
                         workspace_root=workspace,
-                        credential_username="channel:fake:fake-1:token",
+                        credential_username="channel:weixin:fake-1:bot_token",
                     )
                 ]
             ),
@@ -452,7 +451,6 @@ def test_adapter_disconnect_is_explicit(tmp_path: Path) -> None:
         status = manager.status()
         assert any(item["instance_id"] == "fake-1" and item["state"] == "connected" for item in status)
         await adapter.stop()
-        await manager.mark_adapter_state("fake-1", "stopped")
         status2 = manager.status()
         assert any(item["instance_id"] == "fake-1" and item["state"] == "stopped" for item in status2)
         await manager.stop()
@@ -515,7 +513,7 @@ def test_instance_workspace_root_honored(tmp_path: Path) -> None:
         instance_ws = tmp_path / "instance-ws"
         instance_ws.mkdir()
         state = ChannelStateStore(tmp_path / "channels.sqlite3")
-        adapter = FakeAdapter("fake-1", platform="fake")
+        adapter = FakeAdapter("fake-1", platform="weixin")
         services: list[FakeAssistantService] = []
 
         def factory(root: Path) -> FakeAssistantService:
@@ -547,9 +545,6 @@ def test_send_failure_is_surfaced(tmp_path: Path) -> None:
     async def _run() -> None:
         manager, adapter, state, _ = _make_manager(tmp_path)
         state.set_owner("fake-1", "owner-1")
-        adapter.fail_next_sends = 99  # type: ignore[attr-defined]
-        # 扩展 FakeAdapter 支持 fail
-        original = adapter.send_text
 
         async def failing_send(*args, **kwargs):
             from haagent.channels.types import SendResult
@@ -563,7 +558,7 @@ def test_send_failure_is_surfaced(tmp_path: Path) -> None:
         # 未授权路径也会 send；失败应记入 manager 可见状态
         status = manager.status()
         item = next(x for x in status if x["instance_id"] == "fake-1")
-        assert item.get("last_send_error") or manager.last_send_error("fake-1")
+        assert item["last_send_error"] == "send_failed"
         await manager.stop()
 
     asyncio.run(_run())
@@ -576,7 +571,6 @@ def test_auth_expired_visible_in_manager_status(tmp_path: Path) -> None:
         await manager.attach_adapter(adapter)
         # 模拟 adapter 进入 auth_expired
         adapter.state = "auth_expired"  # type: ignore[attr-defined]
-        await manager.sync_adapter_states()
         status = manager.status()
         assert any(item["instance_id"] == "fake-1" and item["state"] == "auth_expired" for item in status)
         await manager.stop()

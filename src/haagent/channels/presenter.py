@@ -1,7 +1,7 @@
 """
 haagent/channels/presenter.py - Runtime 事件到渠道投递动作
 
-把 RuntimeUiEvent 映射为平台无关的 SendText/SetTyping/FinalizeText；
+把 RuntimeUiEvent 映射为平台无关的 SendText/SetTyping；
 不直接调用平台 SDK，也不处理审批（由 InteractionBroker 负责）。
 """
 
@@ -31,30 +31,14 @@ class SetTyping:
     active: bool
 
 
-@dataclass(frozen=True)
-class FinalizeText:
-    text: str
+ChannelDelivery = SendText | SetTyping
 
-
-@dataclass(frozen=True)
-class SendInteractionPrompt:
-    text: str
-    nonce: str
-
-
-ChannelDelivery = SendText | SetTyping | FinalizeText | SendInteractionPrompt
+_TOOL_SUMMARY_LIMIT = 160
+_TOOL_SUMMARY_SILENCE_SECONDS = 8.0
 
 
 class ChannelPresenter:
-    def __init__(
-        self,
-        *,
-        tool_summary_limit: int = 160,
-        tool_summary_silence_seconds: float = 8.0,
-    ) -> None:
-        self._tool_summary_limit = tool_summary_limit
-        # 仅在长时间无用户可见输出后才发工具摘要，避免刷屏。
-        self._tool_summary_silence_seconds = tool_summary_silence_seconds
+    def __init__(self) -> None:
         self._delta_buffer: list[str] = []
         self._typing_active = False
         self._finalized = False
@@ -101,11 +85,11 @@ class ChannelPresenter:
             return []
         now = time.monotonic()
         # 静默期未到：不发工具摘要。
-        if now - self._last_user_visible_at < self._tool_summary_silence_seconds:
+        if now - self._last_user_visible_at < _TOOL_SUMMARY_SILENCE_SECONDS:
             return []
         summary = (event.summary or event.tool_name).strip()
-        if len(summary) > self._tool_summary_limit:
-            summary = summary[: self._tool_summary_limit] + "…"
+        if len(summary) > _TOOL_SUMMARY_LIMIT:
+            summary = summary[:_TOOL_SUMMARY_LIMIT] + "…"
         self._last_user_visible_at = now
         return [SendText(text=f"工具：{event.tool_name} — {summary}")]
 
@@ -132,4 +116,4 @@ class ChannelPresenter:
         if not text:
             return []
         self._last_user_visible_at = time.monotonic()
-        return [FinalizeText(text=text)]
+        return [SendText(text=text)]

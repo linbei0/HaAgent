@@ -92,6 +92,7 @@ class AssistantModels:
             )
         except (ProviderProfileError, CredentialError) as error:
             raise AssistantServiceError(str(error)) from error
+        self._context.status_generation += 1
         return record
 
     def discover_local_runtimes(self) -> tuple[LocalRuntimeDiscovery, LocalRuntimeDiscovery]:
@@ -120,6 +121,7 @@ class AssistantModels:
             runtime_kind=discovery.runtime_kind,
         )
         save_provider_connection_with_key(record, None, config_dir=user_config_dir())
+        self._context.status_generation += 1
         return ModelSelection(connection_id=connection_id, model=model.id)
 
     def set_fallback_selection(
@@ -143,12 +145,14 @@ class AssistantModels:
             save_active_model_selection(selection, config_dir=user_config_dir())
         except (ProviderProfileError, CredentialError) as error:
             raise AssistantServiceError(str(error)) from error
+        self._context.status_generation += 1
 
     def delete_connection(self, connection_id: str) -> None:
         try:
             delete_provider_connection(connection_id, config_dir=user_config_dir())
         except ProviderProfileError as error:
             raise AssistantServiceError(str(error)) from error
+        self._context.status_generation += 1
 
     def refresh_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
         try:

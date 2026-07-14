@@ -10,6 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from haagent.app.assistant_types import (
+    AssistantSessionStatus,
+    AssistantSessionSummary,
+    AssistantSessionTurn,
+)
 from haagent.tui.overlays.sessions import SessionOverlay, SessionOverlayResult
 from haagent.tui.widgets import ConversationTimeline
 
@@ -23,7 +28,7 @@ class SessionFlow:
 
     def restore_initial_session(self) -> None:
         """启动时按 --resume / --continue 参数恢复会话。"""
-        initial_resume = getattr(self._app.service.sessions, "initial_resume", None)
+        initial_resume = self._app.service.sessions.initial_resume
         if initial_resume is not None:
             try:
                 status = self._app.service.sessions.resume(initial_resume)
@@ -32,7 +37,7 @@ class SessionFlow:
             else:
                 self.show_session_history(status, prefix="已恢复 session")
             return
-        if not bool(getattr(self._app.service.sessions, "initial_continue", False)):
+        if not self._app.service.sessions.initial_continue:
             return
         try:
             status = self._app.service.sessions.continue_latest()
@@ -50,7 +55,7 @@ class SessionFlow:
         # 列表扫描可能触碰大量 session 目录，放到 worker 避免卡 UI。
         self._app._load_session_list_worker()
 
-    def open_sessions_with_list(self, sessions: list[Any]) -> None:
+    def open_sessions_with_list(self, sessions: list[AssistantSessionSummary]) -> None:
         self._app.push_screen(
             SessionOverlay(sessions),
             self.handle_session_overlay_result,
@@ -89,14 +94,14 @@ class SessionFlow:
         self._app._refresh()
         self._app._defer_prompt_focus()
 
-    def apply_continue_success(self, status: object) -> None:
+    def apply_continue_success(self, status: AssistantSessionStatus) -> None:
         self._busy = False
         self._app._reset_image_input_state()
-        self._app._conversation.append_line(f"已恢复会话：{getattr(status, 'session_id', '')}")
+        self._app._conversation.append_line(f"已恢复会话：{status.session_id}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
-    def apply_overlay_success(self, result: SessionOverlayResult, status: object) -> None:
+    def apply_overlay_success(self, result: SessionOverlayResult, status: AssistantSessionStatus) -> None:
         self._busy = False
         self._app._reset_image_input_state()
         if result.action == "new":
@@ -112,7 +117,7 @@ class SessionFlow:
         self._app._refresh()
         self._app._defer_prompt_focus()
 
-    def show_session_history(self, status: object, *, prefix: str) -> None:
+    def show_session_history(self, status: AssistantSessionStatus, *, prefix: str) -> None:
         conversation = self._timeline()
         try:
             history = list(self._app.service.sessions.history())
@@ -134,13 +139,11 @@ class SessionFlow:
         return self._app.query_one("#conversation", ConversationTimeline)
 
 
-def session_turn_assistant_text(turn: object) -> str:
+def session_turn_assistant_text(turn: AssistantSessionTurn) -> str:
     """从会话历史 turn 提取用于展示的 assistant 文本。"""
-    for field_name in ("assistant_display_text", "assistant_final_response", "final_response", "response", "content"):
-        value = getattr(turn, field_name, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    summary = str(getattr(turn, "summary", "")).strip()
+    if turn.assistant_display_text and turn.assistant_display_text.strip():
+        return turn.assistant_display_text.strip()
+    summary = turn.summary.strip()
     extracted = _summary_field(summary, "assistant_final_response") or _summary_field(summary, "final_response")
     return extracted or summary
 

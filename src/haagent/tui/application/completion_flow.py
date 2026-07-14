@@ -20,8 +20,17 @@ class CompletionFlow:
 
     def __init__(self, app: Any) -> None:
         self._app = app
-        self.command_overlay = None
-        self.file_ref_overlay = None
+
+    @property
+    def command_overlay(self):
+        # TextArea.Changed 可能晚于 screen 卸载到达；此时 overlay 已不存在，不能重查 DOM。
+        dock = self._app._input_dock_widget
+        return None if dock is None else dock.command_overlay
+
+    @property
+    def file_ref_overlay(self):
+        dock = self._app._input_dock_widget
+        return None if dock is None else dock.file_ref_overlay
 
     # ── 命令建议 ─────────────────────────────────────────────────────────
     def open_command_suggestions(self) -> None:
@@ -38,8 +47,7 @@ class CompletionFlow:
         self._open_command_overlay(self._app._prompt_value(prompt_input).removeprefix("/"))
 
     def _open_command_overlay(self, query: str) -> None:
-        self.file_ref_overlay = None
-        self.command_overlay = self._app._input_dock().open_command_suggestions(query)
+        self._app._input_dock().open_command_suggestions(query)
 
     def handle_command_key(self, event: events.Key) -> None:
         overlay = self.command_overlay
@@ -81,7 +89,6 @@ class CompletionFlow:
         self.command_overlay.update_query(text.removeprefix("/"))
 
     def close_command_suggestions(self) -> None:
-        self.command_overlay = None
         self._app._input_dock().close_command_suggestions()
 
     def command_suggestions_is_open(self) -> bool:
@@ -97,7 +104,7 @@ class CompletionFlow:
         input_dock = self._app._input_dock()
         input_dock.workspace_root = status.workspace_root
         input_dock.file_reference_index = self._app._file_ref_index
-        self.file_ref_overlay = input_dock.open_file_refs(query)
+        input_dock.open_file_refs(query)
 
     def handle_file_ref_key(self, event: events.Key) -> None:
         overlay = self.file_ref_overlay
@@ -135,7 +142,6 @@ class CompletionFlow:
         prompt_input.focus()
 
     def close_file_refs(self) -> None:
-        self.file_ref_overlay = None
         self._app._input_dock().close_file_refs()
 
     def file_reference_is_open(self) -> bool:

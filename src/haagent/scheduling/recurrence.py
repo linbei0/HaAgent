@@ -11,7 +11,6 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from dateutil import rrule as dateutil_rrule
 from dateutil.rrule import rrulestr
 
 from haagent.scheduling.models import ScheduleDefinition
@@ -99,10 +98,6 @@ def normalize_rrule(value: str | None) -> str | None:
         if interval < 1:
             raise RecurrenceError("interval_too_small", "INTERVAL 必须 >= 1")
 
-    # 低于一分钟：MINUTELY 且 INTERVAL < 1 已拒绝；SECONDLY 已在 FREQ 拒绝
-    if freq == "MINUTELY" and interval < 1:
-        raise RecurrenceError("interval_too_small", "间隔不得低于一分钟")
-
     # 规范化顺序：FREQ 优先，其余按出现顺序
     ordered = ["FREQ"] + [k for k in keys if k != "FREQ"]
     normalized = ";".join(f"{k}={parsed[k]}" for k in ordered)
@@ -148,49 +143,6 @@ def _local_to_utc(local_naive: datetime, tz: ZoneInfo) -> datetime | None:
     return as_utc
 
 
-def _build_rrule(definition: ScheduleDefinition, tz: ZoneInfo) -> dateutil_rrule.rrule | None:
-    rule = normalize_rrule(definition.rrule)
-    if rule is None:
-        return None
-    # dateutil 在 naive dtstart 上按墙上时间展开
-    try:
-        return rrulestr(rule, dtstart=definition.dtstart_local, ignoretz=True)  # type: ignore[return-value]
-    except (ValueError, TypeError) as exc:
-        raise RecurrenceError("rrule_parse", f"无法解析 RRULE: {exc}") from exc
-
-
-def _iter_local_occurrences(
-    definition: ScheduleDefinition,
-    *,
-    after_local: datetime | None,
-    limit: int | None,
-) -> Iterator[datetime]:
-    """产出本地 naive occurrence（已跳过无效日期由 dateutil 处理）。"""
-    rule = normalize_rrule(definition.rrule)
-    if rule is None:
-        yield definition.dtstart_local
-        return
-
-    rr = _build_rrule(definition, _zone(definition.timezone))
-    assert rr is not None
-    if after_local is None:
-        cursor = rr
-        count = 0
-        for occ in cursor:
-            yield occ
-            count += 1
-            if limit is not None and count >= limit:
-                return
-        return
-
-    # after 为本地 naive：取严格大于 after 的实例时由调用方用 UTC 过滤
-    for occ in rr:
-        yield occ
-        if limit is not None:
-            # limit 在 UTC 过滤后由外层控制；此处若 after 很早可能过多
-            pass
-
-
 def _occurrences_utc(
     definition: ScheduleDefinition,
     *,
@@ -222,12 +174,11 @@ def _occurrences_utc(
     rr = rrulestr(rule, dtstart=definition.dtstart_local, ignoretz=True)
     # 从 after 前一天起扫，避免漏掉本地边界
     after_local = after_utc.astimezone(tz).replace(tzinfo=None) - timedelta(days=1)
-    # dateutil between 使用 naive
-    try:
-        candidates = rr.xafter(after_local, count=5000 if count is None else max(count * 20, 50))
-    except Exception:
-        # 部分 dateutil 版本无 xafter；回退完整迭代（有 COUNT/UNTIL 时有界）
-        candidates = iter(rr)
+    # dateutil 按本地 naive 墙上时间展开。
+    candidates = rr.xafter(
+        after_local,
+        count=5000 if count is None else max(count * 20, 50),
+    )
 
     seen: set[datetime] = set()
     for local_occ in candidates:

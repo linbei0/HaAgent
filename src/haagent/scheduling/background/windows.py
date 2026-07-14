@@ -50,11 +50,8 @@ def _normalize_console_text(text: str) -> str:
 class WindowsBackgroundAdapter:
     """Windows 任务计划程序：ONLOGON、当前用户、幂等安装。"""
 
-    def __init__(self, *, task_name: str = TASK_NAME) -> None:
-        self._task_name = task_name
-
     def status(self) -> BackgroundServiceStatus:
-        result = self._run(["schtasks.exe", "/Query", "/TN", self._task_name, "/FO", "LIST"])
+        result = self._run(["schtasks.exe", "/Query", "/TN", TASK_NAME, "/FO", "LIST"])
         if result.returncode != 0:
             combined = f"{result.stderr or ''} {result.stdout or ''}".lower()
             # 权限/访问拒绝不得伪装成 not_installed
@@ -77,7 +74,7 @@ class WindowsBackgroundAdapter:
                     "找不到",
                 )
             )
-            if access_denied and not not_found:
+            if access_denied:
                 raw = _normalize_console_text(result.stderr or result.stdout or "")
                 return BackgroundServiceStatus(
                     state="error",
@@ -85,10 +82,18 @@ class WindowsBackgroundAdapter:
                     detail=bounded_detail(raw or _DETAIL_ACCESS_DENIED),
                     executable=sys.executable,
                 )
+            if not_found:
+                return BackgroundServiceStatus(
+                    state="not_installed",
+                    host_type="windows_task_scheduler",
+                    detail=_DETAIL_NOT_INSTALLED,
+                    executable=sys.executable,
+                )
+            raw = _normalize_console_text(result.stderr or result.stdout or "")
             return BackgroundServiceStatus(
-                state="not_installed",
+                state="error",
                 host_type="windows_task_scheduler",
-                detail=_DETAIL_NOT_INSTALLED,
+                detail=bounded_detail(raw or "查询计划任务失败"),
                 executable=sys.executable,
             )
         # 中英文状态列：Running / 正在运行
@@ -107,15 +112,15 @@ class WindowsBackgroundAdapter:
         user = getpass.getuser()
         tr = self._build_tr()
         # 幂等：已存在则先删除再创建
-        existing = self._run(["schtasks.exe", "/Query", "/TN", self._task_name])
+        existing = self._run(["schtasks.exe", "/Query", "/TN", TASK_NAME])
         if existing.returncode == 0:
-            self._run(["schtasks.exe", "/Delete", "/TN", self._task_name, "/F"])
+            self._run(["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"])
         create = self._run(
             [
                 "schtasks.exe",
                 "/Create",
                 "/TN",
-                self._task_name,
+                TASK_NAME,
                 "/SC",
                 "ONLOGON",
                 "/RU",
@@ -146,10 +151,14 @@ class WindowsBackgroundAdapter:
         return st
 
     def uninstall(self) -> BackgroundServiceStatus:
-        result = self._run(["schtasks.exe", "/Delete", "/TN", self._task_name, "/F"])
+        result = self._run(["schtasks.exe", "/Delete", "/TN", TASK_NAME, "/F"])
         if result.returncode != 0:
             combined = f"{result.stderr or ''} {result.stdout or ''}".lower()
             # 已不存在可视为成功；其它错误必须 fail-fast
+            access_denied = any(
+                token in combined
+                for token in ("access is denied", "access denied", "拒绝访问", "denied")
+            )
             not_found = any(
                 token in combined
                 for token in (
@@ -160,7 +169,7 @@ class WindowsBackgroundAdapter:
                     "does not exist",
                 )
             )
-            if not not_found:
+            if access_denied or not not_found:
                 raw = _normalize_console_text(result.stderr or result.stdout or "")
                 raise BackgroundServiceError(
                     bounded_detail(raw or "删除计划任务失败")
@@ -193,9 +202,9 @@ class WindowsBackgroundAdapter:
             )
             return subprocess.CompletedProcess(
                 args=list(args),
-                returncode=int(getattr(result, "returncode", 1)),
-                stdout=_normalize_console_text(getattr(result, "stdout", None) or ""),
-                stderr=_normalize_console_text(getattr(result, "stderr", None) or ""),
+                returncode=result.returncode,
+                stdout=_normalize_console_text(result.stdout or ""),
+                stderr=_normalize_console_text(result.stderr or ""),
             )
         except FileNotFoundError as error:
             raise BackgroundServiceError("schtasks.exe 不可用") from error

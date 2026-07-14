@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
+from haagent.tui.commands import command_registry, parse_slash_command
 from haagent.tui.overlays.channels import ChannelsOverlay, ChannelsOverlayState
 from tests.tui.support import FakeAssistantService, _all_text
 
@@ -22,7 +22,7 @@ def test_channels_is_structured_slash_command() -> None:
     assert result.command is not None
     assert result.command.name == "channels"
     assert result.command.action == "open_channels"
-    assert result == SlashCommandResult(command=registry.require("channels"), argument="")
+    assert result.argument == ""
 
 
 def test_channels_overlay_render_hides_secrets_and_shows_reauth(tmp_path: Path) -> None:

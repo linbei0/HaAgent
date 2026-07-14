@@ -15,10 +15,11 @@ from typing import Any, Literal
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
-from haagent.app.assistant_types import ScheduleCreateRequest
+from haagent.app.assistant_types import AssistantSchedule, ScheduleCreateRequest
 from haagent.scheduling.models import (
     RetryPolicy,
     SCHEDULE_WEB_TOOLS,
@@ -235,59 +236,46 @@ class ScheduleEditorState:
     @classmethod
     def from_schedule(
         cls,
-        item: Any,
+        item: AssistantSchedule,
         *,
         defaults: ScheduleEditorState | None = None,
     ) -> ScheduleEditorState:
         """从 AssistantSchedule 完整还原编辑器状态。"""
         base = defaults or cls()
-        fields = parse_rrule_fields(getattr(item, "rrule", None))
-        preset, custom_tools = infer_tool_preset(
-            tuple(getattr(item, "allowed_tools", ()) or ())
-        )
-        retry = getattr(item, "retry_policy", None) or RetryPolicy()
+        fields = parse_rrule_fields(item.rrule)
+        preset, custom_tools = infer_tool_preset(item.allowed_tools)
+        retry = item.retry_policy
         return replace(
             base,
-            name=str(getattr(item, "name", "") or ""),
-            prompt=str(getattr(item, "prompt", "") or ""),
-            destination_kind=str(getattr(item, "destination_kind", "new_session")),
-            destination_session_path=str(
-                getattr(item, "destination_session_path", None) or ""
-            ),
-            workspace_root=str(getattr(item, "workspace_root", "") or ""),
+            name=item.name,
+            prompt=item.prompt,
+            destination_kind=item.destination_kind,
+            destination_session_path=str(item.destination_session_path or ""),
+            workspace_root=str(item.workspace_root),
             frequency=fields["frequency"],  # type: ignore[arg-type]
             interval_value=int(fields["interval_value"]),
             interval_unit=str(fields["interval_unit"]),
             byday=str(fields["byday"]),
             bymonthday=int(fields["bymonthday"]),
             custom_rrule=str(fields["custom_rrule"]),
-            timezone=str(getattr(item, "timezone", base.timezone) or base.timezone),
-            dtstart_local=getattr(item, "dtstart_local").isoformat(timespec="minutes")
-            if getattr(item, "dtstart_local", None) is not None
-            else base.dtstart_local,
-            misfire_policy=str(getattr(item, "misfire_policy", "latest")),
-            overlap_policy=str(getattr(item, "overlap_policy", "skip")),
-            retry_max_attempts=int(getattr(retry, "max_attempts", 3)),
-            retry_initial_delay_seconds=int(
-                getattr(retry, "initial_delay_seconds", 30)
-            ),
-            retry_multiplier=float(getattr(retry, "multiplier", 2.0)),
-            retry_max_delay_seconds=int(getattr(retry, "max_delay_seconds", 900)),
-            connection_id=str(getattr(item, "connection_id", "") or ""),
-            model=str(getattr(item, "model", "") or ""),
-            web_enabled=bool(getattr(item, "web_enabled", False)),
+            timezone=item.timezone,
+            dtstart_local=item.dtstart_local.isoformat(timespec="minutes"),
+            misfire_policy=item.misfire_policy,
+            overlap_policy=item.overlap_policy,
+            retry_max_attempts=retry.max_attempts,
+            retry_initial_delay_seconds=retry.initial_delay_seconds,
+            retry_multiplier=retry.multiplier,
+            retry_max_delay_seconds=retry.max_delay_seconds,
+            connection_id=item.connection_id,
+            model=item.model,
+            web_enabled=item.web_enabled,
             tool_preset=preset,
             custom_allowed_tools=custom_tools,
-            approval_allowed_tools=tuple(
-                getattr(item, "approval_allowed_tools", ()) or ()
-            ),
-            approved_tools=tuple(getattr(item, "approved_tools", ()) or ()),
-            permission_mode=str(
-                getattr(item, "permission_mode", "request_approval")
-                or "request_approval"
-            ),
-            editing_id=str(getattr(item, "id", "") or "") or None,
-            expected_revision=int(getattr(item, "revision", 1)),
+            approval_allowed_tools=item.approval_allowed_tools,
+            approved_tools=item.approved_tools,
+            permission_mode=item.permission_mode,
+            editing_id=item.id,
+            expected_revision=item.revision,
         )
 
     def with_page(self, page: int) -> ScheduleEditorState:
@@ -906,18 +894,14 @@ class ScheduleEditorOverlay(ModalScreen[ScheduleEditorState | None]):
     def _hide_input(self) -> None:
         try:
             field = self.query_one("#schedule-editor-input", Input)
-        except Exception:
+        except NoMatches:
             return
         field.value = ""
         field.display = False
         field.disabled = True
 
     def _request_preview(self) -> None:
-        flow = getattr(self.app, "schedule_flow", None)
-        if flow is not None and hasattr(flow, "preview_editor_state"):
-            flow.preview_editor_state(self)
-            return
-        self._set_state(replace(self.state, message="无法预览", previews=()))
+        self.app.schedule_flow.preview_editor_state(self)
 
     def apply_previews(self, previews: tuple[datetime, ...], message: str = "") -> None:
         self._set_state(self.state.with_previews(previews).with_field("message", message or "已更新预览"))

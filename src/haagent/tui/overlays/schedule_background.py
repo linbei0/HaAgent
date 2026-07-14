@@ -7,8 +7,8 @@ haagent/tui/overlays/schedule_background.py - 后台服务状态页
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
+from haagent.app.assistant_types import BackgroundServiceStatus, ScheduleHostStatus
 from haagent.tui.design.utils import safe_summary
 
 _STATE_LABELS = {
@@ -31,8 +31,8 @@ _HOST_TYPE_LABELS = {
 
 @dataclass(frozen=True)
 class ScheduleBackgroundState:
-    status: Any | None = None
-    host: Any | None = None
+    status: BackgroundServiceStatus | None = None
+    host: ScheduleHostStatus | None = None
 
     def render(self) -> str:
         lines = [
@@ -46,10 +46,10 @@ class ScheduleBackgroundState:
         # TUI 内嵌 host：死亡/致命错误必须可见，禁止静默
         host = self.host
         if host is not None:
-            running = bool(getattr(host, "running", False))
-            fatal = bool(getattr(host, "fatal", False))
-            last_error = str(getattr(host, "last_error", "") or "")
-            owner = str(getattr(host, "owner_id", "") or "")
+            running = host.running
+            fatal = host.fatal
+            last_error = host.last_error or ""
+            owner = host.owner_id or ""
             host_label = "运行中" if running else "已停止"
             if fatal:
                 host_label = "异常退出"
@@ -63,13 +63,13 @@ class ScheduleBackgroundState:
         if status is None:
             lines.append("（正在加载系统后台状态…）")
         else:
-            state = str(getattr(status, "state", "unknown"))
+            state = status.state
             label = _STATE_LABELS.get(state, state)
-            host_type = str(getattr(status, "host_type", "-"))
+            host_type = status.host_type
             host_label = _HOST_TYPE_LABELS.get(host_type, host_type)
-            detail = str(getattr(status, "detail", "") or "").replace("\ufffd", "")
-            executable = getattr(status, "executable", None)
-            heartbeat = getattr(status, "last_heartbeat_utc", None)
+            detail = status.detail.replace("\ufffd", "")
+            executable = status.executable
+            heartbeat = status.last_heartbeat_utc
             lines.append(f"系统后台: {label}")
             lines.append(f"安装方式: {host_label}")
             if detail:

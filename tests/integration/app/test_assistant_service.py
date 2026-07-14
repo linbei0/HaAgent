@@ -6,7 +6,6 @@ tests/integration/app/test_assistant_service.py - AssistantService 应用服务�
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import threading
 from collections.abc import Mapping
@@ -23,9 +22,7 @@ from haagent.app.assistant_types import (
 from haagent.models.catalog import ModelCatalogProvider
 from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.types import ModelResponse
-from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models import model_connections
-from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderConnectionRecord,
@@ -37,28 +34,6 @@ from haagent.models.model_connections import (
 from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent, TaskProgressEvent
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills.marketplace import MarketplaceProvider, MarketplaceSearchResult, MarketplaceSkillCard
-
-
-def test_assistant_application_types_live_outside_composition_root() -> None:
-    assert importlib.util.find_spec("haagent.app.assistant_types") is not None
-
-
-def test_assistant_service_composes_grouped_modules_over_one_context(tmp_path: Path) -> None:
-    service = AssistantService(workspace_root=tmp_path)
-
-    assert service.workspace._context is service.sessions._context
-    assert service.sessions._context is service.models._context
-    assert service.models._context is service.skills._context
-    assert service.skills._context is service.memory._context
-
-
-def test_assistant_service_does_not_expose_flat_usecase_methods(tmp_path: Path) -> None:
-    service = AssistantService(workspace_root=tmp_path)
-
-    assert not hasattr(service, "run_prompt_events")
-    assert not hasattr(service, "list_model_connections")
-    assert not hasattr(service, "list_skills")
-    assert not hasattr(service, "list_memory_candidates")
 
 
 class RecordingGateway:
@@ -267,17 +242,20 @@ def _service(
     *,
     environ: Mapping[str, str] | None = None,
     gateway_factory=None,
+    session_cls=None,
     config_dir: Path | None = None,
 ) -> AssistantService:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     if config_dir is not None:
         config_dir.mkdir(parents=True, exist_ok=True)
+    kwargs = {"session_cls": session_cls} if session_cls is not None else {}
     return AssistantService(
         workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         environ=environ or {},
         gateway_factory=gateway_factory or (lambda profile: RecordingGateway(profile.name)),
+        **kwargs,
     )
 
 
@@ -504,7 +482,7 @@ def test_service_sets_default_model_selection_without_switching_current_session(
 
     service.models.set_default_selection(ModelSelectionRequest("router", "openai/gpt-5.2-chat"))
 
-    assert service.workspace.current_session() is None
+    assert service.workspace.status().current_session_id is None
     assert load_active_model_selection(config_dir=config_dir) == ModelSelection("router", "openai/gpt-5.2-chat")
 
 
@@ -512,14 +490,15 @@ def test_service_compacts_current_session_through_session_boundary(tmp_path: Pat
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
     _write_user_connection(home)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     service = AssistantService(
-        workspace_root=tmp_path / "workspace",
+        workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         environ={"DEEPSEEK_API_KEY": "sk-test"},
         gateway_factory=lambda profile: RecordingGateway(profile.name),
         session_cls=RecordingSession,
     )
-    service._context.workspace_root.mkdir()
     service.sessions.create()
 
     result = service.sessions.compact()
@@ -924,29 +903,7 @@ def test_create_new_session_sets_current_session(tmp_path: Path, monkeypatch) ->
     assert session.turn_count == 0
     assert session.workspace_root == (tmp_path / "workspace").resolve()
     assert session.permission_mode == "request_approval"
-    assert service.workspace.current_session().session_id == session.session_id
-
-
-def test_create_new_session_uses_registry_as_default_gateway_factory(tmp_path: Path, monkeypatch) -> None:
-    _set_home(monkeypatch, tmp_path / "home")
-    _write_user_connection(Path.home())
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    service = AssistantService(
-        workspace_root=workspace,
-        runs_root=tmp_path / ".runs",
-        environ={"DEEPSEEK_API_KEY": "secret"},
-        session_cls=RecordingSession,
-    )
-
-    service.sessions.create()
-
-    assert service._context.gateway_factory is gateway_from_profile
-    from haagent.models.negotiating_gateway import NegotiatingModelGateway
-
-    gateway = service._context.session.model_gateway
-    assert isinstance(gateway, NegotiatingModelGateway)
-    assert isinstance(gateway._primary, OpenAIChatCompletionsGateway)
+    assert service.workspace.status().current_session_id == session.session_id
 
 
 def test_create_and_resume_session_inject_same_retry_policy_into_compatible_factory(
@@ -973,8 +930,6 @@ def test_create_and_resume_session_inject_same_retry_policy_into_compatible_fact
     service.sessions.resume(created.session_path)
 
     assert [controller.policy.max_attempts for controller in controllers] == [2]
-    assert service._context.session is not None
-    assert service._context.session.model_gateway is not None
 
 
 def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, monkeypatch) -> None:
@@ -996,7 +951,6 @@ def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, 
 
     assert status.web_enabled is True
     assert session.web_enabled is True
-    assert service._context.session.enable_web is True
 
 
 def test_assistant_service_mcp_status_without_session(tmp_path: Path, monkeypatch) -> None:
@@ -1067,8 +1021,6 @@ def test_service_can_toggle_web_for_current_and_future_sessions(tmp_path: Path, 
 
     assert session.web_enabled is True
     assert service.workspace.status().web_enabled is False
-    assert service.workspace.current_session().web_enabled is False
-    assert service._context.session.enable_web is False
 
 
 def test_service_saves_interactive_turn_limit_and_updates_current_session(
@@ -1082,16 +1034,15 @@ def test_service_saves_interactive_turn_limit_and_updates_current_session(
         tmp_path,
         environ={"DEEPSEEK_API_KEY": "secret"},
         gateway_factory=lambda profile: RecordingGateway(profile.name),
+        session_cls=RecordingSession,
     )
-    service._context.session_factory = RecordingSession
     service.sessions.create()
 
     status = service.workspace.set_interactive_max_turns(80)
 
     assert status.current_max_turns == 80
     assert status.configured_interactive_max_turns == 80
-    assert service.workspace.current_session().max_turns == 80
-    assert service._context.session.max_turns == 80
+    assert service.workspace.turn_limit_status().current_max_turns == 80
     saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
     assert saved["active_model"] == {"connection_id": "local", "model": "deepseek-chat"}
     assert saved["interactive_max_turns"] == 80
@@ -1108,16 +1059,15 @@ def test_service_sets_current_session_unlimited_without_persisting(
         tmp_path,
         environ={"DEEPSEEK_API_KEY": "secret"},
         gateway_factory=lambda profile: RecordingGateway(profile.name),
+        session_cls=RecordingSession,
     )
-    service._context.session_factory = RecordingSession
     service.sessions.create()
 
     status = service.workspace.set_current_turns_unlimited()
 
     assert status.current_max_turns is None
     assert status.configured_interactive_max_turns == 200
-    assert service.workspace.current_session().max_turns is None
-    assert service._context.session.max_turns is None
+    assert service.workspace.turn_limit_status().current_max_turns is None
     saved = json.loads((home / ".haagent" / "settings.json").read_text(encoding="utf-8"))
     assert saved["active_model"] == {"connection_id": "local", "model": "deepseek-chat"}
 
@@ -1142,7 +1092,6 @@ def test_service_switches_current_session_model_without_changing_default(
     workspace_status = service.workspace.status()
 
     assert status.model_connection_id == "router"
-    assert service.workspace.current_session().model_connection_id == "router"
     assert workspace_status.profile_name == "router"
     assert workspace_status.model == "openai/gpt-5.2-chat"
     assert workspace_status.base_url == "https://openrouter.ai/api/v1"
@@ -1170,7 +1119,7 @@ def test_service_switch_before_session_uses_profile_for_next_session_without_cre
 
     assert pending.session_id == "pending"
     assert pending.model_connection_id == "router"
-    assert service.workspace.current_session() is None
+    assert service.workspace.status().current_session_id is None
 
     created = service.sessions.create()
 
@@ -1249,7 +1198,7 @@ def test_resume_session_sets_current_session(tmp_path: Path, monkeypatch) -> Non
 
     assert resumed.session_id == created.session_id
     assert resumed.turn_count == 1
-    assert service.workspace.current_session().session_id == created.session_id
+    assert service.workspace.status().current_session_id == created.session_id
     history = service.sessions.history()
     assert len(history) == 1
     assert history[0].request == "remember this"

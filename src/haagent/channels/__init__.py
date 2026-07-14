@@ -8,18 +8,14 @@ from __future__ import annotations
 
 from haagent.channels.types import (
     ChannelAddress,
-    ChannelCapabilities,
     ChannelReplyHandle,
     InboundChannelMessage,
     SendResult,
-    UnsupportedCapabilityError,
 )
 
 __all__ = [
     "ChannelAddress",
-    "ChannelCapabilities",
     "ChannelReplyHandle",
     "InboundChannelMessage",
     "SendResult",
-    "UnsupportedCapabilityError",
 ]

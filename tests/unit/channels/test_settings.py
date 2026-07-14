@@ -30,14 +30,14 @@ def test_invalid_version_fails(tmp_path: Path) -> None:
         load_channel_settings(path)
 
 
-def test_invalid_platform_fails(tmp_path: Path, workspace: Path) -> None:
+def test_unimplemented_platform_fails(tmp_path: Path, workspace: Path) -> None:
     path = tmp_path / "channels.json"
     path.write_text(
         (
             '{"version": 1, "instances": [{'
-            f'"id": "a", "platform": "unknown", "enabled": true, '
+            f'"id": "a", "platform": "feishu", "enabled": true, '
             f'"workspace_root": "{workspace.as_posix()}", '
-            '"credential_username": "channel:fake:a:token", "metadata": {}}]}'
+            '"credential_username": "channel:feishu:a:token", "metadata": {}}]}'
         ),
         encoding="utf-8",
     )

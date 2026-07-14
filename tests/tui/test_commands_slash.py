@@ -11,7 +11,6 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from haagent import cli
 from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSessionStatus,
@@ -35,7 +34,7 @@ from haagent.runtime.events import (
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.flows.path_authorization import find_untrusted_absolute_paths
-from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
+from haagent.tui.commands import command_registry, parse_slash_command
 from haagent.tui.design.failures import failure_from_payload, failure_next_steps
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
 from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
@@ -93,7 +92,10 @@ def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
     unknown = parse_slash_command("/wat", registry)
     not_command = parse_slash_command(" /help", registry)
 
-    assert result == SlashCommandResult(command=registry.require("sessions"), argument="")
+    assert result is not None
+    assert result.command is not None
+    assert result.command.name == "sessions"
+    assert result.argument == ""
     assert model.command.action == "open_models"
     assert model.command.name == "model"
     assert models.command.action == "open_models"
@@ -526,15 +528,6 @@ def test_tui_web_command_toggles_networking_inside_app(tmp_path: Path) -> None:
             assert "联网已关闭" in _text(app, "#conversation")
 
     asyncio.run(run())
-
-def test_tui_parser_accepts_explicit_command() -> None:
-    parser = cli.build_parser()
-
-    args = parser.parse_args(["tui", "--workspace-root", "workspace", "--runs-root", "runs"])
-
-    assert args.command == "tui"
-    assert args.workspace_root == Path("workspace")
-    assert args.runs_root == Path("runs")
 
 def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None:
     long_workspace = tmp_path / "very" / "long" / "workspace-name-that-should-not-fill-the-status-bar"

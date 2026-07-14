@@ -38,16 +38,16 @@ class PromptInput(TextArea):
 
     def on_key(self, event: events.Key) -> None:
         app = self.app
-        if getattr(app, "command_suggestions_is_open", lambda: False)() and event.key in {"escape", "up", "down", "enter"}:
+        if app.command_suggestions_is_open() and event.key in {"escape", "up", "down", "enter"}:
             event.prevent_default()
             app.action_handle_command_suggestion_key(event)
             return
-        if getattr(app, "file_reference_is_open", lambda: False)() and event.key in {"escape", "up", "down", "enter"}:
+        if app.file_reference_is_open() and event.key in {"escape", "up", "down", "enter"}:
             event.prevent_default()
             app.action_handle_file_ref_key(event)
             return
-        memory_flow = getattr(app, "memory_flow", None)
-        if memory_flow is not None and memory_flow.mode and getattr(app, "_pending_interaction", None) is None:
+        memory_flow = app.memory_flow
+        if memory_flow.mode and app._pending_interaction is None:
             handled = False
             if event.key == "enter":
                 app.action_memory_enter()
@@ -94,14 +94,13 @@ class PromptInput(TextArea):
         self.app.action_paste_image_from_input()
 
     def action_submit_from_input(self) -> None:
-        if getattr(self.app, "command_suggestions_is_open", lambda: False)():
+        if self.app.command_suggestions_is_open():
             self.app.action_accept_command_suggestion()
             return
-        if getattr(self.app, "file_reference_is_open", lambda: False)():
+        if self.app.file_reference_is_open():
             self.app.action_accept_file_ref()
             return
-        memory_flow = getattr(self.app, "memory_flow", None)
-        if memory_flow is not None and memory_flow.mode:
+        if self.app.memory_flow.mode:
             self.app.action_memory_enter()
             return
         self.app.action_submit_prompt()

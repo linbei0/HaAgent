@@ -11,7 +11,7 @@ from typing import Any
 
 from haagent.tui.design.copy import BLOCK_TITLES
 from haagent.tui.design.utils import safe_summary
-from haagent.tui.widgets import ConversationTimeline, ToolActivity, ToolStatus
+from haagent.tui.widgets import ConversationTimeline
 
 
 class ConversationController:
@@ -100,17 +100,6 @@ class ConversationController:
         self.streaming_key = None
         self.streaming_text = ""
 
-    # ── 工具活动 ─────────────────────────────────────────────────────────
-    def record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
-        self._timeline().add_tool_activity(
-            ToolActivity(
-                turn_index=turn_index,
-                tool_name=tool_name,
-                status=_tool_status(status),
-                summary=safe_summary(summary, 96),
-            )
-        )
-
     def record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         self._timeline().add_tool_diagnostic(turn_index, tool_name, safe_summary(message, 120))
 
@@ -176,15 +165,3 @@ class ConversationController:
 
     def _timeline(self) -> ConversationTimeline:
         return self._app.query_one("#conversation", ConversationTimeline)
-
-
-def _tool_status(status: str) -> ToolStatus:
-    if status in {"started", "running", "pending"}:
-        return "running"
-    if status in {"approval", "approval_requested"}:
-        return "approval"
-    if status in {"finished", "done", "completed"}:
-        return "done"
-    if status in {"failed", "cancelled"}:
-        return "failed"
-    return "running"

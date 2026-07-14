@@ -25,6 +25,7 @@ from haagent.app.assistant_types import (
     RunQuery,
     SandboxDoctorReport,
     ScheduleCreateRequest,
+    ScheduleHostStatus,
     SchedulePreviewRequest,
     ScheduleUpdateRequest,
 )
@@ -242,9 +243,6 @@ class FakeMemory:
     def list_candidates(self, *, status="pending"):
         return self._owner._list_memory_candidates(status=status)
 
-    def get_candidate(self, candidate_id):
-        return self._owner._get_memory_candidate(candidate_id)
-
     def confirm_candidate(self, candidate_id):
         return self._owner._confirm_memory_candidate(candidate_id)
 
@@ -302,6 +300,9 @@ class FakeSchedules:
         self.preview_calls = 0
         self.install_count = 0
         self.uninstall_count = 0
+        self.host_start_count = 0
+        self.host_stop_count = 0
+        self.host_running = False
         self.created: list[ScheduleCreateRequest] = []
         self.background = BackgroundServiceStatus(
             state="not_installed",
@@ -506,6 +507,19 @@ class FakeSchedules:
                 return replace(run, status="cancelled", cancellation_requested=True)
         raise RuntimeError(f"missing run {run_id}")
 
+    def start_host(self) -> ScheduleHostStatus:
+        self.host_start_count += 1
+        self.host_running = True
+        return self.host_status()
+
+    def stop_host(self) -> ScheduleHostStatus:
+        self.host_stop_count += 1
+        self.host_running = False
+        return self.host_status()
+
+    def host_status(self) -> ScheduleHostStatus:
+        return ScheduleHostStatus(running=self.host_running, owner_id="fake-tui" if self.host_running else None)
+
     def preview(self, request: SchedulePreviewRequest, *, count: int = 3):
         del request
         self.preview_calls += 1
@@ -537,11 +551,6 @@ class FakeSchedules:
             executable=self.background.executable,
         )
         return self.background
-
-    def unread_count(self) -> int:
-        runs = list(getattr(self._owner, "schedule_runs", []) or [])
-        return sum(1 for r in runs if r.unread)
-
 
 class FakeAssistantService:
     def __init__(

@@ -6,10 +6,9 @@ haagent/app/assistant_context.py - 应用 Module 私有共享状态
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from haagent.app.assistant_types import GatewayFactory
 from haagent.context.instruction_cache import InstructionCache
@@ -17,10 +16,6 @@ from haagent.models.model_connections import ModelSelection
 from haagent.runtime.session.agent import AgentSession
 from haagent.skills.catalog import SkillCatalogService
 from haagent.tools.schema_cache import ToolSchemaCache
-
-if TYPE_CHECKING:
-    from haagent.scheduling.store import ScheduleStore
-
 
 @dataclass
 class AssistantContext:
@@ -35,10 +30,6 @@ class AssistantContext:
     initial_continue: bool
     session: AgentSession | None = None
     pending_model_selection: ModelSelection | None = None
-    last_model_selection: ModelSelection | None = None
-    schedule_db_path: Path | None = None
-    schedule_store_factory: Callable[[], ScheduleStore] | None = None
-    background_adapter_factory: Callable[[], object] | None = None
     # workspace.status 缓存世代；session/模型/权限/凭据变化时 +1。
     status_generation: int = 0
     # 交互延迟优化：跨 session/turn 共享的只读缓存服务。

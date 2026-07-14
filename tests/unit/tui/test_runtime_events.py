@@ -45,9 +45,6 @@ class _FakeConversation:
         self._app.assistant_messages.append((turn_index, content))
         self._app.presentation_texts.append(f"助手\n{content}")
 
-    def record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
-        self._app.tool_activities.append((turn_index, tool_name, status, summary))
-
     def record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         self._app.tool_diagnostics.append((turn_index, tool_name, message))
 
@@ -79,10 +76,11 @@ class FakeRuntimeEventApp:
         self._last_failure = None
         self._sandbox_status = None
         self._active_turn_index = 0
+        self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
+        self._task_problem_groups: dict[int, dict[str, object]] = {}
         self.assistant_deltas: list[tuple[int, str]] = []
         self.assistant_intermediates: list[tuple[int, int | None, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
-        self.tool_activities: list[tuple[int, str, str, str]] = []
         self.tool_diagnostics: list[tuple[int, str, str]] = []
         self.blocks: list[tuple[str, str]] = []
         self.lines: list[str] = []
@@ -231,12 +229,11 @@ def test_runtime_ui_event_handler_routes_intermediate_assistant_message() -> Non
     assert app.refreshes == 1
 
 
-def test_runtime_ui_event_handler_does_not_persist_read_tool_activity() -> None:
+def test_runtime_ui_event_handler_does_not_add_read_tool_to_timeline() -> None:
     app = FakeRuntimeEventApp()
 
     handle_runtime_ui_event(app, ToolActivityEvent("session-1", 1, 2, "file_read", "finished", "读取 README"))
 
-    assert app.tool_activities == []
     assert app.plain_text == ""
 
 
@@ -256,7 +253,6 @@ def test_runtime_ui_event_handler_routes_read_tool_to_progress_status() -> None:
 
     text = app.query_one("#conversation", ConversationTimeline).plain_text
     assert app.progress_status_text == "正在阅读文件..."
-    assert app.tool_activities == []
     assert "file_read" not in text
     assert "README.md" not in text
 
@@ -278,7 +274,6 @@ def test_runtime_ui_event_handler_routes_web_fetch_to_progress_status() -> None:
     )
 
     assert app.progress_status_text == "正在阅读资料..."
-    assert app.tool_activities == []
     assert "web_fetch" not in app.plain_text
     assert "example.com" not in app.plain_text
 
@@ -299,7 +294,6 @@ def test_runtime_ui_event_handler_routes_apply_patch_to_effect_summary() -> None
         ),
     )
 
-    assert app.tool_activities == []
     assert "已修改文件" in app.plain_text
     assert "2 个文件有变更" in app.plain_text
     assert "apply_patch" not in app.plain_text
@@ -460,7 +454,6 @@ def test_runtime_ui_event_handler_tracks_approval_state() -> None:
         ),
     )
 
-    assert app.tool_activities == []
     assert "需要确认：shell" in app.plain_text
     assert "建议：在弹窗中确认或拒绝" in app.plain_text
     assert app._state == "waiting approval"
@@ -470,7 +463,6 @@ def test_runtime_ui_event_handler_tracks_approval_state() -> None:
         ApprovalStateEvent("session-1", 1, 2, "shell", "granted", "", True),
     )
 
-    assert app.tool_activities == []
     assert "审批已允许" not in app.plain_text
     assert app.lines == []
     assert app._state == "running"
@@ -484,7 +476,6 @@ def test_runtime_ui_event_handler_keeps_approval_denials_visible() -> None:
         ApprovalStateEvent("session-1", 1, 2, "shell", "denied", "", False),
     )
 
-    assert app.tool_activities == []
     assert app.lines == []
     assert "审批已拒绝：shell" in app.plain_text
     assert "建议：调整请求或选择其他方案" in app.plain_text

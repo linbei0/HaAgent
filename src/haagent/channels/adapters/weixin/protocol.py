@@ -22,7 +22,6 @@ from haagent.channels.adapters.weixin.types import (
     WeixinQrCode,
     WeixinQrStatus,
     WeixinRateLimited,
-    WeixinSendResult,
     WeixinUnsupportedBaseUrl,
     WeixinUpdates,
 )
@@ -80,9 +79,6 @@ class WeixinProtocolClient:
     def __repr__(self) -> str:
         return f"WeixinProtocolClient(base_url={self._base_url!r}, has_token={bool(self._bot_token)})"
 
-    def set_bot_token(self, token: str) -> None:
-        self._bot_token = token
-
     async def aclose(self) -> None:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
@@ -136,16 +132,13 @@ class WeixinProtocolClient:
             content = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             hdrs.setdefault("Content-Type", "application/json")
             hdrs["Content-Length"] = str(len(content))
-        try:
-            response = await client.request(
-                method,
-                url,
-                params=params,
-                content=content,
-                headers=hdrs,
-            )
-        except httpx.TimeoutException:
-            raise
+        response = await client.request(
+            method,
+            url,
+            params=params,
+            content=content,
+            headers=hdrs,
+        )
         response.raise_for_status()
         try:
             data = response.json()
@@ -192,55 +185,32 @@ class WeixinProtocolClient:
                 raise WeixinRateLimited(errmsg or "rate limited", errcode=effective)
         raise WeixinProtocolError(errmsg or f"protocol error {effective}", errcode=effective)
 
-    async def get_qrcode(self, *, local_token_list: list[str] | None = None) -> WeixinQrCode:
+    async def get_qrcode(self) -> WeixinQrCode:
         # POST /ilink/bot/get_bot_qrcode?bot_type=3
         # 响应：qrcode=轮询 token，qrcode_img_content=展示 URL（非我们旧假设的 qrcode_id/url）。
         data = await self._request_json(
             "POST",
             PATH_GET_QRCODE,
             params={"bot_type": "3"},
-            payload={"local_token_list": list(local_token_list or [])},
+            payload={"local_token_list": []},
             headers=self._common_headers(),
         )
-        qid = str(data.get("qrcode") or data.get("qrcode_id") or "")
-        url = str(
-            data.get("qrcode_img_content")
-            or data.get("qrcode_url")
-            or data.get("qrcode_img")
-            or ""
-        )
+        qid = str(data.get("qrcode") or "")
+        url = str(data.get("qrcode_img_content") or "")
         if not url or not qid:
             raise WeixinProtocolError("qrcode response missing fields")
         return WeixinQrCode(qrcode_url=url, qrcode_id=qid)
 
-    async def poll_qrcode_status(
-        self,
-        qrcode_id: str,
-        *,
-        verify_code: str | None = None,
-        poll_base_url: str | None = None,
-    ) -> WeixinQrStatus:
+    async def poll_qrcode_status(self, qrcode_id: str) -> WeixinQrStatus:
         # GET /ilink/bot/get_qrcode_status?qrcode=<token>[&verify_code=...]
-        base = (poll_base_url or self._base_url).rstrip("/")
-        if poll_base_url:
-            # 仅允许 https 主机；IDC redirect 时 host 由服务端给出。
-            parsed = urlparse(base)
-            if parsed.scheme != "https" or not parsed.hostname:
-                raise WeixinUnsupportedBaseUrl(f"unsupported poll base: {base!r}")
-            base = f"https://{parsed.hostname}"
         params: dict[str, str] = {"qrcode": qrcode_id}
-        if verify_code:
-            params["verify_code"] = verify_code
         client = await self._ensure_client()
-        url = f"{base}{PATH_QR_STATUS}"
-        try:
-            response = await client.get(
-                url,
-                params=params,
-                headers=self._common_headers(),
-            )
-        except httpx.TimeoutException:
-            raise
+        url = f"{self._base_url}{PATH_QR_STATUS}"
+        response = await client.get(
+            url,
+            params=params,
+            headers=self._common_headers(),
+        )
         response.raise_for_status()
         try:
             data = response.json()
@@ -280,11 +250,7 @@ class WeixinProtocolClient:
 
     async def get_updates(self, *, cursor: str = "") -> WeixinUpdates:
         payload = {"get_updates_buf": cursor or "", "base_info": self._base_info()}
-        try:
-            data = await self._post(PATH_GET_UPDATES, payload)
-        except httpx.TimeoutException:
-            # 网络超时：空更新但保留原 cursor，不伪装协议成功。
-            return WeixinUpdates(messages=[], cursor=cursor)
+        data = await self._post(PATH_GET_UPDATES, payload)
         new_cursor = str(data.get("get_updates_buf") or cursor or "")
         messages: list[WeixinInboundMessage] = []
         for item in data.get("msgs") or data.get("messages") or []:
@@ -309,12 +275,10 @@ class WeixinProtocolClient:
         to_user_id: str,
         text: str,
         context_token: str,
-    ) -> WeixinSendResult:
+    ) -> None:
         if not context_token:
             # 未拿到 context_token 时显式失败。
             raise WeixinProtocolError("context_token required for send")
-        if not text:
-            return WeixinSendResult(ok=False, error="empty_text")
         client_id = str(uuid.uuid4())
         payload = {
             "msg": {
@@ -329,7 +293,6 @@ class WeixinProtocolClient:
             "base_info": self._base_info(),
         }
         await self._post(PATH_SEND_MESSAGE, payload)
-        return WeixinSendResult(ok=True)
 
     async def get_typing_ticket(self, *, context_token: str, ilink_user_id: str = "") -> str:
         payload: dict[str, Any] = {
@@ -379,12 +342,10 @@ def _parse_inbound(item: dict[str, Any]) -> WeixinInboundMessage | None:
             if isinstance(text_item, dict):
                 text = str(text_item.get("text") or "")
                 break
-    create_time_ms = int(item.get("create_time_ms") or item.get("create_time") or 0)
     return WeixinInboundMessage(
         message_id=message_id,
         from_user_id=from_user_id,
         text=text,
         context_token=context_token,
-        create_time_ms=create_time_ms,
         raw=item,
     )

@@ -26,10 +26,8 @@ PLIST_NAME = "io.haagent.scheduler.plist"
 class LaunchdBackgroundAdapter:
     """macOS 用户 LaunchAgent。"""
 
-    def __init__(self, *, agents_dir: Path | None = None) -> None:
-        if agents_dir is None:
-            agents_dir = Path.home() / "Library" / "LaunchAgents"
-        self._agents_dir = Path(agents_dir)
+    def __init__(self) -> None:
+        self._agents_dir = Path.home() / "Library" / "LaunchAgents"
         self._plist_path = self._agents_dir / PLIST_NAME
 
     def status(self) -> BackgroundServiceStatus:
@@ -59,6 +57,19 @@ class LaunchdBackgroundAdapter:
                 host_type="launchd",
                 detail=bounded_detail(listed.stdout or "loaded"),
                 executable=sys.executable,
+            )
+        if not (
+            self._is_launchctl_not_loaded(printed)
+            and self._is_launchctl_not_loaded(listed)
+        ):
+            raise BackgroundServiceError(
+                bounded_detail(
+                    printed.stderr
+                    or listed.stderr
+                    or printed.stdout
+                    or listed.stdout
+                    or "launchctl status failed"
+                )
             )
         return BackgroundServiceStatus(
             state="installed",
@@ -164,10 +175,7 @@ class LaunchdBackgroundAdapter:
         return False
 
     def _gui_domain(self) -> str:
-        # os.getuid 仅 POSIX；Windows 上跑单元测试时回退 0
-        getuid = getattr(os, "getuid", None)
-        uid = int(getuid()) if callable(getuid) else 0
-        return f"gui/{uid}"
+        return f"gui/{os.getuid()}"
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         try:

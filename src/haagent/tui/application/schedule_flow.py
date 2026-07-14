@@ -9,12 +9,11 @@ DB 调用经 Textual worker，不阻塞 UI 线程。TUI 内嵌 ScheduleCoordinat
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from haagent.app.assistant_types import (
+    BackgroundServiceStatus,
     RunQuery,
     ScheduleCreateRequest,
     SchedulePreviewRequest,
@@ -40,151 +39,72 @@ class ScheduleFlow:
         self._app = app
         self.unread_count = 0
         self._badge_timer = None
+        self._badge_error: str | None = None
         self._last_tab: SchedulesTab = "plans"
-        self._pending_open_tab: SchedulesTab = "plans"
-
-    @property
-    def host_worker_running(self) -> bool:
-        schedules = getattr(getattr(self._app, "service", None), "schedules", None)
-        if schedules is None or not hasattr(schedules, "host_status"):
-            return False
-        try:
-            return bool(schedules.host_status().running)
-        except Exception:
-            return False
 
     def start_background_polling(self) -> None:
         self.refresh_badge()
+        self._badge_timer = self._app.set_interval(2.0, self.refresh_badge)
         try:
-            self._badge_timer = self._app.set_interval(2.0, self.refresh_badge)
-        except Exception:
-            self._badge_timer = None
-        # 真实 AssistantSchedules 才启 host；Fake 无 start_host
-        self._maybe_start_host_worker()
+            self._app.service.schedules.start_host()
+        except Exception as error:
+            # Host 启动失败不能阻断普通 TUI，但必须在主对话中显式暴露。
+            self._app._conversation.append_block("计划任务", f"TUI Host 启动失败：{error}")
+            self._app._refresh()
 
     def stop_background_polling(self) -> None:
         timer = self._badge_timer
         self._badge_timer = None
         if timer is not None:
-            try:
-                timer.stop()
-            except Exception:
-                pass
-        self._stop_host_worker()
-
-    def start_coordinator_host(
-        self,
-        *,
-        executor: Any | None = None,
-        clock: Callable[[], datetime] | None = None,
-        sleep: Callable[[float], None] | None = None,
-        owner_id: str | None = None,
-        store: Any | None = None,
-    ) -> None:
-        """启动 TUI 内嵌 host（经 AssistantSchedules.start_host，可注入 executor 供测试）。"""
-        del store  # store 仅由 AssistantSchedules 持有，TUI 不得注入私有连接
-        schedules = getattr(getattr(self._app, "service", None), "schedules", None)
-        if schedules is None or not hasattr(schedules, "start_host"):
-            return
-        try:
-            schedules.start_host(
-                executor=executor,
-                clock=clock,
-                sleep=sleep,
-                owner_id=owner_id,
-            )
-        except Exception:
-            return
-
-    def _maybe_start_host_worker(self) -> None:
-        schedules = getattr(getattr(self._app, "service", None), "schedules", None)
-        if schedules is None or not hasattr(schedules, "start_host"):
-            return
-        try:
-            self.start_coordinator_host()
-        except Exception:
-            return
-
-    def _stop_host_worker(self) -> None:
-        schedules = getattr(getattr(self._app, "service", None), "schedules", None)
-        if schedules is None or not hasattr(schedules, "stop_host"):
-            return
-        try:
-            schedules.stop_host()
-        except Exception:
-            pass
+            timer.stop()
+        # stop_host 负责停止线程和释放租约；异常必须向 Textual 生命周期传播。
+        self._app.service.schedules.stop_host()
 
     def refresh_badge(self) -> None:
         # set_interval 在 UI 线程触发；DB 读放到 worker/线程，避免卡主事件循环
-        schedules = getattr(self._app.service, "schedules", None)
-        if schedules is None:
-            self._apply_badge_count(0)
-            return
-        try:
-            # Textual run_worker(thread=True) 优先；测试/无 worker 时同步回退
-            run_worker = getattr(self._app, "run_worker", None)
-            if callable(run_worker):
-                run_worker(
-                    lambda: self._poll_badge_count(schedules),
-                    thread=True,
-                    exclusive=True,
-                    name="schedule-badge",
-                    group="schedule-badge",
-                )
-                return
-        except Exception:
-            pass
-        self._poll_badge_count(schedules)
+        schedules = self._app.service.schedules
+        self._app.run_worker(
+            lambda: self._poll_badge_count(schedules),
+            thread=True,
+            exclusive=True,
+            name="schedule-badge",
+            group="schedule-badge",
+        )
 
     def _poll_badge_count(self, schedules: Any) -> None:
         try:
-            if hasattr(schedules, "unread_count"):
-                count = int(schedules.unread_count())
-            else:
-                runs = schedules.list_runs(RunQuery(unread_only=True, limit=200))
-                count = len(runs)
-        except Exception:
+            runs = schedules.list_runs(RunQuery(unread_only=True, limit=200))
+            count = len(runs)
+        except Exception as error:
+            self._app.call_from_thread(self._apply_badge_error, str(error))
             return
-        apply = getattr(self._app, "call_from_thread", None)
-        if callable(apply):
-            try:
-                apply(self._apply_badge_count, count)
-                return
-            except Exception:
-                pass
-        self._apply_badge_count(count)
+        self._app.call_from_thread(self._apply_badge_count, count)
+
+    def _apply_badge_error(self, message: str) -> None:
+        if message == self._badge_error or not self._app.is_mounted:
+            return
+        self._badge_error = message
+        self._app._conversation.append_block("计划任务", f"未读状态刷新失败：{message}")
+        self._app._refresh()
 
     def _apply_badge_count(self, count: int) -> None:
         # 未读数未变时不触发全量 _refresh，减轻 UI 压力
+        self._badge_error = None
         if count == self.unread_count:
             return
         self.unread_count = count
-        try:
-            if self._app.is_mounted:
-                self._app._refresh()
-        except Exception:
-            pass
+        if self._app.is_mounted:
+            self._app._refresh()
 
     def open_schedules(self, *, initial_tab: SchedulesTab | None = None) -> None:
         if self._app._prompt_has_pending_text():
             return
         tab = initial_tab or self._last_tab
         self._last_tab = tab
-        self._pending_open_tab = tab
-        # 同步打开路径：Fake/测试与轻量 list 可直接走主线程；重 IO 由 app worker 包装。
-        try:
-            data = self._load_overlay_data()
-        except Exception as error:
-            self._app._conversation.append_block("计划任务", f"打开失败：{error}")
-            self._app._refresh()
-            return
-        self._push_overlay(data, tab)
+        self._app._load_schedules_overlay_worker(tab)
 
-    def open_schedules_async(self, *, initial_tab: SchedulesTab | None = None) -> None:
-        """由 app @work 线程加载后回调。"""
-        tab = initial_tab or self._last_tab
-        self._last_tab = tab
-        self._pending_open_tab = tab
+    def load_schedules_overlay(self, tab: SchedulesTab) -> None:
+        """仅由 App 的 thread worker 调用，完成 DB 读取后回到 UI 线程挂载 overlay。"""
         try:
             data = self._load_overlay_data()
         except Exception as error:
@@ -196,23 +116,17 @@ class ScheduleFlow:
         schedules_api = self._app.service.schedules
         items = schedules_api.list()
         runs = schedules_api.list_runs(RunQuery(limit=100))
-        detail = None
-        if items:
-            try:
-                detail = schedules_api.get(items[0].id)
-            except Exception:
-                detail = items[0]
-        background = None
+        detail = schedules_api.get(items[0].id) if items else None
         try:
             background = schedules_api.background_status()
-        except Exception:
-            background = None
-        host = None
-        try:
-            if hasattr(schedules_api, "host_status"):
-                host = schedules_api.host_status()
-        except Exception:
-            host = None
+        except Exception as error:
+            # 系统后台状态失败不应遮蔽 plans/runs，但必须显式呈现为 error。
+            background = BackgroundServiceStatus(
+                state="error",
+                host_type="none",
+                detail=f"状态读取失败：{error}",
+            )
+        host = schedules_api.host_status()
         return {
             "schedules": items,
             "runs": runs,
@@ -227,7 +141,7 @@ class ScheduleFlow:
         self._app._defer_prompt_focus()
 
     def _push_overlay(self, data: dict[str, Any], tab: SchedulesTab) -> None:
-        width = getattr(self._app.size, "width", 120) or 120
+        width = self._app.size.width or 120
         wide = width >= 100
         run_state = ScheduleRunsState(runs=list(data.get("runs") or []))
         bg_state = ScheduleBackgroundState(
@@ -295,10 +209,7 @@ class ScheduleFlow:
                 self.open_schedules()
                 return
             if action == "open_run" and result.run_id:
-                try:
-                    self._app.service.schedules.mark_run_read(result.run_id)
-                except Exception:
-                    pass
+                self._app.service.schedules.mark_run_read(result.run_id)
                 self.refresh_badge()
                 self.open_schedules(initial_tab="runs")
                 return
@@ -369,33 +280,16 @@ class ScheduleFlow:
         # 优先 session_path 恢复；resume 后必须装载历史，否则主界面像“没反应”
         try:
             schedules = self._app.service.schedules
-            match = None
-            getter = getattr(schedules, "get_run", None)
-            if callable(getter):
-                try:
-                    match = getter(run_id)
-                except Exception:
-                    match = None
-            if match is None:
-                runs = schedules.list_runs(RunQuery(limit=500))
-                match = next((r for r in runs if r.id == run_id), None)
-            if match is None:
-                self._notify("运行记录不存在")
-                self.open_schedules(initial_tab="runs")
-                return
-            session_path = getattr(match, "session_path", None)
-            session_id = getattr(match, "session_id", None)
+            match = schedules.get_run(run_id)
+            session_path = match.session_path
+            session_id = match.session_id
             target = session_path or session_id
             if not target:
                 self._notify("该运行没有关联会话")
                 self.open_schedules(initial_tab="runs")
                 return
             status = self._app.service.sessions.resume(str(target))
-            session_flow = getattr(self._app, "session_flow", None)
-            if session_flow is not None and hasattr(session_flow, "show_session_history"):
-                session_flow.show_session_history(status, prefix="已打开计划会话")
-            else:
-                self._notify(f"已打开会话：{getattr(status, 'session_id', target)}")
+            self._app.session_flow.show_session_history(status, prefix="已打开计划会话")
             self._app._refresh()
             self._app._defer_prompt_focus()
         except Exception as error:
@@ -419,7 +313,7 @@ class ScheduleFlow:
             return
         try:
             status = self._app.service.schedules.install_background_service()
-            detail = getattr(status, "detail", "") or getattr(status, "state", "")
+            detail = status.detail or status.state
             self._notify(f"安装结果：{detail}")
         except Exception as error:
             self._app._conversation.append_block("计划任务", f"安装失败：{error}")
@@ -441,7 +335,7 @@ class ScheduleFlow:
             return
         try:
             status = self._app.service.schedules.uninstall_background_service()
-            detail = getattr(status, "detail", "") or getattr(status, "state", "")
+            detail = status.detail or status.state
             self._notify(f"卸载结果：{detail}")
         except Exception as error:
             self._app._conversation.append_block("计划任务", f"卸载失败：{error}")
@@ -496,16 +390,10 @@ class ScheduleFlow:
     def _save_editor_state(self, state: ScheduleEditorState) -> str:
         request = state.to_create_request()
         status = self._app.service.workspace.status()
-        ws = request.workspace_root
-        try:
-            if not Path(ws).exists():
-                ws = Path(status.workspace_root)
-        except Exception:
-            ws = Path(status.workspace_root)
         request = ScheduleCreateRequest(
             name=request.name,
             prompt=request.prompt,
-            workspace_root=ws,
+            workspace_root=request.workspace_root,
             destination_kind=request.destination_kind,
             destination_session_path=request.destination_session_path,
             connection_id=state.connection_id or status.profile_name or "local",

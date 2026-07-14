@@ -20,16 +20,8 @@ class PairingError(RuntimeError):
 
 @dataclass(frozen=True)
 class ChannelBinding:
-    binding_key: str
-    instance_id: str
-    platform: str
-    conversation_kind: str
-    conversation_id: str
-    thread_id: str | None
     workspace_root: str
     session_id: str
-    owner_sender_id: str
-    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -165,22 +157,14 @@ class ChannelStateStore:
 
     def get_binding(self, binding_key: str) -> ChannelBinding | None:
         row = self._conn.execute(
-            "SELECT * FROM channel_bindings WHERE binding_key = ?",
+            "SELECT workspace_root, session_id FROM channel_bindings WHERE binding_key = ?",
             (binding_key,),
         ).fetchone()
         if row is None:
             return None
         return ChannelBinding(
-            binding_key=row["binding_key"],
-            instance_id=row["instance_id"],
-            platform=row["platform"],
-            conversation_kind=row["conversation_kind"],
-            conversation_id=row["conversation_id"],
-            thread_id=row["thread_id"],
             workspace_root=row["workspace_root"],
             session_id=row["session_id"],
-            owner_sender_id=row["owner_sender_id"],
-            updated_at=row["updated_at"],
         )
 
     def delete_binding(self, binding_key: str) -> bool:
@@ -199,44 +183,19 @@ class ChannelStateStore:
         ).fetchone()
         return row is not None
 
-    def claim_receipt(self, instance_id: str, message_id: str) -> bool:
-        """原子去重：已存在返回 False。"""
-        try:
-            self._conn.execute(
-                "INSERT INTO inbound_receipts (instance_id, message_id, received_at) VALUES (?, ?, ?)",
-                (instance_id, message_id, _utc_now_iso()),
-            )
-            self._conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
     def commit_accepted_batch(
         self,
         *,
         instance_id: str,
         message_ids: list[str],
-        cursor_name: str | None = None,
-        cursor_value: str | None = None,
     ) -> None:
-        # 仅在 Actor 接受后同事务推进 receipt 与 cursor，避免半提交。
+        # 仅在 Actor 接受后提交 receipt；cursor 由 transport 成功批次单独推进。
         now = _utc_now_iso()
         try:
             for message_id in message_ids:
                 self._conn.execute(
                     "INSERT OR IGNORE INTO inbound_receipts (instance_id, message_id, received_at) VALUES (?, ?, ?)",
                     (instance_id, message_id, now),
-                )
-            if cursor_name is not None and cursor_value is not None:
-                self._conn.execute(
-                    """
-                    INSERT INTO transport_cursors (instance_id, cursor_name, cursor_value, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(instance_id, cursor_name) DO UPDATE SET
-                        cursor_value=excluded.cursor_value,
-                        updated_at=excluded.updated_at
-                    """,
-                    (instance_id, cursor_name, cursor_value, now),
                 )
             self._conn.commit()
         except Exception:
@@ -369,7 +328,6 @@ class ChannelStateStore:
         *,
         owner_sender_id: str,
         workspace_root: str,
-        now: datetime | None = None,
     ) -> TemporaryChannelPermission | None:
         row = self._conn.execute(
             "SELECT * FROM channel_temporary_permissions WHERE instance_id = ?",
@@ -380,7 +338,7 @@ class ChannelStateStore:
         expires_at = datetime.fromisoformat(str(row["expires_at"]))
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = datetime.now(timezone.utc)
         if (
             str(row["owner_sender_id"]) != owner_sender_id
             or str(row["workspace_root"]) != workspace_root

@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from haagent.models.gateway_registry import GatewayCapability
 from haagent.models.types import ModelGateway
 from haagent.channels.settings import ChannelPermissionMode
 from haagent.runtime.events import RuntimeUiEvent
@@ -137,21 +136,6 @@ class AssistantSessionCompactResult:
 class AssistantCancelResult:
     status: str
     reason: str
-
-
-@dataclass(frozen=True)
-class AssistantModelProfile:
-    name: str
-    provider: str
-    base_url: str
-    model: str
-    api_key_env: str
-    credential_source: str
-    active: bool
-    credential_available: bool
-    credential_source_used: str | None
-    capability: GatewayCapability
-    current_session: bool = False
 
 
 @dataclass(frozen=True)

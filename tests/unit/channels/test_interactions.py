@@ -5,13 +5,11 @@ tests/unit/channels/test_interactions.py - InteractionBroker 审批与补充输�
 from __future__ import annotations
 
 import threading
-import time
-from datetime import datetime, timezone
 
 import pytest
 
 from haagent.channels.interactions import InteractionBroker, InteractionError
-from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
+from haagent.channels.types import ChannelAddress
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 
 
@@ -21,17 +19,6 @@ def _address() -> ChannelAddress:
         platform="weixin",
         conversation_kind="dm",
         conversation_id="owner-1",
-    )
-
-
-def _message(text: str = "hello") -> InboundChannelMessage:
-    return InboundChannelMessage(
-        address=_address(),
-        message_id="m-1",
-        sender_id="owner-1",
-        text=text,
-        received_at=datetime.now(timezone.utc),
-        reply_handle=ChannelReplyHandle(platform="weixin", payload={"context_token": "hidden"}),
     )
 
 
@@ -50,7 +37,6 @@ def test_approval_blocks_worker_and_owner_nonce_approves() -> None:
         result_holder.append(
             broker.request_approval(
                 request,
-                address=_address(),
                 owner_sender_id="owner-1",
                 binding_key=_address().binding_key(),
             )
@@ -61,7 +47,7 @@ def test_approval_blocks_worker_and_owner_nonce_approves() -> None:
     pending = broker.wait_for_pending(timeout=2.0)
     assert pending is not None
     assert pending.kind == "approval"
-    assert "pytest" not in repr(pending) or "command" in repr(pending)
+    assert "pytest" not in repr(pending)
     assert broker.resolve(pending.nonce, approved=True, sender_id="owner-1", binding_key=_address().binding_key())
     thread.join(timeout=3)
     assert len(result_holder) == 1
@@ -81,7 +67,6 @@ def test_non_owner_wrong_expired_duplicate_rejected() -> None:
         holder.append(
             broker.request_approval(
                 request,
-                address=_address(),
                 owner_sender_id="owner-1",
                 binding_key=_address().binding_key(),
             )
@@ -106,7 +91,6 @@ def test_non_owner_wrong_expired_duplicate_rejected() -> None:
         holder2.append(
             broker.request_approval(
                 request,
-                address=_address(),
                 owner_sender_id="owner-1",
                 binding_key=_address().binding_key(),
             )
@@ -135,7 +119,6 @@ def test_answer_separated_from_approval() -> None:
         holder.append(
             broker.request_user_input(
                 request,
-                address=_address(),
                 owner_sender_id="owner-1",
                 binding_key=_address().binding_key(),
             )
@@ -173,7 +156,6 @@ def test_pending_repr_hides_secret_like_params() -> None:
         holder.append(
             broker.request_approval(
                 request,
-                address=_address(),
                 owner_sender_id="owner-1",
                 binding_key=_address().binding_key(),
             )

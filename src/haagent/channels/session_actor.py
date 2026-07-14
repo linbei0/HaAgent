@@ -16,8 +16,6 @@ from haagent.channels.interactions import InteractionBroker
 from haagent.channels.presenter import (
     ChannelDelivery,
     ChannelPresenter,
-    FinalizeText,
-    SendInteractionPrompt,
     SendText,
     SetTyping,
 )
@@ -49,7 +47,6 @@ class ChannelSessionActor:
         adapter: Any,
         service: Any,
         broker: InteractionBroker,
-        presenter: ChannelPresenter | None = None,
         permission_mode: ChannelPermissionMode = "request_approval",
     ) -> None:
         self.binding_key = binding_key
@@ -60,7 +57,7 @@ class ChannelSessionActor:
         self._adapter = adapter
         self._service = service
         self._broker = broker
-        self._presenter = presenter or ChannelPresenter()
+        self._presenter = ChannelPresenter()
         self._bridge = ChannelEventBridge()
         self._lock = asyncio.Lock()
         self._active = False
@@ -74,8 +71,6 @@ class ChannelSessionActor:
         self._interaction_watcher: asyncio.Task[None] | None = None
         # 最近一次出站失败原因；不落盘，供 manager status 可见。
         self.last_send_error: str = ""
-        # drain 只在 sentinel/关闭时结束；空闲超时不得丢弃仍在生成的模型回复。
-        self._drain_idle_timeout: float | None = None
 
     async def submit(
         self,
@@ -103,7 +98,7 @@ class ChannelSessionActor:
 
     async def cancel_current_turn(self) -> bool:
         result = self._service.sessions.cancel_current_run()
-        return getattr(result, "status", "") == "cancelled"
+        return result.status == "cancelled"
 
     async def close(self) -> None:
         self._closed = True
@@ -175,7 +170,6 @@ class ChannelSessionActor:
         # 远程渠道只接受两种受限模式，禁止 full_access 等模式泄漏。
         self._lock_permission_mode(permission_mode)
         handler = self._broker.build_handler(
-            address=self.address,
             owner_sender_id=self.owner_sender_id,
             binding_key=self.binding_key,
         )
@@ -187,7 +181,6 @@ class ChannelSessionActor:
                 self._run_prompt_sync,
                 message.text,
                 handler,
-                permission_mode,
             )
         finally:
             # 通知 drain 结束并等待排空。
@@ -209,21 +202,9 @@ class ChannelSessionActor:
 
     def _lock_permission_mode(self, mode: str) -> None:
         mode = _channel_permission_mode(mode)
-        sessions = getattr(self._service, "sessions", None)
-        if sessions is None:
-            return
-        setter = getattr(sessions, "set_permission_mode", None)
-        if callable(setter):
-            setter(mode)
-            return
-        # 部分 service 把 mode 挂在 session 本体上。
-        session = getattr(sessions, "current", None) or getattr(self._service, "session", None)
-        if session is not None and hasattr(session, "set_permission_mode"):
-            session.set_permission_mode(mode)
+        self._service.sessions.permissions.set_mode(mode)
 
     async def _force_typing_off(self) -> None:
-        if not getattr(self._adapter.capabilities, "typing", False):
-            return
         try:
             await self._adapter.set_typing(
                 self.address,
@@ -234,9 +215,7 @@ class ChannelSessionActor:
             # typing 失败不阻断主路径。
             pass
 
-    def _run_prompt_sync(self, prompt: str, handler: Any, permission_mode: ChannelPermissionMode) -> None:
-        # 每次 turn 前再锁一次，防止 resume 后 session 带有其他 mode。
-        self._lock_permission_mode(permission_mode)
+    def _run_prompt_sync(self, prompt: str, handler: Any) -> None:
         self._service.sessions.run_prompt_events(
             prompt,
             event_sink=self._bridge.emit_from_thread,
@@ -245,18 +224,10 @@ class ChannelSessionActor:
         )
     async def _drain_bridge_until_done(self) -> None:
         # 关键路径：阻塞到 worker 发出 sentinel，不因模型长思考空闲而提前退出。
-        # 测试可设 _drain_idle_timeout 复现旧 bug；生产必须为 None。
-        idle = self._drain_idle_timeout
         while True:
             try:
-                if idle is None:
-                    event = await self._bridge.get()
-                else:
-                    event = await self._bridge.get(timeout=idle)
-            except (asyncio.TimeoutError, asyncio.QueueEmpty):
-                # 仅测试/异常路径：空闲超时退出会丢后续回复，生产禁止。
-                if idle is not None:
-                    break
+                event = await self._bridge.get()
+            except asyncio.QueueEmpty:
                 continue
             if event is _SENTINEL or event is None:
                 # 排空剩余非哨兵事件后结束。
@@ -337,27 +308,25 @@ class ChannelSessionActor:
 
     async def _apply_actions(self, actions: list[ChannelDelivery]) -> None:
         for action in actions:
-            if isinstance(action, (SendText, FinalizeText, SendInteractionPrompt)):
-                text = action.text if not isinstance(action, SendInteractionPrompt) else action.text
-                await self._deliver_text(text)
+            if isinstance(action, SendText):
+                await self._deliver_text(action.text)
             elif isinstance(action, SetTyping):
-                if getattr(self._adapter.capabilities, "typing", False):
-                    try:
-                        await self._adapter.set_typing(
-                            self.address,
-                            action.active,
-                            reply_handle=self._current_reply_handle,
-                        )
-                    except Exception:
-                        # typing 失败不阻断主回复。
-                        pass
+                try:
+                    await self._adapter.set_typing(
+                        self.address,
+                        action.active,
+                        reply_handle=self._current_reply_handle,
+                    )
+                except Exception:
+                    # typing 失败不阻断主回复。
+                    pass
 
     async def _deliver_text(
         self,
         text: str,
         *,
         reply_handle: ChannelReplyHandle | None = None,
-    ) -> SendResult | None:
+    ) -> SendResult:
         handle = reply_handle if reply_handle is not None else self._current_reply_handle
         result = await self._adapter.send_text(
             self.address,
@@ -365,8 +334,8 @@ class ChannelSessionActor:
             reply_handle=handle,
         )
         # 发送失败必须显式记录，禁止“模型已回复但渠道无消息”静默发生。
-        if result is not None and not getattr(result, "ok", True):
-            self.last_send_error = str(getattr(result, "error", None) or "send_failed")
+        if not result.ok:
+            self.last_send_error = str(result.error or "send_failed")
         return result
 
 

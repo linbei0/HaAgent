@@ -24,10 +24,8 @@ SERVICE_NAME = "haagent-scheduler.service"
 class SystemdBackgroundAdapter:
     """Linux systemd --user 服务。"""
 
-    def __init__(self, *, unit_dir: Path | None = None) -> None:
-        if unit_dir is None:
-            unit_dir = Path.home() / ".config" / "systemd" / "user"
-        self._unit_dir = Path(unit_dir)
+    def __init__(self) -> None:
+        self._unit_dir = Path.home() / ".config" / "systemd" / "user"
         self._unit_path = self._unit_dir / SERVICE_NAME
 
     def status(self) -> BackgroundServiceStatus:
@@ -40,6 +38,15 @@ class SystemdBackgroundAdapter:
             )
         result = self._systemctl(["--user", "is-active", SERVICE_NAME])
         active = (result.stdout or "").strip()
+        if result.returncode != 0 and active not in {
+            "inactive",
+            "failed",
+            "dead",
+            "unknown",
+        }:
+            raise BackgroundServiceError(
+                bounded_detail(result.stderr or result.stdout or "systemctl status failed")
+            )
         if active == "active":
             state = "running"
         elif active in {"inactive", "failed"}:
@@ -105,7 +112,13 @@ class SystemdBackgroundAdapter:
                 )
         # disable --now 已成功时不再重复 plain disable
         if stop.returncode != 0:
-            self._systemctl(["--user", "disable", SERVICE_NAME])
+            disable = self._systemctl(["--user", "disable", SERVICE_NAME])
+            if disable.returncode != 0:
+                raise BackgroundServiceError(
+                    bounded_detail(
+                        disable.stderr or disable.stdout or "systemctl disable failed"
+                    )
+                )
         if self._unit_path.exists():
             try:
                 self._unit_path.unlink()
@@ -164,5 +177,5 @@ class SystemdBackgroundAdapter:
                 errors="replace",
                 check=False,
             )
-        except FileNotFoundError:
-            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="systemctl not found")
+        except FileNotFoundError as error:
+            raise BackgroundServiceError("systemctl 不可用") from error

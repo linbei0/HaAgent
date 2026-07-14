@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from haagent.app.assistant_types import AssistantServiceError
+from haagent.app.assistant_types import (
+    AssistantSandboxStatus,
+    AssistantServiceError,
+    SandboxDoctorReport,
+)
 
 
 class ChatCommandHandlers:
@@ -17,10 +21,6 @@ class ChatCommandHandlers:
 
     def __init__(self, app: Any) -> None:
         self._app = app
-
-    # ── /schedules ───────────────────────────────────────────────────────
-    def schedules(self) -> None:
-        self._app.schedule_flow.open_schedules()
 
     # ── /turns ───────────────────────────────────────────────────────────
     def turns(self, argument: str) -> None:
@@ -172,20 +172,20 @@ class ChatCommandHandlers:
         self._app._refresh()
 
 
-def _sandbox_state(status: object) -> dict[str, object]:
+def _sandbox_state(status: AssistantSandboxStatus) -> dict[str, object]:
     return {
-        "backend": getattr(status, "backend", "unknown"),
+        "backend": status.backend,
         "availability": {
-            "degraded": getattr(status, "degraded", True),
-            "reason": getattr(status, "reason", ""),
+            "degraded": status.degraded,
+            "reason": status.reason,
         },
     }
 
 
-def sandbox_status_text(status: object) -> str:
-    backend = getattr(status, "backend", "unknown")
-    degraded = bool(getattr(status, "degraded", True))
-    reason = str(getattr(status, "reason", "") or "")
+def sandbox_status_text(status: AssistantSandboxStatus) -> str:
+    backend = status.backend
+    degraded = status.degraded
+    reason = status.reason
     lines = [f"当前沙箱：{backend}", f"degraded={str(degraded).lower()}"]
     if reason:
         lines.append(f"reason={reason}")
@@ -196,17 +196,17 @@ def sandbox_status_text(status: object) -> str:
     return "\n".join(lines)
 
 
-def sandbox_doctor_text(report: object) -> str:
+def sandbox_doctor_text(report: SandboxDoctorReport) -> str:
     lines = [
-        f"当前沙箱：{getattr(report, 'backend', 'unknown')}",
-        f"ready={str(bool(getattr(report, 'ready', False))).lower()}",
-        f"Docker CLI: {getattr(report, 'docker_cli', 'unknown')}",
-        f"Docker daemon: {getattr(report, 'docker_daemon', 'unknown')}",
-        f"image={getattr(report, 'image', 'unknown')}",
-        f"auto_build_image={str(bool(getattr(report, 'auto_build_image', False))).lower()}",
+        f"当前沙箱：{report.backend}",
+        f"ready={str(report.ready).lower()}",
+        f"Docker CLI: {report.docker_cli}",
+        f"Docker daemon: {report.docker_daemon}",
+        f"image={report.image}",
+        f"auto_build_image={str(report.auto_build_image).lower()}",
     ]
-    reason = str(getattr(report, "reason", "") or "")
-    next_action = str(getattr(report, "next_action", "") or "")
+    reason = report.reason
+    next_action = report.next_action
     if reason:
         lines.append(f"reason={reason}")
     if next_action:

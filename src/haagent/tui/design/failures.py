@@ -18,14 +18,6 @@ class FailureView:
     reason: str
     episode_path: str
 
-    def summary_text(self) -> str:
-        return (
-            f"  stage: {safe_summary(self.failed_stage, 80)}\n"
-            f"  category: {safe_summary(self.failure_category, 100)}\n"
-            f"  reason: {safe_summary(self.reason, 180)}\n"
-            f"  episode: {safe_summary(self.episode_path, 180)}"
-        )
-
     def block_text(self) -> str:
         lines: list[str] = []
         if self.failure_category == "Loop Limit Failure":

@@ -10,10 +10,9 @@ import secrets
 import string
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
-from haagent.channels.types import ChannelAddress
 from haagent.runtime.execution.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
@@ -28,14 +27,10 @@ class InteractionError(RuntimeError):
 class PendingInteraction:
     nonce: str
     kind: Literal["approval", "user_input"]
-    address: ChannelAddress
     owner_sender_id: str
     binding_key: str
     tool_name: str
     question: str
-    created_at: float = field(default_factory=time.time)
-    # 敏感参数摘要只在内存中用于生成提示，repr 不得泄露。
-    _args_summary: dict[str, object] = field(default_factory=dict, repr=False)
 
     def __repr__(self) -> str:
         return (
@@ -57,14 +52,12 @@ class InteractionBroker:
         self,
         request: HumanInteractionRequest,
         *,
-        address: ChannelAddress,
         owner_sender_id: str,
         binding_key: str,
     ) -> HumanInteractionResponse:
         return self._request(
             kind="approval",
             request=request,
-            address=address,
             owner_sender_id=owner_sender_id,
             binding_key=binding_key,
         )
@@ -73,14 +66,12 @@ class InteractionBroker:
         self,
         request: HumanInteractionRequest,
         *,
-        address: ChannelAddress,
         owner_sender_id: str,
         binding_key: str,
     ) -> HumanInteractionResponse:
         return self._request(
             kind="user_input",
             request=request,
-            address=address,
             owner_sender_id=owner_sender_id,
             binding_key=binding_key,
         )
@@ -90,7 +81,6 @@ class InteractionBroker:
         *,
         kind: Literal["approval", "user_input"],
         request: HumanInteractionRequest,
-        address: ChannelAddress,
         owner_sender_id: str,
         binding_key: str,
     ) -> HumanInteractionResponse:
@@ -98,12 +88,10 @@ class InteractionBroker:
         pending = PendingInteraction(
             nonce=nonce,
             kind=kind,
-            address=address,
             owner_sender_id=owner_sender_id,
             binding_key=binding_key,
             tool_name=request.tool_name,
             question=request.question,
-            _args_summary=dict(request.args_summary),
         )
         event = threading.Event()
         with self._lock:
@@ -209,7 +197,6 @@ class InteractionBroker:
     def build_handler(
         self,
         *,
-        address: ChannelAddress,
         owner_sender_id: str,
         binding_key: str,
     ):
@@ -217,13 +204,11 @@ class InteractionBroker:
             if request.interaction_type == "user_input":
                 return self.request_user_input(
                     request,
-                    address=address,
                     owner_sender_id=owner_sender_id,
                     binding_key=binding_key,
                 )
             return self.request_approval(
                 request,
-                address=address,
                 owner_sender_id=owner_sender_id,
                 binding_key=binding_key,
             )

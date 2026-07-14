@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from haagent.scheduling.background.windows import (
-    TASK_NAME,
     WindowsBackgroundAdapter,
 )
 
@@ -42,7 +41,7 @@ def test_install_uses_logon_trigger_current_user_and_arg_array(
     monkeypatch.setattr("haagent.scheduling.background.windows.subprocess.run", fake_run)
     monkeypatch.setattr("haagent.scheduling.background.windows.getpass.getuser", lambda: "alice")
 
-    adapter = WindowsBackgroundAdapter(task_name=TASK_NAME)
+    adapter = WindowsBackgroundAdapter()
     status = adapter.install()
     assert status.state in {"installed", "running", "stopped"}
     assert status.host_type == "windows_task_scheduler"
@@ -117,6 +116,16 @@ def test_status_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "\ufffd" not in (status.detail or "")
 
 
+def test_status_exposes_unclassified_query_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "haagent.scheduling.background.windows.subprocess.run",
+        lambda *args, **kwargs: FakeCompleted(1, stderr="RPC endpoint unavailable"),
+    )
+    status = WindowsBackgroundAdapter().status()
+    assert status.state == "error"
+    assert "RPC" in (status.detail or "")
+
+
 def test_status_uses_system_console_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
     """中文 Windows 下 schtasks 走系统代码页，不得强制 utf-8。"""
     seen: dict[str, object] = {}
@@ -158,3 +167,17 @@ def test_uninstall_deletes_task(monkeypatch: pytest.MonkeyPatch) -> None:
     status = WindowsBackgroundAdapter().uninstall()
     assert status.state == "not_installed"
     assert any("/Delete" in c for c in calls)
+
+
+def test_uninstall_does_not_treat_access_denied_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "haagent.scheduling.background.windows.subprocess.run",
+        lambda *args, **kwargs: FakeCompleted(
+            1,
+            stderr="Access denied: task not found",
+        ),
+    )
+    with pytest.raises(Exception, match="Access denied"):
+        WindowsBackgroundAdapter().uninstall()

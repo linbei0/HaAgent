@@ -7,6 +7,7 @@ tests/integration/scheduling/test_worker_lifecycle.py - schedule-worker 生命�
 from __future__ import annotations
 
 import signal
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import pytest
@@ -16,7 +17,8 @@ from haagent.cli_parser import build_cli_parser
 from haagent.cli_runtime import CliRuntime
 from haagent.scheduling.models import RetryPolicy, ScheduleDefinition
 from haagent.scheduling.store import ScheduleStore
-from haagent.scheduling.worker import ScheduleWorker, run_schedule_worker
+import haagent.scheduling.worker as worker_module
+from haagent.scheduling.worker import ScheduleWorker
 
 
 def _utc(*parts: int) -> datetime:
@@ -54,10 +56,14 @@ def _def(tmp_path: Path, *, schedule_id: str = "sch_1", rrule: str | None = "FRE
 class RecordingExecutor:
     def __init__(self) -> None:
         self.executed: list[str] = []
+        self.cancelled: list[str] = []
 
     def execute(self, claim) -> object:
         self.executed.append(claim.run_id)
         return {"run_id": claim.run_id, "status": "succeeded"}
+
+    def request_cancel(self, run_id: str) -> None:
+        self.cancelled.append(run_id)
 
 
 def test_schedule_worker_hidden_from_root_help() -> None:
@@ -114,14 +120,6 @@ def test_once_empty_queue_exits_clean(tmp_path: Path) -> None:
         code = worker.run_once()
     assert code == 0
     assert executor.executed == []
-
-
-def test_invalid_db_exits_nonzero(tmp_path: Path) -> None:
-    # 目录当作 DB 路径，打开应失败
-    bad = tmp_path / "not-a-db-dir"
-    bad.mkdir()
-    code = run_schedule_worker(db_path=bad, once=True, owner_id="w")
-    assert code != 0
 
 
 def test_lease_occupied_once_does_not_double_dispatch(tmp_path: Path) -> None:
@@ -187,13 +185,50 @@ def test_crash_recovery_via_recover_expired_runs(tmp_path: Path) -> None:
         refreshed = store.get_run(run.id)
     assert code == 0
     assert refreshed is not None
-    assert refreshed.status in {"interrupted", "retry_wait", "queued", "running", "succeeded"}
-    # 至少不应仍是过期 lease 的 running
-    if refreshed.status == "running":
-        assert refreshed.worker_id == "recover-w"
+    assert refreshed.status == "retry_wait"
+    assert refreshed.failure_category == "worker_interrupted"
 
 
-def test_signal_handler_only_sets_stop_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_lease_loss_requests_persisted_and_in_process_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = _utc(2026, 7, 13, 10, 0, 0)
+
+    class SlowExecutor(RecordingExecutor):
+        def execute(self, claim) -> object:
+            self.executed.append(claim.run_id)
+            time.sleep(0.05)
+            return {"run_id": claim.run_id, "status": "succeeded"}
+
+    executor = SlowExecutor()
+    with ScheduleStore(tmp_path / "lease-loss.db") as store:
+        definition = _def(tmp_path, rrule=None)
+        store.create(definition, now=now)
+        run = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="manual:lease-loss",
+            trigger_kind="manual",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        monkeypatch.setattr(store, "renew_run_lease", lambda *args, **kwargs: False)
+        monkeypatch.setattr(worker_module, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+        worker = ScheduleWorker(
+            store,
+            owner_id="lease-worker",
+            executor=executor,
+            clock=lambda: now,
+            sleep=lambda _seconds: None,
+        )
+        assert worker.run_once() == 0
+        refreshed = store.get_run(run.id)
+
+    assert executor.cancelled == [run.id]
+    assert refreshed is not None and refreshed.cancellation_requested is True
+
+
+def test_signal_handler_requests_clean_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db = tmp_path / "s.db"
     now = _utc(2026, 7, 13, 10, 0, 0)
     handlers: dict[int, object] = {}
@@ -217,7 +252,7 @@ def test_signal_handler_only_sets_stop_event(tmp_path: Path, monkeypatch: pytest
         for handler in handlers.values():
             if callable(handler):
                 handler(signal.SIGTERM, None)
-        assert worker.stop_event.is_set()
+        assert worker.run_forever() == 0
 
 
 def test_run_loop_heartbeats_and_respects_stop(tmp_path: Path) -> None:
@@ -233,7 +268,7 @@ def test_run_loop_heartbeats_and_respects_stop(tmp_path: Path) -> None:
         sleeps.append(seconds)
         ticks["n"] += 1
         if ticks["n"] >= 3:
-            worker.stop_event.set()
+            worker.stop()
 
     with ScheduleStore(db) as store:
         worker = ScheduleWorker(
@@ -244,6 +279,11 @@ def test_run_loop_heartbeats_and_respects_stop(tmp_path: Path) -> None:
             sleep=sleep,
         )
         code = worker.run_forever()
+        assert store.acquire_lease(
+            owner_id="after-stop",
+            now=clock(),
+            ttl_seconds=30,
+        ) is True
     assert code == 0
     assert sleeps
     # 至少每 10 秒会 wakeup（sleep 上限 <= 10）

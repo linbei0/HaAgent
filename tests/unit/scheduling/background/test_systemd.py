@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from haagent.scheduling.background.base import BackgroundServiceError
 from haagent.scheduling.background.systemd import (
     SERVICE_NAME,
     SystemdBackgroundAdapter,
@@ -24,10 +25,15 @@ class FakeCompleted:
         self.stderr = stderr
 
 
+def _adapter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SystemdBackgroundAdapter:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    return SystemdBackgroundAdapter()
+
+
 def test_install_writes_unit_with_restart_and_worker_args(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    unit_dir = tmp_path / "systemd" / "user"
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
     calls: list[list[str]] = []
 
     def fake_run(args, **kwargs):
@@ -36,7 +42,7 @@ def test_install_writes_unit_with_restart_and_worker_args(
 
     monkeypatch.setattr("haagent.scheduling.background.systemd.subprocess.run", fake_run)
 
-    adapter = SystemdBackgroundAdapter(unit_dir=unit_dir)
+    adapter = _adapter(monkeypatch, tmp_path)
     status = adapter.install()
     assert status.host_type == "systemd_user"
     assert status.state in {"installed", "running", "stopped"}
@@ -65,7 +71,7 @@ def test_install_writes_unit_with_restart_and_worker_args(
 def test_uninstall_disable_then_remove(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    unit_dir = tmp_path / "systemd" / "user"
+    unit_dir = tmp_path / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True)
     unit_path = unit_dir / SERVICE_NAME
     unit_path.write_text("[Unit]\nDescription=x\n", encoding="utf-8")
@@ -76,7 +82,7 @@ def test_uninstall_disable_then_remove(
         return FakeCompleted(0)
 
     monkeypatch.setattr("haagent.scheduling.background.systemd.subprocess.run", fake_run)
-    adapter = SystemdBackgroundAdapter(unit_dir=unit_dir)
+    adapter = _adapter(monkeypatch, tmp_path)
     status = adapter.uninstall()
     assert status.state == "not_installed"
     assert any("disable" in c for c in calls)
@@ -84,12 +90,65 @@ def test_uninstall_disable_then_remove(
     assert any("daemon-reload" in c for c in calls)
 
 
+def test_uninstall_keeps_unit_when_service_may_still_be_active(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _adapter(monkeypatch, tmp_path)
+    unit_path = tmp_path / ".config" / "systemd" / "user" / SERVICE_NAME
+    unit_path.parent.mkdir(parents=True)
+    unit_path.write_text("x", encoding="utf-8")
+
+    def fake_run(args, **kwargs):
+        if "is-active" in args:
+            return FakeCompleted(0, stdout="active\n")
+        if "--now" in args:
+            return FakeCompleted(1, stderr="disable --now failed")
+        return FakeCompleted(0)
+
+    monkeypatch.setattr("haagent.scheduling.background.systemd.subprocess.run", fake_run)
+    with pytest.raises(BackgroundServiceError):
+        adapter.uninstall()
+    assert unit_path.exists()
+
+
+def test_uninstall_exposes_daemon_reload_failure_after_removal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _adapter(monkeypatch, tmp_path)
+    unit_path = tmp_path / ".config" / "systemd" / "user" / SERVICE_NAME
+    unit_path.parent.mkdir(parents=True)
+    unit_path.write_text("x", encoding="utf-8")
+
+    def fake_run(args, **kwargs):
+        if "daemon-reload" in args:
+            return FakeCompleted(1, stderr="reload denied")
+        return FakeCompleted(0)
+
+    monkeypatch.setattr("haagent.scheduling.background.systemd.subprocess.run", fake_run)
+    with pytest.raises(BackgroundServiceError, match="reload|denied"):
+        adapter.uninstall()
+    assert not unit_path.exists()
+
+
+def test_status_exposes_systemctl_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter = _adapter(monkeypatch, tmp_path)
+    unit_path = tmp_path / ".config" / "systemd" / "user" / SERVICE_NAME
+    unit_path.parent.mkdir(parents=True)
+    unit_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "haagent.scheduling.background.systemd.subprocess.run",
+        lambda *args, **kwargs: FakeCompleted(1, stderr="access denied"),
+    )
+    with pytest.raises(BackgroundServiceError, match="access denied"):
+        adapter.status()
+
+
 def test_status_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    unit_dir = tmp_path / "empty"
-    unit_dir.mkdir()
     monkeypatch.setattr(
         "haagent.scheduling.background.systemd.subprocess.run",
         lambda *a, **k: FakeCompleted(1),
     )
-    status = SystemdBackgroundAdapter(unit_dir=unit_dir).status()
+    status = _adapter(monkeypatch, tmp_path).status()
     assert status.state == "not_installed"

@@ -48,26 +48,15 @@ def test_binding_create_read_update(store: ChannelStateStore) -> None:
     assert store.get_binding("weixin:wx-1:dm:user-a").session_id == "sess-2"
 
 
-def test_receipt_claim_is_atomic_dedup(store: ChannelStateStore) -> None:
-    assert store.has_receipt("wx-1", "msg-1") is False
-    first = store.claim_receipt("wx-1", "msg-1")
-    second = store.claim_receipt("wx-1", "msg-1")
-    assert first is True
-    assert second is False
-    assert store.has_receipt("wx-1", "msg-1") is True
-
-
-def test_cursor_and_batch_commit_transactional(store: ChannelStateStore) -> None:
-    # 只有 Actor 接受后才同事务写 receipt + cursor。
+def test_receipts_and_cursor_persist(store: ChannelStateStore) -> None:
     store.commit_accepted_batch(
         instance_id="wx-1",
         message_ids=["m-1", "m-2"],
-        cursor_name="get_updates_buf",
-        cursor_value="cursor-2",
     )
+    store.set_cursor("wx-1", "get_updates_buf", "cursor-2")
     assert store.get_cursor("wx-1", "get_updates_buf") == "cursor-2"
-    assert store.claim_receipt("wx-1", "m-1") is False
-    assert store.claim_receipt("wx-1", "m-2") is False
+    assert store.has_receipt("wx-1", "m-1") is True
+    assert store.has_receipt("wx-1", "m-2") is True
 
 
 def test_pairing_hash_only_and_owner_flow(store: ChannelStateStore) -> None:
@@ -113,9 +102,8 @@ def test_sqlite_has_no_secret_tokens(store: ChannelStateStore, tmp_path: Path) -
     store.commit_accepted_batch(
         instance_id="wx-1",
         message_ids=["m-1"],
-        cursor_name="get_updates_buf",
-        cursor_value="buf-1",
     )
+    store.set_cursor("wx-1", "get_updates_buf", "buf-1")
     store.set_owner("wx-1", "user-a")
     raw = Path(store.path).read_bytes()
     assert b"test-bot-token-secret" not in raw
@@ -125,7 +113,7 @@ def test_sqlite_has_no_secret_tokens(store: ChannelStateStore, tmp_path: Path) -
 def test_temporary_permission_requires_matching_owner_workspace_and_unexpired_time(
     store: ChannelStateStore,
 ) -> None:
-    now = datetime(2026, 7, 12, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     store.set_temporary_permission(
         instance_id="wx-1",
         owner_sender_id="owner-1",
@@ -138,7 +126,6 @@ def test_temporary_permission_requires_matching_owner_workspace_and_unexpired_ti
         "wx-1",
         owner_sender_id="owner-1",
         workspace_root="C:/work",
-        now=now,
     )
     assert active is not None
     assert active.permission_mode == "auto_approve"
@@ -147,16 +134,6 @@ def test_temporary_permission_requires_matching_owner_workspace_and_unexpired_ti
             "wx-1",
             owner_sender_id="other-owner",
             workspace_root="C:/work",
-            now=now,
-        )
-        is None
-    )
-    assert (
-        store.get_temporary_permission(
-            "wx-1",
-            owner_sender_id="owner-1",
-            workspace_root="C:/other-work",
-            now=now,
         )
         is None
     )
@@ -166,14 +143,29 @@ def test_temporary_permission_requires_matching_owner_workspace_and_unexpired_ti
         owner_sender_id="owner-1",
         workspace_root="C:/work",
         permission_mode="auto_approve",
-        expires_at=now + timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=30),
+    )
+    assert (
+        store.get_temporary_permission(
+            "wx-1",
+            owner_sender_id="owner-1",
+            workspace_root="C:/other-work",
+        )
+        is None
+    )
+
+    store.set_temporary_permission(
+        instance_id="wx-1",
+        owner_sender_id="owner-1",
+        workspace_root="C:/work",
+        permission_mode="auto_approve",
+        expires_at=now - timedelta(minutes=1),
     )
     assert (
         store.get_temporary_permission(
             "wx-1",
             owner_sender_id="owner-1",
             workspace_root="C:/work",
-            now=now + timedelta(minutes=2),
         )
         is None
     )
@@ -184,7 +176,7 @@ def test_reset_instance_identity_removes_all_dynamic_state(tmp_path: Path) -> No
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
     store.set_owner("wx-1", "owner-1")
     store.set_cursor("wx-1", "get_updates_buf", "cursor-1")
-    assert store.claim_receipt("wx-1", "message-1") is True
+    store.commit_accepted_batch(instance_id="wx-1", message_ids=["message-1"])
     store.upsert_binding(
         binding_key="weixin:wx-1:dm:owner-1",
         instance_id="wx-1",

@@ -82,17 +82,6 @@ def test_workspace_status_reuses_credential_lookup_on_hot_path(tmp_path: Path, m
     assert counter.calls == 1
 
 
-def test_workspace_status_refresh_force_rechecks_credentials(tmp_path: Path, monkeypatch) -> None:
-    counter = _CountingCredentialStatus()
-    workspace = _workspace(tmp_path, monkeypatch, counter)
-
-    workspace.status()
-    workspace.invalidate_status_cache()
-    workspace.status()
-
-    assert counter.calls == 2
-
-
 def test_set_web_enabled_invalidates_status_cache(tmp_path: Path, monkeypatch) -> None:
     counter = _CountingCredentialStatus()
     workspace = _workspace(tmp_path, monkeypatch, counter)

@@ -51,20 +51,19 @@ class ScheduleWorker:
         executor: RunExecutor | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
-        max_in_flight: int = MAX_IN_FLIGHT,
     ) -> None:
         self._store = store
         self._owner_id = owner_id or f"worker-{uuid.uuid4().hex[:12]}"
         self._executor = executor
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._sleep = sleep or _default_sleep
-        self.stop_event = threading.Event()
+        self._stop_event = threading.Event()
         # tick 只展开/恢复，不在 coordinator 内同步执行 Agent
         self._coordinator = ScheduleCoordinator(
             store,
             owner_id=self._owner_id,
         )
-        self._max_in_flight = max(1, int(max_in_flight))
+        self._max_in_flight = MAX_IN_FLIGHT
         self._pool = ThreadPoolExecutor(
             max_workers=self._max_in_flight,
             thread_name_prefix="haagent-sched-exec",
@@ -90,7 +89,7 @@ class ScheduleWorker:
     def install_signal_handlers(self) -> None:
         # 仅置位停止事件；不在 handler 内做 IO 或释放租约。
         def _handler(_signum: int, _frame: object) -> None:
-            self.stop_event.set()
+            self.stop()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -104,9 +103,9 @@ class ScheduleWorker:
         exit_code = 0
         try:
             now = self._clock()
-            tick = self._coordinator.tick(now=now)
+            lease_held = self._coordinator.tick(now=now)
             # 仅持有 coordinator lease 的进程可派发，避免 TUI/系统 worker 双消费
-            if tick.lease_held:
+            if lease_held:
                 self._dispatch_claimable(now=now)
             self._wait_in_flight()
             if self._fatal:
@@ -129,34 +128,31 @@ class ScheduleWorker:
         """循环 tick + 动态 sleep；执行在线程池，主循环持续 heartbeat。"""
         exit_code = 0
         try:
-            while not self.stop_event.is_set():
+            while not self._stop_event.is_set():
                 now = self._clock()
-                try:
-                    tick = self._coordinator.tick(now=now)
-                    if tick.lease_held:
-                        self._dispatch_claimable(now=now)
-                    self._reap_finished()
-                    if self._fatal:
-                        exit_code = 1
-                        break
-                except ScheduleStoreError as error:
-                    # 核心 Store 错误：非零退出，禁止装作健康
-                    self._record_error(f"store:{error.code}:{error}", fatal=True)
+                lease_held = self._coordinator.tick(now=now)
+                if lease_held:
+                    self._dispatch_claimable(now=now)
+                self._reap_finished()
+                if self._fatal:
                     exit_code = 1
                     break
-                except Exception as error:
-                    self._record_error(f"tick:{type(error).__name__}:{error}", fatal=True)
-                    exit_code = 1
-                    break
-                if self.stop_event.is_set():
+                if self._stop_event.is_set():
                     break
                 delay = self._next_wakeup_delay(now=self._clock())
                 if self._sleep is not _default_sleep:
                     self._sleep(delay)
                 else:
-                    self.stop_event.wait(timeout=delay)
+                    self._stop_event.wait(timeout=delay)
+        except ScheduleStoreError as error:
+            # 核心 Store 错误：非零退出，禁止装作健康。
+            self._record_error(f"store:{error.code}:{error}", fatal=True)
+            exit_code = 1
+        except Exception as error:
+            self._record_error(f"worker:{type(error).__name__}:{error}", fatal=True)
+            exit_code = 1
         finally:
-            self.stop_event.set()
+            self._stop_event.set()
             self._wait_in_flight(timeout=30.0)
             try:
                 self._coordinator.release()
@@ -167,11 +163,15 @@ class ScheduleWorker:
 
     def request_cancel(self, run_id: str) -> None:
         """同进程取消：通知执行器中断当前 Agent。"""
-        if self._executor is not None and hasattr(self._executor, "request_cancel"):
+        if self._executor is not None:
             try:
                 self._executor.request_cancel(run_id)
             except Exception as error:
                 logger.warning("request_cancel failed run=%s: %s", run_id, error)
+
+    def stop(self) -> None:
+        """请求 worker 在安全边界停止；租约由运行循环的 finally 释放。"""
+        self._stop_event.set()
 
     def _record_error(self, message: str, *, fatal: bool = False) -> None:
         self._last_error = message[:500]
@@ -186,14 +186,7 @@ class ScheduleWorker:
             capacity = self._max_in_flight - len(self._in_flight)
         if capacity <= 0:
             return
-        try:
-            claimable = self._store.list_claimable_runs(now=now, limit=capacity)
-        except ScheduleStoreError as error:
-            self._record_error(f"list_claimable:{error.code}:{error}", fatal=True)
-            return
-        except Exception as error:
-            self._record_error(f"list_claimable:{type(error).__name__}:{error}", fatal=True)
-            return
+        claimable = self._store.list_claimable_runs(now=now, limit=capacity)
         for run in claimable:
             with self._in_flight_lock:
                 if run.id in self._in_flight:
@@ -201,16 +194,12 @@ class ScheduleWorker:
                 if len(self._in_flight) >= self._max_in_flight:
                     break
             lease_exp = now + timedelta(seconds=RUN_LEASE_TTL_SECONDS)
-            try:
-                claimed = self._store.claim_run(
-                    run.id,
-                    worker_id=self._owner_id,
-                    lease_expires_at=lease_exp,
-                    now=now,
-                )
-            except ScheduleStoreError as error:
-                self._record_error(f"claim:{error.code}:{error}", fatal=True)
-                return
+            claimed = self._store.claim_run(
+                run.id,
+                worker_id=self._owner_id,
+                lease_expires_at=lease_exp,
+                now=now,
+            )
             if claimed is None:
                 continue
             # claim 时固化不可变 token
@@ -228,13 +217,17 @@ class ScheduleWorker:
         run_id = claim.run_id
         stop_hb = threading.Event()
         lease_lost = threading.Event()
+        cancel_notified = threading.Event()
 
         def _request_cancel() -> None:
-            if self._executor is not None and hasattr(self._executor, "request_cancel"):
-                try:
-                    self._executor.request_cancel(run_id)
-                except Exception as error:
-                    logger.warning("executor cancel failed run=%s: %s", run_id, error)
+            if self._executor is None or cancel_notified.is_set():
+                return
+            try:
+                self._executor.request_cancel(run_id)
+            except Exception as error:
+                logger.warning("executor cancel failed run=%s: %s", run_id, error)
+                return
+            cancel_notified.set()
 
         def _heartbeat_loop() -> None:
             while not stop_hb.wait(HEARTBEAT_INTERVAL_SECONDS):
@@ -325,21 +318,16 @@ class ScheduleWorker:
     def _shutdown_pool(self) -> None:
         try:
             self._pool.shutdown(wait=False, cancel_futures=True)
-        except TypeError:
-            self._pool.shutdown(wait=False)
         except Exception as error:
             logger.warning("pool shutdown failed: %s", error)
 
     def _next_wakeup_delay(self, *, now: datetime) -> float:
         # 有界轮询：默认 1s，最长 5s；查询最近 next_run
-        try:
-            due = self._store.list_due_schedules(now=now)
-            if due:
-                return 0.2
-            # 无到期：短轮询，避免饿死 retry_wait / 新计划
-            return 5.0
-        except Exception:
-            return 1.0
+        due = self._store.list_due_schedules(now=now)
+        if due:
+            return 0.2
+        # 无到期：短轮询，避免饿死 retry_wait / 新计划
+        return 5.0
 
 
 def run_schedule_worker(
@@ -380,5 +368,5 @@ def run_schedule_worker(
     finally:
         try:
             store.close()
-        except Exception:
-            pass
+        except Exception as error:
+            logger.error("close schedule store failed: %s", error)

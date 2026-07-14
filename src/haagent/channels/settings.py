@@ -7,11 +7,11 @@ haagent/channels/settings.py - 用户级渠道实例配置
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-SUPPORTED_PLATFORMS = frozenset({"weixin", "wecom", "feishu", "dingtalk", "qq", "fake"})
+SUPPORTED_PLATFORMS = frozenset({"weixin"})
 SETTINGS_VERSION = 1
 ChannelPermissionMode = Literal["request_approval", "auto_approve"]
 _CHANNEL_PERMISSION_MODES = frozenset({"request_approval", "auto_approve"})

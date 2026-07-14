@@ -14,6 +14,7 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
+from textual.timer import Timer
 from textual.widgets import TextArea
 
 from haagent.app.assistant_service import AssistantService
@@ -64,14 +65,6 @@ from haagent.tui.widgets import (
     _end_location,
 )
 
-def _permission_mode_label(mode: str) -> str:
-    if mode == "auto_approve":
-        return "自动批准"
-    if mode == "full_access":
-        return "完全访问权限"
-    return "请求批准"
-
-
 class HaAgentTuiApp(App[None]):
     MIN_WIDTH = MIN_WIDTH
     MIN_HEIGHT = MIN_HEIGHT
@@ -108,9 +101,13 @@ class HaAgentTuiApp(App[None]):
         self._theme_choice = select_theme()
         self._file_ref_index: FileReferenceIndex | None = None
         self.is_wide_external_root = path_authorization.is_wide_external_root
-        self.permission_mode_label = _permission_mode_label
         # delta 热路径只调度批量 timeline 刷新，禁止每 token 全量 _refresh。
         self._streaming_refresh_scheduled = False
+        self._streaming_refresh_timer: Timer | None = None
+        self._timeline_widget: ConversationTimeline | None = None
+        self._input_dock_widget: InputDock | None = None
+        self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
+        self._task_problem_groups: dict[int, dict[str, object]] = {}
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -128,6 +125,8 @@ class HaAgentTuiApp(App[None]):
         yield FooterBar(footer_text("chat"), id="footer-bar")
 
     def on_mount(self) -> None:
+        self._timeline_widget = self.query_one("#conversation", ConversationTimeline)
+        self._input_dock_widget = self.query_one("#input-panel", InputDock)
         self._apply_theme()
         self._show_initial_configuration_state()
         self.session_flow.restore_initial_session()
@@ -140,6 +139,14 @@ class HaAgentTuiApp(App[None]):
     def on_unmount(self) -> None:
         # 停止 badge 轮询并停止 TUI 内嵌 coordinator host，释放租约。
         self.schedule_flow.stop_background_polling()
+        # Textual 可能在 default screen 卸载后才触发 timer；必须显式取消，
+        # 否则回调会查询已移除的 timeline 并中断退出。
+        if self._streaming_refresh_timer is not None:
+            self._streaming_refresh_timer.stop()
+            self._streaming_refresh_timer = None
+        self._streaming_refresh_scheduled = False
+        self._timeline_widget = None
+        self._input_dock_widget = None
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_responsive_layout(width=event.size.width, height=event.size.height)
@@ -227,6 +234,8 @@ class HaAgentTuiApp(App[None]):
         display_prompt: str | None = None,
     ) -> None:
         self._active_turn_index = self._next_turn_index()
+        self._tool_failure_groups.clear()
+        self._task_problem_groups.clear()
         self._conversation.stick_to_bottom = True
         timeline = self._timeline()
         timeline.set_stick_to_bottom(True)
@@ -255,7 +264,7 @@ class HaAgentTuiApp(App[None]):
         except Exception as error:
             self.call_from_thread(self._handle_prompt_error, error)
             return
-        status = str(getattr(result, "status", "completed"))
+        status = result.status
         self.call_from_thread(self._finish_prompt, status)
 
     def _handle_chat_event(self, event: RuntimeUiEvent) -> None:
@@ -440,10 +449,10 @@ class HaAgentTuiApp(App[None]):
     def _run_model_connection_test(self, connection_id: str, model: str | None = None) -> None:
         self.model_flow.run_connection_test(connection_id, model)
 
-    # ── 计划任务后台 worker（薄 @work；测试路径可走 schedule_flow 同步打开）──
+    # ── 计划任务后台 worker（DB 读取不得阻塞 Textual UI 线程）──────────
     @work(thread=True, exclusive=True, group="schedules")
     def _load_schedules_overlay_worker(self, tab: str = "plans") -> None:
-        self.schedule_flow.open_schedules_async(initial_tab=tab)  # type: ignore[arg-type]
+        self.schedule_flow.load_schedules_overlay(tab)  # type: ignore[arg-type]
 
     # ── 渠道后台 worker（薄 @work 包装，逻辑在 ChannelFlow）──────────────
     @work(thread=True, exclusive=True, group="channels")
@@ -539,7 +548,7 @@ class HaAgentTuiApp(App[None]):
         result = self._request_current_task_cancel()
         if result is None:
             return
-        status = str(getattr(result, "status", "cancelled"))
+        status = result.status
         if status == "unavailable":
             self._conversation.append_block("Cancel", "当前 service 未提供可取消协议；本轮不能安全取消。")
         elif status == "idle":
@@ -651,7 +660,7 @@ class HaAgentTuiApp(App[None]):
             sandbox_status=self._sandbox_status,
         )
         # 未读计划运行 badge：颜色非唯一语义，文案本身可访问。
-        unread = int(getattr(self.schedule_flow, "unread_count", 0) or 0)
+        unread = self.schedule_flow.unread_count
         if unread > 0:
             badge = f" 计划任务 {unread}"
             # 窄屏优先保留 badge
@@ -671,10 +680,18 @@ class HaAgentTuiApp(App[None]):
         if self._streaming_refresh_scheduled:
             return
         self._streaming_refresh_scheduled = True
-        self.set_timer(0.033, self._flush_streaming_refresh, name="streaming-refresh")
+        self._streaming_refresh_timer = self.set_timer(
+            0.033,
+            self._flush_streaming_refresh,
+            name="streaming-refresh",
+        )
 
     def _flush_streaming_refresh(self) -> None:
+        self._streaming_refresh_timer = None
         self._streaming_refresh_scheduled = False
+        timeline = self._timeline_widget
+        if timeline is None or not timeline.is_attached:
+            return
         self._refresh_conversation()
 
     def _refresh_conversation(self) -> None:
@@ -730,7 +747,7 @@ class HaAgentTuiApp(App[None]):
             self._conversation.append_block("Command", f"无法确认当前模型是否支持图片输入：{error}")
             self._refresh()
             return False
-        if getattr(status, "image_input_supported", None) is not False:
+        if status.image_input_supported is not False:
             return True
         model_label = status.model or status.profile_name or "当前模型"
         self._conversation.append_block(
@@ -753,6 +770,9 @@ class HaAgentTuiApp(App[None]):
         return self.query_one("#input-panel", InputDock)
 
     def _timeline(self) -> ConversationTimeline:
+        timeline = self._timeline_widget
+        if timeline is not None and timeline.is_attached:
+            return timeline
         return self.query_one("#conversation", ConversationTimeline)
 
     def _prompt_has_pending_text(self) -> bool:

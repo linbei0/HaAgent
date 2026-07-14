@@ -7,6 +7,7 @@ src/haagent/tui/widgets/timeline_block.py - 对话时间线条目渲染块
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from textual import events
@@ -98,10 +99,6 @@ class TimelineBlock(Vertical):
         self._streaming_indicator_index = 0
         super().__init__(classes=_timeline_item_classes(item))
 
-    @property
-    def item_id(self) -> int:
-        return self._item.item_id
-
     def compose(self) -> ComposeResult:
         self._header_widget = Static("", classes="timeline-header")
         if self._item.role == "assistant":
@@ -118,8 +115,13 @@ class TimelineBlock(Vertical):
     def on_mount(self) -> None:
         self.update_item(self._item, show_tool_details=self._show_tool_details)
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         self._stop_streaming_indicator()
+        stream = self._markdown_stream
+        self._markdown_stream = None
+        self._markdown_stream_content = ""
+        if stream is not None:
+            await stream.stop()
 
     def on_click(self, event: events.Click) -> None:
         if not _is_clickable_item(self._item):
@@ -179,8 +181,10 @@ class TimelineBlock(Vertical):
             delta = content[len(self._markdown_stream_content) :]
             if delta:
                 # write 不可 exclusive：否则新 delta 会取消未完成 write，中间字丢失。
+                stream = self._markdown_stream
+                assert stream is not None
                 self.run_worker(
-                    self._markdown_stream.write(delta),
+                    partial(stream.write, delta),
                     group="markdown-stream",
                     exit_on_error=False,
                 )
@@ -194,7 +198,7 @@ class TimelineBlock(Vertical):
         self._markdown_update_version += 1
         version = self._markdown_update_version
         self.run_worker(
-            self._finalize_markdown_content(body, content, version, stream),
+            partial(self._finalize_markdown_content, body, content, version, stream),
             group="markdown-stream",
             exclusive=True,
             exit_on_error=False,
@@ -204,7 +208,7 @@ class TimelineBlock(Vertical):
         self._markdown_update_version += 1
         version = self._markdown_update_version
         self.run_worker(
-            self._update_markdown_content(body, content, version),
+            partial(self._update_markdown_content, body, content, version),
             group="markdown-update",
             exit_on_error=False,
         )
@@ -242,7 +246,7 @@ class TimelineBlock(Vertical):
         stream = self._markdown_stream
         self._markdown_stream = None
         self._markdown_stream_content = ""
-        self.run_worker(stream.stop(), group="markdown-stream", exit_on_error=False)
+        self.run_worker(partial(stream.stop), group="markdown-stream", exit_on_error=False)
 
     def _start_streaming_indicator(self) -> None:
         if self._streaming_indicator_timer is not None:

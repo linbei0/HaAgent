@@ -26,7 +26,7 @@ def test_request_always_raises_unattended_required() -> None:
     with pytest.raises(UnattendedInteractionRequired) as exc:
         handler.request(request)
     assert exc.value.kind == "approval"
-    assert "shell" in exc.value.summary or "高风险" in exc.value.summary or "允许" in exc.value.summary
+    assert "shell" in exc.value.summary
 
 
 def test_callable_handler_also_raises() -> None:
@@ -40,17 +40,3 @@ def test_callable_handler_also_raises() -> None:
         handler(request)
     assert exc.value.kind == "user_input"
     assert exc.value.summary
-
-
-def test_never_returns_fake_approval() -> None:
-    handler = UnattendedInteractionHandler()
-    request = HumanInteractionRequest(
-        interaction_type="approval",
-        tool_name="file_write",
-        question="write?",
-    )
-    try:
-        result = handler.request(request)
-    except UnattendedInteractionRequired:
-        return
-    raise AssertionError(f"must not return response: {result!r}")

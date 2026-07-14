@@ -6,7 +6,6 @@ tests/integration/cli/test_cli_personal_assistant.py - 个人助手启动体验�
 
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 
@@ -14,19 +13,6 @@ from haagent import cli
 from haagent.models.types import ModelResponse
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.contracts.task import load_task
-
-
-def _cli_gateway_from_profile(profile, gateway_cls):
-    """测试用：按 Gateway 构造函数签名转发临时 profile 字段。"""
-    params = inspect.signature(gateway_cls.__init__).parameters
-    kwargs = {}
-    if "model" in params:
-        kwargs["model"] = profile.model
-    if "base_url" in params:
-        kwargs["base_url"] = profile.base_url or None
-    if "api_key" in params:
-        kwargs["api_key"] = profile.api_key or None
-    return gateway_cls(**kwargs)
 
 
 class RecordingGateway:
@@ -72,54 +58,18 @@ class SmartCompactGateway(RecordingGateway):
         return ModelResponse("done", [])
 
 
-class FakeConnectionGateway:
-    provider_name = "openai-chat"
-
-    def __init__(self, api_key: str, model: str, base_url: str) -> None:
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url
-
-    def generate(self, messages, tool_schemas):
-        return ModelResponse(f"profile done: {' '.join(m.get('content', '') for m in messages if m.get('role') == 'user')}", [])
-
-
 def _set_home(monkeypatch, home: Path) -> None:
     monkeypatch.setattr(Path, "home", lambda: home)
 
 
-def _write_user_connection(home: Path, *, api_key_env: str = "CHAT_SECRET") -> None:
-    config_dir = home / ".haagent"
-    config_dir.mkdir(parents=True)
-    (config_dir / "providers.json").write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "connections": [
-                    {
-                        "id": "local",
-                        "name": "local",
-                        "provider_id": "local",
-                        "provider_name": "Local",
-                        "gateway_provider": "openai-chat",
-                        "base_url": "https://api.example/v1",
-                        "api_key_env": api_key_env,
-                        "credential_source": "keyring",
-                    },
-                ],
-                "custom_models": [],
-            },
-        ),
-        encoding="utf-8",
-    )
-    (config_dir / "settings.json").write_text(
-        json.dumps({"active_model": {"connection_id": "local", "model": "chat-test"}}),
-        encoding="utf-8",
-    )
-
-
 def test_legacy_personal_commands_point_to_tui(capsys) -> None:
-    for argv in (["setup"], ["chat", "Hello"], ["sessions"], ["memory"], ["memory", "list"]):
+    for argv in (
+        ["setup"],
+        ["chat", "--web", "Hello"],
+        ["sessions", "--workspace-root", "."],
+        ["memory", "confirm", "candidate-1"],
+        ["tui", "--web"],
+    ):
         exit_code = cli.main(argv)
         output = capsys.readouterr().out
 
@@ -317,34 +267,6 @@ def test_chat_session_manual_compact_uses_smart_summary_for_next_turn(tmp_path: 
         assert f"- user_request: turn {index}" in gateway.model_inputs[-1].splitlines()
 
 
-def test_sessions_lists_only_current_workspace_sessions(tmp_path: Path, monkeypatch, capsys) -> None:
-    workspace = tmp_path / "workspace"
-    other_workspace = tmp_path / "other"
-    workspace.mkdir()
-    other_workspace.mkdir()
-    session = AgentSession(
-        workspace_root=workspace,
-        runs_root=tmp_path / ".runs",
-        model_gateway=RecordingGateway(),
-    )
-    session.run_prompt("Summarize these documents")
-    other = AgentSession(
-        workspace_root=other_workspace,
-        runs_root=tmp_path / ".runs",
-        model_gateway=RecordingGateway(),
-    )
-    other.run_prompt("Other workspace task")
-    monkeypatch.chdir(tmp_path)
-
-    exit_code = cli.main(["sessions", "--workspace-root", str(workspace), "--runs-root", str(tmp_path / ".runs")])
-
-    output = capsys.readouterr().out
-    assert exit_code == 1
-    assert "请运行 haagent 打开 TUI" in output
-    assert other.session_id not in output
-    assert "Other workspace task" not in output
-
-
 def test_session_metadata_records_model_profile_without_api_key(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -418,30 +340,4 @@ def test_haagent_tui_resume_and_continue_conflict(capsys) -> None:
 
     output = capsys.readouterr().out
     assert exit_code == 1
-    assert "--resume cannot be combined with --continue" in output
-
-
-def test_connection_api_key_is_not_written_to_config_session_or_episode(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    secret = "sk-secret-value-that-must-not-leak"
-    _set_home(monkeypatch, tmp_path / "home")
-    _write_user_connection(Path.home())
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.chdir(workspace)
-    monkeypatch.setenv("CHAT_SECRET", secret)
-    monkeypatch.setattr(cli.DEFAULT_RUNTIME, "gateway_factory", lambda profile, _cls=FakeConnectionGateway: _cli_gateway_from_profile(profile, _cls))
-
-    exit_code = cli.main(["chat", "Check secret handling"])
-
-    output = capsys.readouterr().out
-    checked_files = [
-        Path.home() / ".haagent" / "providers.json",
-        Path.home() / ".haagent" / "settings.json",
-    ]
-    combined = output + "\n" + "\n".join(path.read_text(encoding="utf-8") for path in checked_files)
-    assert exit_code == 1
-    assert secret not in combined
+    assert output.strip() == "error: --resume cannot be combined with --continue"

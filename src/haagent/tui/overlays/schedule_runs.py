@@ -7,8 +7,9 @@ haagent/tui/overlays/schedule_runs.py - 计划运行收件箱状态与渲染
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import Literal
 
+from haagent.app.assistant_types import AssistantScheduleRun
 from haagent.tui.design.utils import safe_summary
 
 RunFilterMode = Literal["unread", "attention", "failed", "succeeded", "all"]
@@ -30,15 +31,15 @@ FILTER_KEYS: tuple[RunFilterMode, ...] = (
 )
 
 
-def filter_runs(runs: list[Any], mode: RunFilterMode) -> list[Any]:
+def filter_runs(runs: list[AssistantScheduleRun], mode: RunFilterMode) -> list[AssistantScheduleRun]:
     if mode == "unread":
-        return [r for r in runs if getattr(r, "unread", False)]
+        return [run for run in runs if run.unread]
     if mode == "attention":
-        return [r for r in runs if getattr(r, "status", "") == "needs_attention"]
+        return [run for run in runs if run.status == "needs_attention"]
     if mode == "failed":
-        return [r for r in runs if getattr(r, "status", "") == "failed"]
+        return [run for run in runs if run.status == "failed"]
     if mode == "succeeded":
-        return [r for r in runs if getattr(r, "status", "") == "succeeded"]
+        return [run for run in runs if run.status == "succeeded"]
     return list(runs)
 
 
@@ -71,17 +72,17 @@ def _wrap_text(text: str, *, width: int = 72) -> list[str]:
 
 @dataclass(frozen=True)
 class ScheduleRunsState:
-    runs: list[Any]
+    runs: list[AssistantScheduleRun]
     filter_mode: RunFilterMode = "all"
     selected_index: int = 0
     detail_mode: bool = False
 
     @property
-    def visible(self) -> list[Any]:
+    def visible(self) -> list[AssistantScheduleRun]:
         return filter_runs(self.runs, self.filter_mode)
 
     @property
-    def selected(self) -> Any | None:
+    def selected(self) -> AssistantScheduleRun | None:
         items = self.visible
         if not items:
             return None
@@ -108,7 +109,7 @@ class ScheduleRunsState:
     def close_detail(self) -> ScheduleRunsState:
         return replace(self, detail_mode=False)
 
-    def with_runs(self, runs: list[Any]) -> ScheduleRunsState:
+    def with_runs(self, runs: list[AssistantScheduleRun]) -> ScheduleRunsState:
         return replace(self, runs=list(runs))
 
     def render(self) -> str:
@@ -129,21 +130,19 @@ class ScheduleRunsState:
         else:
             for index, run in enumerate(items):
                 marker = ">" if index == min(self.selected_index, len(items) - 1) else " "
-                unread = "*" if getattr(run, "unread", False) else " "
-                status = str(getattr(run, "status", "?"))
-                summary = safe_summary(str(getattr(run, "summary", "") or "-"), 36)
+                unread = "*" if run.unread else " "
+                status = run.status
+                summary = safe_summary(run.summary or "-", 36)
                 lines.append(
-                    f"{marker}{unread} {getattr(run, 'id', '?'):<12} {status:<14} "
-                    f"{_fmt_dt(getattr(run, 'scheduled_for_utc', None))}  {summary}"
+                    f"{marker}{unread} {run.id:<12} {status:<14} "
+                    f"{_fmt_dt(run.scheduled_for_utc)}  {summary}"
                 )
             selected = self.selected
             if selected is not None:
                 lines.extend(["", "── 详情预览 ──"])
-                lines.append(f"计划: {getattr(selected, 'schedule_id', '-')}")
-                lines.append(f"状态: {getattr(selected, 'status', '-')}")
-                lines.append(
-                    f"摘要: {safe_summary(str(getattr(selected, 'summary', '') or '-'), 80)}"
-                )
+                lines.append(f"计划: {selected.schedule_id}")
+                lines.append(f"状态: {selected.status}")
+                lines.append(f"摘要: {safe_summary(selected.summary or '-', 80)}")
                 lines.append("（按 Enter 打开完整详情）")
         lines.extend(
             [
@@ -154,37 +153,37 @@ class ScheduleRunsState:
         )
         return "\n".join(lines)
 
-    def _render_detail(self, selected: Any) -> str:
+    def _render_detail(self, selected: AssistantScheduleRun) -> str:
         lines = [
             "运行详情",
-            f"run: {getattr(selected, 'id', '-')}",
-            f"计划: {getattr(selected, 'schedule_id', '-')}",
-            f"revision: {getattr(selected, 'schedule_revision', '-')}",
-            f"触发: {getattr(selected, 'trigger_kind', '-')} / {getattr(selected, 'trigger_key', '-')}",
+            f"run: {selected.id}",
+            f"计划: {selected.schedule_id}",
+            f"revision: {selected.schedule_revision}",
+            f"触发: {selected.trigger_kind} / {selected.trigger_key}",
             (
-                f"时间: 计划 {_fmt_dt(getattr(selected, 'scheduled_for_utc', None))}  "
-                f"开始 {_fmt_dt(getattr(selected, 'started_at_utc', None))}  "
-                f"结束 {_fmt_dt(getattr(selected, 'finished_at_utc', None))}"
+                f"时间: 计划 {_fmt_dt(selected.scheduled_for_utc)}  "
+                f"开始 {_fmt_dt(selected.started_at_utc)}  "
+                f"结束 {_fmt_dt(selected.finished_at_utc)}"
             ),
-            f"尝试: {getattr(selected, 'attempt_count', 0)}",
-            f"状态: {getattr(selected, 'status', '-')}",
-            f"未读: {'是' if getattr(selected, 'unread', False) else '否'}",
+            f"尝试: {selected.attempt_count}",
+            f"状态: {selected.status}",
+            f"未读: {'是' if selected.unread else '否'}",
         ]
-        cat = getattr(selected, "failure_category", None)
+        cat = selected.failure_category
         if cat:
             lines.append(f"类别: {cat}")
-        fail = getattr(selected, "failure_reason", None)
+        fail = selected.failure_reason
         if fail:
             lines.append("失败:")
             lines.extend(f"  {part}" for part in _wrap_text(str(fail)))
-        need = getattr(selected, "needs_attention_reason", None)
+        need = selected.needs_attention_reason
         if need:
             lines.append("需关注:")
             lines.extend(f"  {part}" for part in _wrap_text(str(need)))
         lines.append("摘要:")
-        lines.extend(f"  {part}" for part in _wrap_text(str(getattr(selected, "summary", "") or "-")))
-        session_path = getattr(selected, "session_path", None)
-        episode_path = getattr(selected, "episode_path", None)
+        lines.extend(f"  {part}" for part in _wrap_text(selected.summary or "-"))
+        session_path = selected.session_path
+        episode_path = selected.episode_path
         if session_path:
             lines.append(f"会话: {session_path}")
         if episode_path:

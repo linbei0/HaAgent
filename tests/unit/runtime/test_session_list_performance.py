@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from haagent.models.model_connections import ProviderProfile
+from haagent.models.model_connections import ModelSelection, ProviderProfile
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.session.package import (
     list_sessions,
@@ -241,9 +241,11 @@ def test_assistant_resume_reuses_existing_mcp_runtime(tmp_path: Path) -> None:
         api_key="test-key",
     )
 
-    with patch.object(
-        sessions,
-        "_load_resume_profile",
+    with patch(
+        "haagent.app.session_usecases.load_active_model_selection",
+        return_value=ModelSelection("test", "test-model"),
+    ), patch(
+        "haagent.app.session_usecases.load_model_selection_profile",
         return_value=resume_profile,
     ), patch(
         "haagent.runtime.session.lifecycle.bootstrap_mcp",

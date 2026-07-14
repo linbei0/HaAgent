@@ -72,13 +72,11 @@ def _service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs) -> Assis
     _write_connection(home)
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("HAAGENT_TEST_KEY", "test-key")
-    db = tmp_path / "schedules.sqlite3"
     return AssistantService(
         workspace_root=ws,
         runs_root=tmp_path / "runs",
         environ={"HAAGENT_TEST_KEY": "test-key"},
         gateway_factory=lambda profile, **_kw: RecordingGateway(),
-        schedule_db_path=db,
         **kwargs,
     )
 
@@ -108,15 +106,9 @@ def _create_req(ws: Path, **overrides) -> ScheduleCreateRequest:
     return ScheduleCreateRequest(**base)  # type: ignore[arg-type]
 
 
-def test_assistant_service_exposes_schedules_module(tmp_path: Path, monkeypatch) -> None:
-    service = _service(tmp_path, monkeypatch)
-    assert hasattr(service, "schedules")
-    assert service.schedules._context is service.sessions._context
-
-
 def test_create_list_get_preview(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path, monkeypatch)
-    ws = service._context.workspace_root
+    ws = service.workspace.status().workspace_root
     created = service.schedules.create(_create_req(ws))
     assert created.id
     assert created.name == "daily notes"
@@ -143,9 +135,33 @@ def test_create_list_get_preview(tmp_path: Path, monkeypatch) -> None:
     assert all(p.tzinfo is not None for p in preview)
 
 
+def test_duplicate_creates_independent_revision_one_copy(tmp_path: Path, monkeypatch) -> None:
+    service = _service(tmp_path, monkeypatch)
+    workspace = service.workspace.status().workspace_root
+    created = service.schedules.create(_create_req(workspace, name="original"))
+
+    copied = service.schedules.duplicate(created.id)
+
+    assert copied.id != created.id
+    assert copied.name == "original 副本"
+    assert copied.prompt == created.prompt
+    assert copied.rrule == created.rrule
+    assert copied.revision == 1
+    assert len(service.schedules.list()) == 2
+
+
+def test_embedded_host_starts_and_stops_cleanly(tmp_path: Path, monkeypatch) -> None:
+    service = _service(tmp_path, monkeypatch)
+    try:
+        assert service.schedules.start_host().running is True
+    finally:
+        stopped = service.schedules.stop_host()
+    assert stopped.running is False
+
+
 def test_update_pause_resume_archive_delete(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path, monkeypatch)
-    ws = service._context.workspace_root
+    ws = service.workspace.status().workspace_root
     created = service.schedules.create(_create_req(ws))
 
     updated = service.schedules.update(
@@ -173,7 +189,7 @@ def test_update_pause_resume_archive_delete(tmp_path: Path, monkeypatch) -> None
 
 def test_run_now_and_inbox_read_cancel(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path, monkeypatch)
-    ws = service._context.workspace_root
+    ws = service.workspace.status().workspace_root
     created = service.schedules.create(_create_req(ws, rrule=None))
 
     run = service.schedules.run_now(created.id, request_id="req-1")
@@ -194,24 +210,21 @@ def test_run_now_and_inbox_read_cancel(tmp_path: Path, monkeypatch) -> None:
     assert all(r.id != run.id for r in unread)
 
     # 再造一个未读
-    run2 = service.schedules.run_now(created.id, request_id="req-2")
+    service.schedules.run_now(created.id, request_id="req-2")
     count = service.schedules.mark_all_runs_read()
     assert count >= 1
 
-    # 取消 queued：若已执行完则可能 not cancellable
+    # 没有 worker 消费时，queued run 必须可取消。
     run3 = service.schedules.run_now(created.id, request_id="req-3")
-    try:
-        cancelled = service.schedules.cancel_run(run3.id)
-        assert cancelled.status in {"cancelled", "running", "succeeded", "failed", "needs_attention"}
-    except AssistantServiceError:
-        pass
+    cancelled = service.schedules.cancel_run(run3.id)
+    assert cancelled.status == "cancelled"
 
 
 def test_invalid_id_and_revision_conflict_chinese_errors(
     tmp_path: Path, monkeypatch
 ) -> None:
     service = _service(tmp_path, monkeypatch)
-    ws = service._context.workspace_root
+    ws = service.workspace.status().workspace_root
     created = service.schedules.create(_create_req(ws))
 
     with pytest.raises(AssistantServiceError) as exc:
@@ -228,7 +241,7 @@ def test_invalid_id_and_revision_conflict_chinese_errors(
 
 def test_unknown_connection_rejected(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path, monkeypatch)
-    ws = service._context.workspace_root
+    ws = service.workspace.status().workspace_root
     with pytest.raises(AssistantServiceError) as exc:
         service.schedules.create(_create_req(ws, connection_id="no-such-conn"))
     msg = str(exc.value)
@@ -243,25 +256,8 @@ def test_missing_workspace_rejected(tmp_path: Path, monkeypatch) -> None:
     assert "workspace" in str(exc.value).lower() or "不存在" in str(exc.value) or "目录" in str(exc.value)
 
 
-def test_background_status_and_install_stub(tmp_path: Path, monkeypatch) -> None:
-    service = _service(tmp_path, monkeypatch)
-    status = service.schedules.background_status()
-    assert status.state in {"unsupported", "not_installed", "stopped", "running", "error"}
-    # Task 6 可 stub：install 应返回状态或抛明确错误，不静默成功
-    try:
-        installed = service.schedules.install_background_service()
-        assert installed is not None
-    except AssistantServiceError as err:
-        assert str(err)
-    try:
-        uninstalled = service.schedules.uninstall_background_service()
-        assert uninstalled is not None
-    except AssistantServiceError as err:
-        assert str(err)
-
-
 def test_validation_error_on_empty_name(tmp_path: Path, monkeypatch) -> None:
     service = _service(tmp_path, monkeypatch)
-    ws = service._context.workspace_root
+    ws = service.workspace.status().workspace_root
     with pytest.raises(AssistantServiceError):
         service.schedules.create(_create_req(ws, name="  "))

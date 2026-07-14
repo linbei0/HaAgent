@@ -15,7 +15,6 @@ from haagent.channels.adapters.weixin.types import (
     WeixinAuthenticationExpired,
     WeixinInboundMessage,
     WeixinProtocolError,
-    WeixinSendResult,
     WeixinUpdates,
 )
 from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
@@ -48,9 +47,8 @@ class FakeProtocol:
     async def notify_stop(self) -> None:
         self.lifecycle_calls.append("notify_stop")
 
-    async def send_text(self, *, to_user_id: str, text: str, context_token: str) -> WeixinSendResult:
+    async def send_text(self, *, to_user_id: str, text: str, context_token: str) -> None:
         self.sent.append({"to": to_user_id, "text": text, "ctx": context_token})
-        return WeixinSendResult(ok=True)
 
     async def get_typing_ticket(self, *, context_token: str) -> str:
         ticket = self.tickets.get(context_token, f"ticket-for-{context_token[:4]}")
@@ -77,6 +75,10 @@ def _wx_msg(
         text=text,
         context_token=context_token,
     )
+
+
+async def _accept_message(_message: InboundChannelMessage) -> str:
+    return "accepted"
 
 
 def test_only_user_dm_text_received() -> None:
@@ -221,7 +223,7 @@ def test_start_and_stop_notify_weixin_around_poll_loop() -> None:
     async def _run() -> None:
         proto = FakeProtocol()
         adapter = WeixinAdapter(instance_id="wx-1", protocol=proto, poll_interval=0.01)
-        await adapter.start(lambda message: "accepted")
+        await adapter.start(_accept_message)
         deadline = asyncio.get_event_loop().time() + 2
         while proto.get_updates_calls == 0 and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.01)
@@ -255,7 +257,12 @@ def test_start_notification_failure_retries_before_polling() -> None:
         proto = RetryStartProtocol()
         received: list[InboundChannelMessage] = []
         adapter = WeixinAdapter(instance_id="wx-1", protocol=proto, poll_interval=0.01)
-        await adapter.start(lambda message: received.append(message) or "accepted")
+
+        async def on_message(message: InboundChannelMessage) -> str:
+            received.append(message)
+            return "accepted"
+
+        await adapter.start(on_message)
         deadline = asyncio.get_event_loop().time() + 2
         while not received and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.01)
@@ -290,7 +297,12 @@ def test_auth_expired_calls_notify_start_and_recovers_without_relogin() -> None:
         proto = RecoveringProtocol()
         received: list[InboundChannelMessage] = []
         adapter = WeixinAdapter(instance_id="wx-1", protocol=proto, poll_interval=0.01)
-        await adapter.start(lambda message: received.append(message) or "accepted")
+
+        async def on_message(message: InboundChannelMessage) -> str:
+            received.append(message)
+            return "accepted"
+
+        await adapter.start(on_message)
         deadline = asyncio.get_event_loop().time() + 2
         while not received and asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(0.01)
@@ -307,7 +319,7 @@ def test_permanent_protocol_error_enters_failed_without_retry() -> None:
     async def _run() -> None:
         proto = FakeProtocol(fail_mode="protocol")
         adapter = WeixinAdapter(instance_id="wx-1", protocol=proto, poll_interval=0.01)
-        await adapter.start(lambda message: "accepted")
+        await adapter.start(_accept_message)
         deadline = asyncio.get_running_loop().time() + 2
         while adapter.state != "failed" and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.01)
@@ -341,7 +353,12 @@ def test_transient_transport_error_stays_reconnecting_until_success() -> None:
         proto = TransientProtocol()
         received: list[InboundChannelMessage] = []
         adapter = WeixinAdapter(instance_id="wx-1", protocol=proto, poll_interval=0.01)
-        await adapter.start(lambda message: received.append(message) or "accepted")
+
+        async def on_message(message: InboundChannelMessage) -> str:
+            received.append(message)
+            return "accepted"
+
+        await adapter.start(on_message)
         await asyncio.wait_for(entered_retry.wait(), timeout=2)
         assert adapter.state == "reconnecting"
         release_retry.set()
@@ -359,6 +376,7 @@ def test_transient_transport_error_stays_reconnecting_until_success() -> None:
 
 def test_partial_batch_failure_does_not_advance_cursor() -> None:
     async def _run() -> None:
+        persisted: list[str] = []
         msg = _wx_msg(message_id="m-fail")
         proto = FakeProtocol(
             updates_queue=[
@@ -369,14 +387,17 @@ def test_partial_batch_failure_does_not_advance_cursor() -> None:
         async def bad_handler(m: InboundChannelMessage) -> None:
             raise RuntimeError("actor failed")
 
-        adapter = WeixinAdapter(instance_id="wx-1", protocol=proto, poll_interval=0.01)
-        # 注入初始 cursor
-        adapter._cursor = "old-cursor"
+        adapter = WeixinAdapter(
+            instance_id="wx-1",
+            protocol=proto,
+            poll_interval=0.01,
+            initial_cursor="old-cursor",
+            on_cursor_persist=persisted.append,
+        )
         await adapter.start(bad_handler)
         await asyncio.sleep(0.15)
         await adapter.stop()
-        # 失败不得推进 cursor
-        assert adapter.cursor == "old-cursor"
+        assert persisted == []
 
     asyncio.run(_run())
 
@@ -424,7 +445,6 @@ def test_successful_batch_persists_cursor_via_callback() -> None:
             await asyncio.sleep(0.02)
         await adapter.stop()
         assert received
-        assert adapter.cursor == "cursor-next"
         assert persisted == ["cursor-next"]
 
     asyncio.run(_run())
@@ -452,7 +472,6 @@ def test_handler_reject_does_not_persist_cursor() -> None:
         await adapter.start(on_message)
         await asyncio.sleep(0.15)
         await adapter.stop()
-        assert adapter.cursor == "old"
         assert persisted == []
 
     asyncio.run(_run())

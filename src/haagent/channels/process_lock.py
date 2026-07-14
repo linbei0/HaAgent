@@ -19,10 +19,6 @@ class GatewayInstanceLock:
         self.path = Path(path)
         self._handle: BinaryIO | None = None
 
-    @property
-    def acquired(self) -> bool:
-        return self._handle is not None
-
     def acquire(self) -> bool:
         if self._handle is not None:
             return True

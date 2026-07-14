@@ -11,12 +11,12 @@ import json
 import sqlite3
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from haagent.scheduling.migrations import CURRENT_SCHEMA_VERSION, apply_migrations
+from haagent.scheduling.migrations import apply_migrations
 from haagent.scheduling.models import (
     DestinationKind,
     FailureCategory,
@@ -38,14 +38,6 @@ class ScheduleStoreError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
-
-
-@dataclass(frozen=True)
-class ScheduleRevisionRecord:
-    schedule_id: str
-    revision: int
-    definition: ScheduleDefinition
-    created_at_utc: datetime
 
 
 def _dt_to_iso(value: datetime | None) -> str | None:
@@ -173,7 +165,7 @@ def _store_locked(method: Any) -> Any:
 def _lock_public_methods(cls: type) -> type:
     # 类级一次性包装，替代 __getattribute__ 动态代理
     for name, attr in list(cls.__dict__.items()):
-        if name.startswith("_") or name in {"path"}:
+        if name.startswith("_"):
             continue
         if not callable(attr):
             continue
@@ -190,12 +182,12 @@ class ScheduleStore:
     """
 
     def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         # 线程安全：公开 API 经 _lock 串行；禁止跨线程无锁共用事务
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(
-            str(self.path),
+            str(path),
             timeout=5.0,
             check_same_thread=False,
             isolation_level=None,
@@ -224,10 +216,6 @@ class ScheduleStore:
 
     def close(self) -> None:
         self._conn.close()
-
-    def schema_version(self) -> int:
-        row = self._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
-        return int(row[0]) if row else 0
 
     def create(
         self,
@@ -505,26 +493,6 @@ class ScheduleStore:
             self._conn.rollback()
             raise
 
-    def list_revisions(self, schedule_id: str) -> list[ScheduleRevisionRecord]:
-        rows = self._conn.execute(
-            """
-            SELECT schedule_id, revision, definition_json, created_at_utc
-            FROM schedule_revisions
-            WHERE schedule_id = ?
-            ORDER BY revision ASC
-            """,
-            (schedule_id,),
-        ).fetchall()
-        return [
-            ScheduleRevisionRecord(
-                schedule_id=r["schedule_id"],
-                revision=int(r["revision"]),
-                definition=_definition_from_json(r["definition_json"]),
-                created_at_utc=_dt_from_iso(r["created_at_utc"]) or datetime.now(timezone.utc),
-            )
-            for r in rows
-        ]
-
     def get_revision(
         self, schedule_id: str, revision: int
     ) -> ScheduleDefinition | None:
@@ -558,17 +526,6 @@ class ScheduleStore:
         if row is None:
             return None
         return _dt_from_iso(row["next_run_at_utc"])
-
-    def set_last_run(
-        self, schedule_id: str, *, last_run_at_utc: datetime, now: datetime
-    ) -> None:
-        self._conn.execute(
-            """
-            UPDATE schedules SET last_run_at_utc = ?, updated_at_utc = ?
-            WHERE id = ?
-            """,
-            (_dt_to_iso(last_run_at_utc), _dt_to_iso(now), schedule_id),
-        )
 
     def get_last_run_at_utc(self, schedule_id: str) -> datetime | None:
         """公开 API：读取 last_run_at_utc，禁止调用方直接访问 _conn。"""
@@ -703,12 +660,6 @@ class ScheduleStore:
             "UPDATE schedule_runs SET unread = 0 WHERE unread = 1"
         )
         return int(cur.rowcount)
-
-    def unread_count(self) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS c FROM schedule_runs WHERE unread = 1"
-        ).fetchone()
-        return int(row["c"])
 
     def request_cancel(self, run_id: str) -> ScheduleRun:
         self._conn.execute("BEGIN IMMEDIATE")
@@ -866,8 +817,8 @@ class ScheduleStore:
         try:
             row = self._conn.execute(
                 """
-                SELECT attempt_count, cancellation_requested, status AS cur_status,
-                       worker_id
+                SELECT schedule_id, attempt_count, cancellation_requested,
+                       status AS cur_status, worker_id
                 FROM schedule_runs WHERE id = ?
                 """,
                 (run_id,),
@@ -1021,6 +972,15 @@ class ScheduleStore:
                         attempt,
                     ),
                 )
+            # run 终结与计划最近执行时间必须同事务提交，避免 UI 读到半完成状态。
+            self._conn.execute(
+                """
+                UPDATE schedules
+                SET last_run_at_utc = ?, updated_at_utc = ?
+                WHERE id = ?
+                """,
+                (_dt_to_iso(now), _dt_to_iso(now), row["schedule_id"]),
+            )
             self._conn.commit()
         except ScheduleStoreError:
             raise
@@ -1171,14 +1131,6 @@ class ScheduleStore:
             "DELETE FROM coordinator_lease WHERE singleton = 1 AND owner_id = ?",
             (owner_id,),
         )
-
-    def get_lease(self) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM coordinator_lease WHERE singleton = 1"
-        ).fetchone()
-        if row is None:
-            return None
-        return dict(row)
 
     def _row_to_definition(self, row: sqlite3.Row) -> ScheduleDefinition:
         try:

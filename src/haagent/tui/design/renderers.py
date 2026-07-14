@@ -6,8 +6,6 @@ haagent/tui/renderers.py - TUI 文本渲染逻辑
 
 from __future__ import annotations
 
-from typing import Any
-
 from haagent.app.assistant_types import AssistantWorkspaceStatus
 from haagent.memory import MemoryCandidate
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
@@ -254,76 +252,14 @@ def impact_summary(tool_name: str, args_summary: dict[str, object]) -> str:
     return "影响范围以工具参数摘要为准"
 
 
-def payload_text(payload: dict[str, object], key: str, default: str) -> str:
-    value: Any = payload.get(key)
-    if value is None:
-        return default
-    return str(value)
-
-
-def key_state(status: AssistantWorkspaceStatus) -> str:
-    if status.api_key_available and status.credential_source_used:
-        return f"available via {status.credential_source_used} ({status_semantic('success').symbol} 可用)"
-    return f"missing ({status_semantic('failed').symbol} 缺失)"
-
-
 def compact_key_state(status: AssistantWorkspaceStatus) -> str:
     return "ok" if status.api_key_available else "missing"
 
 
-def web_state(status: AssistantWorkspaceStatus) -> str:
-    return "on" if status.web_enabled else "off"
-
-
 def permission_mode_short(status: AssistantWorkspaceStatus) -> str:
-    mode = getattr(status, "permission_mode", "request_approval")
+    mode = status.permission_mode
     if mode == "auto_approve":
         return "auto"
     if mode == "full_access":
         return "full"
     return "ask"
-
-
-def permission_mode_label(status: AssistantWorkspaceStatus) -> str:
-    mode = getattr(status, "permission_mode", "request_approval")
-    if mode == "auto_approve":
-        return "自动批准"
-    if mode == "full_access":
-        return "完全访问权限"
-    return "请求批准"
-
-
-def external_roots_text(status: AssistantWorkspaceStatus) -> str:
-    roots = status.external_roots or []
-    if not roots:
-        return "  外部目录: none"
-    lines = ["  外部目录:"]
-    for root in roots:
-        access = root.get("access", "")
-        label = "只读参考" if access == "read" else "完全信任" if access == "full" else access or "-"
-        lines.append(f"    {root.get('path', '-')}  {label}")
-    return "\n".join(lines)
-
-
-def keyring_status(status: AssistantWorkspaceStatus) -> str:
-    if status.credential_store_available is False:
-        reason = status.credential_store_error or "unknown"
-        return f"keyring unavailable: {reason}"
-    if status.credential_store_available is True:
-        return "available"
-    return "-"
-
-
-def failure_body(failed_stage: str, category: str, reason: str, episode_path: str) -> str:
-    lines: list[str] = []
-    if category == "Loop Limit Failure":
-        lines.append("本轮没有完成：模型连续调用工具但没有给出最终回答。")
-    lines.extend(
-        [
-            f"stage={failed_stage}",
-            f"category={category}",
-            f"reason={reason}",
-            f"episode_path={episode_path}",
-        ],
-    )
-    return "\n".join(lines)

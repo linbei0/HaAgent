@@ -37,9 +37,6 @@ class _FakeWeixinProtocol:
         self._token = kwargs.get("bot_token", "")
         self.polls = 0
 
-    def set_bot_token(self, token: str) -> None:
-        self._token = token
-
     async def get_qrcode(self) -> WeixinQrCode:
         return WeixinQrCode(qrcode_url="https://example.com/qr", qrcode_id="qr-1")
 

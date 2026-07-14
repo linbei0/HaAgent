@@ -39,11 +39,6 @@ class CommandRegistry:
     def get(self, name: str) -> SlashCommand | None:
         return self._commands.get(name)
 
-    def require(self, name: str) -> SlashCommand:
-        command = self.get(name)
-        if command is None:
-            raise KeyError(name)
-        return command
 
 
 def command_registry() -> CommandRegistry:

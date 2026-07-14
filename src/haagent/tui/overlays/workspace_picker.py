@@ -57,12 +57,6 @@ class WorkspacePickerState:
         index = min(max(self.selected_index, 0), len(self.entries) - 1)
         return self.entries[index]
 
-    def ensure_selection_on(self, name: str) -> WorkspacePickerState:
-        for index, entry in enumerate(self.entries):
-            if entry.name == name:
-                return replace(self, selected_index=index, error="")
-        return self
-
     def move(self, delta: int) -> WorkspacePickerState:
         if not self.entries:
             return replace(self, selected_index=0, scroll_offset=0)
@@ -104,9 +98,6 @@ class WorkspacePickerState:
             path_input=str(parent),
             error="",
         )
-
-    def with_path_input(self, path_input: str) -> WorkspacePickerState:
-        return replace(self, path_input=path_input, error="")
 
     def append_path_char(self, char: str) -> WorkspacePickerState:
         return replace(self, path_input=self.path_input + char, error="")

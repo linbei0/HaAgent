@@ -20,9 +20,6 @@ class AssistantMemory:
     def list_candidates(self, status: str | None = "pending") -> list[MemoryCandidate]:
         return self._queue().list(status=status)
 
-    def get_candidate(self, candidate_id: str) -> MemoryCandidate:
-        return self._queue().get(candidate_id)
-
     def confirm_candidate(self, candidate_id: str) -> MemoryRecord:
         try:
             return self._store().confirm_candidate(self._queue(), candidate_id, actor="user")

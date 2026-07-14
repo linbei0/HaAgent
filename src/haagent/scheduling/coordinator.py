@@ -7,13 +7,8 @@ Agent 执行在事务外由 executor 完成。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from haagent.scheduling.models import (
-    FailureCategory,
-    ScheduleDefinition,
-    ScheduleRun,
-)
+from haagent.scheduling.models import ScheduleDefinition
 from haagent.scheduling.recurrence import (
     iter_due_occurrences,
     preview_occurrences,
@@ -34,15 +29,6 @@ RETRYABLE_CATEGORIES: frozenset[str] = frozenset(
         "internal_error",
     }
 )
-
-
-@dataclass(frozen=True)
-class CoordinatorResult:
-    """tick 只展开/恢复/续租；claim/execute 由 worker 负责。"""
-
-    lease_held: bool
-    recovered: int
-    runs_created: int
 
 
 def _trigger_key_for_occurrence(occurrence_utc: datetime) -> str:
@@ -77,9 +63,8 @@ class ScheduleCoordinator:
     def release(self) -> None:
         self._store.release_lease(owner_id=self._owner_id)
 
-    def recover_expired_runs(self, *, now: datetime) -> int:
+    def _recover_expired_runs(self, *, now: datetime) -> None:
         expired = self._store.list_expired_running(now=now)
-        count = 0
         for run in expired:
             fence_worker = run.worker_id
             fence_attempt = run.attempt_count
@@ -95,16 +80,18 @@ class ScheduleCoordinator:
                     expected_worker_id=fence_worker,
                     expected_attempt=fence_attempt,
                 )
-            except ScheduleStoreError:
-                # 已被其他 worker 接管
-                count += 1
-                continue
+            except ScheduleStoreError as error:
+                if error.code == "stale_finish":
+                    # 已被其他 worker 接管。
+                    continue
+                raise
             definition = self._store.get_revision(run.schedule_id, run.schedule_revision)
             if definition is None:
-                definition = self._store.get(run.schedule_id)
-            if definition is None:
-                count += 1
-                continue
+                # run 通过复合外键绑定 revision；缺失说明持久化已损坏，必须暴露。
+                raise ScheduleStoreError(
+                    "revision_not_found",
+                    f"run {run.id} 的计划 revision 不存在",
+                )
             if run.attempt_count < definition.retry_policy.max_attempts:
                 delay = _compute_retry_delay(definition.retry_policy, run.attempt_count)
                 retry_at = now + timedelta(seconds=delay)
@@ -120,137 +107,28 @@ class ScheduleCoordinator:
                         expected_worker_id=fence_worker,
                         expected_attempt=fence_attempt,
                     )
-                except ScheduleStoreError:
-                    pass
-            count += 1
-        return count
+                except ScheduleStoreError as error:
+                    if error.code == "stale_finish":
+                        continue
+                    raise
 
-    def tick(self, *, now: datetime) -> CoordinatorResult:
+    def tick(self, *, now: datetime) -> bool:
         # 仅持有 lease 时展开 due 与 recover；不 claim、不执行 Agent
         if not self.heartbeat(now=now):
-            return CoordinatorResult(
-                lease_held=False,
-                recovered=0,
-                runs_created=0,
-            )
-        recovered = self.recover_expired_runs(now=now)
-        created = self._expand_due(now=now)
-        return CoordinatorResult(
-            lease_held=True,
-            recovered=recovered,
-            runs_created=created,
-        )
+            return False
+        self._recover_expired_runs(now=now)
+        self._expand_due(now=now)
+        return True
 
-    def schedule_retry(
-        self,
-        run_id: str,
-        *,
-        now: datetime,
-        category: FailureCategory,
-        reason: str,
-        expected_worker_id: str | None = None,
-        expected_attempt: int | None = None,
-    ) -> datetime | None:
-        run = self._store.get_run(run_id)
-        if run is None:
-            raise ScheduleStoreError("not_found", f"run 不存在: {run_id}")
-        fence_w = expected_worker_id if expected_worker_id is not None else run.worker_id
-        fence_a = expected_attempt if expected_attempt is not None else run.attempt_count
-        if category not in RETRYABLE_CATEGORIES:
-            self._store.finish_run(
-                run_id,
-                status="failed",
-                now=now,
-                summary=reason,
-                failure_category=category,
-                failure_reason=reason,
-                expected_worker_id=fence_w,
-                expected_attempt=fence_a,
-            )
-            return None
-        definition = self._store.get_revision(run.schedule_id, run.schedule_revision)
-        if definition is None:
-            definition = self._store.get(run.schedule_id)
-        if definition is None:
-            self._store.finish_run(
-                run_id,
-                status="failed",
-                now=now,
-                summary=reason,
-                failure_category=category,
-                failure_reason=reason,
-                expected_worker_id=fence_w,
-                expected_attempt=fence_a,
-            )
-            return None
-        if run.attempt_count >= definition.retry_policy.max_attempts:
-            self._store.finish_run(
-                run_id,
-                status="failed",
-                now=now,
-                summary=reason,
-                failure_category=category,
-                failure_reason=reason,
-                expected_worker_id=fence_w,
-                expected_attempt=fence_a,
-            )
-            return None
-        delay = _compute_retry_delay(definition.retry_policy, run.attempt_count)
-        retry_at = now + timedelta(seconds=delay)
-        self._store.finish_run(
-            run_id,
-            status="retry_wait",
-            now=now,
-            summary=reason,
-            failure_category=category,
-            failure_reason=reason,
-            retry_at_utc=retry_at,
-            expected_worker_id=fence_w,
-            expected_attempt=fence_a,
-        )
-        return retry_at
-
-    def mark_needs_attention(
-        self,
-        run_id: str,
-        *,
-        now: datetime,
-        category: FailureCategory,
-        reason: str,
-        expected_worker_id: str | None = None,
-        expected_attempt: int | None = None,
-    ) -> ScheduleRun:
-        run = self._store.get_run(run_id)
-        fence_w = expected_worker_id
-        fence_a = expected_attempt
-        if run is not None:
-            if fence_w is None:
-                fence_w = run.worker_id
-            if fence_a is None:
-                fence_a = run.attempt_count
-        return self._store.finish_run(
-            run_id,
-            status="needs_attention",
-            now=now,
-            summary=reason,
-            failure_category=category,
-            expected_worker_id=fence_w,
-            expected_attempt=fence_a,
-            failure_reason=reason,
-            needs_attention_reason=reason,
-        )
-
-    def _expand_due(self, *, now: datetime) -> int:
-        created = 0
+    def _expand_due(self, *, now: datetime) -> None:
         due_schedules = self._store.list_due_schedules(now=now)
         for schedule in due_schedules:
-            created += self._expand_schedule(schedule, now=now)
-        return created
+            self._expand_schedule(schedule, now=now)
 
-    def _expand_schedule(self, schedule: ScheduleDefinition, *, now: datetime) -> int:
+    def _expand_schedule(self, schedule: ScheduleDefinition, *, now: datetime) -> None:
         next_cached = self._store.get_next_run_at_utc(schedule.id)
         if next_cached is None:
-            return 0
+            return
         # 从上一次 next 到 now 展开；after 取 next 前一微秒以包含 next 本身
         after = next_cached - timedelta(microseconds=1)
         # 多取 1 条用于判断 all 是否仍有积压；避免无界 list 物化
@@ -263,9 +141,8 @@ class ScheduleCoordinator:
         if not occurrences:
             # 重算 next
             self._advance_next(schedule, after=now, now=now)
-            return 0
+            return
 
-        created = 0
         policy = schedule.misfire_policy
         if policy == "skip":
             # 规格：跳过所有真正过期 occurrence；grace 内视为 tick 抖动仍执行
@@ -273,7 +150,7 @@ class ScheduleCoordinator:
             on_time = [o for o in occurrences if o + grace >= now]
             if not on_time:
                 self._advance_next(schedule, after=now, now=now)
-                return 0
+                return
             target = on_time
         elif policy == "latest":
             target = [occurrences[-1]]
@@ -282,14 +159,13 @@ class ScheduleCoordinator:
             target = occurrences[:MISFIRE_BATCH_LIMIT]
 
         for occ in target:
-            created += self._create_occurrence_run(schedule, occ, now=now)
+            self._create_occurrence_run(schedule, occ, now=now)
 
         if policy == "all" and len(occurrences) > MISFIRE_BATCH_LIMIT:
             # 从本批最后一条之后继续，不跳到 now
             self._advance_next(schedule, after=target[-1], now=now)
         else:
             self._advance_next(schedule, after=now, now=now)
-        return created
 
     def _create_occurrence_run(
         self,
@@ -297,23 +173,13 @@ class ScheduleCoordinator:
         occurrence: datetime,
         *,
         now: datetime,
-    ) -> int:
+    ) -> None:
         trigger_key = _trigger_key_for_occurrence(occurrence)
         active = self._store.list_active_runs_for_schedule(schedule.id)
-        has_blocking = any(r.status in {"running", "retry_wait"} for r in active)
-        has_any_active = bool(active)
 
         status = "queued"
-        if schedule.overlap_policy == "skip" and has_blocking:
+        if schedule.overlap_policy == "skip" and active:
             status = "skipped"
-        elif schedule.overlap_policy == "skip" and has_any_active:
-            # 已有 queued 也跳过新 occurrence，避免堆积
-            if any(r.status == "queued" for r in active):
-                status = "skipped"
-        elif schedule.overlap_policy == "parallel":
-            if schedule.destination_kind == "resume_session":
-                status = "skipped"
-            # parallel 仅 new_session；副作用工具由应用层保存时校验
 
         try:
             self._store.create_run(
@@ -326,10 +192,9 @@ class ScheduleCoordinator:
                 now=now,
                 summary="skipped due to overlap" if status == "skipped" else "",
             )
-            return 1
         except ScheduleStoreError as exc:
             if exc.code == "duplicate_trigger":
-                return 0
+                return
             raise
 
     def _advance_next(
@@ -343,19 +208,14 @@ class ScheduleCoordinator:
         next_run = preview[0] if preview else None
         if next_run is None:
             # once 或 COUNT/UNTIL 等有限 RRULE 耗尽 → completed，避免僵尸 active
-            try:
-                current = self._store.get(schedule.id)
-                if current is not None and current.status == "active":
-                    self._store.update(
-                        schedule.id,
-                        expected_revision=current.revision,
-                        now=now,
-                        status="completed",
-                        next_run_at_utc=None,
-                    )
-                    return
-            except ScheduleStoreError:
-                pass
-            self._store.set_next_run(schedule.id, next_run_at_utc=None, now=now)
+            current = self._store.get(schedule.id)
+            if current is not None and current.status == "active":
+                self._store.update(
+                    schedule.id,
+                    expected_revision=current.revision,
+                    now=now,
+                    status="completed",
+                    next_run_at_utc=None,
+                )
             return
         self._store.set_next_run(schedule.id, next_run_at_utc=next_run, now=now)

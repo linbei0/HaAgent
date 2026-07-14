@@ -14,6 +14,7 @@ from haagent.runtime.events.types import TaskProgressEvent
 from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem, present_task_progress
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.timeline_models import TimelineItem
+from haagent.tui.widgets.timeline_rendering import render_timeline_item
 
 
 class TimelineClickTestApp(App[None]):
@@ -65,6 +66,25 @@ class TimelineClickTestApp(App[None]):
         )
 
 
+class NoticeClickTestApp(App[None]):
+    def compose(self) -> ComposeResult:
+        yield ConversationTimeline(id="conversation")
+
+    def on_mount(self) -> None:
+        timeline = self.query_one("#conversation", ConversationTimeline)
+        timeline.add_presentation_item(
+            TimelinePresentationItem(
+                kind="notice",
+                title="任务遇到问题：验证失败",
+                summary="建议：修复后重新运行测试",
+                severity="error",
+                turn_index=1,
+                detail_id="notice-detail",
+            ),
+            ExpandableDetail("notice-detail", ["步骤：step-001", "类别：verification_failed", "证据：1"]),
+        )
+
+
 def test_intermediate_assistant_output_remains_after_final_message() -> None:
     timeline = ConversationTimeline()
 
@@ -110,40 +130,6 @@ def test_plain_task_progress_projection_does_not_add_timeline_item() -> None:
     assert "任务进度" not in timeline.plain_text
     assert "step-001" not in timeline.plain_text
     assert "model_turn_started" not in timeline.plain_text
-
-
-def test_timeline_accepts_notice_and_effect_presentation_items() -> None:
-    timeline = ConversationTimeline()
-
-    timeline.add_notice(
-        "任务遇到问题：验证失败",
-        "建议：修复后重新运行测试",
-        turn_index=1,
-        detail_id="detail-1",
-        detail_lines=["步骤：step-001", "类别：verification_failed"],
-    )
-    timeline.add_effect_summary(
-        "已修改文件",
-        "2 个文件有变更",
-        turn_index=1,
-        detail_id="detail-2",
-        detail_lines=["工具：apply_patch"],
-    )
-
-    text = timeline.plain_text
-    assert "任务遇到问题：验证失败" in text
-    assert "建议：修复后重新运行测试" in text
-    assert "已处理 1 项 >" in text
-    assert "已修改文件" not in text
-    assert "2 个文件有变更" not in text
-    assert "类别：verification_failed" not in text
-    assert "工具：apply_patch" not in text
-
-    assert timeline.toggle_process_group(1) is True
-    text = timeline.plain_text
-    assert "已修改文件" in text
-    assert "2 个文件有变更" in text
-    assert "工具：apply_patch" not in text
 
 
 def test_timeline_adds_projected_presentation_items() -> None:
@@ -278,27 +264,23 @@ def test_replacing_late_presentation_item_keeps_it_before_same_turn_assistant_fi
 
 
 def test_notice_details_are_collapsed_by_default_and_expand_in_place() -> None:
-    timeline = ConversationTimeline()
-    timeline.add_notice(
-        "任务遇到问题：验证失败",
-        "建议：修复后重新运行测试",
-        turn_index=1,
-        detail_id="detail-1",
-        detail_lines=["步骤：step-001", "类别：verification_failed", "证据：1"],
-    )
+    async def run() -> None:
+        app = NoticeClickTestApp()
+        async with app.run_test(size=(120, 30)) as pilot:
+            timeline = app.query_one("#conversation", ConversationTimeline)
+            assert "类别：verification_failed" not in timeline.plain_text
 
-    collapsed = timeline.plain_text
-    assert "类别：verification_failed" not in collapsed
+            await pilot.click(".timeline-notice")
+            await pilot.pause(0.1)
 
-    item_id = timeline._items[0].item_id
-    assert timeline.toggle_detail(item_id) is True
+            assert "详情：点击收起" in timeline.plain_text
+            assert "类别：verification_failed" in timeline.plain_text
 
-    expanded = timeline.plain_text
-    assert "详情：点击收起" in expanded
-    assert "类别：verification_failed" in expanded
+            await pilot.click(".timeline-notice")
+            await pilot.pause(0.1)
+            assert "类别：verification_failed" not in timeline.plain_text
 
-    assert timeline.toggle_detail(item_id) is True
-    assert "类别：verification_failed" not in timeline.plain_text
+    asyncio.run(run())
 
 
 def test_process_items_are_folded_into_turn_summary_by_default() -> None:
@@ -393,19 +375,19 @@ def test_clicking_process_group_expands_the_folded_items() -> None:
 
 
 def test_expanded_detail_lines_are_bounded() -> None:
-    timeline = ConversationTimeline()
     long_detail = "错误摘要：" + ("x" * 500)
-    timeline.add_effect_summary(
-        "已执行操作",
-        "操作已完成",
-        turn_index=1,
-        detail_id="detail-1",
-        detail_lines=[long_detail],
+    text = render_timeline_item(
+        TimelineItem(
+            item_id=1,
+            role="effect",
+            turn_index=1,
+            content="操作已完成",
+            title="已执行操作",
+            detail_lines=[long_detail],
+            expanded=True,
+        ),
+        show_tool_details=False,
     )
-
-    timeline.toggle_detail(timeline._items[0].item_id)
-
-    text = timeline.plain_text
     assert long_detail not in text
     assert "..." in text
 

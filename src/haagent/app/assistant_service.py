@@ -7,9 +7,8 @@ haagent/app/assistant_service.py - 个人助手应用组合根
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from haagent.app import (
     channel_usecases,
@@ -26,10 +25,6 @@ from haagent.models.gateway_registry import gateway_from_profile
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
-if TYPE_CHECKING:
-    from haagent.scheduling.store import ScheduleStore
-
-
 class AssistantService:
     """组合应用 Module；具体用例由各 Module 自己实现。"""
 
@@ -45,9 +40,6 @@ class AssistantService:
         enable_web: bool = False,
         initial_resume: str | Path | None = None,
         initial_continue: bool = False,
-        schedule_db_path: Path | None = None,
-        schedule_store_factory: Callable[[], ScheduleStore] | None = None,
-        background_adapter_factory: Callable[[], object] | None = None,
     ) -> None:
         # 所有 Module 共享同一私有状态，避免配置与当前 session 在层间漂移。
         self._context = AssistantContext(
@@ -60,9 +52,6 @@ class AssistantService:
             enable_web=enable_web,
             initial_resume=initial_resume,
             initial_continue=initial_continue,
-            schedule_db_path=schedule_db_path,
-            schedule_store_factory=schedule_store_factory,
-            background_adapter_factory=background_adapter_factory,
         )
         self.workspace = workspace_usecases.AssistantWorkspace(self._context)
         self.sessions = session_usecases.AssistantSessions(self._context)

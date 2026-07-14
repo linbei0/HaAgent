@@ -58,7 +58,6 @@ def test_conversation_controller_wraps_timeline_public_operations() -> None:
     controller.finalize_intermediate_message(1, 1, "完整审查报告")
     controller.merge_assistant_delta(1, 2, "最终")
     controller.finalize_assistant_message(1, 2, "最终总结")
-    controller.record_tool_activity(1, "shell", "finished", "完成")
     controller.record_tool_diagnostic(1, "shell", "诊断")
     controller.set_tool_details(True)
 
@@ -69,7 +68,6 @@ def test_conversation_controller_wraps_timeline_public_operations() -> None:
         ("intermediate", "完整审查报告", 1),
         ("delta", "最终", 1),
         ("final", "最终总结", 1),
-        ("tool", "shell:done:完成", 1),
         ("diagnostic", "shell:诊断", 1),
         ("details", "True", 0),
     ]
@@ -81,14 +79,16 @@ def test_input_dock_opens_one_overlay_and_preserves_prompt_value() -> None:
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause(0.1)
             dock = app.query_one(InputDock)
+            prompt = app.query_one(PromptInput)
 
-            dock.set_prompt_value("/he")
+            prompt.text = "/he"
+            prompt.focus()
             dock.open_command_suggestions("he")
             await pilot.pause(0.1)
             dock.open_file_refs("read")
             await pilot.pause(0.1)
 
-            assert dock.prompt_value() == "/he"
+            assert prompt.text == "/he"
             assert len(app.query(OptionList)) == 1
             assert app.query_one(PromptInput).has_focus
 
@@ -175,9 +175,6 @@ class _ConversationTimeline:
     def finalize_intermediate(self, turn_index: int, model_turn: int | None, content: str) -> None:
         del model_turn
         self.calls.append(("intermediate", content, turn_index))
-
-    def add_tool_activity(self, activity) -> None:
-        self.calls.append(("tool", f"{activity.tool_name}:{activity.status}:{activity.summary}", activity.turn_index))
 
     def add_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         self.calls.append(("diagnostic", f"{tool_name}:{message}", turn_index))

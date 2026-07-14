@@ -50,29 +50,22 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
     app._refresh()
 
 
-def _handle_assistant_delta(app, event: RuntimeUiEvent) -> None:
-    typed = _as_event(event, AssistantDeltaEvent)
-    app._conversation.merge_assistant_delta(typed.turn_index, typed.model_turn, typed.delta)
+def _handle_assistant_delta(app, event: AssistantDeltaEvent) -> None:
+    app._conversation.merge_assistant_delta(event.turn_index, event.model_turn, event.delta)
     # timeline 自身已有 ~33ms markdown 批同步；这里只调度轻量 stick/scroll，不触 status。
-    schedule = getattr(app, "_schedule_streaming_refresh", None)
-    if callable(schedule):
-        schedule()
-    else:
-        app._refresh_conversation()
+    app._schedule_streaming_refresh()
 
 
-def _handle_assistant_message(app, event: RuntimeUiEvent) -> None:
-    typed = _as_event(event, AssistantMessageEvent)
-    app._conversation.finalize_assistant_message(typed.turn_index, typed.model_turn, typed.content)
+def _handle_assistant_message(app, event: AssistantMessageEvent) -> None:
+    app._conversation.finalize_assistant_message(event.turn_index, event.model_turn, event.content)
     app.clear_progress_status()
 
 
-def _handle_assistant_intermediate(app, event: RuntimeUiEvent) -> None:
-    typed = _as_event(event, AssistantIntermediateEvent)
+def _handle_assistant_intermediate(app, event: AssistantIntermediateEvent) -> None:
     app._conversation.finalize_intermediate_message(
-        typed.turn_index,
-        typed.model_turn,
-        typed.content,
+        event.turn_index,
+        event.model_turn,
+        event.content,
     )
 
 
@@ -146,7 +139,7 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
         app._conversation.record_tool_diagnostic(
             event.turn_index,
             _warning_tool_name(event),
-            _warning_detail_message(event),
+            event.message,
         )
         return
     app._conversation.append_block(event.title, event.message)
@@ -171,12 +164,6 @@ def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:
     return
 
 
-def _as_event(event: RuntimeUiEvent, event_type):
-    if not isinstance(event, event_type):
-        raise TypeError(f"expected {event_type.__name__}, got {type(event).__name__}")
-    return event
-
-
 def _warning_tool_name(event: WarningNoticeEvent) -> str:
     value = event.details.get("tool_name")
     if isinstance(value, str) and value:
@@ -185,12 +172,6 @@ def _warning_tool_name(event: WarningNoticeEvent) -> str:
     if isinstance(subject, str) and subject:
         return subject
     return "unknown_tool"
-
-
-def _warning_detail_message(event: WarningNoticeEvent) -> str:
-    if event.notice_kind == "compression_diagnostic":
-        return event.message
-    return event.message
 
 
 def _apply_progress_presentation(app, presentation: ProgressPresentation) -> None:
@@ -212,17 +193,13 @@ def _aggregate_tool_failure(
 ) -> ProgressPresentation:
     if presentation.timeline_item is None:
         return presentation
-    groups = getattr(app, "_tui_tool_failure_groups", None)
-    if groups is None:
-        groups = {}
-        setattr(app, "_tui_tool_failure_groups", groups)
     key = (
         event.turn_index,
         event.tool_name,
         event.error_type or event.result_status or event.status,
     )
-    count = groups.get(key, 0) + 1
-    groups[key] = count
+    count = app._tool_failure_groups.get(key, 0) + 1
+    app._tool_failure_groups[key] = count
     if count <= 1:
         return presentation
     return present_grouped_tool_failure(event, count=count)
@@ -235,11 +212,7 @@ def _aggregate_task_problem(
 ) -> ProgressPresentation:
     if presentation.timeline_item is None:
         return presentation
-    groups = getattr(app, "_tui_task_problem_groups", None)
-    if groups is None:
-        groups = {}
-        setattr(app, "_tui_task_problem_groups", groups)
-    group = groups.setdefault(
+    group = app._task_problem_groups.setdefault(
         event.turn_index,
         {"count": 0, "labels": [], "actions": []},
     )

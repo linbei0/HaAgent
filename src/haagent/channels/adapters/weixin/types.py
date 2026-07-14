@@ -67,7 +67,6 @@ class WeixinInboundMessage:
     from_user_id: str
     text: str
     context_token: str
-    create_time_ms: int = 0
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __repr__(self) -> str:
@@ -81,9 +80,3 @@ class WeixinInboundMessage:
 class WeixinUpdates:
     messages: list[WeixinInboundMessage]
     cursor: str
-
-
-@dataclass(frozen=True)
-class WeixinSendResult:
-    ok: bool
-    error: str | None = None

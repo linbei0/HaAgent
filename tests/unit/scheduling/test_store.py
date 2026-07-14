@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -62,12 +62,13 @@ def _def(
 
 def test_store_creates_schema_with_wal_and_version(tmp_path: Path) -> None:
     db = tmp_path / "schedules.sqlite3"
-    with ScheduleStore(db) as store:
-        assert store.schema_version() == 1
-        row = store._conn.execute("PRAGMA journal_mode").fetchone()
+    with ScheduleStore(db):
+        pass
+    with sqlite3.connect(db) as conn:
+        version = conn.execute("SELECT version FROM schema_version").fetchone()
+        assert version == (1,)
+        row = conn.execute("PRAGMA journal_mode").fetchone()
         assert row[0].lower() == "wal"
-        fk = store._conn.execute("PRAGMA foreign_keys").fetchone()
-        assert fk[0] == 1
 
 
 def test_create_get_list_update_revision(tmp_path: Path) -> None:
@@ -94,10 +95,10 @@ def test_create_get_list_update_revision(tmp_path: Path) -> None:
         )
         assert updated.revision == 2
         assert updated.name == "plan-v2"
-        revs = store.list_revisions(created.id)
-        assert len(revs) == 2
-        assert revs[0].revision == 1
-        assert revs[1].revision == 2
+        revision_1 = store.get_revision(created.id, 1)
+        revision_2 = store.get_revision(created.id, 2)
+        assert revision_1 is not None and revision_1.name == "plan"
+        assert revision_2 is not None and revision_2.name == "plan-v2"
 
 
 def test_optimistic_revision_conflict(tmp_path: Path) -> None:
@@ -231,7 +232,7 @@ def test_run_inbox_unread(tmp_path: Path) -> None:
         assert run.unread is True
         store.mark_run_read(run.id)
         assert store.get_run(run.id).unread is False
-        assert store.unread_count() == 0
+        assert store.list_runs(unread_only=True) == []
 
 
 def test_unique_trigger_key(tmp_path: Path) -> None:
@@ -261,6 +262,240 @@ def test_unique_trigger_key(tmp_path: Path) -> None:
                 now=now,
             )
         assert exc.value.code == "duplicate_trigger"
+
+
+def test_parallel_policy_allows_second_run_while_first_is_running(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+    with ScheduleStore(tmp_path / "parallel.db") as store:
+        definition = _def(tmp_path, overlap_policy="parallel")
+        store.create(definition, now=now)
+        first = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="parallel:first",
+            trigger_kind="scheduled",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        second = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="parallel:second",
+            trigger_kind="scheduled",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        assert store.claim_run(
+            first.id,
+            worker_id="worker-1",
+            lease_expires_at=now,
+            now=now,
+        ) is not None
+
+        claimable = store.list_claimable_runs(now=now, limit=10)
+        assert second.id in {run.id for run in claimable}
+
+
+def test_queue_policy_does_not_bypass_future_retry(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+    retry_at = now.replace(hour=14)
+    with ScheduleStore(tmp_path / "queue.db") as store:
+        definition = _def(tmp_path, overlap_policy="queue")
+        store.create(definition, now=now)
+        first = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="queue:first",
+            trigger_kind="scheduled",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        second = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="queue:second",
+            trigger_kind="scheduled",
+            scheduled_for_utc=now.replace(hour=13),
+            now=now,
+        )
+        claim = store.claim_run(
+            first.id,
+            worker_id="worker",
+            lease_expires_at=now.replace(minute=5),
+            now=now,
+        )
+        assert claim is not None
+        assert second.id not in {
+            run.id for run in store.list_claimable_runs(now=now, limit=10)
+        }
+        store.finish_run(
+            first.id,
+            status="retry_wait",
+            now=now,
+            retry_at_utc=retry_at,
+            expected_worker_id="worker",
+            expected_attempt=claim.attempt_count,
+        )
+
+        assert store.list_claimable_runs(now=now.replace(hour=13), limit=10) == []
+        assert [
+            run.id for run in store.list_claimable_runs(now=retry_at, limit=10)
+        ] == [first.id]
+
+
+def test_retry_wait_cancel_is_terminal(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+    with ScheduleStore(tmp_path / "retry-cancel.db") as store:
+        definition = _def(tmp_path)
+        store.create(definition, now=now)
+        run = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="manual:retry-cancel",
+            trigger_kind="manual",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        claim = store.claim_run(
+            run.id,
+            worker_id="worker",
+            lease_expires_at=now + timedelta(seconds=45),
+            now=now,
+        )
+        assert claim is not None
+        store.finish_run(
+            run.id,
+            status="retry_wait",
+            now=now,
+            retry_at_utc=now + timedelta(seconds=30),
+            expected_worker_id="worker",
+            expected_attempt=claim.attempt_count,
+        )
+
+        cancelled = store.request_cancel(run.id)
+        assert cancelled.status == "cancelled"
+        assert run.id not in {
+            item.id
+            for item in store.list_claimable_runs(
+                now=now + timedelta(hours=1), limit=10
+            )
+        }
+
+
+def test_cancellation_wins_finish_race(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+    with ScheduleStore(tmp_path / "cancel-race.db") as store:
+        definition = _def(tmp_path)
+        store.create(definition, now=now)
+        run = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="manual:cancel-race",
+            trigger_kind="manual",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        claim = store.claim_run(
+            run.id,
+            worker_id="worker",
+            lease_expires_at=now + timedelta(seconds=45),
+            now=now,
+        )
+        assert claim is not None
+        store.request_cancel(run.id)
+
+        finished = store.finish_run(
+            run.id,
+            status="succeeded",
+            now=now,
+            expected_worker_id="worker",
+            expected_attempt=claim.attempt_count,
+        )
+        assert finished.status == "cancelled"
+
+
+def test_finish_requires_current_claim_fence(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+    with ScheduleStore(tmp_path / "fence.db") as store:
+        definition = _def(tmp_path)
+        store.create(definition, now=now)
+        run = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="manual:fence",
+            trigger_kind="manual",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        first = store.claim_run(
+            run.id,
+            worker_id="worker-1",
+            lease_expires_at=now + timedelta(seconds=5),
+            now=now,
+        )
+        assert first is not None
+        with pytest.raises(ScheduleStoreError) as missing:
+            store.finish_run(run.id, status="succeeded", now=now)
+        assert missing.value.code == "missing_fence"
+
+        retry_at = now + timedelta(seconds=10)
+        store.finish_run(
+            run.id,
+            status="retry_wait",
+            now=retry_at,
+            retry_at_utc=retry_at,
+            expected_worker_id="worker-1",
+            expected_attempt=first.attempt_count,
+        )
+        second = store.claim_run(
+            run.id,
+            worker_id="worker-2",
+            lease_expires_at=retry_at + timedelta(seconds=45),
+            now=retry_at,
+        )
+        assert second is not None and second.attempt_count == 2
+
+        with pytest.raises(ScheduleStoreError) as stale:
+            store.finish_run(
+                run.id,
+                status="succeeded",
+                now=retry_at,
+                expected_worker_id="worker-1",
+                expected_attempt=first.attempt_count,
+            )
+        assert stale.value.code == "stale_finish"
+        current = store.get_run(run.id)
+        assert current is not None and current.worker_id == "worker-2"
+
+
+def test_finish_updates_schedule_last_run_in_same_store_operation(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
+    with ScheduleStore(tmp_path / "last-run.db") as store:
+        definition = _def(tmp_path)
+        store.create(definition, now=now)
+        run = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="manual:last-run",
+            trigger_kind="manual",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        claim = store.claim_run(
+            run.id,
+            worker_id="worker",
+            lease_expires_at=now + timedelta(seconds=45),
+            now=now,
+        )
+        assert claim is not None
+        store.finish_run(
+            run.id,
+            status="succeeded",
+            now=now,
+            expected_worker_id="worker",
+            expected_attempt=claim.attempt_count,
+        )
+        assert store.get_last_run_at_utc(definition.id) == now
 
 
 def test_connection_closed_allows_tmp_cleanup(tmp_path: Path) -> None:

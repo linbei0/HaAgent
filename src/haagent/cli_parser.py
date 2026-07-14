@@ -68,50 +68,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     )
     _add_runs_root(parser, help_text="directory for assistant session packages (default: .runs)")
     _add_web_flag(parser)
-    parser.set_defaults(command="tui", request=None, handler=handle_tui_entry)
+    parser.set_defaults(command="tui", handler=handle_tui_entry)
     subparsers = parser.add_subparsers(dest="command", required=False, parser_class=argparse.ArgumentParser)
 
-    setup_parser = subparsers.add_parser("setup", help=argparse.SUPPRESS)
-    setup_parser.set_defaults(handler=handle_tui_migration)
-
-    sessions_parser = subparsers.add_parser("sessions", help=argparse.SUPPRESS)
-    sessions_parser.add_argument(
-        "--workspace-root",
-        type=Path,
-        help="workspace root to list sessions for (default: current directory)",
-    )
-    _add_runs_root(sessions_parser, help_text="directory for assistant session packages (default: .runs)")
-    sessions_parser.set_defaults(handler=handle_tui_migration)
-
-    memory_parser = subparsers.add_parser("memory", help=argparse.SUPPRESS)
-    memory_parser.set_defaults(handler=handle_tui_migration)
-    memory_subparsers = memory_parser.add_subparsers(dest="memory_action", required=False)
-    memory_list = memory_subparsers.add_parser("list", help="list pending memory candidates")
-    _add_memory_common_args(memory_list)
-    memory_list.add_argument("--all", action="store_true", help="include confirmed and rejected candidates")
-    memory_list.set_defaults(handler=handle_tui_migration)
-    memory_confirm = memory_subparsers.add_parser("confirm", help="confirm a pending memory candidate")
-    memory_confirm.add_argument("candidate_id", help="candidate id to confirm")
-    _add_memory_common_args(memory_confirm)
-    memory_confirm.add_argument("--title", help="edited title to commit")
-    memory_confirm.add_argument("--body", help="edited body to commit")
-    memory_confirm.add_argument("--tag", action="append", help="edited tag; repeat for multiple tags")
-    memory_confirm.set_defaults(handler=handle_tui_migration)
-    memory_reject = memory_subparsers.add_parser("reject", help="reject a pending memory candidate")
-    memory_reject.add_argument("candidate_id", help="candidate id to reject")
-    _add_memory_common_args(memory_reject)
-    memory_reject.add_argument("--reason", default="rejected by user", help="rejection reason")
-    memory_reject.set_defaults(handler=handle_tui_migration)
-
-    tui_parser = subparsers.add_parser("tui", help=argparse.SUPPRESS)
-    tui_parser.add_argument(
-        "--workspace-root",
-        type=Path,
-        help="workspace root for the TUI session (default: current directory)",
-    )
-    _add_runs_root(tui_parser, help_text="directory for assistant session packages (default: .runs)")
-    _add_web_flag(tui_parser)
-    tui_parser.set_defaults(handler=handle_tui_migration)
+    for legacy_command in ("setup", "chat", "sessions", "memory", "tui"):
+        _add_migration_command(subparsers, legacy_command)
 
     sandbox_parser = subparsers.add_parser("sandbox", help=argparse.SUPPRESS)
     sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_action", required=True)
@@ -156,29 +117,6 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         help_text=f"maximum model/tool turns before failing the run (default: {DEFAULT_RUN_MAX_TURNS})",
     )
     run_parser.set_defaults(handler=lambda args: handle_run(args, runtime))
-
-    chat_parser = subparsers.add_parser("chat", help=argparse.SUPPRESS)
-    chat_parser.add_argument(
-        "request",
-        nargs="?",
-        help="legacy natural language request; use plain haagent and the TUI instead",
-    )
-    chat_parser.add_argument(
-        "--workspace-root",
-        type=Path,
-        help="workspace root for the chat request (default: current directory)",
-    )
-    chat_parser.add_argument("--resume", help="resume a chat session by session id or session package path")
-    chat_parser.add_argument(
-        "--continue",
-        action="store_true",
-        dest="continue_session",
-        help="resume the latest chat session for the current workspace",
-    )
-    _add_runs_root(chat_parser, help_text="directory for assistant session packages (default: .runs)")
-    _add_model_provider(chat_parser, default=None)
-    _add_web_flag(chat_parser)
-    chat_parser.set_defaults(handler=handle_tui_migration)
 
     smoke_parser = subparsers.add_parser("smoke", help="run the minimal HaAgent smoke suite")
     _add_runs_root(smoke_parser, help_text="directory for episode packages (default: .runs)")
@@ -329,14 +267,16 @@ def _add_runs_root(parser: argparse.ArgumentParser, *, help_text: str) -> None:
     )
 
 
-def _add_memory_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--workspace-root",
-        type=Path,
-        help="workspace root for memory review (default: current directory)",
+def _add_migration_command(subparsers, command: str) -> None:
+    parser = subparsers.add_parser(
+        command,
+        help=argparse.SUPPRESS,
+        add_help=False,
+        prefix_chars="+",
     )
-    parser.add_argument("--session", help="session id or session package path")
-    _add_runs_root(parser, help_text="directory for assistant session packages (default: .runs)")
+    # 旧命令只负责给迁移提示，不再维护已失效的参数/子命令模型。
+    parser.add_argument("legacy_args", nargs=argparse.REMAINDER)
+    parser.set_defaults(handler=handle_tui_migration)
 
 
 def _add_model_provider(

@@ -56,7 +56,6 @@ def test_wait_for_pending_filters_by_binding_key() -> None:
         holders.append(
             broker.request_approval(
                 req,
-                address=address,
                 owner_sender_id=address.conversation_id,
                 binding_key=address.binding_key(),
             )
@@ -92,7 +91,6 @@ def test_wait_for_pending_skips_seen_nonce_without_busy_spin() -> None:
     def worker() -> None:
         broker.request_approval(
             req,
-            address=address,
             owner_sender_id="owner-1",
             binding_key=address.binding_key(),
         )

@@ -30,7 +30,7 @@ def handle_prompt_path_authorization(app: "HaAgentTuiApp", prompt: str) -> bool:
     if not untrusted_paths:
         return False
     target_path = untrusted_paths[0]
-    if getattr(status, "permission_mode", "request_approval") == "full_access":
+    if status.permission_mode == "full_access":
         app._set_next_turn_target_path(target_path)
         app._conversation.append_block("Permissions", "完全访问权限已启用；本轮不会限制工作区外路径。")
         app._start_prompt(prompt)

@@ -14,6 +14,7 @@ from textual import events
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from haagent.app.assistant_types import AssistantSessionTurn
 from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem
 from haagent.tui.widgets.timeline_models import (
     DETAILS_REFRESH_RECENT_TURNS,
@@ -107,10 +108,6 @@ class ConversationTimeline(VerticalScroll):
         self._plain_text_dirty = False
         self._show_singleton("memory", text, "timeline-memory")
 
-    def append_lines(self, lines: list[str], *, start: int) -> None:
-        for line in lines[start:]:
-            self.add_system("系统", line)
-
     @property
     def plain_text(self) -> str:
         if self._plain_text_dirty:
@@ -153,14 +150,14 @@ class ConversationTimeline(VerticalScroll):
         self._append_item(TimelineItem(item_id=next(self._ids), role="user", turn_index=turn_index, content=content, title="你"))
         self._render_timeline()
 
-    def load_session_history(self, turns: list[Any]) -> None:
+    def load_session_history(self, turns: list[AssistantSessionTurn]) -> None:
         """批量装载会话历史，只触发一次 timeline 同步。"""
         from haagent.tui.application.session_flow import session_turn_assistant_text
 
         self.clear_timeline()
         for turn in turns:
-            turn_index = int(getattr(turn, "turn_index", 0) or 0)
-            request = str(getattr(turn, "request", "") or "")
+            turn_index = turn.turn_index
+            request = turn.request
             assistant_text = session_turn_assistant_text(turn)
             self._append_item(
                 TimelineItem(
@@ -181,7 +178,7 @@ class ConversationTimeline(VerticalScroll):
                     title="HaAgent",
                 ),
             )
-            status = str(getattr(turn, "status", "completed") or "completed")
+            status = turn.status
             if status != "completed":
                 self._append_item(
                     TimelineItem(
@@ -197,48 +194,6 @@ class ConversationTimeline(VerticalScroll):
     def add_system(self, title: str, content: str, *, turn_index: int = 0) -> None:
         self._append_item(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
         self._render_timeline()
-
-    def add_notice(
-        self,
-        title: str,
-        content: str,
-        *,
-        turn_index: int,
-        detail_id: str | None = None,
-        detail_lines: list[str] | None = None,
-    ) -> None:
-        item = TimelineItem(
-            item_id=next(self._ids),
-            role="notice",
-            turn_index=turn_index,
-            title=title,
-            content=content,
-            detail_id=detail_id,
-            detail_lines=detail_lines or [],
-        )
-        self._append_item(item)
-        self._render_or_mark_dirty()
-
-    def add_effect_summary(
-        self,
-        title: str,
-        content: str,
-        *,
-        turn_index: int,
-        detail_id: str | None = None,
-        detail_lines: list[str] | None = None,
-    ) -> None:
-        item = TimelineItem(
-            item_id=next(self._ids),
-            role="effect",
-            turn_index=turn_index,
-            title=title,
-            content=content,
-            detail_id=detail_id,
-            detail_lines=detail_lines or [],
-        )
-        self._append_item(item)
-        self._render_or_mark_dirty()
 
     def add_presentation_item(
         self,

@@ -87,19 +87,6 @@ FailureCategory = Literal[
 SCHEDULE_STATUSES: frozenset[str] = frozenset(
     {"active", "paused", "completed", "error", "archived"}
 )
-RUN_STATUSES: frozenset[str] = frozenset(
-    {
-        "queued",
-        "running",
-        "retry_wait",
-        "succeeded",
-        "failed",
-        "needs_attention",
-        "cancelled",
-        "skipped",
-        "interrupted",
-    }
-)
 DESTINATION_KINDS: frozenset[str] = frozenset({"new_session", "resume_session"})
 MISFIRE_POLICIES: frozenset[str] = frozenset({"skip", "latest", "all"})
 OVERLAP_POLICIES: frozenset[str] = frozenset({"skip", "queue", "parallel"})

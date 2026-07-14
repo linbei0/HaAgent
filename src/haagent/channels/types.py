@@ -7,12 +7,7 @@ haagent/channels/types.py - 渠道消息与能力公共合同
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Literal
-
-
-class UnsupportedCapabilityError(RuntimeError):
-    """平台未声明的能力被调用时显式失败，禁止静默降级。"""
 
 
 @dataclass(frozen=True)
@@ -48,24 +43,10 @@ class InboundChannelMessage:
     message_id: str
     sender_id: str
     text: str
-    received_at: datetime
     reply_handle: ChannelReplyHandle
-    reply_to_message_id: str | None = None
-
-
-@dataclass(frozen=True)
-class ChannelCapabilities:
-    message_editing: bool
-    native_streaming: bool
-    typing: bool
-    buttons: bool
-    threads: bool
-    inbound_media: frozenset[str]
-    outbound_media: frozenset[str]
 
 
 @dataclass(frozen=True)
 class SendResult:
     ok: bool
-    message_id: str | None = None
     error: str | None = None

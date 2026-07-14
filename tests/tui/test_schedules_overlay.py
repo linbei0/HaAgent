@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from haagent.app.assistant_types import (
     AssistantSchedule,
@@ -23,9 +26,17 @@ from haagent.app.assistant_types import (
 )
 from haagent.scheduling.models import RetryPolicy
 from haagent.tui.application.app import HaAgentTuiApp
-from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
-from haagent.tui.overlays.schedule_editor import ScheduleEditorOverlay, ScheduleEditorState
-from haagent.tui.overlays.schedules import SchedulesOverlay, SchedulesOverlayState
+from haagent.tui.commands import command_registry, parse_slash_command
+from haagent.tui.overlays.schedule_editor import (
+    ScheduleEditorOverlay,
+    ScheduleEditorState,
+    parse_rrule_fields,
+)
+from haagent.tui.overlays.schedules import (
+    VISIBLE_SCHEDULE_COUNT,
+    SchedulesOverlay,
+    SchedulesOverlayState,
+)
 from tests.tui.support import FakeAssistantService, FakeSchedules, _all_text
 
 
@@ -95,7 +106,7 @@ def test_schedules_is_structured_slash_command() -> None:
     assert result.command is not None
     assert result.command.name == "schedules"
     assert result.command.action == "open_schedules"
-    assert result == SlashCommandResult(command=registry.require("schedules"), argument="")
+    assert result.argument == ""
 
 
 def test_schedules_overlay_empty_state_and_list_fields(tmp_path: Path) -> None:
@@ -205,6 +216,94 @@ def test_schedule_editor_frequency_forms_build_rrule() -> None:
     assert "INTERVAL=30" in rrule
     custom = ScheduleEditorState(page=1, frequency="custom", custom_rrule="FREQ=WEEKLY;BYDAY=MO")
     assert custom.build_rrule() == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_schedule_editor_round_trips_interval_rrules() -> None:
+    for rule, expected in [
+        ("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO", ("INTERVAL=2", "BYDAY=MO")),
+        ("FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=15", ("INTERVAL=3", "BYMONTHDAY=15")),
+    ]:
+        fields = parse_rrule_fields(rule)
+        state = ScheduleEditorState(
+            name="n",
+            prompt="p",
+            frequency=str(fields["frequency"]),
+            interval_value=int(fields["interval_value"]),
+            interval_unit=str(fields["interval_unit"]),
+            byday=str(fields["byday"]),
+            bymonthday=int(fields["bymonthday"]),
+            custom_rrule=str(fields["custom_rrule"]),
+        )
+        rebuilt = state.build_rrule() or ""
+        assert all(fragment in rebuilt for fragment in expected)
+
+
+def test_schedule_editor_request_preserves_explicit_empty_tools_and_zero_retry() -> None:
+    state = ScheduleEditorState(
+        name="n",
+        prompt="p",
+        workspace_root="E:/absolute/ws",
+        connection_id="local",
+        model="m1",
+        tool_preset="custom",
+        custom_allowed_tools=(),
+        retry_max_attempts=2,
+        retry_initial_delay_seconds=0,
+        retry_multiplier=2.0,
+        retry_max_delay_seconds=60,
+    )
+    request = state.to_create_request()
+    assert request.allowed_tools == ()
+    assert request.retry_policy.initial_delay_seconds == 0
+
+
+def test_schedule_editor_from_schedule_preserves_execution_policy(tmp_path: Path) -> None:
+    item = replace(
+        _full(workspace=tmp_path),
+        rrule="FREQ=WEEKLY;BYDAY=FR",
+        allowed_tools=(
+            "file_list",
+            "grep",
+            "file_read",
+            "file_write",
+            "apply_patch",
+            "skill_list",
+            "skill_read",
+        ),
+        approval_allowed_tools=("shell",),
+        retry_policy=RetryPolicy(
+            max_attempts=5,
+            initial_delay_seconds=10,
+            multiplier=3.0,
+            max_delay_seconds=600,
+        ),
+    )
+    state = ScheduleEditorState.from_schedule(item)
+    request = state.to_create_request()
+
+    assert state.tool_preset == "workspace_write"
+    assert request.rrule == "FREQ=WEEKLY;BYDAY=FR"
+    assert request.retry_policy == item.retry_policy
+    assert request.approval_allowed_tools == ("shell",)
+    assert "file_write" in request.allowed_tools
+
+
+def test_schedule_editor_rejects_empty_required_fields() -> None:
+    state = ScheduleEditorState(name="", prompt="")
+    assert state.validate_for_save() is not None
+    with pytest.raises(ValueError):
+        state.to_create_request()
+
+
+def test_schedules_list_keeps_selection_visible_after_scrolling() -> None:
+    items = [
+        _summary(schedule_id=f"sch_{index}", name=f"plan-{index}")
+        for index in range(VISIBLE_SCHEDULE_COUNT + 5)
+    ]
+    state = SchedulesOverlayState(schedules=items, runs=[])
+    for _ in range(VISIBLE_SCHEDULE_COUNT + 1):
+        state = state.move(1)
+    assert f"plan-{state.selected_index}" in state.render()
 
 
 def test_schedules_overlay_long_text_and_no_color(tmp_path: Path) -> None:

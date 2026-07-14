@@ -22,6 +22,8 @@ from haagent.cli_render import (
     print_eval_summary,
     print_run_summary,
     print_smoke_result,
+    render_sandbox_doctor,
+    render_sandbox_status,
 )
 from haagent.app.assistant_service import AssistantService
 from haagent.channels.process_lock import GatewayInstanceLock
@@ -45,11 +47,6 @@ from haagent.tui.application.app import run_tui
 
 AUTHORING_ALLOWED_TOOLS = ["file_list", "grep", "file_read", "apply_patch", "shell"]
 AUTHORING_APPROVED_TOOLS = ["apply_patch", "shell"]
-
-# 测试可替换：平台 Adapter 工厂与凭据库。
-_gateway_adapter_factories: dict[str, Any] = {}
-_gateway_credential_store: Any = None
-
 
 @dataclass(frozen=True)
 class SmokeResult:
@@ -92,7 +89,7 @@ def handle_run(args, runtime: CliRuntime) -> int:
 
 
 def handle_tui_entry(args) -> int:
-    if getattr(args, "resume", None) is not None and bool(getattr(args, "continue_session", False)):
+    if args.resume is not None and args.continue_session:
         print("error: --resume cannot be combined with --continue")
         return 1
     workspace_root = args.workspace_root if args.workspace_root is not None else Path.cwd()
@@ -100,14 +97,14 @@ def handle_tui_entry(args) -> int:
         workspace_root=workspace_root,
         runs_root=args.runs_root,
         max_turns=load_runtime_settings().interactive_max_turns,
-        enable_web=bool(getattr(args, "enable_web", False)),
-        initial_resume=getattr(args, "resume", None),
-        initial_continue=bool(getattr(args, "continue_session", False)),
+        enable_web=args.enable_web,
+        initial_resume=args.resume,
+        initial_continue=args.continue_session,
     )
     return run_tui(service)
 
 
-def handle_tui_migration(args) -> int:
+def handle_tui_migration(_args) -> int:
     print("此交互入口已迁移到 TUI；请运行 haagent 打开 TUI 后完成该操作。")
     return 1
 
@@ -127,14 +124,14 @@ def handle_schedule_worker(args) -> int:
 
 def handle_gateway(args) -> int:
     """高级渠道网关：status 只读配置；run 前台挂载 Adapter；pair 重发配对码。"""
-    action = getattr(args, "gateway_action", None)
+    action = args.gateway_action
     if action == "status":
         return _gateway_status()
     if action == "run":
-        workspace = args.workspace_root if getattr(args, "workspace_root", None) is not None else Path.cwd()
+        workspace = args.workspace_root if args.workspace_root is not None else Path.cwd()
         return _gateway_run(Path(workspace).resolve())
     if action == "pair":
-        return _gateway_pair(getattr(args, "instance_id", None))
+        return _gateway_pair(args.instance_id)
     print("error: unknown gateway action")
     return 2
 
@@ -150,11 +147,11 @@ def _gateway_model_preflight(workspace_root: Path) -> tuple[bool, str]:
         status = service.workspace.status()
     except Exception as error:
         return False, f"model preflight failed: {type(error).__name__}"
-    if getattr(status, "profile_error", None):
+    if status.profile_error:
         return False, f"model profile error: {status.profile_error}"
-    if not getattr(status, "api_key_available", False):
+    if not status.api_key_available:
         return False, "model credential unavailable; configure via TUI first"
-    if not getattr(status, "model", None) and not getattr(status, "profile_name", None):
+    if not status.model and not status.profile_name:
         return False, "no active model profile; configure via TUI first"
     return True, "ok"
 
@@ -170,7 +167,7 @@ def _gateway_status() -> int:
     if not settings.instances:
         print("no channel instances configured; use TUI /channels")
         return 0
-    store = _resolve_gateway_store()
+    store = KeyringCredentialStore()
     state = ChannelStateStore(state_path)
     try:
         for item in settings.instances:
@@ -199,11 +196,6 @@ def _gateway_status() -> int:
 
 def _gateway_pair(instance_id: str | None) -> int:
     """重新签发一次性配对码（仅打印一次，不落明文）。"""
-    from haagent.app.assistant_context import AssistantContext
-    from haagent.app.channel_usecases import AssistantChannels
-    from haagent.models.gateway_registry import gateway_from_profile
-    from haagent.runtime.session.agent import AgentSession
-
     config_dir = user_config_dir()
     target = (instance_id or "").strip()
     if not target:
@@ -219,22 +211,7 @@ def _gateway_pair(instance_id: str | None) -> int:
         else:
             print("error: multiple instances; pass --instance-id")
             return 2
-    context = AssistantContext(
-        workspace_root=Path.cwd(),
-        runs_root=Path.cwd() / ".runs",
-        environ={},
-        gateway_factory=gateway_from_profile,
-        session_factory=AgentSession,
-        max_turns=8,
-        enable_web=False,
-        initial_resume=None,
-        initial_continue=False,
-    )
-    channels = AssistantChannels(
-        context,
-        config_dir=config_dir,
-        credential_store=_resolve_gateway_store(),
-    )
+    channels = AssistantService(workspace_root=Path.cwd()).channels
     try:
         code = channels.issue_pairing_code(target)
     except Exception as error:
@@ -291,15 +268,13 @@ def _gateway_run_with_lock(
     def service_factory(root: Path) -> AssistantService:
         return AssistantService(workspace_root=root)
 
-    store = _resolve_gateway_store()
     # 组合根负责装载 settings/state/adapters，CLI 只做前台生命周期。
     runtime = ChannelGatewayRuntime(
         config_path=config_path,
         state_path=state_path,
         default_workspace_root=workspace_root,
         service_factory=service_factory,
-        credential_store=store,
-        adapter_factories=_gateway_adapter_factories or None,
+        credential_store=KeyringCredentialStore(),
     )
     try:
         adapters = runtime.build_adapters()
@@ -337,14 +312,6 @@ def _gateway_run_with_lock(
         return 0
 
 
-def _resolve_gateway_store() -> Any:
-    if _gateway_credential_store is None:
-        return KeyringCredentialStore()
-    if callable(_gateway_credential_store) and not hasattr(_gateway_credential_store, "get_password"):
-        return _gateway_credential_store()
-    return _gateway_credential_store
-
-
 async def _run_gateway_until_cancelled(runtime: Any, stop_event: Any = None) -> int:
     import asyncio
     import signal
@@ -360,9 +327,8 @@ async def _run_gateway_until_cancelled(runtime: Any, stop_event: Any = None) -> 
     async def _watch_adapter_health() -> None:
         # 轮询 adapter 状态，auth_expired 时明确提示重新登录。
         while not stop.is_set():
-            manager = getattr(runtime, "manager", None)
+            manager = runtime.manager
             if manager is not None:
-                await manager.sync_adapter_states()
                 for item in manager.status():
                     instance_id = str(item["instance_id"])
                     state = str(item.get("state") or "")
@@ -551,36 +517,6 @@ def handle_check(args, runtime: CliRuntime) -> int:
         print(f"check_report={args.output}")
     print_check_summary(report)
     return 0 if report["status"] == "passed" else 1
-
-
-def render_sandbox_status(status) -> str:
-    return "\n".join(
-        [
-            f"backend={status.backend}",
-            f"isolation_level={status.isolation_level}",
-            f"network_policy={status.network_policy}",
-            f"credential_policy={status.credential_policy}",
-            f"degraded={str(status.degraded).lower()}",
-            f"reason={status.reason}",
-            f"config_path={status.config_path}",
-            f"next_action={status.recommendation}",
-        ],
-    )
-
-
-def render_sandbox_doctor(report) -> str:
-    return "\n".join(
-        [
-            f"backend={report.backend}",
-            f"ready={str(report.ready).lower()}",
-            f"docker_cli={report.docker_cli}",
-            f"docker_daemon={report.docker_daemon}",
-            f"image={report.image}",
-            f"auto_build_image={str(report.auto_build_image).lower()}",
-            f"reason={report.reason}",
-            f"next_action={report.next_action}",
-        ],
-    )
 
 
 def handle_export_eval(args) -> int:

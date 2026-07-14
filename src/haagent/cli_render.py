@@ -6,7 +6,6 @@ haagent/cli_render.py - CLI 用户可见输出渲染
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package
@@ -96,27 +95,6 @@ def print_eval_summary(report: dict[str, Any]) -> None:
         print(f"failure_reason={summary_value(str(result.get('failure_reason', '')))}")
 
 
-def format_event_mapping(value: object) -> str:
-    if not isinstance(value, dict) or not value:
-        return "none"
-    parts = []
-    for key in sorted(value):
-        item = value[key]
-        if item is None or item == "":
-            continue
-        parts.append(f"{key}={shell_token(str(item))}")
-    return ",".join(parts) if parts else "none"
-
-
-def shell_token(value: str) -> str:
-    compact = summary_value(" ".join(value.split()), 160)
-    if not compact:
-        return "none"
-    if any(character.isspace() or character in {",", "="} for character in compact):
-        return json.dumps(compact, ensure_ascii=False)
-    return compact
-
-
 def run_final_response(transcript: list[dict[str, Any]]) -> str:
     response = last_model_response(transcript)
     if response is None:
@@ -180,3 +158,33 @@ def summary_value(value: str, limit: int = 300) -> str:
     if not normalized:
         normalized = "none"
     return excerpt(normalized, limit)
+
+
+def render_sandbox_status(status) -> str:
+    return "\n".join(
+        [
+            f"backend={status.backend}",
+            f"isolation_level={status.isolation_level}",
+            f"network_policy={status.network_policy}",
+            f"credential_policy={status.credential_policy}",
+            f"degraded={str(status.degraded).lower()}",
+            f"reason={status.reason}",
+            f"config_path={status.config_path}",
+            f"next_action={status.recommendation}",
+        ],
+    )
+
+
+def render_sandbox_doctor(report) -> str:
+    return "\n".join(
+        [
+            f"backend={report.backend}",
+            f"ready={str(report.ready).lower()}",
+            f"docker_cli={report.docker_cli}",
+            f"docker_daemon={report.docker_daemon}",
+            f"image={report.image}",
+            f"auto_build_image={str(report.auto_build_image).lower()}",
+            f"reason={report.reason}",
+            f"next_action={report.next_action}",
+        ],
+    )

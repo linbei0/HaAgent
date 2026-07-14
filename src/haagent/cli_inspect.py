@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from haagent.cli_render import excerpt, last_model_response, summary_bool, summary_provider
 from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
@@ -56,7 +57,7 @@ def render_episode_summary(episode_path: Path) -> str:
         f"- episode_path: {episode_path}",
         f"- episode_version: {episode_metadata.get('episode_version', 'unknown')}",
         f"- status: {final_status}",
-        f"- provider: {_summary_provider(episode_metadata)}",
+        f"- provider: {summary_provider(episode_metadata)}",
         f"- context_count: {context_manifest.get('context_count', 0)}",
         "",
         "State Flow",
@@ -174,10 +175,6 @@ def _find_runs_root_for_episode(episode_path: Path) -> Path | None:
     return None
 
 
-def _summary_provider(episode_metadata: dict[str, Any]) -> str:
-    return str(episode_metadata.get("provider", "unknown"))
-
-
 def _format_contexts(episode_path: Path, contexts: list[dict[str, Any]]) -> list[str]:
     if not contexts:
         return ["- none"]
@@ -254,7 +251,7 @@ def _format_full_compact_contract(full_compact_contract: Any) -> list[str]:
         return []
     return [
         "  full_compact_contract: "
-        f"eligible={_format_bool(full_compact_contract.get('eligible'))} "
+        f"eligible={summary_bool(full_compact_contract.get('eligible'))} "
         f"reason={full_compact_contract.get('reason', 'unknown')} "
         f"preserve_recent={full_compact_contract.get('required_preserve_recent', 0)}",
     ]
@@ -275,7 +272,7 @@ def _format_full_compact(full_compact: Any) -> list[str]:
         ]
     return [
         "  full_compact: "
-        f"applied={_format_bool(applied)} "
+        f"applied={summary_bool(applied)} "
         f"reason={full_compact.get('reason', 'unknown')}",
     ]
 
@@ -305,7 +302,7 @@ def _format_source_diagnostics(source_diagnostics: Any) -> list[str]:
     if isinstance(session, dict):
         lines.append(
             "  source_diagnostics: session_summary "
-            f"included={_format_bool(session.get('included'))} "
+            f"included={summary_bool(session.get('included'))} "
             f"chars={session.get('model_input_chars', 0)}/{session.get('limit', 0)}",
         )
     memory = source_diagnostics.get("memory")
@@ -314,13 +311,13 @@ def _format_source_diagnostics(source_diagnostics: Any) -> list[str]:
             "  source_diagnostics: memory "
             f"used={memory.get('used_count', 0)} "
             f"skipped_over_budget={memory.get('skipped_over_budget', 0)} "
-            f"included={_format_bool(memory.get('included_in_model_input'))}",
+            f"included={summary_bool(memory.get('included_in_model_input'))}",
         )
     observations = source_diagnostics.get("observations")
     if isinstance(observations, dict):
         lines.append(
             "  source_diagnostics: observations "
-            f"included={_format_bool(observations.get('included_in_model_input'))} "
+            f"included={summary_bool(observations.get('included_in_model_input'))} "
             f"sections={observations.get('observation_section_count', 0)} "
             f"compacted={observations.get('compacted_count', 0)} "
             f"truncated={observations.get('truncated_count', 0)} "
@@ -375,8 +372,8 @@ def _format_cost(cost: dict[str, Any]) -> list[str]:
     else:
         estimated = str(estimated_cost)
     return [
-        f"- usage_available: {_format_bool(cost.get('usage_available'))}",
-        f"- pricing_available: {_format_bool(cost.get('pricing_available'))}",
+        f"- usage_available: {summary_bool(cost.get('usage_available'))}",
+        f"- pricing_available: {summary_bool(cost.get('pricing_available'))}",
         f"- model_call_count: {totals.get('model_call_count', 'unknown')}",
         f"- input_tokens: {_format_optional_count(totals.get('input_tokens'))}",
         f"- output_tokens: {_format_optional_count(totals.get('output_tokens'))}",
@@ -421,11 +418,11 @@ def _format_workspace_preflight(preflight: dict[str, Any]) -> list[str]:
         return ["- none"]
     lines = [
         f"- workspace_root: {preflight.get('workspace_root', 'unknown')}",
-        f"- exists: {_format_bool(preflight.get('exists'))}",
+        f"- exists: {summary_bool(preflight.get('exists'))}",
         f"- git_status: {preflight.get('git_status', 'unknown')}",
-        f"- is_git_repo: {_format_bool(preflight.get('is_git_repo'))}",
+        f"- is_git_repo: {summary_bool(preflight.get('is_git_repo'))}",
         f"- git_branch: {preflight.get('git_branch') or 'none'}",
-        f"- git_dirty: {_format_bool(preflight.get('git_dirty'))}",
+        f"- git_dirty: {summary_bool(preflight.get('git_dirty'))}",
     ]
     summary = preflight.get("git_dirty_summary")
     if isinstance(summary, dict):
@@ -443,18 +440,10 @@ def _format_workspace_preflight(preflight: dict[str, Any]) -> list[str]:
     lines.append(
         (
             "- modifies_original_workspace: "
-            f"{_format_bool(preflight.get('modifies_original_workspace'))}"
+            f"{summary_bool(preflight.get('modifies_original_workspace'))}"
         ),
     )
     return lines
-
-
-def _format_bool(value: Any) -> str:
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    return "unknown"
 
 
 def _format_optional_count(value: Any) -> str:
@@ -493,7 +482,7 @@ def _format_model_calls(model_calls: list[dict[str, Any]]) -> list[str]:
 
 
 def _format_final_response(transcript: list[dict[str, Any]]) -> list[str]:
-    response = _last_model_response(transcript)
+    response = last_model_response(transcript)
     if response is None:
         return ["- none"]
     tool_calls = response.get("tool_calls", [])
@@ -505,21 +494,8 @@ def _format_final_response(transcript: list[dict[str, Any]]) -> list[str]:
             f"turn={response.get('turn', 'unknown')} "
             f"tool_call_count={tool_call_count}"
         ),
-        f"- content: {_excerpt(content)}",
+        f"- content: {excerpt(content)}",
     ]
-
-
-def _last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for record in reversed(transcript):
-        if record.get("event") == "model_response":
-            return record
-    return None
-
-
-def _excerpt(content: str, limit: int = 500) -> str:
-    if len(content) <= limit:
-        return content
-    return content[:limit] + "... [truncated]"
 
 
 def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
@@ -550,7 +526,7 @@ def _format_human_interactions(transcript: list[dict[str, Any]]) -> list[str]:
     for record in interaction_events:
         event = record.get("event", "unknown")
         tool_name = record.get("tool_name", "unknown")
-        question = _excerpt(str(record.get("question", "")), 160)
+        question = excerpt(str(record.get("question", "")), 160)
         if event == "user_input_received":
             lines.append(f"- {event}: tool={tool_name} answer_chars={record.get('answer_chars', 0)}")
         elif event in {"approval_granted", "approval_denied"}:

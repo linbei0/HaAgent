@@ -32,10 +32,6 @@ class ConversationSearchState:
         self._matches: list[int] = []
         self._current = 0
 
-    def update_lines(self, lines: list[str]) -> SearchResult:
-        self._lines = lines
-        return self.update_query(self.query)
-
     def update_query(self, query: str) -> SearchResult:
         self.query = query
         needle = query.casefold()

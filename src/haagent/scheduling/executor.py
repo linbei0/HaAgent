@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -38,23 +37,13 @@ from haagent.scheduling.models import (
     RunClaim,
     RunStatus,
     ScheduleDefinition,
+    ScheduleRun,
     merge_web_tools,
 )
 from haagent.scheduling.store import ScheduleStore, ScheduleStoreError
 
 ServiceFactory = Callable[..., AssistantService]
 Clock = Callable[[], datetime]
-
-
-@dataclass(frozen=True)
-class ScheduleRunResult:
-    run_id: str
-    status: RunStatus
-    failure_category: FailureCategory | None = None
-    summary: str = ""
-    session_id: str | None = None
-    session_path: str | None = None
-    episode_path: str | None = None
 
 
 def _bounded_summary(text: str, *, limit: int = 400) -> str:
@@ -109,17 +98,11 @@ def _map_exception(error: BaseException) -> tuple[RunStatus, FailureCategory, st
             _bounded_summary(f"{error.kind}: {error.summary}"),
         )
     if isinstance(error, ProviderProfileError):
-        code = getattr(error, "code", None) or getattr(error, "error_code", None)
-        if code in {"api_key_missing", "credential_unavailable", "not_available"}:
-            return "needs_attention", "credential_unavailable", _bounded_summary(str(error))
-        if code in {"profile_missing", "profile_unavailable", "connection_missing"}:
-            return "needs_attention", "profile_unavailable", _bounded_summary(str(error))
-        # 回退：ProviderProfileError 默认视为 profile/credential 配置问题
         return "needs_attention", "profile_unavailable", _bounded_summary(str(error))
     if isinstance(error, ModelCallError):
-        details = getattr(error, "details", None)
-        retryable = bool(getattr(details, "retryable", False))
-        category = getattr(details, "category", None)
+        details = error.details
+        retryable = bool(details is not None and details.retryable)
+        category = details.category if details is not None else None
         if retryable or category in {"network", "timeout", "rate_limited", "server"}:
             return "failed", "model_transient", _bounded_summary(str(error))
         if category in {"auth", "quota_exhausted"}:
@@ -131,14 +114,6 @@ def _map_exception(error: BaseException) -> tuple[RunStatus, FailureCategory, st
         return "needs_attention", "workspace_unavailable", _bounded_summary(str(error))
     if isinstance(error, OSError):
         return "needs_attention", "workspace_unavailable", _bounded_summary(str(error))
-    # AssistantServiceError：优先读结构化 code
-    code = getattr(error, "code", None)
-    if code in {"credential_unavailable", "api_key_missing"}:
-        return "needs_attention", "credential_unavailable", _bounded_summary(str(error))
-    if code in {"workspace_unavailable", "workspace_missing"}:
-        return "needs_attention", "workspace_unavailable", _bounded_summary(str(error))
-    if code in {"profile_unavailable", "connection_missing"}:
-        return "needs_attention", "profile_unavailable", _bounded_summary(str(error))
     return "failed", "internal_error", _bounded_summary(str(error))
 
 
@@ -178,19 +153,16 @@ class ScheduledRunExecutor:
     def request_cancel(self, run_id: str) -> None:
         self._cancel_requested.add(run_id)
         session = self._active_sessions.get(run_id)
-        if session is not None and hasattr(session, "cancel_current_run"):
+        if session is not None:
             session.cancel_current_run()
 
-    def is_cancel_requested(self, run_id: str) -> bool:
+    def _is_cancel_requested(self, run_id: str) -> bool:
         if run_id in self._cancel_requested:
             return True
-        try:
-            run = self._store.get_run(run_id)
-        except Exception:
-            return False
+        run = self._store.get_run(run_id)
         return bool(run is not None and run.cancellation_requested)
 
-    def execute(self, claim: RunClaim) -> ScheduleRunResult:
+    def execute(self, claim: RunClaim) -> ScheduleRun:
         now = self._clock()
         run_id = claim.run_id
         run = self._store.get_run(run_id)
@@ -225,8 +197,6 @@ class ScheduledRunExecutor:
 
         definition = self._store.get_revision(run.schedule_id, run.schedule_revision)
         if definition is None:
-            definition = self._store.get(run.schedule_id)
-        if definition is None:
             return self._finish(
                 run_id,
                 status="needs_attention",
@@ -235,19 +205,6 @@ class ScheduledRunExecutor:
                 failure_category="schedule_invalid",
                 claim=claim,
             )
-
-        # revision 漂移：禁止静默套用新 prompt
-        current = self._store.get(run.schedule_id)
-        if current is not None and current.revision != run.schedule_revision:
-            if definition is None:
-                return self._finish(
-                    run_id,
-                    status="needs_attention",
-                    now=now,
-                    summary="schedule revision mismatch",
-                    failure_category="schedule_invalid",
-                    claim=claim,
-                )
 
         try:
             return self._execute_definition(
@@ -278,7 +235,7 @@ class ScheduledRunExecutor:
         *,
         now: datetime,
         claim: RunClaim,
-    ) -> ScheduleRunResult:
+    ) -> ScheduleRun:
         workspace = definition.workspace_root
         if not workspace.is_absolute():
             return self._finish(
@@ -339,8 +296,7 @@ class ScheduledRunExecutor:
         if self._runs_root is not None:
             service._context.runs_root = Path(self._runs_root)
 
-        session_status = self._open_destination(service, definition)
-        _ = session_status
+        self._open_destination(service, definition)
         session = service._context.session
         if session is None:
             return self._finish(
@@ -356,7 +312,7 @@ class ScheduledRunExecutor:
         self._apply_tool_overrides(session, definition)
         self._active_sessions[run_id] = session
 
-        if self.is_cancel_requested(run_id):
+        if self._is_cancel_requested(run_id):
             return self._finish(
                 run_id,
                 status="cancelled",
@@ -402,7 +358,7 @@ class ScheduledRunExecutor:
                 claim=claim,
             )
 
-        if self.is_cancel_requested(run_id):
+        if self._is_cancel_requested(run_id):
             return self._finish(
                 run_id,
                 status="cancelled",
@@ -434,15 +390,16 @@ class ScheduledRunExecutor:
 
     def _open_destination(
         self, service: AssistantService, definition: ScheduleDefinition
-    ):
+    ) -> None:
         if definition.destination_kind == "resume_session":
             path = definition.destination_session_path
             if path is None:
                 raise FileNotFoundError("resume_session 缺少 destination_session_path")
             if not Path(path).exists():
                 raise FileNotFoundError(f"session 不存在: {path}")
-            return service.sessions.resume(path)
-        return service.sessions.create()
+            service.sessions.resume(path)
+            return
+        service.sessions.create()
 
     def _apply_tool_overrides(
         self, session: AgentSession, definition: ScheduleDefinition
@@ -452,14 +409,13 @@ class ScheduledRunExecutor:
         allowed = list(
             merge_web_tools(definition.allowed_tools, web_enabled=definition.web_enabled)
         )
-        if hasattr(session, "enable_web"):
-            session.enable_web = definition.web_enabled
-        if hasattr(session, "_allowed_tools_override"):
-            session._allowed_tools_override = allowed
-        if hasattr(session, "_approval_allowed_tools_override"):
-            session._approval_allowed_tools_override = list(definition.approval_allowed_tools)
-        if hasattr(session, "_approved_tools_override"):
-            session._approved_tools_override = list(definition.approved_tools)
+        session.enable_web = definition.web_enabled
+        session.set_permission_mode(definition.permission_mode)
+        session.set_tool_overrides(
+            allowed_tools=allowed,
+            approval_allowed_tools=list(definition.approval_allowed_tools),
+            approved_tools=list(definition.approved_tools),
+        )
 
     def _finish_with_retry(
         self,
@@ -474,7 +430,7 @@ class ScheduledRunExecutor:
         session_path: str | None = None,
         episode_path: str | None = None,
         claim: RunClaim,
-    ) -> ScheduleRunResult:
+    ) -> ScheduleRun:
         # 生产链路接入 retry：可重试类别按 schedule retry_policy 进入 retry_wait
         if (
             status == "failed"
@@ -482,18 +438,20 @@ class ScheduledRunExecutor:
             and failure_category in RETRYABLE_CATEGORIES
         ):
             run = self._store.get_run(run_id)
-            if run is not None and not run.cancellation_requested:
+            if run is None:
+                raise ScheduleStoreError("not_found", f"run 不存在: {run_id}")
+            if not run.cancellation_requested:
                 definition = self._store.get_revision(
                     run.schedule_id, run.schedule_revision
                 )
                 if definition is None:
-                    definition = self._store.get(run.schedule_id)
+                    raise ScheduleStoreError(
+                        "revision_not_found",
+                        f"run {run_id} 的计划 revision 不存在",
+                    )
                 # attempt 用 claim token，避免 live DB 已被 reclaimed 时算错
                 attempt = int(claim.attempt)
-                if (
-                    definition is not None
-                    and attempt < definition.retry_policy.max_attempts
-                ):
+                if attempt < definition.retry_policy.max_attempts:
                     delay = _compute_retry_delay(definition.retry_policy, attempt)
                     retry_at = now + timedelta(seconds=delay)
                     return self._finish(
@@ -536,7 +494,7 @@ class ScheduledRunExecutor:
         episode_path: str | None = None,
         retry_at_utc: datetime | None = None,
         claim: RunClaim,
-    ) -> ScheduleRunResult:
+    ) -> ScheduleRun:
         # fencing：必须用 execute 入口捕获的 claim token，禁止再读 live worker/attempt
         # （否则 stale worker 会读到 reclaimer 的 id 并成功覆盖）
         finished = self._store.finish_run(
@@ -554,20 +512,4 @@ class ScheduledRunExecutor:
             expected_worker_id=claim.worker_id,
             expected_attempt=claim.attempt,
         )
-        # 更新 last_run
-        run = finished
-        try:
-            self._store.set_last_run(
-                run.schedule_id, last_run_at_utc=now, now=now
-            )
-        except Exception:
-            pass
-        return ScheduleRunResult(
-            run_id=run_id,
-            status=finished.status,
-            failure_category=finished.failure_category,
-            summary=finished.summary,
-            session_id=finished.session_id,
-            session_path=finished.session_path,
-            episode_path=finished.episode_path,
-        )
+        return finished

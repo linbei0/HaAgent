@@ -23,7 +23,6 @@ from haagent.channels.state import ChannelStateStore, PairingError
 from haagent.channels.types import ChannelAddress, InboundChannelMessage
 
 ServiceFactory = Callable[[Path], Any]
-AdapterState = Literal["connected", "reconnecting", "auth_expired", "failed", "stopped"]
 # Actor 明确接受/入队后写 receipt；busy/rejected 不写，允许平台重投。
 _ACCEPT_OUTCOMES = frozenset({"accepted", "queued"})
 
@@ -31,9 +30,7 @@ _ACCEPT_OUTCOMES = frozenset({"accepted", "queued"})
 @dataclass
 class AdapterRuntime:
     adapter: ChannelAdapter
-    state: AdapterState = "stopped"
     last_send_error: str = ""
-    last_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,43 +76,12 @@ class ChannelManager:
 
     async def attach_adapter(self, adapter: ChannelAdapter) -> None:
         instance_id = adapter.instance_id
-        self._adapters[instance_id] = AdapterRuntime(adapter=adapter, state="connected")
+        self._adapters[instance_id] = AdapterRuntime(adapter=adapter)
         await adapter.start(self._on_message)
 
-    async def mark_adapter_state(self, instance_id: str, state: AdapterState) -> None:
-        runtime = self._adapters.get(instance_id)
-        if runtime is None:
-            return
-        runtime.state = state
-
-    async def sync_adapter_states(self) -> None:
-        """从 adapter 对象同步 state（如 auth_expired），供 status/CLI 可见。"""
-        for instance_id, runtime in self._adapters.items():
-            adapter_state = getattr(runtime.adapter, "state", None)
-            if adapter_state in {"connected", "reconnecting", "auth_expired", "failed", "stopped"}:
-                runtime.state = adapter_state  # type: ignore[assignment]
-            last_error = getattr(runtime.adapter, "last_error", "") or ""
-            # Adapter 恢复后必须清掉旧错误，否则 CLI 会长期展示已经失效的诊断。
-            runtime.last_error = str(last_error)
-            # 同步 actor 侧发送失败
-            for actor in self._actors.values():
-                if actor.address.instance_id == instance_id and actor.last_send_error:
-                    runtime.last_send_error = actor.last_send_error
-
-    def last_send_error(self, instance_id: str) -> str:
-        runtime = self._adapters.get(instance_id)
-        if runtime is None:
-            return ""
-        return runtime.last_send_error
-
     def status(self) -> list[dict[str, str]]:
-        # 读取前尽量同步 adapter 真实状态。
+        # 直接读取 adapter 的真实状态，避免 manager 复制一份易失真的生命周期状态。
         for instance_id, runtime in self._adapters.items():
-            adapter_state = getattr(runtime.adapter, "state", None)
-            if adapter_state in {"connected", "reconnecting", "auth_expired", "failed", "stopped"}:
-                runtime.state = adapter_state  # type: ignore[assignment]
-            last_error = getattr(runtime.adapter, "last_error", "") or ""
-            runtime.last_error = str(last_error)
             for actor in self._actors.values():
                 if actor.address.instance_id == instance_id and actor.last_send_error:
                     runtime.last_send_error = actor.last_send_error
@@ -126,9 +92,9 @@ class ChannelManager:
                 {
                     "instance_id": instance_id,
                     "platform": runtime.adapter.platform,
-                    "state": runtime.state,
+                    "state": runtime.adapter.state,
                     "last_send_error": runtime.last_send_error,
-                    "last_error": runtime.last_error,
+                    "last_error": runtime.adapter.last_error,
                     "owner": summary.get("owner", "(unpaired)"),
                     "pairing": summary.get("pairing", "none"),
                     "cursor": summary.get("cursor", "empty"),
@@ -152,8 +118,6 @@ class ChannelManager:
                 # 显式记录，避免「看起来已停、实际关失败」不可见。
                 msg = f"{runtime.adapter.instance_id}:stop:{error}"
                 errors.append(msg)
-                runtime.last_error = str(error)
-            runtime.state = "stopped"
         return errors
 
     async def _on_message(self, message: InboundChannelMessage) -> str:
@@ -412,22 +376,6 @@ class ChannelManager:
             message_ids=[message_id],
         )
 
-    def commit_transport_cursor(
-        self,
-        *,
-        instance_id: str,
-        cursor_name: str,
-        cursor_value: str,
-        message_ids: list[str] | None = None,
-    ) -> None:
-        """Adapter 在批次全部 accepted 后调用：同事务写 receipt + cursor。"""
-        self._state.commit_accepted_batch(
-            instance_id=instance_id,
-            message_ids=list(message_ids or []),
-            cursor_name=cursor_name,
-            cursor_value=cursor_value,
-        )
-
     async def _handle_pair(self, message: InboundChannelMessage, text: str) -> None:
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
@@ -439,7 +387,7 @@ class ChannelManager:
             await self._reply(message, "已配对，无需重复 /pair")
             return
         try:
-            owner = self._state.consume_pairing_token(
+            self._state.consume_pairing_token(
                 message.address.instance_id,
                 code,
                 sender_id=message.sender_id,
@@ -450,7 +398,6 @@ class ChannelManager:
         # 新 owner 不得继承旧 owner 的自动权限。
         self._set_permanent_permission(message.address.instance_id, "request_approval")
         await self._reply(message, f"配对成功，owner 已绑定为当前用户")
-        del owner
 
     async def _handle_approval(self, message: InboundChannelMessage, text: str) -> None:
         match = re.match(r"^/(approve|deny)\s+(\S+)\s*$", text, flags=re.IGNORECASE)
@@ -509,29 +456,8 @@ class ChannelManager:
         )
 
     async def _handle_new(self, message: InboundChannelMessage) -> None:
-        key = message.address.binding_key()
-        actor = self._actors.pop(key, None)
-        if actor is not None:
-            await actor.close()
-        # 删除 binding 以便下次创建新 session；不删 HaAgent session package。
-        binding = self._state.get_binding(key)
-        if binding is not None:
-            self._state.upsert_binding(
-                binding_key=key,
-                instance_id=binding.instance_id,
-                platform=binding.platform,
-                conversation_kind=binding.conversation_kind,
-                conversation_id=binding.conversation_id,
-                thread_id=binding.thread_id,
-                workspace_root=binding.workspace_root,
-                session_id="",  # 空 session 触发下次 create
-                owner_sender_id=binding.owner_sender_id,
-            )
-        # 用空 session_id 不够干净：直接重建 actor 时 _ensure_session 会 create。
-        # 若 binding.session_id 为空字符串，resume 会失败；改为删除后靠 create。
-        # 简化：关闭旧 actor，写入占位后下次 create 覆盖。
-        actor = await self._get_or_create_actor(message, force_new=True)
-        del actor
+        # 只删除 binding，不删除旧 session package；新 actor 会走公开 create 主路径。
+        await self._get_or_create_actor(message, force_new=True)
         await self._reply(message, "已开启新会话")
 
     async def _get_or_create_actor(
@@ -581,18 +507,15 @@ class ChannelManager:
         return root.resolve()
 
     async def _reply(self, message: InboundChannelMessage, text: str) -> None:
-        runtime = self._adapters.get(message.address.instance_id)
-        if runtime is None:
-            return
+        runtime = self._adapters[message.address.instance_id]
         result = await runtime.adapter.send_text(
             message.address,
             text,
             reply_handle=message.reply_handle,
-            reply_to_message_id=message.message_id,
         )
         # 发送失败显式记录，禁止静默丢弃。
-        if result is not None and not getattr(result, "ok", True):
-            runtime.last_send_error = str(getattr(result, "error", None) or "send_failed")
+        if not result.ok:
+            runtime.last_send_error = str(result.error or "send_failed")
 
 
 def _channel_permission_mode(value: str) -> Literal["request_approval", "auto_approve"]:

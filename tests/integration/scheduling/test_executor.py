@@ -7,7 +7,7 @@ tests/integration/scheduling/test_executor.py - 隔离 ScheduledRunExecutor
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,7 +18,7 @@ from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 from haagent.runtime.session.turn_completion import ChatTurnResult
 from haagent.scheduling.executor import ScheduledRunExecutor
 from haagent.scheduling.models import RunClaim, RetryPolicy, ScheduleDefinition
-from haagent.scheduling.store import ScheduleStore
+from haagent.scheduling.store import ScheduleStore, ScheduleStoreError
 
 
 def _utc(*parts: int) -> datetime:
@@ -68,6 +68,8 @@ def _definition(
     approved: tuple[str, ...] = (),
     prompt: str = "summarize workspace",
     web_enabled: bool = False,
+    permission_mode: str = "request_approval",
+    retry_policy: RetryPolicy | None = None,
 ) -> ScheduleDefinition:
     return ScheduleDefinition(
         id=schedule_id,
@@ -82,14 +84,14 @@ def _definition(
         allowed_tools=allowed,
         approval_allowed_tools=approval_allowed,
         approved_tools=approved,
-        permission_mode="request_approval",
+        permission_mode=permission_mode,  # type: ignore[arg-type]
         dtstart_local=datetime(2026, 7, 13, 9, 0, 0),
         timezone="UTC",
         rrule=None,
         status="active",
         misfire_policy="latest",
         overlap_policy="skip",
-        retry_policy=RetryPolicy(max_attempts=1),
+        retry_policy=retry_policy or RetryPolicy(max_attempts=1),
         revision=1,
     )
 
@@ -120,12 +122,28 @@ class TransientGateway:
 
     def generate(self, messages, tool_schemas):
         raise ModelCallError(
-            "rate limited",
+            "rate limited for sk-abcdefghijklmnopqrstuvwxyz",
             details=ModelFailureDetails(category="rate_limited", retryable=True, status_code=429),
         )
 
 
-class InteractionTriggerSession:
+class ToolPolicySessionMixin:
+    def set_permission_mode(self, mode: str) -> None:
+        self.permission_mode = mode
+
+    def set_tool_overrides(
+        self,
+        *,
+        allowed_tools: list[str],
+        approval_allowed_tools: list[str],
+        approved_tools: list[str],
+    ) -> None:
+        self._allowed_tools_override = allowed_tools
+        self._approval_allowed_tools_override = approval_allowed_tools
+        self._approved_tools_override = approved_tools
+
+
+class InteractionTriggerSession(ToolPolicySessionMixin):
     """最小 session 替身：调用 interaction_handler 以触发无人值守失败。"""
 
     provider_name = "openai-chat"
@@ -144,9 +162,6 @@ class InteractionTriggerSession:
         self.enable_web = kwargs.get("enable_web", False)
         self.session_path = self.runs_root / "sessions" / self.session_id
         self.session_path.mkdir(parents=True, exist_ok=True)
-        self._allowed_tools_override = kwargs.get("allowed_tools_override")
-        self._approval_allowed_tools_override = kwargs.get("approval_allowed_tools_override")
-        self._approved_tools_override = kwargs.get("approved_tools_override")
 
     def run_prompt_events(self, prompt, **kwargs):
         handler = kwargs.get("interaction_handler")
@@ -172,7 +187,7 @@ class InteractionTriggerSession:
         )
 
 
-class CancelAwareSession:
+class CancelAwareSession(ToolPolicySessionMixin):
     provider_name = "openai-chat"
     turn_count = 0
 
@@ -190,9 +205,6 @@ class CancelAwareSession:
         self.session_path = self.runs_root / "sessions" / self.session_id
         self.session_path.mkdir(parents=True, exist_ok=True)
         self._cancelled = False
-        self._allowed_tools_override = kwargs.get("allowed_tools_override")
-        self._approval_allowed_tools_override = kwargs.get("approval_allowed_tools_override")
-        self._approved_tools_override = kwargs.get("approved_tools_override")
 
     def cancel_current_run(self) -> bool:
         self._cancelled = True
@@ -251,6 +263,46 @@ def _seed_running_run(
     )
     assert claimed is not None
     return claimed.id
+
+
+def test_execute_rejects_stale_attempt_without_mutating_current_claim(tmp_path: Path) -> None:
+    now = _utc(2026, 7, 13, 12, 0, 0)
+    with ScheduleStore(tmp_path / "stale.db") as store:
+        run_id = _seed_running_run(store, _definition(tmp_path / "ws"), now=now)
+        with pytest.raises(ScheduleStoreError, match="claim token") as exc_info:
+            ScheduledRunExecutor(store).execute(
+                RunClaim(run_id=run_id, worker_id="worker-1", attempt=2)
+            )
+        current = store.get_run(run_id)
+
+    assert exc_info.value.code == "stale_execute"
+    assert current is not None
+    assert current.status == "running"
+    assert current.worker_id == "worker-1"
+    assert current.attempt_count == 1
+
+
+def test_execute_rejects_unclaimed_run_without_finishing_it(tmp_path: Path) -> None:
+    now = _utc(2026, 7, 13, 12, 0, 0)
+    definition = _definition(tmp_path / "ws")
+    with ScheduleStore(tmp_path / "queued.db") as store:
+        store.create(definition, now=now)
+        run = store.create_run(
+            schedule_id=definition.id,
+            schedule_revision=definition.revision,
+            trigger_key="manual:queued",
+            trigger_kind="manual",
+            scheduled_for_utc=now,
+            now=now,
+        )
+        with pytest.raises(ScheduleStoreError) as exc_info:
+            ScheduledRunExecutor(store).execute(
+                RunClaim(run_id=run.id, worker_id="worker-1", attempt=1)
+            )
+        current = store.get_run(run.id)
+
+    assert exc_info.value.code == "stale_execute"
+    assert current is not None and current.status == "queued"
 
 
 def test_execute_new_session_success_records_links(
@@ -473,7 +525,15 @@ def test_execute_model_transient_maps_category(
 
     db = tmp_path / "schedules.db"
     now = _utc(2026, 7, 13, 12, 0, 0)
-    definition = _definition(ws)
+    definition = _definition(
+        ws,
+        retry_policy=RetryPolicy(
+            max_attempts=2,
+            initial_delay_seconds=30,
+            multiplier=2.0,
+            max_delay_seconds=900,
+        ),
+    )
     with ScheduleStore(db) as store:
         run_id = _seed_running_run(store, definition, now=now)
         executor = ScheduledRunExecutor(
@@ -490,10 +550,33 @@ def test_execute_model_transient_maps_category(
         result = executor.execute(RunClaim(run_id=run_id, worker_id="worker-1", attempt=1))
         finished = store.get_run(run_id)
         assert finished is not None
-        # 瞬时失败：failed 或 retry_wait（max_attempts=1 则 failed）
         assert finished.failure_category == "model_transient"
-        assert finished.status in {"failed", "retry_wait", "needs_attention"}
-        assert result.status in {"failed", "retry_wait", "needs_attention"}
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in finished.summary
+        assert "REDACTED" in finished.summary
+        assert finished.status == "retry_wait"
+        assert finished.retry_at_utc == now + timedelta(seconds=30)
+        assert result.status == "retry_wait"
+
+        later = now + timedelta(seconds=30)
+        claimed_again = store.claim_run(
+            run_id,
+            worker_id="worker-1",
+            lease_expires_at=later + timedelta(seconds=45),
+            now=later,
+        )
+        assert claimed_again is not None and claimed_again.attempt_count == 2
+        exhausted = ScheduledRunExecutor(
+            store,
+            service_factory=lambda **kwargs: AssistantService(
+                workspace_root=kwargs["workspace_root"],
+                runs_root=kwargs.get("runs_root", runs),
+                environ=kwargs.get("environ"),
+                gateway_factory=lambda profile, **_kw: TransientGateway(),
+            ),
+            runs_root=runs,
+            clock=lambda: later,
+        ).execute(RunClaim(run_id=run_id, worker_id="worker-1", attempt=2))
+        assert exhausted.status == "failed"
 
 
 def test_execute_uses_isolated_service_not_shared_context(
@@ -560,7 +643,7 @@ def test_passes_tool_overrides_into_session(
 
     captured: dict[str, object] = {}
 
-    class CaptureSession:
+    class CaptureSession(ToolPolicySessionMixin):
         provider_name = "openai-chat"
         turn_count = 0
 
@@ -577,14 +660,12 @@ def test_passes_tool_overrides_into_session(
             self.enable_web = kwargs.get("enable_web", False)
             self.session_path = self.runs_root / "sessions" / self.session_id
             self.session_path.mkdir(parents=True, exist_ok=True)
-            self._allowed_tools_override = kwargs.get("allowed_tools_override")
-            self._approval_allowed_tools_override = kwargs.get("approval_allowed_tools_override")
-            self._approved_tools_override = kwargs.get("approved_tools_override")
 
         def run_prompt_events(self, prompt, **kwargs):
             captured["allowed"] = self._allowed_tools_override
             captured["approval"] = self._approval_allowed_tools_override
             captured["approved"] = self._approved_tools_override
+            captured["permission_mode"] = self.permission_mode
             captured["enable_web"] = self.enable_web
             captured["handler"] = kwargs.get("interaction_handler")
             ep = self.session_path / "episodes" / "ep"
@@ -606,6 +687,7 @@ def test_passes_tool_overrides_into_session(
         allowed=("file_read", "file_write"),
         approval_allowed=("file_write",),
         approved=("file_write",),
+        permission_mode="auto_approve",
     )
     with ScheduleStore(db) as store:
         run_id = _seed_running_run(store, definition, now=now)
@@ -625,85 +707,8 @@ def test_passes_tool_overrides_into_session(
         assert captured.get("allowed") == ["file_read", "file_write"] or captured.get(
             "allowed"
         ) == ("file_read", "file_write")
+        assert captured.get("permission_mode") == "auto_approve"
         assert captured.get("handler") is not None
-
-
-def test_web_enabled_merges_web_tools_into_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """计划 web_enabled=True 时，allowed_tools 必须包含 web_search/web_fetch。"""
-    home = tmp_path / "home"
-    ws = tmp_path / "ws"
-    runs = tmp_path / "runs"
-    ws.mkdir()
-    _write_connection(home)
-    monkeypatch.setattr(Path, "home", lambda: home)
-    monkeypatch.setenv("HAAGENT_TEST_KEY", "test-key")
-
-    captured: dict[str, object] = {}
-
-    class CaptureSession:
-        provider_name = "openai-chat"
-        turn_count = 0
-
-        def __init__(self, **kwargs) -> None:
-            self.session_id = "sess-web"
-            self.workspace_root = kwargs["workspace_root"]
-            self.runs_root = kwargs["runs_root"]
-            self.model_gateway = kwargs.get("model_gateway")
-            self.model_profile_name = kwargs.get("model_profile_name")
-            self.model_connection_id = kwargs.get("model_connection_id")
-            self.model_name = kwargs.get("model_name")
-            self.model_base_url = kwargs.get("model_base_url")
-            self.max_turns = kwargs.get("max_turns")
-            self.enable_web = kwargs.get("enable_web", False)
-            self.session_path = self.runs_root / "sessions" / self.session_id
-            self.session_path.mkdir(parents=True, exist_ok=True)
-            self._allowed_tools_override = kwargs.get("allowed_tools_override")
-            self._approval_allowed_tools_override = kwargs.get("approval_allowed_tools_override")
-            self._approved_tools_override = kwargs.get("approved_tools_override")
-
-        def run_prompt_events(self, prompt, **kwargs):
-            captured["allowed"] = self._allowed_tools_override
-            captured["enable_web"] = self.enable_web
-            ep = self.session_path / "episodes" / "ep"
-            ep.mkdir(parents=True, exist_ok=True)
-            return ChatTurnResult(
-                session_id=self.session_id,
-                turn_index=1,
-                status="completed",
-                episode_path=ep,
-                provider="openai-chat",
-                final_response="ok",
-                verification_status="not_run",
-            )
-
-    db = tmp_path / "schedules.db"
-    now = _utc(2026, 7, 13, 12, 0, 0)
-    definition = _definition(
-        ws,
-        allowed=("file_list", "file_read"),
-        web_enabled=True,
-    )
-    with ScheduleStore(db) as store:
-        run_id = _seed_running_run(store, definition, now=now)
-        executor = ScheduledRunExecutor(
-            store,
-            service_factory=lambda **kwargs: AssistantService(
-                workspace_root=kwargs["workspace_root"],
-                runs_root=kwargs.get("runs_root", runs),
-                environ=kwargs.get("environ"),
-                gateway_factory=lambda profile, **_kw: RecordingGateway(),
-                session_cls=CaptureSession,  # type: ignore[arg-type]
-                enable_web=kwargs.get("enable_web", False),
-            ),
-            runs_root=runs,
-            clock=lambda: now,
-        )
-        executor.execute(RunClaim(run_id=run_id, worker_id="worker-1", attempt=1))
-        allowed = list(captured.get("allowed") or [])
-        assert captured.get("enable_web") is True
-        assert "web_search" in allowed
-        assert "web_fetch" in allowed
-        assert "file_list" in allowed
 
 
 def test_web_enabled_real_session_writes_web_tools_to_task_yaml(

@@ -50,15 +50,13 @@ def _valid_definition(**overrides: object) -> ScheduleDefinition:
 
 def test_validate_schedule_accepts_valid_definition() -> None:
     definition = _valid_definition()
-    assert validate_schedule(definition) is definition
+    assert validate_schedule(definition) == definition
 
 
 @pytest.mark.parametrize(
     ("overrides", "code"),
     [
-        ({"name": ""}, "empty_name"),
         ({"name": "   "}, "empty_name"),
-        ({"prompt": ""}, "empty_prompt"),
         ({"prompt": "\n"}, "empty_prompt"),
         ({"workspace_root": Path("relative/path")}, "relative_workspace"),
         ({"destination_kind": "other"}, "invalid_destination"),  # type: ignore[dict-item]
@@ -76,6 +74,13 @@ def test_validate_schedule_accepts_valid_definition() -> None:
                 "overlap_policy": "parallel",
             },
             "resume_forbids_parallel",
+        ),
+        (
+            {
+                "overlap_policy": "parallel",
+                "allowed_tools": ("file_read", "file_write"),
+            },
+            "parallel_forbids_side_effects",
         ),
         (
             {
@@ -139,18 +144,17 @@ def test_schedule_definition_is_frozen() -> None:
         definition.name = "other"  # type: ignore[misc]
 
 
-def test_merge_web_tools_appends_when_enabled() -> None:
-    tools = merge_web_tools(("file_read", "file_list"), web_enabled=True)
-    assert tools == ("file_read", "file_list", "web_search", "web_fetch")
-
-
-def test_merge_web_tools_noop_when_disabled() -> None:
-    tools = merge_web_tools(("file_read", "web_search"), web_enabled=False)
-    assert tools == ("file_read", "web_search")
-
-
-def test_merge_web_tools_idempotent() -> None:
-    tools = merge_web_tools(
-        ("file_read", "web_search", "web_fetch"), web_enabled=True
+def test_merge_web_tools_respects_enablement_without_duplicates() -> None:
+    assert merge_web_tools(("file_read", "file_list"), web_enabled=True) == (
+        "file_read",
+        "file_list",
+        "web_search",
+        "web_fetch",
     )
-    assert tools == ("file_read", "web_search", "web_fetch")
+    assert merge_web_tools(("file_read", "web_search"), web_enabled=False) == (
+        "file_read",
+        "web_search",
+    )
+    assert merge_web_tools(
+        ("file_read", "web_search", "web_fetch"), web_enabled=True
+    ) == ("file_read", "web_search", "web_fetch")

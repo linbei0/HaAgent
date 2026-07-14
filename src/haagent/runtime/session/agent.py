@@ -570,6 +570,18 @@ class AgentSession:
         self.path_policy = with_permission_mode(self.path_policy, self.workspace_root, mode)
         self._write_session_metadata()
 
+    def set_tool_overrides(
+        self,
+        *,
+        allowed_tools: list[str],
+        approval_allowed_tools: list[str],
+        approved_tools: list[str],
+    ) -> None:
+        """应用前端无关的工具快照；调度恢复不得继承更宽的历史权限。"""
+        self._allowed_tools_override = list(allowed_tools)
+        self._approval_allowed_tools_override = list(approval_allowed_tools)
+        self._approved_tools_override = list(approved_tools)
+
     def set_next_turn_target_paths(self, paths: list[Path]) -> None:
         self._next_turn_target_paths = [str(path.resolve()) for path in paths]
 

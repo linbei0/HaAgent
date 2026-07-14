@@ -8,7 +8,6 @@ DM 过滤、typing finally、presenter 静默工具摘要。
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +35,7 @@ from haagent.runtime.events.types import (
     ToolActivityEvent,
 )
 from haagent.runtime.session.agent import AgentSession
+from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
 from tests.support.model_credentials import FakeCredentialStore
 
 
@@ -137,14 +137,18 @@ def test_set_workspace_rejects_missing_path(tmp_path: Path) -> None:
 # ---- P1-13 presenter tool silence ----
 
 
-def test_tool_summary_only_after_silence() -> None:
-    presenter = ChannelPresenter(tool_summary_silence_seconds=2.0)
+def test_tool_summary_only_after_silence(monkeypatch) -> None:
+    from haagent.channels import presenter as presenter_module
+
+    clock = [0.0]
+    monkeypatch.setattr(presenter_module.time, "monotonic", lambda: clock[0])
+    presenter = ChannelPresenter()
     presenter.handle(SessionLifecycleEvent("s", 1, "turn_started", "start"))
     # 刚开始立刻 tool：不应发摘要
     early = presenter.handle(ToolActivityEvent("s", 1, 1, "shell", "started", "run tests"))
     assert not any(isinstance(a, SendText) for a in early)
     # 模拟静默后
-    presenter._last_user_visible_at = time.monotonic() - 3.0
+    clock[0] = 9.0
     late = presenter.handle(ToolActivityEvent("s", 1, 2, "file_read", "started", "read"))
     texts = [a for a in late if isinstance(a, SendText)]
     assert texts
@@ -155,7 +159,6 @@ def test_tool_summary_only_after_silence() -> None:
 
 
 def test_actor_turns_typing_off_on_exception(tmp_path: Path) -> None:
-    from haagent.channels.adapters.fake import FakeAdapter
     from haagent.channels.interactions import InteractionBroker
     from tests.unit.channels.test_session_actor import FakeAssistantService, _address, _message
 
@@ -216,6 +219,12 @@ def test_weixin_drops_empty_text_even_with_context_token() -> None:
                 if self.updates_queue:
                     return self.updates_queue.pop(0)
                 return WeixinUpdates(messages=[], cursor=cursor)
+
+            async def notify_start(self):
+                return None
+
+            async def notify_stop(self):
+                return None
 
             async def aclose(self):
                 return None
@@ -283,7 +292,6 @@ def test_weixin_drops_group_and_non_text_message_types() -> None:
 
 
 def test_channel_actor_forces_request_approval(tmp_path: Path) -> None:
-    from haagent.channels.adapters.fake import FakeAdapter
     from haagent.channels.interactions import InteractionBroker
     from tests.unit.channels.test_session_actor import FakeAssistantService, _address, _message
 
@@ -334,7 +342,6 @@ def test_gateway_preflight_fails_without_model_key(tmp_path: Path, monkeypatch, 
     workspace = tmp_path / "ws"
     workspace.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
-    store = FakeCredentialStore({f"channel:fake:f1:token": "tok"})
     save_channel_settings(
         config_dir / "channels.json",
         ChannelSettings(
@@ -342,30 +349,15 @@ def test_gateway_preflight_fails_without_model_key(tmp_path: Path, monkeypatch, 
             instances=[
                 ChannelInstanceConfig(
                     id="f1",
-                    platform="fake",
+                    platform="weixin",
                     enabled=True,
                     workspace_root=workspace,
-                    credential_username="channel:fake:f1:token",
+                    credential_username="channel:weixin:f1:bot_token",
                     metadata={},
                 )
             ],
         ),
     )
-    monkeypatch.setattr(cli_commands, "_gateway_credential_store", store)
-    monkeypatch.setattr(
-        cli_commands,
-        "_gateway_adapter_factories",
-        {"fake": lambda cfg, token, cursor, **kw: __import__("haagent.channels.adapters.fake", fromlist=["FakeAdapter"]).FakeAdapter(instance_id=cfg.id)},
-    )
-
-    def _bad_status():
-        return SimpleNamespace(
-            api_key_available=False,
-            profile_error="no profile",
-            profile_name=None,
-            model=None,
-        )
-
     monkeypatch.setattr(
         cli_commands,
         "_gateway_model_preflight",
@@ -376,83 +368,3 @@ def test_gateway_preflight_fails_without_model_key(tmp_path: Path, monkeypatch, 
     text = capsys.readouterr().out + capsys.readouterr().err
     assert code != 0
     assert "model" in text.lower() or "credential" in text.lower() or "configure" in text.lower()
-
-def test_runtime_builds_fake_adapter_from_settings(tmp_path: Path) -> None:
-    from haagent.channels.runtime import ChannelGatewayRuntime
-    from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    config = tmp_path / "channels.json"
-    state = tmp_path / "channels.sqlite3"
-    save_channel_settings(
-        config,
-        ChannelSettings(
-            version=1,
-            instances=[
-                ChannelInstanceConfig(
-                    id="f1",
-                    platform="fake",
-                    enabled=True,
-                    workspace_root=workspace,
-                    credential_username="channel:fake:f1:token",
-                    metadata={},
-                    permission_mode="auto_approve",
-                )
-            ],
-        ),
-    )
-    runtime = ChannelGatewayRuntime(
-        config_path=config,
-        state_path=state,
-        default_workspace_root=workspace,
-        service_factory=lambda root: object(),
-        credential_store=FakeCredentialStore(),
-    )
-    adapters = runtime.build_adapters()
-    assert len(adapters) == 1
-    assert adapters[0].instance_id == "f1"
-    assert runtime.manager is not None
-    assert runtime.manager._instance_permission_modes["f1"] == "auto_approve"
-
-
-def test_adapter_factory_type_error_propagates_without_retry(tmp_path: Path) -> None:
-    from haagent.channels.runtime import ChannelGatewayRuntime
-
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    config = tmp_path / "channels.json"
-    save_channel_settings(
-        config,
-        ChannelSettings(
-            instances=[
-                ChannelInstanceConfig(
-                    id="f1",
-                    platform="fake",
-                    enabled=True,
-                    workspace_root=workspace,
-                    credential_username="channel:fake:f1:token",
-                )
-            ]
-        ),
-    )
-    calls = 0
-
-    def failing_factory(config, token, cursor, *, on_cursor_persist):
-        nonlocal calls
-        del config, token, cursor, on_cursor_persist
-        calls += 1
-        raise TypeError("factory body failed")
-
-    runtime = ChannelGatewayRuntime(
-        config_path=config,
-        state_path=tmp_path / "channels.sqlite3",
-        default_workspace_root=workspace,
-        service_factory=lambda root: object(),
-        credential_store=FakeCredentialStore(),
-        adapter_factories={"fake": failing_factory},
-    )
-
-    with pytest.raises(TypeError, match="factory body failed"):
-        runtime.build_adapters()
-
-    assert calls == 1

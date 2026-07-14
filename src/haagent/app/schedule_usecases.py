@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import (
@@ -41,16 +40,16 @@ from haagent.scheduling.models import (
     merge_web_tools,
     validate_schedule,
 )
+from haagent.scheduling.background.base import (
+    BackgroundServiceAdapter,
+    BackgroundServiceError,
+    BackgroundServiceUnsupported,
+)
 from haagent.scheduling.recurrence import RecurrenceError, normalize_rrule, preview_occurrences
 from haagent.scheduling.store import ScheduleStore, ScheduleStoreError
 
-
-class BackgroundServiceAdapter(Protocol):
-    def status(self) -> BackgroundServiceStatus: ...
-
-    def install(self) -> BackgroundServiceStatus: ...
-
-    def uninstall(self) -> BackgroundServiceStatus: ...
+if TYPE_CHECKING:
+    from haagent.scheduling.worker import ScheduleWorker
 
 
 def _now_utc() -> datetime:
@@ -154,49 +153,29 @@ def _to_run(run: ScheduleRun) -> AssistantScheduleRun:
 class AssistantSchedules:
     """TUI/CLI 共用的计划任务用例。"""
 
-    def __init__(
-        self,
-        context: AssistantContext,
-        *,
-        store: ScheduleStore | None = None,
-        background: BackgroundServiceAdapter | None = None,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+    def __init__(self, context: AssistantContext) -> None:
         self._context = context
-        self._store = store
-        self._background = background
-        self._clock = clock or _now_utc
-        self._owns_store = store is None
+        self._store: ScheduleStore | None = None
+        self._background: BackgroundServiceAdapter | None = None
+        self._clock = _now_utc
         # TUI 内嵌 host：由 start_host/stop_host 管理，TUI 不得直接碰 worker/store
-        self._host_worker: object | None = None
-        self._host_thread: object | None = None
+        self._host_worker: ScheduleWorker | None = None
+        self._host_thread: threading.Thread | None = None
         self._host_lock = threading.RLock()
-        self._cancel_notifier: Callable[[str], None] | None = None
 
     def _get_background(self) -> BackgroundServiceAdapter:
         if self._background is not None:
             return self._background
-        factory = getattr(self._context, "background_adapter_factory", None)
-        if factory is not None:
-            self._background = factory()  # type: ignore[assignment]
-        else:
-            from haagent.scheduling.background.factory import create_background_adapter
+        from haagent.scheduling.background.factory import create_background_adapter
 
-            self._background = create_background_adapter()  # type: ignore[assignment]
-        return self._background  # type: ignore[return-value]
+        self._background = create_background_adapter()
+        return self._background
 
     def _get_store(self) -> ScheduleStore:
         if self._store is not None:
             return self._store
-        factory = getattr(self._context, "schedule_store_factory", None)
-        path = getattr(self._context, "schedule_db_path", None)
-        if factory is not None:
-            self._store = factory()
-        elif path is not None:
-            self._store = ScheduleStore(Path(path))
-        else:
-            db = user_config_dir() / "schedules.sqlite3"
-            self._store = ScheduleStore(db)
+        db = user_config_dir() / "schedules.sqlite3"
+        self._store = ScheduleStore(db)
         return self._store
 
     def create(self, request: ScheduleCreateRequest) -> AssistantSchedule:
@@ -520,61 +499,31 @@ class AssistantSchedules:
         except ScheduleStoreError as error:
             raise _map_store_error(error) from error
         # 同进程 host worker/executor 若在途，立即传播取消
-        notifier = self._cancel_notifier
-        if callable(notifier):
-            try:
-                notifier(run_id)
-            except Exception:
-                pass
+        worker = self._host_worker
+        if worker is not None:
+            worker.request_cancel(run_id)
         return _to_run(run)
 
-    def start_host(
-        self,
-        *,
-        executor: object | None = None,
-        clock: Callable[[], datetime] | None = None,
-        sleep: Callable[[float], None] | None = None,
-        owner_id: str | None = None,
-    ) -> ScheduleHostStatus:
+    def start_host(self) -> ScheduleHostStatus:
         """启动 TUI 内嵌 ScheduleWorker；已在跑则幂等返回状态。"""
-        import uuid as _uuid
-
         with self._host_lock:
-            if self._host_thread is not None and getattr(
-                self._host_thread, "is_alive", lambda: False
-            )():
+            if self._host_thread is not None and self._host_thread.is_alive():
                 return self.host_status()
             store = self._get_store()
             from haagent.scheduling.executor import ScheduledRunExecutor
             from haagent.scheduling.worker import ScheduleWorker
 
-            run_executor = executor
-            if run_executor is None:
-                run_executor = ScheduledRunExecutor(store)
+            run_executor = ScheduledRunExecutor(store)
             worker = ScheduleWorker(
                 store,
-                owner_id=owner_id or f"tui-{_uuid.uuid4().hex[:12]}",
-                executor=run_executor,  # type: ignore[arg-type]
-                clock=clock or self._clock,
-                sleep=sleep,
+                owner_id=f"tui-{uuid.uuid4().hex[:12]}",
+                executor=run_executor,
+                clock=self._clock,
             )
             self._host_worker = worker
-            self._cancel_notifier = worker.request_cancel
-
-            def _run() -> None:
-                try:
-                    worker.run_forever()
-                except Exception as error:
-                    # 失败写入 worker.last_error；禁止静默吞掉
-                    try:
-                        worker._record_error(
-                            f"host:{type(error).__name__}:{error}", fatal=True
-                        )
-                    except Exception:
-                        pass
 
             thread = threading.Thread(
-                target=_run,
+                target=worker.run_forever,
                 name="haagent-schedule-host",
                 daemon=True,
             )
@@ -587,42 +536,30 @@ class AssistantSchedules:
         with self._host_lock:
             worker = self._host_worker
             thread = self._host_thread
-            self._host_worker = None
-            self._host_thread = None
-            if self._cancel_notifier is not None and worker is not None:
-                # 仅清除指向本 worker 的 notifier
-                if self._cancel_notifier == getattr(worker, "request_cancel", None):
-                    self._cancel_notifier = None
         if worker is not None:
-            try:
-                worker.stop_event.set()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            try:
-                worker._coordinator.release()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        if thread is not None and getattr(thread, "is_alive", lambda: False)():
-            try:
-                thread.join(timeout=2.0)  # type: ignore[attr-defined]
-            except Exception:
-                pass
+            worker.stop()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        # join 超时必须继续暴露 running；不能先清状态伪装已停止。
+        if thread is None or not thread.is_alive():
+            with self._host_lock:
+                if self._host_thread is thread:
+                    self._host_worker = None
+                    self._host_thread = None
         return self.host_status()
 
     def host_status(self) -> ScheduleHostStatus:
         """返回内嵌 host 可展示状态（供后台页与诊断）。"""
         worker = self._host_worker
         thread = self._host_thread
-        running = bool(
-            thread is not None and getattr(thread, "is_alive", lambda: False)()
-        )
+        running = bool(thread is not None and thread.is_alive())
         owner_id = None
         last_error = None
         fatal = False
         if worker is not None:
-            owner_id = getattr(worker, "owner_id", None)
-            last_error = getattr(worker, "last_error", None)
-            fatal = bool(getattr(worker, "fatal", False))
+            owner_id = worker.owner_id
+            last_error = worker.last_error
+            fatal = worker.fatal
             # 线程已死但 worker 仍有错误：视为未运行且需关注
             if not running and last_error:
                 fatal = True
@@ -675,11 +612,6 @@ class AssistantSchedules:
         try:
             return self._get_background().install()
         except Exception as error:
-            from haagent.scheduling.background.base import (
-                BackgroundServiceError,
-                BackgroundServiceUnsupported,
-            )
-
             if isinstance(error, (BackgroundServiceUnsupported, BackgroundServiceError)):
                 raise AssistantServiceError(str(error)) from error
             if isinstance(error, AssistantServiceError):
@@ -690,11 +622,6 @@ class AssistantSchedules:
         try:
             return self._get_background().uninstall()
         except Exception as error:
-            from haagent.scheduling.background.base import (
-                BackgroundServiceError,
-                BackgroundServiceUnsupported,
-            )
-
             if isinstance(error, (BackgroundServiceUnsupported, BackgroundServiceError)):
                 raise AssistantServiceError(str(error)) from error
             if isinstance(error, AssistantServiceError):

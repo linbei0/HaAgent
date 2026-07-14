@@ -16,7 +16,6 @@ from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresenta
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.timeline_block import TimelineBlock
 from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
-from haagent.tui.widgets.timeline_rendering import timeline_render_metrics
 
 
 class InstrumentedTimeline(ConversationTimeline):
@@ -348,45 +347,3 @@ def test_long_timeline_mounts_only_the_active_window() -> None:
             assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
 
     asyncio.run(run_test())
-
-
-def test_timeline_render_metrics_reports_detail_weight() -> None:
-    items = [
-        TimelineItem(
-            item_id=1,
-            role="assistant",
-            content="answer",
-            status="done",
-            turn_index=1,
-            tools=[
-                ToolActivity(
-                    tool_name="web_fetch",
-                    status="done",
-                    summary="status=success",
-                    turn_index=1,
-                    diagnostics=["结果已压缩 20228 -> 931 字符"],
-                ),
-                ToolActivity(
-                    tool_name="web_search",
-                    status="done",
-                    summary="status=success",
-                    turn_index=1,
-                ),
-            ],
-        ),
-        TimelineItem(
-            item_id=2,
-            role="user",
-            content="prompt",
-            status="done",
-            turn_index=2,
-        ),
-    ]
-
-    metrics = timeline_render_metrics(items, show_tool_details=True)
-
-    assert metrics.item_count == 2
-    assert metrics.tool_count == 2
-    assert metrics.diagnostic_count == 1
-    assert metrics.detail_line_count == 4
-    assert metrics.rendered_character_count > 0

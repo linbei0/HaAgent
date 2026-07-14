@@ -13,12 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from haagent import cli
-from haagent.channels.adapters.fake import FakeAdapter
 from haagent.channels.manager import ChannelManager
 from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.state import ChannelStateStore
 from haagent.models.credentials import KEYRING_SERVICE_NAME
+from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
 from tests.support.model_credentials import FakeCredentialStore
 
 
@@ -66,10 +66,10 @@ def test_gateway_run_rejects_second_process_before_preflight_or_adapter_build(
             instances=[
                 ChannelInstanceConfig(
                     id="f1",
-                    platform="fake",
+                    platform="weixin",
                     enabled=True,
                     workspace_root=workspace,
-                    credential_username="channel:fake:f1:token",
+                    credential_username="channel:weixin:f1:bot_token",
                 )
             ]
         ),
@@ -77,21 +77,21 @@ def test_gateway_run_rejects_second_process_before_preflight_or_adapter_build(
     from haagent import cli_commands
 
     preflight_called = False
-    factory_called = False
+    adapter_build_called = False
 
     def _preflight(root: Path) -> tuple[bool, str]:
         nonlocal preflight_called
         preflight_called = True
         return True, "ok"
 
-    def _factory(*args, **kwargs):
-        nonlocal factory_called
-        factory_called = True
-        return FakeAdapter(instance_id="f1")
+    def _build_adapters(self):
+        nonlocal adapter_build_called
+        adapter_build_called = True
+        return []
 
     monkeypatch.setattr(cli_commands.GatewayInstanceLock, "acquire", lambda self: False)
     monkeypatch.setattr(cli_commands, "_gateway_model_preflight", _preflight)
-    monkeypatch.setattr(cli_commands, "_gateway_adapter_factories", {"fake": _factory})
+    monkeypatch.setattr(ChannelGatewayRuntime, "build_adapters", _build_adapters)
 
     code = cli.main(["gateway", "run", "--workspace-root", str(workspace)])
     output = capsys.readouterr().out
@@ -99,7 +99,7 @@ def test_gateway_run_rejects_second_process_before_preflight_or_adapter_build(
     assert code != 0
     assert "already running" in output
     assert preflight_called is False
-    assert factory_called is False
+    assert adapter_build_called is False
 
 
 def test_gateway_run_starts_fake_adapter_and_stops(
@@ -112,7 +112,7 @@ def test_gateway_run_starts_fake_adapter_and_stops(
     workspace.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
 
-    store = FakeCredentialStore({"channel:fake:f1:token": "tok"})
+    store = FakeCredentialStore({"channel:weixin:f1:bot_token": "tok"})
     save_channel_settings(
         config_dir / "channels.json",
         ChannelSettings(
@@ -120,10 +120,10 @@ def test_gateway_run_starts_fake_adapter_and_stops(
             instances=[
                 ChannelInstanceConfig(
                     id="f1",
-                    platform="fake",
+                    platform="weixin",
                     enabled=True,
                     workspace_root=workspace,
-                    credential_username="channel:fake:f1:token",
+                    credential_username="channel:weixin:f1:bot_token",
                     metadata={},
                 )
             ],
@@ -148,11 +148,11 @@ def test_gateway_run_starts_fake_adapter_and_stops(
     from haagent import cli_commands
 
     monkeypatch.setattr(
-        cli_commands,
-        "_gateway_adapter_factories",
-        {"fake": lambda cfg, token, cursor, **kw: _TrackingFake(instance_id=cfg.id)},
+        ChannelGatewayRuntime,
+        "_build_one",
+        lambda self, cfg, **kwargs: _TrackingFake(instance_id=cfg.id),
     )
-    monkeypatch.setattr(cli_commands, "_gateway_credential_store", store)
+    monkeypatch.setattr(cli_commands, "KeyringCredentialStore", lambda: store)
     monkeypatch.setattr(
         cli_commands,
         "_gateway_model_preflight",
@@ -187,17 +187,17 @@ def test_gateway_partial_start_failure_stops_started_adapters_and_closes_state(
             instances=[
                 ChannelInstanceConfig(
                     id="first",
-                    platform="fake",
+                    platform="weixin",
                     enabled=True,
                     workspace_root=workspace,
-                    credential_username="channel:fake:first:token",
+                    credential_username="channel:weixin:first:bot_token",
                 ),
                 ChannelInstanceConfig(
                     id="second",
-                    platform="fake",
+                    platform="weixin",
                     enabled=True,
                     workspace_root=workspace,
-                    credential_username="channel:fake:second:token",
+                    credential_username="channel:weixin:second:bot_token",
                 ),
             ]
         ),
@@ -227,17 +227,31 @@ def test_gateway_partial_start_failure_stops_started_adapters_and_closes_state(
     from haagent import cli_commands
     from haagent.channels import runtime as runtime_module
 
-    created: list[ChannelGatewayRuntime] = []
     original_runtime = runtime_module.ChannelGatewayRuntime
 
     class _TrackingRuntime(original_runtime):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
-            created.append(self)
+
+        def _build_one(self, item, *, token, cursor, on_cursor_persist):
+            return factory(
+                item,
+                token,
+                cursor,
+                on_cursor_persist=on_cursor_persist,
+            )
 
     monkeypatch.setattr(runtime_module, "ChannelGatewayRuntime", _TrackingRuntime)
-    monkeypatch.setattr(cli_commands, "_gateway_adapter_factories", {"fake": factory})
-    monkeypatch.setattr(cli_commands, "_gateway_credential_store", FakeCredentialStore())
+    monkeypatch.setattr(
+        cli_commands,
+        "KeyringCredentialStore",
+        lambda: FakeCredentialStore(
+            {
+                "channel:weixin:first:bot_token": "tok-first",
+                "channel:weixin:second:bot_token": "tok-second",
+            }
+        ),
+    )
     monkeypatch.setattr(cli_commands, "_gateway_model_preflight", lambda root: (True, "ok"))
 
     with pytest.raises(RuntimeError, match="second start failed"):
@@ -248,7 +262,6 @@ def test_gateway_partial_start_failure_stops_started_adapters_and_closes_state(
         )
 
     assert lifecycle == ["first:start", "second:start", "first:stop"]
-    assert created[0].state is None
 
 
 def test_gateway_run_reports_reconnecting_adapter_error(capsys) -> None:
@@ -258,10 +271,8 @@ def test_gateway_run_reports_reconnecting_adapter_error(capsys) -> None:
         stop = asyncio.Event()
 
         class _Manager:
-            async def sync_adapter_states(self) -> None:
-                stop.set()
-
             def status(self) -> list[dict[str, str]]:
+                stop.set()
                 return [
                     {
                         "instance_id": "wx-1",
@@ -292,10 +303,8 @@ def test_gateway_run_skips_reconnecting_without_error(capsys) -> None:
         stop = asyncio.Event()
 
         class _Manager:
-            async def sync_adapter_states(self) -> None:
-                stop.set()
-
             def status(self) -> list[dict[str, str]]:
+                stop.set()
                 return [
                     {
                         "instance_id": "wx-1",
@@ -405,9 +414,9 @@ def test_gateway_pair_prints_code_once(tmp_path: Path, monkeypatch, capsys) -> N
         ),
     )
     store = FakeCredentialStore({"channel:weixin:wx-1:bot_token": "tok"})
-    from haagent import cli_commands
+    from haagent.app import channel_usecases
 
-    monkeypatch.setattr(cli_commands, "_gateway_credential_store", store)
+    monkeypatch.setattr(channel_usecases, "KeyringCredentialStore", lambda: store)
     code = cli.main(["gateway", "pair", "--instance-id", "wx-1"])
     out = capsys.readouterr().out
     assert code == 0

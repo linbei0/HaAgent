@@ -22,7 +22,7 @@ def show_permissions(app: "HaAgentTuiApp") -> None:
         PermissionsModal(
             status.workspace_root,
             status.external_roots or [],
-            getattr(status, "permission_mode", "request_approval"),
+            status.permission_mode,
         ),
         app._handle_permissions_result,
     )
@@ -80,7 +80,11 @@ def set_permission_mode(app: "HaAgentTuiApp", mode: str) -> None:
     except Exception as error:
         app._conversation.append_block("Permissions warning", f"权限模式切换失败：{error}")
     else:
-        app._conversation.append_block("Permissions", f"权限模式已切换为：{app.permission_mode_label(mode)}")
+        label = {
+            "auto_approve": "自动批准",
+            "full_access": "完全访问权限",
+        }.get(mode, "请求批准")
+        app._conversation.append_block("Permissions", f"权限模式已切换为：{label}")
     app._refresh()
     app._restore_prompt_focus()
 

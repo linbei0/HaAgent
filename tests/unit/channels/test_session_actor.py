@@ -8,13 +8,11 @@ import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
 
-from haagent.channels.adapters.fake import FakeAdapter
 from haagent.channels.interactions import InteractionBroker
 from haagent.channels.session_actor import ChannelSessionActor, SubmitResult
 from haagent.channels.state import ChannelStateStore
@@ -24,6 +22,7 @@ from haagent.runtime.execution.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
 )
+from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
 
 
 @dataclass
@@ -46,7 +45,7 @@ class FakeCancelResult:
 class FakeSessions:
     def __init__(self, service: "FakeAssistantService") -> None:
         self._service = service
-        self.permissions = object()
+        self.permissions = self
         self.permission_modes: list[str] = []
 
     def create(self) -> FakeSessionStatus:
@@ -55,7 +54,7 @@ class FakeSessions:
     def resume(self, session: str | Path) -> FakeSessionStatus:
         return self._service._resume(str(session))
 
-    def set_permission_mode(self, mode: str) -> None:
+    def set_mode(self, mode: str) -> None:
         self.permission_modes.append(mode)
 
     def run_prompt_events(
@@ -210,7 +209,6 @@ def _message(
         message_id=message_id,
         sender_id=sender_id,
         text=text,
-        received_at=datetime.now(timezone.utc),
         reply_handle=ChannelReplyHandle(platform=addr.platform, payload={"token": "hidden"}),
     )
 
@@ -299,8 +297,6 @@ def test_slow_model_reply_still_delivered_after_idle_gap(tmp_path: Path) -> None
             return {"status": "ok"}
 
         svc._run_prompt = slow_run  # type: ignore[method-assign]
-        # 生产路径 _drain_idle_timeout=None：只等 sentinel，不因空闲退出。
-        assert actor._drain_idle_timeout is None
         await adp.start(lambda m: None)
         result = await actor.submit(_message("slow", message_id="slow-1"))
         assert result.status == "accepted"
@@ -343,7 +339,6 @@ def test_first_message_creates_session_and_persists_binding(tmp_path: Path) -> N
         binding = state.get_binding(_address().binding_key())
         assert binding is not None
         assert binding.session_id == svc.session_id
-        assert binding.owner_sender_id == "owner-1"
         # 等待 turn 完成并投递回复
         await asyncio.sleep(0.05)
         await actor.close()

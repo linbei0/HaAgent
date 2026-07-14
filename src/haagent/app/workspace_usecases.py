@@ -45,9 +45,6 @@ def sandbox_status() -> AssistantSandboxStatus:
 
 
 class AssistantSandbox:
-    def __init__(self, context: AssistantContext) -> None:
-        self._context = context
-
     def status(self) -> AssistantSandboxStatus:
         return sandbox_status()
 
@@ -66,17 +63,10 @@ class AssistantSandbox:
 class AssistantWorkspace:
     def __init__(self, context: AssistantContext) -> None:
         self._context = context
-        self.sandbox = AssistantSandbox(context)
+        self.sandbox = AssistantSandbox()
         # token 热路径会频繁读 status；缓存后避免每次打 keyring / 重读 providers。
         self._status_cache: AssistantWorkspaceStatus | None = None
         self._status_cache_key: tuple[object, ...] | None = None
-
-    def invalidate_status_cache(self) -> None:
-        """session/模型/凭据/配置变化后必须显式失效，禁止热路径静默读到旧状态。"""
-
-        self._context.status_generation += 1
-        self._status_cache = None
-        self._status_cache_key = None
 
     def mcp_status(self) -> dict[str, object]:
         if self._context.session is None:
@@ -96,10 +86,7 @@ class AssistantWorkspace:
                 "failed_count": 0,
                 "servers": servers,
             }
-        status = getattr(self._context.session, "mcp_status", None)
-        if callable(status):
-            return status()
-        return {"configured_count": 0, "connected_count": 0, "failed_count": 0, "servers": []}
+        return self._context.session.mcp_status()
 
     def list_agents(self) -> list[dict[str, object]]:
         if self._context.session is None:
@@ -123,7 +110,9 @@ class AssistantWorkspace:
         self._context.enable_web = enabled
         if self._context.session is not None:
             self._context.session.enable_web = enabled
-        self.invalidate_status_cache()
+        self._context.status_generation += 1
+        self._status_cache = None
+        self._status_cache_key = None
         return self.status()
 
     def turn_limit_status(self) -> AssistantTurnLimitStatus:
@@ -148,13 +137,6 @@ class AssistantWorkspace:
             raise AssistantServiceError("当前没有 session；先发送一条消息再使用 /turns unlimited。")
         self._context.session.set_max_turns(None)
         return self.turn_limit_status()
-
-    def current_session(self) -> AssistantSessionStatus | None:
-        if self._context.session is None:
-            return None
-        from haagent.app.session_usecases import session_status
-
-        return session_status(self._context.session)
 
     def status(self) -> AssistantWorkspaceStatus:
         cache_key = self._status_cache_key_for_current()
@@ -207,7 +189,9 @@ class AssistantWorkspace:
         )
 
     def _build_status(self) -> AssistantWorkspaceStatus:
-        session = self.current_session()
+        from haagent.app.session_usecases import session_status
+
+        session = session_status(self._context.session) if self._context.session is not None else None
         override = (
             ModelSelection(connection_id=session.model_connection_id, model=session.model or "")
             if session is not None and session.model_connection_id is not None

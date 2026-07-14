@@ -7,7 +7,10 @@ from __future__ import annotations
 import sys
 
 from haagent.app.assistant_types import BackgroundServiceStatus
-from haagent.scheduling.background.base import BackgroundServiceUnsupported
+from haagent.scheduling.background.base import (
+    BackgroundServiceAdapter,
+    BackgroundServiceUnsupported,
+)
 
 
 class UnsupportedBackgroundAdapter:
@@ -27,7 +30,7 @@ class UnsupportedBackgroundAdapter:
         raise BackgroundServiceUnsupported(f"当前平台不支持后台服务卸载: {sys.platform}")
 
 
-def create_background_adapter():
+def create_background_adapter() -> BackgroundServiceAdapter:
     """返回当前平台的 BackgroundServiceAdapter 实现。"""
     platform = sys.platform
     if platform == "win32":

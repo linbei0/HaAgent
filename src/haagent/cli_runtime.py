@@ -23,7 +23,6 @@ from haagent.models.model_connections import (
     load_model_route,
 )
 from haagent.models.types import ModelGateway
-from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
 
@@ -41,7 +40,6 @@ class SmokeDefinition:
 class CliRuntime:
     project_root: Path
     orchestrator_cls: type = RunOrchestrator
-    session_cls: type = AgentSession
     # 测试可注入；默认与 TUI/multi_agent 共用 registry 工厂。
     gateway_factory: GatewayFactory = field(default=gateway_from_profile)
 
@@ -91,7 +89,7 @@ class CliRuntime:
                 )
             return self.gateway_factory(primary)
 
-        if args.provider in {"openai", "openai-chat", "anthropic", "google"}:
+        if args.provider in {"openai", "openai-chat"}:
             return self.gateway_factory(self._cli_provider_profile(args))
         return None
 
@@ -119,18 +117,12 @@ class CliRuntime:
         default_models = {
             "openai": "gpt-4.1-mini",
             "openai-chat": "gpt-4.1-mini",
-            "anthropic": "claude-sonnet-4-5",
-            "google": "gemini-2.5-pro",
         }
         api_key_env = {
             "openai": "OPENAI_API_KEY",
             "openai-chat": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "google": "GEMINI_API_KEY",
         }[provider]
         api_key = os.environ.get(api_key_env) or ""
-        if provider == "google" and not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY") or ""
         model = args.model if args.model is not None else default_models[provider]
         base_url = args.base_url if args.base_url is not None else ""
         return ProviderProfile(

@@ -257,9 +257,6 @@ dependencies = [
 channels-weixin = [
     { name = "qrcode" },
 ]
-channels-weixin-media = [
-    { name = "cryptography" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -270,7 +267,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
-    { name = "cryptography", marker = "extra == 'channels-weixin-media'", specifier = ">=42.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "keyring", specifier = ">=25.0.0" },
     { name = "mcp", specifier = ">=1,<2" },
@@ -283,7 +279,7 @@ requires-dist = [
     { name = "tzdata", specifier = ">=2025.2" },
     { name = "uniseg", specifier = ">=0.10.1,<1.0" },
 ]
-provides-extras = ["channels-weixin", "channels-weixin-media", "channels-wecom", "channels-feishu", "channels-dingtalk", "channels-qq"]
+provides-extras = ["channels-weixin"]
 
 [package.metadata.requires-dev]
 dev = [

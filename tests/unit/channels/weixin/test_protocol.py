@@ -209,7 +209,7 @@ def test_get_qrcode_omits_empty_bearer_authorization() -> None:
     asyncio.run(_run())
 
 
-def test_long_poll_timeout_keeps_cursor() -> None:
+def test_long_poll_timeout_is_exposed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timeout")
 
@@ -222,9 +222,8 @@ def test_long_poll_timeout_keeps_cursor() -> None:
                 bot_token="tok",
                 http_client=client,
             )
-            result = await proto.get_updates(cursor="keep-me")
-            assert result.messages == []
-            assert result.cursor == "keep-me"
+            with pytest.raises(httpx.ReadTimeout):
+                await proto.get_updates(cursor="keep-me")
 
     asyncio.run(_run())
 
@@ -329,9 +328,8 @@ def test_sendmessage_requires_context_token_and_unique_client_id() -> None:
             )
             with pytest.raises(WeixinProtocolError):
                 await proto.send_text(to_user_id="u1", text="hi", context_token="")
-            r1 = await proto.send_text(to_user_id="u1", text="hi", context_token="ctx-1")
-            r2 = await proto.send_text(to_user_id="u1", text="hi2", context_token="ctx-1")
-            assert r1.ok and r2.ok
+            await proto.send_text(to_user_id="u1", text="hi", context_token="ctx-1")
+            await proto.send_text(to_user_id="u1", text="hi2", context_token="ctx-1")
         assert len(captured) == 2
         assert captured[0].get("context_token") == "ctx-1" or "context_token" in json.dumps(captured[0])
         ids = []

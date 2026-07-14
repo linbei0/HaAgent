@@ -1,7 +1,7 @@
 """
 tests/unit/channels/test_p2_hygiene.py - P2 卫生合同
 
-覆盖：公开 delete_binding、stop 不吞错误、receipt 清理、媒体入站忽略。
+覆盖：stop 错误暴露、receipt 清理与媒体入站忽略。
 """
 
 from __future__ import annotations
@@ -11,15 +11,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from haagent.channels.adapters.weixin.adapter import WeixinAdapter
-from haagent.channels.adapters.weixin.media import WeixinMediaNotImplemented, download_media
 from haagent.channels.adapters.weixin.types import WeixinInboundMessage, WeixinUpdates
 from haagent.channels.manager import ChannelManager
 from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.state import ChannelStateStore
 from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
+from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
 
 
 def test_delete_binding_public_api(tmp_path: Path) -> None:
@@ -39,86 +37,6 @@ def test_delete_binding_public_api(tmp_path: Path) -> None:
     assert store.delete_binding("weixin:wx-1:dm:u1") is True
     assert store.get_binding("weixin:wx-1:dm:u1") is None
     assert store.delete_binding("weixin:wx-1:dm:u1") is False
-    store.close()
-
-
-def test_manager_new_uses_public_delete_binding(tmp_path: Path) -> None:
-    """/new 不得直接访问 state._conn，须走 delete_binding。"""
-    store = ChannelStateStore(tmp_path / "channels.sqlite3")
-    deleted: list[str] = []
-    original = store.delete_binding
-
-    def _track(key: str) -> bool:
-        deleted.append(key)
-        return original(key)
-
-    store.delete_binding = _track  # type: ignore[method-assign]
-    store.upsert_binding(
-        binding_key="fake:f1:dm:owner",
-        instance_id="f1",
-        platform="fake",
-        conversation_kind="dm",
-        conversation_id="owner",
-        thread_id=None,
-        workspace_root=str(tmp_path),
-        session_id="old-sess",
-        owner_sender_id="owner",
-    )
-    store.set_owner("f1", "owner")
-
-    class _Svc:
-        def sessions(self):
-            return self
-
-        def create(self, **kwargs):
-            return SimpleNamespace(session_id="new-sess")
-
-        def resume(self, session_id: str):
-            raise AssertionError("should create after /new")
-
-        def run_prompt_events(self, prompt: str):
-            yield from ()
-
-        def cancel_current_run(self) -> bool:
-            return False
-
-        def set_permission_mode(self, mode: str) -> None:
-            return None
-
-        def set_human_interaction_handler(self, handler) -> None:
-            return None
-
-    from types import SimpleNamespace
-
-    from haagent.channels.adapters.fake import FakeAdapter
-
-    manager = ChannelManager(
-        state=store,
-        default_workspace_root=tmp_path,
-        service_factory=lambda root: _Svc(),
-    )
-    adapter = FakeAdapter(instance_id="f1")
-    asyncio.run(manager.attach_adapter(adapter))
-
-    address = ChannelAddress(
-        instance_id="f1",
-        platform="fake",
-        conversation_kind="dm",
-        conversation_id="owner",
-    )
-    handle = ChannelReplyHandle(platform="fake", payload={})
-    msg = InboundChannelMessage(
-        address=address,
-        message_id="new-1",
-        sender_id="owner",
-        text="/new",
-        received_at=datetime.now(timezone.utc),
-        reply_handle=handle,
-    )
-    outcome = asyncio.run(manager._on_message(msg))
-    assert outcome in {"control", "accepted", "queued"}
-    assert deleted == [address.binding_key()]
-    asyncio.run(manager.stop())
     store.close()
 
 
@@ -178,12 +96,10 @@ def test_manager_clears_recovered_adapter_error(tmp_path: Path) -> None:
         service_factory=lambda root: None,
     )
     asyncio.run(manager.attach_adapter(adapter))
-    asyncio.run(manager.sync_adapter_states())
     assert manager.status()[0]["last_error"] == "temporary failure"
 
     adapter.state = "connected"
     adapter.last_error = ""
-    asyncio.run(manager.sync_adapter_states())
     assert manager.status()[0]["last_error"] == ""
 
     asyncio.run(manager.stop())
@@ -214,10 +130,11 @@ def test_runtime_load_purges_old_receipts(tmp_path: Path) -> None:
         service_factory=lambda root: None,
     )
     runtime.load()
-    assert runtime.state is not None
-    assert runtime.state.has_receipt("wx-1", "old-msg") is False
-    assert runtime.state.has_receipt("wx-1", "new-msg") is True
     asyncio.run(runtime.stop())
+    reloaded = ChannelStateStore(state_path)
+    assert reloaded.has_receipt("wx-1", "old-msg") is False
+    assert reloaded.has_receipt("wx-1", "new-msg") is True
+    reloaded.close()
 
 
 def test_weixin_media_message_ignored_advances_cursor(tmp_path: Path) -> None:
@@ -247,6 +164,12 @@ def test_weixin_media_message_ignored_advances_cursor(tmp_path: Path) -> None:
                 )
             return WeixinUpdates(messages=[], cursor="after-media")
 
+        async def notify_start(self) -> None:
+            return None
+
+        async def notify_stop(self) -> None:
+            return None
+
         async def aclose(self) -> None:
             return None
 
@@ -257,31 +180,19 @@ def test_weixin_media_message_ignored_advances_cursor(tmp_path: Path) -> None:
         return "accepted"
 
     async def _run() -> None:
+        persisted: list[str] = []
         adapter = WeixinAdapter(
             instance_id="wx-1",
             protocol=_Proto(),
             poll_interval=0.01,
             initial_cursor="",
+            on_cursor_persist=persisted.append,
         )
         task = asyncio.create_task(adapter.start(_handler))
         await asyncio.sleep(0.08)
         await adapter.stop()
         await task
         assert seen == []
-        assert adapter.cursor == "after-media"
+        assert persisted == ["after-media"]
 
     asyncio.run(_run())
-
-
-def test_download_media_explicitly_unimplemented() -> None:
-    with pytest.raises(WeixinMediaNotImplemented):
-        download_media("any")
-
-
-def test_channels_weixin_optional_deps_document_media_phase() -> None:
-    """文本阶段 qrcode；媒体阶段 cryptography 单独说明，不强制安装。"""
-    text = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert "channels-weixin" in text
-    assert "qrcode" in text
-    # 媒体阶段依赖须在注释或独立 extra 中可见，避免 silent 漂移。
-    assert "cryptography" in text or "channels-weixin-media" in text

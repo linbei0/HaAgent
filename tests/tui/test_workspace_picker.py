@@ -28,8 +28,6 @@ def test_workspace_picker_enter_descends_and_parent(tmp_path: Path) -> None:
     child.mkdir()
     (child / "deep").mkdir()
     state = WorkspacePickerState(root=tmp_path, start_path=tmp_path)
-    # 选中 nested（通常排序后第一项可能是 .. 或 nested）
-    state = state.ensure_selection_on("nested")
     entered = state.enter_selected()
     assert entered is not None
     assert entered.current_path == child.resolve()
@@ -40,8 +38,7 @@ def test_workspace_picker_enter_descends_and_parent(tmp_path: Path) -> None:
 def test_workspace_picker_path_input_and_confirm(tmp_path: Path) -> None:
     target = tmp_path / "chosen"
     target.mkdir()
-    state = WorkspacePickerState(root=tmp_path, start_path=tmp_path)
-    state = state.with_path_input(str(target))
+    state = WorkspacePickerState(root=tmp_path, start_path=tmp_path, path_input=str(target))
     confirmed = state.confirm_path()
     assert confirmed == target.resolve()
 
@@ -49,7 +46,6 @@ def test_workspace_picker_path_input_and_confirm(tmp_path: Path) -> None:
 def test_workspace_picker_rejects_non_directory(tmp_path: Path) -> None:
     file_path = tmp_path / "not-dir.txt"
     file_path.write_text("x", encoding="utf-8")
-    state = WorkspacePickerState(root=tmp_path, start_path=tmp_path)
-    state = state.with_path_input(str(file_path))
+    state = WorkspacePickerState(root=tmp_path, start_path=tmp_path, path_input=str(file_path))
     assert state.confirm_path() is None
     assert state.error

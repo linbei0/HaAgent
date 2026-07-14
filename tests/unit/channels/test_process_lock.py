@@ -25,8 +25,7 @@ def test_second_gateway_lock_is_rejected_until_first_releases(tmp_path: Path) ->
 def test_gateway_lock_context_releases_after_exception(tmp_path: Path) -> None:
     path = tmp_path / "gateway.lock"
     try:
-        with GatewayInstanceLock(path) as lock:
-            assert lock.acquired is True
+        with GatewayInstanceLock(path):
             raise RuntimeError("boom")
     except RuntimeError:
         pass
@@ -42,5 +41,5 @@ def test_gateway_lock_release_is_idempotent(tmp_path: Path) -> None:
 
     lock.release()
     lock.release()
-
-    assert lock.acquired is False
+    assert lock.acquire() is True
+    lock.release()
