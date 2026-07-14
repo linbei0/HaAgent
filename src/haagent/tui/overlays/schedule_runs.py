@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from haagent.app.assistant_types import AssistantScheduleRun
-from haagent.tui.design.utils import safe_summary
+from haagent.tui.design.utils import format_local_datetime, safe_summary
 
 RunFilterMode = Literal["unread", "attention", "failed", "succeeded", "all"]
 
@@ -41,15 +41,6 @@ def filter_runs(runs: list[AssistantScheduleRun], mode: RunFilterMode) -> list[A
     if mode == "succeeded":
         return [run for run in runs if run.status == "succeeded"]
     return list(runs)
-
-
-def _fmt_dt(value: object | None) -> str:
-    if value is None:
-        return "-"
-    text = str(value)
-    if "T" in text:
-        return text.replace("+00:00", "Z")[:19]
-    return text[:19]
 
 
 def _wrap_text(text: str, *, width: int = 72) -> list[str]:
@@ -110,7 +101,26 @@ class ScheduleRunsState:
         return replace(self, detail_mode=False)
 
     def with_runs(self, runs: list[AssistantScheduleRun]) -> ScheduleRunsState:
-        return replace(self, runs=list(runs))
+        selected = self.selected
+        selected_id = selected.id if selected is not None else None
+        updated = replace(self, runs=list(runs))
+        items = updated.visible
+        if not items:
+            return replace(updated, selected_index=0, detail_mode=False)
+        selected_index = min(self.selected_index, len(items) - 1)
+        if selected_id is not None:
+            selected_index = next(
+                (index for index, item in enumerate(items) if item.id == selected_id),
+                selected_index,
+            )
+        selected_still_visible = (
+            selected_id is not None and items[selected_index].id == selected_id
+        )
+        return replace(
+            updated,
+            selected_index=selected_index,
+            detail_mode=self.detail_mode and selected_still_visible,
+        )
 
     def render(self) -> str:
         if self.detail_mode and self.selected is not None:
@@ -135,7 +145,7 @@ class ScheduleRunsState:
                 summary = safe_summary(run.summary or "-", 36)
                 lines.append(
                     f"{marker}{unread} {run.id:<12} {status:<14} "
-                    f"{_fmt_dt(run.scheduled_for_utc)}  {summary}"
+                    f"{format_local_datetime(run.scheduled_for_utc, include_seconds=True)}  {summary}"
                 )
             selected = self.selected
             if selected is not None:
@@ -161,9 +171,12 @@ class ScheduleRunsState:
             f"revision: {selected.schedule_revision}",
             f"触发: {selected.trigger_kind} / {selected.trigger_key}",
             (
-                f"时间: 计划 {_fmt_dt(selected.scheduled_for_utc)}  "
-                f"开始 {_fmt_dt(selected.started_at_utc)}  "
-                f"结束 {_fmt_dt(selected.finished_at_utc)}"
+                "时间: 计划 "
+                f"{format_local_datetime(selected.scheduled_for_utc, include_seconds=True)}  "
+                "开始 "
+                f"{format_local_datetime(selected.started_at_utc, include_seconds=True)}  "
+                "结束 "
+                f"{format_local_datetime(selected.finished_at_utc, include_seconds=True)}"
             ),
             f"尝试: {selected.attempt_count}",
             f"状态: {selected.status}",

@@ -54,3 +54,34 @@ def test_schedule_flow_starts_and_stops_host_with_badge_timer(tmp_path) -> None:
     assert service.schedules.host_stop_count == 1
     assert service.schedules.host_status().running is False
     assert app._intervals[0].stopped is True
+
+
+def test_open_overlay_badge_counts_older_unread_runs(tmp_path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path)
+    service.schedule_runs = [
+        SimpleNamespace(schedule_id="sch", status="succeeded", unread=index >= 200)
+        for index in range(250)
+    ]
+    app = _AppStub(service)
+    flow = ScheduleFlow(app)
+
+    flow._poll_schedule_state(  # type: ignore[arg-type]
+        service.schedules,
+        target_overlay=SimpleNamespace(),
+    )
+
+    assert flow.unread_count == 50
+
+
+def test_stale_refresh_does_not_update_replaced_overlay(tmp_path) -> None:
+    app = _AppStub(FakeAssistantService(workspace_root=tmp_path))
+    calls: list[object] = []
+    old_overlay = SimpleNamespace(
+        is_mounted=True,
+        apply_refresh=lambda *_args: calls.append(object()),
+    )
+    app.screen = SimpleNamespace()
+
+    ScheduleFlow(app)._apply_overlay_refresh(old_overlay, [], [], None)  # type: ignore[arg-type]
+
+    assert calls == []

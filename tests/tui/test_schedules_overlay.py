@@ -124,6 +124,8 @@ def test_schedules_overlay_empty_state_and_list_fields(tmp_path: Path) -> None:
     assert "active" in text or "运行中" in text or "启用" in text
     assert tmp_path.name in text
     assert "FREQ=DAILY" in text or "每天" in text or "日" in text
+    assert "2026-07-13 09:00" in text
+    assert "2026-07-13 01:00" not in text
 
 
 def test_schedules_overlay_narrow_tabs() -> None:
@@ -350,6 +352,93 @@ def test_tui_schedules_command_opens_overlay_120x40(tmp_path: Path) -> None:
             assert not any(isinstance(screen, SchedulesOverlay) for screen in app.screen_stack)
 
     asyncio.run(_run())
+
+
+def test_open_schedules_refreshes_completed_run_without_reopening(tmp_path: Path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path)
+    service.schedules = FakeSchedules(service)
+    summary = _summary(workspace=tmp_path)
+    detail = _full(workspace=tmp_path)
+    queued = AssistantScheduleRun(
+        id="run_refresh",
+        schedule_id="sch_1",
+        schedule_revision=1,
+        trigger_key="manual:refresh",
+        trigger_kind="manual",
+        scheduled_for_utc=datetime(2026, 7, 14, 8, 6, tzinfo=timezone.utc),
+        status="queued",
+        attempt_count=0,
+        summary="",
+        unread=True,
+    )
+    service.schedule_summaries = [summary]
+    service.schedule_details = {"sch_1": detail}
+    service.schedule_runs = [queued]
+    app = HaAgentTuiApp(service)
+
+    async def _run() -> None:
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.schedule_flow.open_schedules()
+            await pilot.pause()
+            overlay = app.screen
+            assert isinstance(overlay, SchedulesOverlay)
+            assert overlay.state.runs[0].status == "queued"
+
+            finished_at = datetime(2026, 7, 14, 8, 6, 51, tzinfo=timezone.utc)
+            service.schedule_runs = [
+                replace(
+                    queued,
+                    status="succeeded",
+                    attempt_count=1,
+                    summary="天气提醒已完成",
+                    finished_at_utc=finished_at,
+                )
+            ]
+            service.schedule_summaries = [replace(summary, last_run_at_utc=finished_at)]
+            service.schedule_details = {
+                "sch_1": replace(detail, last_run_at_utc=finished_at),
+            }
+
+            # 与生产中的 2 秒 timer 使用同一入口，保持 overlay 不关闭。
+            app.schedule_flow.refresh_badge()
+            await pilot.pause()
+
+            assert app.screen is overlay
+            assert overlay.state.runs[0].status == "succeeded"
+            assert overlay.state.run_state is not None
+            assert overlay.state.run_state.runs[0].status == "succeeded"
+            assert overlay.state.selected_schedule is not None
+            assert overlay.state.selected_schedule.last_run_at_utc == finished_at
+            assert "天气提醒已完成" in _all_text(app)
+
+    asyncio.run(_run())
+
+
+def test_schedule_refresh_keeps_reordered_selection_visible() -> None:
+    summaries = [
+        _summary(f"sch_{index}", name=f"计划{index}") for index in range(15)
+    ]
+    selected = summaries[13]
+    overlay = SchedulesOverlay(
+        SchedulesOverlayState(
+            schedules=summaries,
+            runs=[],
+            selected_index=13,
+            scroll_offset=2,
+            detail=selected,
+        )
+    )
+
+    overlay.apply_refresh(
+        [selected, *summaries[:13], summaries[14]],
+        [],
+        selected,
+    )
+
+    assert overlay.state.selected_schedule is not None
+    assert overlay.state.selected_schedule.id == "sch_13"
+    assert overlay.state.selected_index == 0
+    assert overlay.state.scroll_offset == 0
 
 
 def test_tui_schedules_command_opens_overlay_80x24(tmp_path: Path) -> None:

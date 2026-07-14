@@ -7,7 +7,8 @@ tests/tui/test_schedule_runs.py - 计划运行收件箱 TUI
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from haagent.app.assistant_types import AssistantScheduleRun
@@ -93,6 +94,38 @@ def test_runs_state_render_detail_and_empty() -> None:
     assert long_summary in compact
     assert long_fail in compact
     assert "Esc返回列表" in text
+
+
+def test_runs_render_utc_timestamp_in_system_local_timezone(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "haagent.tui.design.utils._to_system_local",
+        lambda value: value.astimezone(timezone(timedelta(hours=8))),
+    )
+
+    text = ScheduleRunsState(runs=[_run()], filter_mode="all").render()
+
+    assert "2026-07-12 09:00:00" in text
+    assert "2026-07-12 01:00:00" not in text
+
+
+def test_refresh_preserves_selected_run_by_id_after_reordering() -> None:
+    first = _run("run_first", status="succeeded")
+    selected = _run("run_selected", status="queued")
+    state = ScheduleRunsState(
+        runs=[first, selected],
+        selected_index=1,
+        detail_mode=True,
+    )
+
+    refreshed = state.with_runs(
+        [replace(selected, status="succeeded", summary="已完成"), first]
+    )
+
+    assert refreshed.selected is not None
+    assert refreshed.selected.id == "run_selected"
+    assert refreshed.selected.status == "succeeded"
+    assert refreshed.selected_index == 0
+    assert refreshed.detail_mode is True
 
 
 def test_runs_detail_enter_and_escape_hierarchy(tmp_path: Path) -> None:
@@ -239,8 +272,6 @@ def test_tui_runs_open_session_resumes_path(tmp_path: Path) -> None:
         )
     ]
     # 覆盖路径，模拟真实 schedule run
-    from dataclasses import replace
-
     service.schedule_runs = [
         replace(
             service.schedule_runs[0],

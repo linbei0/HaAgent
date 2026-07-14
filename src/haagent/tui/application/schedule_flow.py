@@ -1,7 +1,7 @@
 """
 haagent/tui/application/schedule_flow.py - 计划任务 TUI 流程
 
-打开 /schedules overlay，处理创建编辑、运行收件箱、后台服务与未读 badge；
+打开 /schedules overlay，处理创建编辑、运行收件箱、后台服务、状态轮询与未读 badge；
 DB 调用经 Textual worker，不阻塞 UI 线程。TUI 内嵌 ScheduleCoordinator host：
 应用打开期间可派发到期任务，退出时释放租约。
 """
@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from haagent.app.assistant_types import (
+    AssistantSchedule,
+    AssistantScheduleRun,
+    AssistantScheduleSummary,
     BackgroundServiceStatus,
     RunQuery,
     ScheduleCreateRequest,
@@ -63,22 +66,87 @@ class ScheduleFlow:
     def refresh_badge(self) -> None:
         # set_interval 在 UI 线程触发；DB 读放到 worker/线程，避免卡主事件循环
         schedules = self._app.service.schedules
+        screen = getattr(self._app, "screen", None)
+        target_overlay = screen if isinstance(screen, SchedulesOverlay) else None
+        selected = target_overlay.state.selected_schedule if target_overlay is not None else None
+        selected_schedule_id = selected.id if selected is not None else None
         self._app.run_worker(
-            lambda: self._poll_badge_count(schedules),
+            lambda: self._poll_schedule_state(
+                schedules,
+                target_overlay=target_overlay,
+                selected_schedule_id=selected_schedule_id,
+            ),
             thread=True,
             exclusive=True,
             name="schedule-badge",
             group="schedule-badge",
         )
 
-    def _poll_badge_count(self, schedules: Any) -> None:
+    def _poll_schedule_state(
+        self,
+        schedules: Any,
+        *,
+        target_overlay: SchedulesOverlay | None = None,
+        selected_schedule_id: str | None = None,
+    ) -> None:
         try:
-            runs = schedules.list_runs(RunQuery(unread_only=True, limit=200))
-            count = len(runs)
+            unread_runs = schedules.list_runs(RunQuery(unread_only=True, limit=200))
+            count = len(unread_runs)
         except Exception as error:
             self._app.call_from_thread(self._apply_badge_error, str(error))
+            if target_overlay is not None:
+                self._app.call_from_thread(
+                    self._apply_overlay_refresh_error,
+                    target_overlay,
+                    str(error),
+                )
             return
         self._app.call_from_thread(self._apply_badge_count, count)
+        if target_overlay is None:
+            return
+        try:
+            all_runs = schedules.list_runs(RunQuery(limit=100))
+            items = schedules.list()
+            available_ids = {item.id for item in items}
+            detail_id = selected_schedule_id if selected_schedule_id in available_ids else None
+            if detail_id is None and items:
+                detail_id = items[0].id
+            detail = schedules.get(detail_id) if detail_id is not None else None
+        except Exception as error:
+            self._app.call_from_thread(
+                self._apply_overlay_refresh_error,
+                target_overlay,
+                str(error),
+            )
+            return
+        # 批量回到 UI 线程，减少运行列表和计划详情分步重绘。
+        self._app.call_from_thread(
+            self._apply_overlay_refresh,
+            target_overlay,
+            items,
+            all_runs,
+            detail,
+        )
+
+    def _apply_overlay_refresh(
+        self,
+        target_overlay: SchedulesOverlay,
+        schedules: list[AssistantScheduleSummary],
+        runs: list[AssistantScheduleRun],
+        detail: AssistantSchedule | AssistantScheduleSummary | None,
+    ) -> None:
+        screen = getattr(self._app, "screen", None)
+        if screen is target_overlay and target_overlay.is_mounted:
+            target_overlay.apply_refresh(schedules, runs, detail)
+
+    def _apply_overlay_refresh_error(
+        self,
+        target_overlay: SchedulesOverlay,
+        message: str,
+    ) -> None:
+        screen = getattr(self._app, "screen", None)
+        if screen is target_overlay and target_overlay.is_mounted:
+            target_overlay.apply_refresh_error(message)
 
     def _apply_badge_error(self, message: str) -> None:
         if message == self._badge_error or not self._app.is_mounted:

@@ -21,7 +21,7 @@ from haagent.app.assistant_types import (
     AssistantScheduleRun,
     AssistantScheduleSummary,
 )
-from haagent.tui.design.utils import safe_summary, workspace_label
+from haagent.tui.design.utils import format_local_datetime, safe_summary, workspace_label
 from haagent.tui.overlays.schedule_background import ScheduleBackgroundState
 from haagent.tui.overlays.schedule_runs import ScheduleRunsState, filter_runs
 
@@ -29,6 +29,7 @@ SchedulesTab = Literal["plans", "runs", "background"]
 
 # 计划列表可视窗口行数（长列表滚动，不全量渲染）
 VISIBLE_SCHEDULE_COUNT = 12
+_REFRESH_ERROR_PREFIX = "计划状态自动刷新失败："
 
 SchedulesOverlayAction = Literal[
     "create",
@@ -76,13 +77,6 @@ def _rule_summary(rrule: str | None) -> str:
     if "FREQ=HOURLY" in upper:
         return "间隔(时)"
     return safe_summary(rrule, 18)
-
-
-def _fmt_dt(value: object | None) -> str:
-    if value is None:
-        return "-"
-    text = str(value)
-    return text.replace("+00:00", "Z")[:16]
 
 
 @dataclass(frozen=True)
@@ -218,8 +212,14 @@ class SchedulesOverlayState:
             name = safe_summary(item.name, 16)
             status = item.status
             rule = _rule_summary(item.rrule)
-            next_run = _fmt_dt(item.next_run_at_utc)
-            last_run = _fmt_dt(item.last_run_at_utc)
+            next_run = format_local_datetime(
+                item.next_run_at_utc,
+                timezone_name=item.timezone,
+            )
+            last_run = format_local_datetime(
+                item.last_run_at_utc,
+                timezone_name=item.timezone,
+            )
             ws = workspace_label(item.workspace_root, 12)
             lines.append(
                 f"{marker} {name:<16} {status:<9} {rule:<8} next:{next_run} last:{last_run} ws:{ws}"
@@ -237,8 +237,16 @@ class SchedulesOverlayState:
             f"时区: {detail.timezone}",
             f"Workspace: {detail.workspace_root}",
             f"模型: {detail.connection_id}/{detail.model}",
-            f"下次: {_fmt_dt(detail.next_run_at_utc)}",
-            f"上次: {_fmt_dt(detail.last_run_at_utc)}",
+            "下次: "
+            + format_local_datetime(
+                detail.next_run_at_utc,
+                timezone_name=detail.timezone,
+            ),
+            "上次: "
+            + format_local_datetime(
+                detail.last_run_at_utc,
+                timezone_name=detail.timezone,
+            ),
         ]
         prompt = detail.prompt if isinstance(detail, AssistantSchedule) else None
         if prompt:
@@ -474,6 +482,61 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
             self.dismiss(result)
         except ScreenStackError:
             return
+
+    def apply_refresh(
+        self,
+        schedules: list[AssistantScheduleSummary],
+        runs: list[AssistantScheduleRun],
+        detail: AssistantSchedule | AssistantScheduleSummary | None,
+    ) -> None:
+        """在 UI 线程替换后台快照，同时保留用户当前导航位置。"""
+        selected = self.state.selected_schedule
+        selected_id = selected.id if selected is not None else None
+        selected_index = 0
+        if schedules:
+            selected_index = min(self.state.selected_index, len(schedules) - 1)
+            if selected_id is not None:
+                selected_index = next(
+                    (index for index, item in enumerate(schedules) if item.id == selected_id),
+                    selected_index,
+                )
+            selected_id = schedules[selected_index].id
+        else:
+            selected_id = None
+
+        next_detail = detail if detail is not None and detail.id == selected_id else None
+        if next_detail is None and selected_id is not None:
+            next_detail = schedules[selected_index]
+        run_state = self.state.run_state or ScheduleRunsState(runs=self.state.runs)
+        message = self.state.message
+        if message.startswith(_REFRESH_ERROR_PREFIX):
+            message = ""
+        scroll_offset = self.state.scroll_offset
+        if selected_index < scroll_offset:
+            scroll_offset = selected_index
+        elif selected_index >= scroll_offset + VISIBLE_SCHEDULE_COUNT:
+            scroll_offset = selected_index - VISIBLE_SCHEDULE_COUNT + 1
+        scroll_offset = min(
+            max(scroll_offset, 0),
+            max(len(schedules) - VISIBLE_SCHEDULE_COUNT, 0),
+        )
+        next_state = replace(
+            self.state,
+            schedules=list(schedules),
+            runs=list(runs),
+            selected_index=selected_index,
+            scroll_offset=scroll_offset,
+            detail=next_detail,
+            run_state=run_state.with_runs(runs),
+            message=message,
+        )
+        if next_state != self.state:
+            self._set_state(next_state)
+
+    def apply_refresh_error(self, message: str) -> None:
+        text = f"{_REFRESH_ERROR_PREFIX}{message}"
+        if self.state.message != text:
+            self._set_state(replace(self.state, message=text))
 
     def _set_state(self, state: SchedulesOverlayState) -> None:
         self.state = state
