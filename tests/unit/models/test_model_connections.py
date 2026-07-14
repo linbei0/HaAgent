@@ -151,6 +151,28 @@ def test_local_connection_without_credentials_loads_profile_and_writes_version_t
     assert status.credential_source_used == "none"
 
 
+def test_native_catalog_gateways_can_be_persisted(tmp_path) -> None:
+    config_dir = tmp_path / ".haagent"
+
+    for gateway_provider in ("anthropic", "google"):
+        connection = ProviderConnectionRecord(
+            id=gateway_provider,
+            name=gateway_provider,
+            provider_id=gateway_provider,
+            provider_name=gateway_provider.title(),
+            gateway_provider=gateway_provider,
+            base_url=f"https://{gateway_provider}.example/v1",
+            api_key_env=f"{gateway_provider.upper()}_API_KEY",
+        )
+
+        save_provider_connection(connection, config_dir=config_dir)
+
+        assert load_provider_connection_record(
+            gateway_provider,
+            config_path=config_dir / "providers.json",
+        ) == connection
+
+
 def test_model_route_loads_single_fallback_and_cloud_consent(tmp_path) -> None:
     config_dir = tmp_path / ".haagent"
     primary = ModelSelection(connection_id="ollama-local", model="qwen3:8b")

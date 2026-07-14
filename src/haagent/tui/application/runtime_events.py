@@ -1,5 +1,5 @@
 """
-src/haagent/tui/runtime_events.py - TUI 运行时事件处理
+src/haagent/tui/application/runtime_events.py - TUI 运行时事件处理
 
 消费 RuntimeUiEvent 强类型协议并更新 Textual 应用状态。
 """

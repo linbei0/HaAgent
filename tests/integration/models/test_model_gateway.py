@@ -23,7 +23,6 @@ from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.gateway_registry import (
     catalog_provider_capability,
     gateway_from_profile,
-    GatewayRegistryError,
 )
 from haagent.models.model_connections import (
     ModelSelection,
@@ -247,121 +246,87 @@ def _image_user_message(tmp_path: Path) -> dict[str, object]:
     }
 
 
-def test_gateway_registry_maps_anthropic_catalog_provider_to_native_gateway() -> None:
-    provider = ModelCatalogProvider(
-        id="anthropic",
-        name="Anthropic",
-        env_names=["ANTHROPIC_API_KEY"],
-        api_base_url=None,
-        provider_package="@ai-sdk/anthropic",
-        documentation_url="https://docs.anthropic.com/",
-        models=[],
-    )
+def test_gateway_registry_maps_catalog_providers_to_supported_gateways() -> None:
+    cases = [
+        ("anthropic", "Anthropic", None, "@ai-sdk/anthropic", "anthropic"),
+        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", None, "openai-chat"),
+        (
+            "requesty",
+            "Requesty",
+            "https://router.requesty.ai/v1",
+            "@ai-sdk/openai-compatible",
+            "openai-chat",
+        ),
+        ("deepseek", "DeepSeek", "https://api.deepseek.com", "@ai-sdk/openai-compatible", "openai-chat"),
+        (
+            "lmstudio",
+            "LMStudio",
+            "http://127.0.0.1:1234/v1",
+            "@ai-sdk/openai-compatible",
+            "openai-chat",
+        ),
+        (
+            "ollama-cloud",
+            "Ollama Cloud",
+            "https://ollama.com/v1",
+            "@ai-sdk/openai-compatible",
+            "openai-chat",
+        ),
+        (
+            "openrouter",
+            "OpenRouter",
+            "https://openrouter.ai/api/v1",
+            "@openrouter/ai-sdk-provider",
+            "openai-chat",
+        ),
+        (
+            "google",
+            "Google",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "@ai-sdk/google",
+            "google",
+        ),
+    ]
 
-    capability = catalog_provider_capability(provider)
-
-    assert capability.status == "runnable"
-    assert capability.gateway_provider == "anthropic"
-
-
-def test_gateway_registry_tolerates_catalog_provider_without_provider_package() -> None:
-    provider = ModelCatalogProvider(
-        id="openrouter",
-        name="OpenRouter",
-        env_names=["OPENROUTER_API_KEY"],
-        api_base_url="https://openrouter.ai/api/v1",
-        provider_package=None,
-        documentation_url="https://openrouter.ai/docs",
-        models=[],
-    )
-
-    capability = catalog_provider_capability(provider)
-
-    assert capability.status == "runnable"
-    assert capability.gateway_provider == "openai-chat"
-
-
-@pytest.mark.parametrize(
-    ("provider_id", "name", "api_base_url", "provider_package"),
-    [
-        ("requesty", "Requesty", "https://router.requesty.ai/v1", "@ai-sdk/openai-compatible"),
-        ("deepseek", "DeepSeek", "https://api.deepseek.com", "@ai-sdk/openai-compatible"),
-        ("lmstudio", "LMStudio", "http://127.0.0.1:1234/v1", "@ai-sdk/openai-compatible"),
-        ("ollama-cloud", "Ollama Cloud", "https://ollama.com/v1", "@ai-sdk/openai-compatible"),
-        ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "@openrouter/ai-sdk-provider"),
-    ],
-)
-def test_gateway_registry_maps_openai_compatible_catalog_provider_to_chat_gateway(
-    provider_id: str,
-    name: str,
-    api_base_url: str,
-    provider_package: str,
-) -> None:
-    provider = ModelCatalogProvider(
-        id=provider_id,
-        name=name,
-        env_names=[f"{provider_id.upper().replace('-', '_')}_API_KEY"],
-        api_base_url=api_base_url,
-        provider_package=provider_package,
-        documentation_url=f"https://{provider_id}.example/docs",
-        models=[],
-    )
-
-    capability = catalog_provider_capability(provider)
-
-    assert capability.status == "runnable"
-    assert capability.gateway_provider == "openai-chat"
-
-
-def test_gateway_registry_builds_existing_openai_chat_gateway() -> None:
-    gateway = gateway_from_profile(
-        ProviderProfile(
-            name="router",
-            provider="openai-chat",
-            base_url="https://openrouter.ai/api/v1",
-            model="openai/gpt-5.2-chat",
-            api_key_env="OPENROUTER_API_KEY",
-            credential_source="keyring",
-            credential_source_used="direct",
-            api_key="sk-test",
+    for provider_id, name, api_base_url, provider_package, expected_gateway in cases:
+        provider = ModelCatalogProvider(
+            id=provider_id,
+            name=name,
+            env_names=[f"{provider_id.upper().replace('-', '_')}_API_KEY"],
+            api_base_url=api_base_url,
+            provider_package=provider_package,
+            documentation_url=f"https://{provider_id}.example/docs",
+            models=[],
         )
-    )
 
-    assert isinstance(gateway, OpenAIChatCompletionsGateway)
+        capability = catalog_provider_capability(provider)
+
+        assert capability.status == "runnable"
+        assert capability.gateway_provider == expected_gateway
 
 
-def test_gateway_registry_builds_anthropic_gateway() -> None:
-    gateway = gateway_from_profile(
-        ProviderProfile(
-            name="anthropic-main",
-            provider="anthropic",
-            base_url="https://api.anthropic.com",
-            model="claude-sonnet-4-20250514",
-            api_key_env="ANTHROPIC_API_KEY",
-            credential_source="keyring",
-            credential_source_used="direct",
-            api_key="sk-test",
+def test_gateway_registry_builds_supported_provider_gateways() -> None:
+    cases = [
+        ("openai-chat", "https://openrouter.ai/api/v1", OpenAIChatCompletionsGateway),
+        ("anthropic", "https://api.anthropic.com", AnthropicMessagesGateway),
+        ("google", "https://generativelanguage.googleapis.com/v1beta", GoogleGeminiGateway),
+    ]
+
+    for provider, base_url, expected_type in cases:
+        gateway = gateway_from_profile(
+            ProviderProfile(
+                name=f"{provider}-main",
+                provider=provider,
+                base_url=base_url,
+                model="test-model",
+                api_key_env="TEST_API_KEY",
+                credential_source="keyring",
+                credential_source_used="direct",
+                api_key="test-key",
+            )
         )
-    )
 
-    assert isinstance(gateway, AnthropicMessagesGateway)
-
-
-def test_gateway_registry_builds_google_gemini_gateway() -> None:
-    gateway = gateway_from_profile(
-        ProviderProfile(
-            name="google-main",
-            provider="google",
-            base_url="https://generativelanguage.googleapis.com/v1beta",
-            model="gemini-2.5-pro",
-            api_key_env="GEMINI_API_KEY",
-            credential_source="keyring",
-            credential_source_used="direct",
-            api_key="gemini-test-key",
-        )
-    )
-
-    assert isinstance(gateway, GoogleGeminiGateway)
+        assert isinstance(gateway, expected_type)
 
 
 def test_gateway_metadata_redacts_secret_like_endpoint_parts() -> None:
@@ -382,23 +347,6 @@ def test_gateway_metadata_redacts_secret_like_endpoint_parts() -> None:
     assert "api_key" not in serialized
     assert "secret" not in serialized
     assert "user:pass" not in serialized
-
-
-def test_gateway_registry_maps_google_catalog_provider_to_gemini_gateway() -> None:
-    provider = ModelCatalogProvider(
-        id="google",
-        name="Google",
-        env_names=["GEMINI_API_KEY"],
-        api_base_url="https://generativelanguage.googleapis.com/v1beta",
-        provider_package="@ai-sdk/google",
-        documentation_url="https://ai.google.dev/gemini-api/docs",
-        models=[],
-    )
-
-    capability = catalog_provider_capability(provider)
-
-    assert capability.status == "runnable"
-    assert capability.gateway_provider == "google"
 
 
 def test_anthropic_gateway_text_response_uses_messages_payload() -> None:

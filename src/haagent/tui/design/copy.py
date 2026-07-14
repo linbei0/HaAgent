@@ -1,5 +1,5 @@
 """
-src/haagent/tui/copy.py - TUI 中文文案单一来源
+src/haagent/tui/design/copy.py - TUI 中文文案单一来源
 
 集中维护面板、弹窗和常见状态文案，避免 TUI 各模块出现中英标题漂移。
 """

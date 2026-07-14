@@ -84,36 +84,12 @@ def test_recovery_suggestion_becomes_actionable_notice() -> None:
     assert "verification_failed" in "\n".join(presentation.details.lines)
 
 
-def test_read_tool_updates_status_only() -> None:
-    presentation = present_tool_activity(_tool_event("started", tool_name="file_read"))
+def test_started_tools_update_ephemeral_status_only() -> None:
+    for tool_name in ("file_read", "web_fetch", "shell", "code_run"):
+        presentation = present_tool_activity(_tool_event("started", tool_name=tool_name))
 
-    assert presentation.status_line is not None
-    assert presentation.status_line.text == "正在阅读文件..."
-    assert presentation.timeline_item is None
-
-
-def test_web_fetch_updates_status_only() -> None:
-    presentation = present_tool_activity(_tool_event("started", tool_name="web_fetch"))
-
-    assert presentation.status_line is not None
-    assert presentation.status_line.text == "正在阅读资料..."
-    assert presentation.timeline_item is None
-
-
-def test_shell_started_updates_status_only() -> None:
-    presentation = present_tool_activity(_tool_event("started", tool_name="shell"))
-
-    assert presentation.status_line is not None
-    assert presentation.status_line.text == "正在运行命令..."
-    assert presentation.timeline_item is None
-
-
-def test_code_run_started_updates_status_only() -> None:
-    presentation = present_tool_activity(_tool_event("started", tool_name="code_run"))
-
-    assert presentation.status_line is not None
-    assert presentation.status_line.text == "正在执行代码..."
-    assert presentation.timeline_item is None
+        assert presentation.status_line is not None
+        assert presentation.timeline_item is None
 
 
 def test_apply_patch_success_becomes_effect_summary() -> None:

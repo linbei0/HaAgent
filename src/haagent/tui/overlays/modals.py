@@ -1,5 +1,5 @@
 """
-haagent/tui/modals.py - TUI 弹窗组件
+haagent/tui/overlays/modals.py - TUI 弹窗组件
 
 封装帮助和工具审批弹窗，保持 ModalScreen 行为独立于主 App 编排。
 """

@@ -8,9 +8,7 @@ DM 过滤、typing finally、presenter 静默工具摘要。
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,15 +20,12 @@ from haagent.channels.adapters.weixin.types import (
     WeixinInboundMessage,
     WeixinUpdates,
 )
-from haagent.channels.presenter import ChannelPresenter, SendText, SetTyping
+from haagent.channels.presenter import ChannelPresenter, SendText
 from haagent.channels.session_actor import ChannelSessionActor
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.state import ChannelStateStore
-from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.runtime.events.types import (
-    AssistantMessageEvent,
-    FailureNoticeEvent,
     SessionLifecycleEvent,
     ToolActivityEvent,
 )
@@ -334,8 +329,6 @@ def test_gateway_preflight_fails_without_model_key(tmp_path: Path, monkeypatch, 
     from haagent import cli
     from haagent import cli_commands
     from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
-    from haagent.models.credentials import KEYRING_SERVICE_NAME
-
     home = tmp_path / "home"
     config_dir = home / ".haagent"
     config_dir.mkdir(parents=True)

@@ -1,5 +1,5 @@
 """
-haagent/tui/renderers.py - TUI 文本渲染逻辑
+haagent/tui/design/renderers.py - TUI 文本渲染逻辑
 
 集中生成状态栏、审批、失败和记忆候选文本，保持组件层轻量。
 """
@@ -10,7 +10,7 @@ from haagent.app.assistant_types import AssistantWorkspaceStatus
 from haagent.memory import MemoryCandidate
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 from haagent.tui.design.copy import EMPTY_LABELS, PANEL_TITLES
-from haagent.tui.design.theme import status_badge, status_semantic
+from haagent.tui.design.theme import status_badge
 from haagent.tui.design.utils import safe_summary, short_session, truncate_end, truncate_status_line, workspace_label
 
 

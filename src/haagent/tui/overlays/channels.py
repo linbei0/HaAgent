@@ -7,7 +7,6 @@ haagent/tui/overlays/channels.py - 渠道配置 overlay
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Literal
 
 from textual import events

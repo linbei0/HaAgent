@@ -1,5 +1,5 @@
 """
-haagent/tui/command_suggestions.py - slash command 建议面板
+haagent/tui/commands/suggestions.py - slash command 建议面板
 
 基于结构化命令注册表提供过滤、选择和执行回调，不把命令文本发送给模型。
 """

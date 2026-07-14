@@ -5,7 +5,6 @@ tests/integration/cli/test_cli_run.py - HaAgent run 子命令测试
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 import inspect
@@ -14,8 +13,6 @@ import pytest
 
 from haagent import cli
 from haagent.models.types import ModelResponse, ToolCall
-from haagent.runtime.episodes.validator import EpisodePackageView
-from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.contracts.task import load_task
 

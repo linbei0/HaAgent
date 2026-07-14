@@ -1,5 +1,5 @@
 """
-src/src/haagent/runtime/execution/path_policy.py - 路径信任策略
+src/haagent/runtime/execution/path_policy.py - 路径信任策略
 
 集中表达项目根和外部授权目录的读写执行边界，供工具、会话和 TUI 复用。
 """

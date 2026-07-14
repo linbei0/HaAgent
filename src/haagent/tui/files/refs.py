@@ -1,5 +1,5 @@
 """
-haagent/tui/file_refs.py - workspace 内文件引用检索
+haagent/tui/files/refs.py - workspace 内文件引用检索
 
 基于当前 workspace 做模糊文件匹配，并生成稳定的 @file 引用 token。
 """

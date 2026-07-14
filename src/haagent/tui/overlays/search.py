@@ -1,5 +1,5 @@
 """
-haagent/tui/search_modal.py - 当前对话搜索 modal
+haagent/tui/overlays/search.py - 当前对话搜索 modal
 
 提供不进入 conversation、不发送给模型的当前对话搜索界面。
 """

@@ -107,24 +107,34 @@ class McpClientManager:
 
     async def _connect_stdio(self, name: str, config: McpStdioServerConfig) -> None:
         stack = AsyncExitStack()
-        params = StdioServerParameters(
-            command=config.command,
-            args=config.args,
-            env=config.env or None,
-            cwd=config.cwd,
-        )
-        read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
-        await self._register_session(name, stack, read_stream, write_stream)
+        try:
+            params = StdioServerParameters(
+                command=config.command,
+                args=config.args,
+                env=config.env or None,
+                cwd=config.cwd,
+            )
+            read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
+            await self._register_session(name, stack, read_stream, write_stream)
+        except BaseException:
+            # anyio cancel scope 必须由进入它的同一连接任务退出，不能留给异步生成器终结器。
+            await stack.aclose()
+            raise
 
     async def _connect_http(self, name: str, config: McpHttpServerConfig) -> None:
         stack = AsyncExitStack()
-        http_client = await stack.enter_async_context(
-            httpx.AsyncClient(headers=config.headers or None),
-        )
-        read_stream, write_stream, _ = await stack.enter_async_context(
-            streamable_http_client(config.url, http_client=http_client),
-        )
-        await self._register_session(name, stack, read_stream, write_stream)
+        try:
+            http_client = await stack.enter_async_context(
+                httpx.AsyncClient(headers=config.headers or None),
+            )
+            read_stream, write_stream, _ = await stack.enter_async_context(
+                streamable_http_client(config.url, http_client=http_client),
+            )
+            await self._register_session(name, stack, read_stream, write_stream)
+        except BaseException:
+            # anyio cancel scope 必须由进入它的同一连接任务退出，不能留给异步生成器终结器。
+            await stack.aclose()
+            raise
 
     async def _register_session(
         self,

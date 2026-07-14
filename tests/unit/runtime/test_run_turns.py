@@ -12,8 +12,6 @@ import json
 import threading
 import time
 
-import pytest
-
 from haagent.models.gateway_retry import execute_model_request
 from haagent.models.types import ModelCallError, ModelFailureDetails, ModelUsage, ToolCall
 from haagent.models.types import ModelResponse

@@ -1,5 +1,5 @@
 """
-haagent/tui/state.py - TUI 状态模型
+haagent/tui/state/layout.py - TUI 状态模型
 
 集中定义交互等待状态和响应式布局判断，让 App 只负责协调状态变化。
 """

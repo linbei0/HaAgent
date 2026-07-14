@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from haagent.models.fake import FakeModelGateway
+from haagent.mcp.runtime import SyncMcpRuntime
+from haagent.mcp.types import McpSettings
 from haagent.models.types import ModelResponse, ToolCall
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (
@@ -24,17 +26,6 @@ from haagent.models.model_connections import (
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.execution.retry import RetryController
 from haagent.runtime.settings import load_runtime_settings
-
-
-class _EmptyMcpRuntime:
-    def list_tools(self) -> list[Any]:
-        return []
-
-    def list_statuses(self) -> list[Any]:
-        return []
-
-    def close(self) -> None:
-        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,7 +73,7 @@ def run_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         allowed_tools_override=_optional_str_list(payload.get("allowed_tools")),
         approval_allowed_tools_override=_optional_str_list(payload.get("approval_allowed_tools")),
         approved_tools_override=_optional_str_list(payload.get("approved_tools")),
-        mcp_runtime=_EmptyMcpRuntime(),
+        mcp_runtime=SyncMcpRuntime(McpSettings()),
         worker_context=_optional_mapping(payload.get("worker_context")),
     )
     result = session.run_prompt_events(

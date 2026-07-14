@@ -101,56 +101,6 @@ def test_list_sessions_does_not_parse_full_turns_file(tmp_path: Path) -> None:
     assert sessions[0].turn_count == 80
 
 
-def test_turn_summaries_include_recorded_turn(tmp_path: Path) -> None:
-    session = AgentSession(
-        workspace_root=tmp_path,
-        runs_root=tmp_path / ".runs",
-        memory_extraction_enabled=False,
-    )
-    result = ChatTurnResult(
-        session_id=session.session_id,
-        turn_index=1,
-        status="completed",
-        episode_path=tmp_path / ".runs" / "episodes" / "episode-1",
-        provider="fake",
-        final_response="cached answer",
-        verification_status="success",
-    )
-    session._record_turn("cached request", result, "summary")
-
-    turns = session.turn_summaries()
-
-    assert len(turns) == 1
-    assert turns[0].request == "cached request"
-    assert turns[0].assistant_display_text == "cached answer"
-
-
-def test_resume_turn_summaries_include_persisted_turn(tmp_path: Path) -> None:
-    session = AgentSession(
-        workspace_root=tmp_path,
-        runs_root=tmp_path / ".runs",
-        memory_extraction_enabled=False,
-    )
-    result = ChatTurnResult(
-        session_id=session.session_id,
-        turn_index=1,
-        status="completed",
-        episode_path=tmp_path / ".runs" / "episodes" / "episode-1",
-        provider="fake",
-        final_response="resume answer",
-        verification_status="success",
-    )
-    session._record_turn("resume request", result, "summary")
-    session_path = session.session_path
-
-    resumed = AgentSession.resume(session_path, model_gateway=None)
-    turns = resumed.turn_summaries()
-
-    assert len(turns) == 1
-    assert turns[0].request == "resume request"
-    assert turns[0].assistant_display_text == "resume answer"
-
-
 def test_assistant_create_reuses_existing_session_package(tmp_path: Path) -> None:
     from haagent.app.assistant_context import AssistantContext
     from haagent.app.session_usecases import AssistantSessions

@@ -1,5 +1,5 @@
 """
-haagent/tui/failures.py - 失败摘要与保守下一步
+haagent/tui/design/failures.py - 失败摘要与保守下一步
 
 为 TUI 展示失败阶段、来源和可安全执行的下一步建议。
 """

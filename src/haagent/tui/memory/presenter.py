@@ -1,5 +1,5 @@
 """
-haagent/tui/memory_presenter.py - 记忆面板 Presenter
+haagent/tui/memory/presenter.py - 记忆面板 Presenter
 
 把记忆候选面板的展示输入收束成一个可测试 Interface。
 """

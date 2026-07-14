@@ -10,7 +10,6 @@ from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantServiceError,
-    AssistantSessionStatus,
     AssistantTurnLimitStatus,
     AssistantWorkspaceStatus,
     SandboxDoctorReport,

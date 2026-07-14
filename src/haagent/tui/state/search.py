@@ -1,5 +1,5 @@
 """
-haagent/tui/search.py - 当前对话搜索状态
+haagent/tui/state/search.py - 当前对话搜索状态
 
 维护搜索关键字、匹配位置和导航结果，避免搜索行为污染对话流。
 """

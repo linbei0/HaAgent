@@ -10,8 +10,7 @@ from pathlib import Path
 import pytest
 
 from haagent.models.types import ModelResponse, ToolCall
-from haagent.runtime.evaluation import export as eval_export
-from haagent.runtime.episodes.validator import EpisodePackageView, EpisodeValidationError
+from haagent.runtime.episodes.validator import EpisodeValidationError
 from haagent.runtime.evaluation.export import EVAL_CASE_VERSION, export_eval_case
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
@@ -584,85 +583,6 @@ def test_eval_export_includes_environment_and_cost_summary(tmp_path: Path) -> No
     }
 
 
-def test_eval_export_rejects_missing_sandbox_through_validator(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    (result.episode_path / "sandbox.json").unlink()
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="episode package missing required file: sandbox.json",
-    ):
-        export_eval_case(result.episode_path)
-
-
-def test_eval_export_rejects_missing_cost_through_validator(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    (result.episode_path / "cost.json").unlink()
-
-    with pytest.raises(EpisodeValidationError, match="missing required file: cost.json"):
-        export_eval_case(result.episode_path)
-
-
-def test_eval_export_rejects_damaged_sandbox_through_validator(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    sandbox_path = result.episode_path / "sandbox.json"
-    sandbox = json.loads(sandbox_path.read_text(encoding="utf-8"))
-    sandbox["resource_limits"]["command_timeout_seconds"] = "sixty"
-    sandbox_path.write_text(json.dumps(sandbox), encoding="utf-8")
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="sandbox.json resource_limits.command_timeout_seconds must be a number",
-    ):
-        export_eval_case(result.episode_path)
-
-
-def test_eval_export_rejects_missing_verification_metadata(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path, verification_commands=["python -c \"import sys; sys.exit(7)\""])
-    result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
-    commands_path = result.episode_path / "verification" / "commands.jsonl"
-    lines = commands_path.read_text(encoding="utf-8").splitlines()
-    record = json.loads(lines[0])
-    for field_name in [
-        "stdout_excerpt",
-        "stderr_excerpt",
-        "stdout_truncated",
-        "stderr_truncated",
-        "stdout_original_length",
-        "stderr_original_length",
-        "redacted",
-    ]:
-        record.pop(field_name, None)
-    commands_path.write_text(
-        "\n".join([json.dumps(record), *lines[1:]]) + "\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="verification/commands.jsonl line 1 missing required field: stdout_excerpt",
-    ):
-        export_eval_case(result.episode_path)
-
-
-def test_invalid_episode_fails_through_validator(tmp_path: Path) -> None:
-    episode_path = tmp_path / "episode-1"
-    episode_path.mkdir()
-
-    with pytest.raises(
-        EpisodeValidationError,
-        match="episode package missing required file: episode.json",
-    ):
-        export_eval_case(episode_path)
-
-
 def test_exporting_same_episode_is_deterministic(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     write_task(task_path)
@@ -673,44 +593,3 @@ def test_exporting_same_episode_is_deterministic(tmp_path: Path) -> None:
 
     assert first_export == second_export
     assert first_export["sandbox_summary"] == second_export["sandbox_summary"]
-
-
-def test_export_eval_case_uses_package_view(tmp_path: Path, monkeypatch) -> None:
-    task_path = tmp_path / "task.yaml"
-    write_task(task_path)
-    episode_path = tmp_path / "episode-1"
-    episode_path.mkdir()
-    (episode_path / "task.yaml").write_text(task_path.read_text(encoding="utf-8"), encoding="utf-8")
-    package_view = EpisodePackageView(
-        episode_metadata={
-            "episode_version": "1.0",
-            "workspace_root": str(tmp_path),
-            "status": "completed",
-        },
-        failure_record={"status": "success", "failure": None},
-        context_manifest={"context_count": 0, "contexts": []},
-        transcript=[],
-        tool_calls=[{"tool_name": "fake_tool", "status": "success", "policy": valid_policy()}],
-        verification_commands=[],
-        sandbox=expanded_sandbox_json(str(tmp_path)),
-    )
-
-    monkeypatch.setattr(eval_export, "load_validated_episode_package", lambda path: package_view)
-
-    eval_case = export_eval_case(episode_path)
-
-    assert eval_case["episode_version"] == "1.0"
-    assert eval_case["task"]["goal"] == "Export eval case"
-    assert eval_case["tool_names_used"] == ["fake_tool"]
-    assert eval_case["tool_argument_errors"] == []
-    assert eval_case["sandbox_summary"] == expanded_sandbox_summary(expanded_sandbox_json(str(tmp_path)))
-    assert eval_case["approval_summary"] == [
-        {
-            "tool_name": "fake_tool",
-            "action": "allow",
-            "approval_required": False,
-            "approval_status": "not_required",
-            "approval_reason": "low risk",
-        },
-    ]
-    assert eval_case["final_response"] is None

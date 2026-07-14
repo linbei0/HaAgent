@@ -67,7 +67,7 @@ uv run haagent
 - 真实 API key 解析优先级是：当前环境变量、系统凭据库、显式 opt-in 的明文用户文件。
 - TUI 模型配置默认使用系统凭据库；环境变量适合 CI 或临时覆盖；明文用户文件必须显式选择并标记为 insecure。
 - 真实 API key 不写入项目配置、episode、transcript、日志、session summary、UI snapshot 或 tool-calls。
-- UI 只能展示环境变量名、凭据来源和 key 是否可用等非敏感状态，不能输入、保存、复制或显示真实 API key。
+- TUI 可以通过 masked 输入临时接收真实 API key，并直接写入系统凭据库；除该受控写入流程外，UI 只能展示环境变量名、凭据来源和 key 是否可用等非敏感状态，不能回显、复制或写入明文配置。
 
 ## 开发工作流
 

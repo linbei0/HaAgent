@@ -9,9 +9,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from haagent.runtime.orchestration.orchestrator import RunOrchestrator
-
-
 def valid_episode_json(tmp_path: Path, status: str = "completed") -> dict[str, object]:
     return {
         "episode_version": "1.0",
@@ -104,43 +101,3 @@ def write_verification_command(episode_path: Path, **updates: object) -> None:
         json.dumps(record) + "\n",
         encoding="utf-8",
     )
-
-
-class EpisodePackageBuilder:
-    """用真实 orchestrator 或最小文件集合构造 episode package。"""
-
-    def __init__(self, tmp_path: Path) -> None:
-        self.tmp_path = tmp_path
-        self.episode_path = tmp_path / "episode-1"
-
-    def create_completed(self) -> Path:
-        task_path = self.tmp_path / "task.yaml"
-        write_task(task_path)
-        result = RunOrchestrator(runs_root=self.tmp_path / ".runs").run(task_path)
-        self.episode_path = result.episode_path
-        return self.episode_path
-
-    def create_failed(self, stage: str, category: str) -> Path:
-        self.episode_path.mkdir(parents=True, exist_ok=True)
-        write_json(self.episode_path / "episode.json", valid_episode_json(self.tmp_path, status="failed"))
-        write_json(
-            self.episode_path / "failure.json",
-            {
-                "status": "failed",
-                "failure": {
-                    "category": category,
-                    "stage": stage,
-                    "evidence": "builder failure",
-                },
-            },
-        )
-        return self.episode_path
-
-    def update_json(self, relative_path: str, updates: dict[str, object]) -> None:
-        path = self.episode_path / relative_path
-        payload = read_json(path)
-        payload.update(updates)
-        write_json(path, payload)
-
-    def remove(self, relative_path: str) -> None:
-        (self.episode_path / relative_path).unlink()

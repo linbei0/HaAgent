@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from haagent.models.types import ModelGateway
+from haagent.mcp.runtime import SyncMcpRuntime
+from haagent.mcp.types import McpSettings
 from haagent.models.gateway_registry import gateway_from_profile
 from haagent.models.model_connections import (
     ModelSelection,
@@ -59,17 +61,6 @@ class _WorkerTask:
     restart_count: int = 0
     permission_request_to_consume: str = ""
     parent_step_id: str = ""
-
-
-class _EmptyMcpRuntime:
-    def list_tools(self) -> list[Any]:
-        return []
-
-    def list_statuses(self) -> list[Any]:
-        return []
-
-    def close(self) -> None:
-        return None
 
 
 class MultiAgentRuntime:
@@ -673,7 +664,7 @@ class MultiAgentRuntime:
             allowed_tools_override=allowed_tools,
             approval_allowed_tools_override=approval_allowed_tools,
             approved_tools_override=approved_tools,
-            mcp_runtime=self.mcp_runtime or _EmptyMcpRuntime(),
+            mcp_runtime=self.mcp_runtime or SyncMcpRuntime(McpSettings()),
             worker_context={
                 "agent_id": agent_id,
                 "agent_profile": worker_profile.name,

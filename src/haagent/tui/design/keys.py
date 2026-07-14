@@ -1,5 +1,5 @@
 """
-haagent/tui/keys.py - TUI 键位与帮助单一来源
+haagent/tui/design/keys.py - TUI 键位与帮助单一来源
 
 集中维护实际绑定、footer 文案和帮助 modal 内容，降低上下文键位漂移风险。
 """

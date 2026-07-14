@@ -7,6 +7,7 @@ tests/extended/test_eval_runner.py - 本地 eval runner 测试
 import json
 from pathlib import Path
 
+from haagent.mcp.client import McpClientManager
 from haagent.runtime.evaluation.export import export_eval_case
 from haagent.runtime.evaluation.runner import run_eval_path
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
@@ -159,6 +160,37 @@ def test_builtin_eval_suite_is_discoverable_and_runs(tmp_path: Path) -> None:
         "builtin-guardrail",
         "builtin-session-working-state",
     } <= {result["eval_id"] for result in report["results"]}
+
+
+def test_chat_session_eval_does_not_start_user_mcp(monkeypatch, tmp_path: Path) -> None:
+    config_dir = Path.home() / ".haagent"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "user-server": {
+                        "type": "http",
+                        "url": "http://127.0.0.1:9/mcp",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def fail_connect_all(self) -> None:
+        raise AssertionError("deterministic eval must not start user MCP servers")
+
+    monkeypatch.setattr(McpClientManager, "connect_all", fail_connect_all)
+
+    report = run_eval_path(
+        Path("examples/evals/session_working_state.json"),
+        runs_root=tmp_path / ".eval-runs",
+    )
+
+    assert report["passed_count"] == 1
+    assert report["error_count"] == 0
 
 
 def test_eval_runner_replays_case_model_responses(tmp_path: Path) -> None:

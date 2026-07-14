@@ -7,75 +7,14 @@ tests/tui/test_file_refs.py - HaAgent TUI file_refs 集成测试
 from __future__ import annotations
 
 import asyncio
-import threading
 from pathlib import Path
-from types import SimpleNamespace
 
-from haagent import cli
-from haagent.app.assistant_types import (
-    AssistantSandboxStatus,
-    AssistantSessionStatus,
-    AssistantSessionSummary,
-    AssistantWorkspaceStatus,
-    SandboxDoctorReport,
-)
-from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
-from haagent.runtime.events import (
-    ApprovalStateEvent,
-    AssistantDeltaEvent,
-    AssistantMessageEvent,
-    FailureNoticeEvent,
-    MemoryNoticeEvent,
-    RuntimeUiEvent,
-    RuntimeUiEventMapper,
-    TaskProgressEvent,
-    ToolActivityEvent,
-    UserInputStateEvent,
-)
-from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.application.app import HaAgentTuiApp
-from haagent.tui.flows.path_authorization import find_untrusted_absolute_paths
-from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
-from haagent.tui.design.failures import failure_from_payload, failure_next_steps
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
-from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
-from haagent.tui.overlays.models import ModelCatalogLoadingOverlay
-from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
-from haagent.tui.design.renderers import memory_panel_text, status_line
-from haagent.tui.state.search import ConversationSearchState
-from haagent.tui.overlays.sessions import SessionOverlayState
-from haagent.tui.state import ResponsiveLayout, layout_for_size
-from haagent.tui.presentation.progress import ProgressStatusState
-from haagent.tui.design.theme import (
-    SemanticToken,
-    TuiThemeMode,
-    no_color_enabled,
-    select_theme,
-    semantic_tokens,
-    status_semantic,
-)
-from haagent.tui.widgets import ConversationTimeline, ProgressStatusLine, PromptInput
-from haagent.tui.typography.wrap import is_textual_line_breaking_installed
-from textual.widgets import Markdown, OptionList, RichLog, TextArea
+from haagent.tui.widgets import PromptInput
 from textual.screen import Screen
 
-from tests.tui.support import (
-    FakeAssistantService,
-    _all_text,
-    _approval_request,
-    _assistant_event,
-    _connection_record,
-    _interaction_requested_event,
-    _interaction_response_event,
-    _memory_candidate,
-    _open_memory_panel,
-    _runtime_event,
-    _session_summary,
-    _text,
-    _tool_event,
-    _user_input_request,
-    _wait_for_conversation_bottom,
-)
+from tests.tui.support import FakeAssistantService, _all_text
 
 def test_tui_file_reference_fuzzy_search_stays_inside_workspace(tmp_path: Path) -> None:
     docs = tmp_path / "docs"
@@ -214,7 +153,9 @@ def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> No
             input_widget = app.query_one("#prompt-input", PromptInput)
             input_widget.value = "Read "
             await pilot.press("@")
-            await pilot.pause(0.1)
+            # 文件索引在线程 worker 中构建；等待公开 worker 生命周期，避免按机器速度猜测延时。
+            await app.workers.wait_for_complete()
+            await pilot.pause()
             assert input_widget.value == "Read @"
             assert type(app.screen) is Screen
             assert app.query_one("#prompt-input", PromptInput) is input_widget

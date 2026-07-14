@@ -8,16 +8,13 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from haagent import cli
-from haagent.channels.manager import ChannelManager
 from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.state import ChannelStateStore
-from haagent.models.credentials import KEYRING_SERVICE_NAME
 from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
 from tests.support.model_credentials import FakeCredentialStore
 

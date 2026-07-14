@@ -77,9 +77,12 @@ HaAgent 的日常操作都在 TUI 内完成。常用 slash commands：
 
 | 命令 | 用途 |
 | --- | --- |
-| `/model` | 打开模型中心，切换模型、扫描本机运行时或设置备用模型 |
+| `/connect` | 配置供应商连接和凭据 |
+| `/model` | 切换模型、扫描本机运行时或设置备用模型 |
 | `/sessions` | 打开会话列表 |
 | `/memory` | 审查记忆候选 |
+| `/channels` | 配置微信等外部聊天渠道 |
+| `/schedules` | 管理计划任务与运行收件箱 |
 | `/web` | 切换联网工具 |
 | `/new` | 新建 session |
 | `/resume` | 继续当前 workspace 的最新 session |
@@ -95,11 +98,11 @@ HaAgent 使用用户级 profile 管理模型连接配置：
 
 - profile 文件：`~/.haagent/providers.json`
 - 当前激活 profile：`~/.haagent/settings.json`
-- 支持 gateway：`openai` 与 `openai-chat`；运行时类型包括 `remote`、`ollama` 与 `lm_studio`
+- 支持 gateway：`openai`、`openai-chat`，以及模型目录明确识别的 Anthropic 与 Google 原生 gateway；运行时类型包括 `remote`、`ollama` 与 `lm_studio`
 - API key 解析顺序：当前环境变量、系统凭据库、显式 opt-in 的明文用户文件
 - Ollama 默认无需凭据；LM Studio 开启认证时使用 `LM_STUDIO_API_KEY` 或已配置凭据
 
-推荐在 TUI 的 `/model` 中配置和切换模型。模型中心按 `l` 只扫描 `127.0.0.1:11434`（Ollama）和 `127.0.0.1:1234`（LM Studio），选择模型后才保存本地连接；`b` 设置本地备用，`c` 设置已明确同意的云端备用。TUI 只展示环境变量名、凭据来源和 key 是否可用等非敏感状态，不显示、复制或写入真实 API key。
+推荐在 TUI 的 `/connect` 中新增供应商连接，在 `/model` 中切换模型。模型中心按 `l` 只扫描 `127.0.0.1:11434`（Ollama）和 `127.0.0.1:1234`（LM Studio），选择模型后才保存本地连接；`b` 设置本地备用，`c` 设置已明确同意的云端备用。远端连接的 API key 通过 masked 输入直接写入系统凭据库；TUI 不回显、复制或写入明文配置。
 
 `providers.json` 当前为 version 3。一个无需凭据的 Ollama 连接如下；本地能力来自实时发现，不写入配置：
 

@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import threading
 
-import pytest
-
 from haagent.models import transport
 
 

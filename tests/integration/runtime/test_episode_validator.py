@@ -24,7 +24,6 @@ from tests.support.episode_packages import (
     read_json,
     valid_episode_json,
     valid_policy,
-    valid_verification_command,
     write_json,
     write_task,
     write_tool_call,

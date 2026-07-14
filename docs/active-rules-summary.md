@@ -17,7 +17,7 @@
 
 - CLI 只负责解析启动参数、打开 TUI，并保留非交互开发/CI 命令的短输出。
 - TUI 是普通交互前端，只负责交互和展示，不实现 Agent loop，不解析 CLI 文本输出，不绕过 runtime。
-- `AssistantService` 是 CLI 与 TUI 共享的应用服务层；它读取 profile、检查非敏感凭据状态、管理 session，并转发 `ChatEvent` 流。
+- `AssistantService` 是 CLI 与 TUI 共享的应用服务层；它读取 profile、检查非敏感凭据状态、管理 session，并转发 `RuntimeUiEvent` 流。
 - `AgentSession` 负责多轮会话、bounded summary、working state、session package 和前端无关事件流。
 - `RunOrchestrator` 负责 task contract、模型调用、工具执行、episode trace 和 verification。
 - 所有模型调用必须经过 `ModelGateway`。
@@ -27,7 +27,7 @@
 
 ## 3. Profile、凭据与 Secret
 
-- Profile 是模型连接配置，支持云端、本地 Ollama、LM Studio 及显式混合 fallback；OpenAI-compatible endpoint 仍使用 `openai` / `openai-chat` gateway。
+- Profile 是模型连接配置，支持云端、本地 Ollama、LM Studio 及显式混合 fallback；OpenAI-compatible endpoint 使用 `openai` / `openai-chat` gateway，模型目录明确识别的 Anthropic 与 Google provider 使用对应原生 gateway。
 - 本地发现只探测 `127.0.0.1:11434` 和 `127.0.0.1:1234`，不扫描局域网；发现失败必须区分不可达、未授权和无效响应。
 - `providers.json` 当前保存 version 3；旧 version 2 连接读取为 `runtime_kind=remote`。本地连接可以使用 `credential_source=none`，能力快照不持久化。
 - `settings.json` 可保存一个 `fallback_model` 和 `cloud_fallback_consent`。本地到云端 fallback 必须有明确 consent，本地到本地不需要；fallback 不得在已有输出后重放。
@@ -36,7 +36,7 @@
 - 真实 API key 解析优先级是：当前环境变量、系统凭据库、显式 opt-in 的明文用户文件。
 - TUI 模型配置默认使用系统凭据库；环境变量适合 CI 或临时覆盖；明文用户文件必须显式选择并标记为 insecure。
 - 真实 API key 不写入项目配置、episode、transcript、日志、session summary、UI snapshot 或 tool-calls。
-- UI 只能展示环境变量名、凭据来源和 key 是否可用等非敏感状态，不能输入、保存、复制或显示真实 API key。
+- TUI 可以通过 masked 输入临时接收真实 API key，并直接写入系统凭据库；除该受控写入流程外，UI 只能展示环境变量名、凭据来源和 key 是否可用等非敏感状态，不能回显、复制或写入明文配置。
 
 ## 4. Task Contract 与 Policy
 
@@ -69,8 +69,8 @@
 - `AgentSession` 应维护 bounded session summary 和 bounded working state；多轮任务不得线性撑大 `model_input`。
 - 会话恢复只读取 `turns.jsonl` 摘要、turn\_count、workspace\_root 和 working\_state，不读取完整 episode transcript、tool-calls 或 verification 输出。
 - `working_state.json` 保存当前目标、关键发现、已完成动作、下一步和最近更新 turn，字段必须有固定条目数或字符限制。
-- `ChatEvent` 是前端无关的事件契约，payload 只放展示和状态判断需要的摘要。
-- `ChatEvent` payload 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。
+- `RuntimeUiEvent` 是前端无关的强类型事件契约，字段只放展示和状态判断需要的摘要。
+- `RuntimeUiEvent` 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。
 - 稳定事件类型包括 session/turn 开始结束、工具开始/完成/失败、assistant 消息、审批请求/批准/拒绝、用户补充输入请求/接收、failure 和 session finished。
 - 模型路由还记录 `model_protocol_fallback` 与 `model_fallback`，包含脱敏连接、模型、协议、原因和能力缺失；顶部状态和活动流应展示实际使用模型。
 
@@ -105,10 +105,10 @@
 - TUI 的目标是个人助手会话工作台，不是 IDE、代码编辑器、文件树主界面或复杂多标签工作台。
 - TUI 应通过 `AssistantService` 驱动会话，复用 `AgentSession`、`ModelGateway`、`ToolRouter`、workspace root 和 episode trace。
 - TUI 信息架构优先级是：当前上下文、对话流、可恢复状态、配置健康度、低频操作。
-- 首版布局以顶部状态栏、主对话区、可折叠右侧栏、输入区和快捷键 footer 为核心；80x24 应可完成输入、阅读、审批、查看失败和退出。
+- 当前布局以顶部状态栏、主对话 timeline、输入区和快捷键 footer 为核心；低频能力通过 overlay/modal 打开，80x24 应可完成输入、阅读、审批、查看失败和退出。
 - 顶部状态栏展示 workspace、profile、provider/model、API key 可用状态、session 和运行状态；窄屏必须截断或压缩。
-- 主对话区按 `ChatEvent.event_type` 映射用户消息、assistant 回复、工具摘要、审批、补充输入、失败和 turn 状态；默认不展示完整 transcript、tool output、stdout、stderr、patch 或 episode trace。
-- 输入区推荐使用多行 `TextArea`：`Enter` 换行，`Ctrl+Enter` 提交，空输入不提交，`Esc` 取消编辑或关闭 modal。
+- 主对话区按 `RuntimeUiEvent` 类型映射用户消息、assistant 回复、工具摘要、审批、补充输入、失败和 turn 状态；默认不展示完整 transcript、tool output、stdout、stderr、patch 或 episode trace。
+- 输入区使用多行 `TextArea`：`Enter` 提交，`Shift+Enter` 换行，空输入不提交，`Esc` 关闭当前 modal/overlay 或返回上层交互。
 - 运行时请求用户补充信息时，输入区进入回答状态，提交后继续同一个 turn，不能变成新 prompt。
 - 工具审批 modal 必须展示工具名、影响范围和关键参数摘要；文件修改和命令执行等高影响操作默认焦点应放在 Deny。
 - 审批 modal 是 focus trap；审批结果必须回到同一个 turn。
@@ -136,9 +136,9 @@
 - 代码和文档术语都应服务“在目标目录直接运行 `haagent` 并进入 TUI”的体验。
 - 优先做小而明确的改动，避免把个人助手体验改造成 IDE、多 Agent 系统或平台化产品。
 - 不为了旧实验 artifact 增加复杂兼容逻辑。
-- 普通用户文档优先说明无子命令 `haagent`、TUI 内 `/model`、当前目录 workspace、多轮会话和 `/sessions` / `--continue` / `--resume`。
+- 普通用户文档优先说明无子命令 `haagent`、TUI 内用 `/connect` 配置连接并用 `/model` 切换模型、当前目录 workspace、多轮会话和 `/sessions` / `--continue` / `--resume`。
 - 不要把 harness、eval、dogfood、inspect 暴露成普通用户主路径。
-- 不做浏览器自动化、GUI/mobile automation、多 Agent、自动 PR、Dashboard、长期后台任务、完整 IDE 或大规模记忆系统，除非后续有明确产品决策。
+- 已有轻量 worker 与显式计划任务应保持隐藏、受控和可恢复；不把它们扩展成复杂多 Agent 编排平台或通用长期后台任务平台。浏览器自动化、GUI/mobile automation、自动 PR、Dashboard、完整 IDE 或大规模记忆系统仍不在当前范围，除非后续有明确产品决策。
 - 不做 Web UI、Electron / 桌面 App、复杂插件系统、复杂主题市场或自动安装依赖作为 TUI 首版能力。
 - 不靠自然语言匹配实现 slash commands、安全边界、上下文选择或 runtime 决策；命令、工具、session、workspace 都应走结构化 service 方法和明确状态字段。
 - 不把完整 stdout、patch、episode trace 或工具详情默认塞进主对话；默认展示摘要，详情按需打开。

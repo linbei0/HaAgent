@@ -1,5 +1,5 @@
 """
-haagent/tui/commands.py - TUI 结构化命令注册表
+haagent/tui/commands/registry.py - TUI 结构化命令注册表
 
 定义 slash command 的稳定命令边界，供输入区和未来命令面板复用。
 """

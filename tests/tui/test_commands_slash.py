@@ -7,74 +7,15 @@ tests/tui/test_commands_slash.py - HaAgent TUI commands 集成测试
 from __future__ import annotations
 
 import asyncio
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from haagent.app.assistant_types import (
-    AssistantSandboxStatus,
-    AssistantSessionStatus,
-    AssistantSessionSummary,
-    AssistantWorkspaceStatus,
-    SandboxDoctorReport,
-)
-from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
-from haagent.runtime.events import (
-    ApprovalStateEvent,
-    AssistantDeltaEvent,
-    AssistantMessageEvent,
-    FailureNoticeEvent,
-    MemoryNoticeEvent,
-    RuntimeUiEvent,
-    RuntimeUiEventMapper,
-    TaskProgressEvent,
-    ToolActivityEvent,
-    UserInputStateEvent,
-)
-from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.application.app import HaAgentTuiApp
-from haagent.tui.flows.path_authorization import find_untrusted_absolute_paths
 from haagent.tui.commands import command_registry, parse_slash_command
-from haagent.tui.design.failures import failure_from_payload, failure_next_steps
-from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
-from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
-from haagent.tui.overlays.models import ModelCatalogLoadingOverlay
-from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
-from haagent.tui.design.renderers import memory_panel_text, status_line
-from haagent.tui.state.search import ConversationSearchState
-from haagent.tui.overlays.sessions import SessionOverlayState
-from haagent.tui.state import ResponsiveLayout, layout_for_size
-from haagent.tui.presentation.progress import ProgressStatusState
-from haagent.tui.design.theme import (
-    SemanticToken,
-    TuiThemeMode,
-    no_color_enabled,
-    select_theme,
-    semantic_tokens,
-    status_semantic,
-)
-from haagent.tui.widgets import ConversationTimeline, ProgressStatusLine, PromptInput
-from haagent.tui.typography.wrap import is_textual_line_breaking_installed
-from textual.widgets import Markdown, OptionList, RichLog, TextArea
-from textual.screen import Screen
+from haagent.tui.design.renderers import status_line
+from haagent.tui.widgets import PromptInput
 
-from tests.tui.support import (
-    FakeAssistantService,
-    _all_text,
-    _approval_request,
-    _assistant_event,
-    _connection_record,
-    _interaction_requested_event,
-    _interaction_response_event,
-    _memory_candidate,
-    _open_memory_panel,
-    _runtime_event,
-    _session_summary,
-    _text,
-    _tool_event,
-    _user_input_request,
-    _wait_for_conversation_bottom,
-)
+from tests.tui.support import FakeAssistantService, _all_text, _text
 
 def test_tui_status_renderer_shows_sandbox_state(tmp_path: Path) -> None:
     status = FakeAssistantService(workspace_root=tmp_path / "sandbox").workspace.status()

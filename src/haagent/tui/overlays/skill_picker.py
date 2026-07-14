@@ -1,5 +1,5 @@
 """
-haagent/tui/skill_picker.py - Skill 选择界面
+haagent/tui/overlays/skill_picker.py - Skill 选择界面
 
 提供可搜索、可键盘选择的本地 skill 列表，用于 /skill 空参数时先选 skill。
 """

@@ -17,7 +17,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from haagent.scheduling.coordinator import (
-    LEASE_TTL_SECONDS,
     RUN_LEASE_TTL_SECONDS,
     ScheduleCoordinator,
 )

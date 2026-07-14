@@ -16,7 +16,6 @@ import pytest
 from haagent.scheduling.models import (
     RetryPolicy,
     ScheduleDefinition,
-    ScheduleValidationError,
 )
 from haagent.scheduling.store import (
     ScheduleStore,

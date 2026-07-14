@@ -1,5 +1,5 @@
 """
-haagent/tui/utils.py - TUI 纯工具函数
+haagent/tui/design/utils.py - TUI 纯工具函数
 
 提供截断、敏感信息摘要和短标签格式化，避免组件层散落字符串处理逻辑。
 """

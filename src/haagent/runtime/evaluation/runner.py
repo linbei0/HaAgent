@@ -16,6 +16,8 @@ from typing import Any
 import yaml
 
 from haagent.models.types import ModelGateway, ModelResponse, ToolCall
+from haagent.mcp.runtime import SyncMcpRuntime
+from haagent.mcp.types import McpSettings
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.episodes.validator import load_inspect_episode_package
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
@@ -99,24 +101,33 @@ def _run_chat_session_case(
     prompts = _required_str_list(chat, "prompts", "chat.prompts")
     if not prompts:
         raise EvalCaseError("chat.prompts must contain at least one prompt")
-    with tempfile.TemporaryDirectory(prefix="haagent-eval-chat-") as workspace_dir:
-        workspace_root = _materialize_case_workspace(case_path, case, Path(workspace_dir) / "workspace")
-        session = AgentSession(
-            workspace_root=workspace_root,
-            runs_root=runs_root,
-            model_gateway=model_gateway,
-            max_turns=max_turns,
-            memory_extraction_enabled=False,
-        )
-        result = None
-        for index, prompt in enumerate(prompts):
-            if index > 0:
-                session = AgentSession.resume(
-                    session.session_path,
-                    model_gateway=model_gateway,
-                    max_turns=max_turns,
-                )
-            result = session.run_prompt(prompt)
+    # Eval 输入没有 MCP 配置合同；禁止读取或连接用户级 server，保证离线确定性。
+    mcp_runtime = SyncMcpRuntime(McpSettings())
+    mcp_runtime.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="haagent-eval-chat-") as workspace_dir:
+            workspace_root = _materialize_case_workspace(case_path, case, Path(workspace_dir) / "workspace")
+            session = AgentSession(
+                workspace_root=workspace_root,
+                runs_root=runs_root,
+                model_gateway=model_gateway,
+                max_turns=max_turns,
+                memory_extraction_enabled=False,
+                mcp_runtime=mcp_runtime,
+            )
+            result = None
+            for index, prompt in enumerate(prompts):
+                if index > 0:
+                    session = AgentSession.resume(
+                        session.session_path,
+                        model_gateway=model_gateway,
+                        max_turns=max_turns,
+                        mcp_runtime=mcp_runtime,
+                        owns_mcp_runtime=False,
+                    )
+                result = session.run_prompt(prompt)
+    finally:
+        mcp_runtime.close()
     if result is None:
         raise EvalCaseError("chat.prompts must contain at least one prompt")
     return _compare_case(case_path, case, result.episode_path, result.status)

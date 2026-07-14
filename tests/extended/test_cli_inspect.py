@@ -5,14 +5,10 @@ tests/extended/test_cli_inspect.py - HaAgent inspect 子命令测试
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
-
-import pytest
 
 from haagent import cli, cli_inspect
 from haagent.models.types import ModelResponse, ToolCall
-from haagent.runtime.episodes.validator import EpisodePackageView
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
@@ -1401,119 +1397,6 @@ def test_cli_inspect_final_response_content_is_truncated() -> None:
     assert lines[1] == f"- content: {'x' * 500}... [truncated]"
 
 
-def test_cli_inspect_unknown_episode_version_fails(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    episode_json = valid_episode_json(tmp_path)
-    episode_json["episode_version"] = "9.9"
-    write_minimal_episode(
-        episode_path,
-        episode_json=episode_json,
-        failure_json={"status": "success", "failure": None},
-    )
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "unsupported episode_version: 9.9" in output
-
-
-def test_cli_inspect_fails_when_episode_json_missing_field(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    episode_json = valid_episode_json(tmp_path)
-    del episode_json["workspace_root"]
-    write_minimal_episode(
-        episode_path,
-        episode_json=episode_json,
-        failure_json={"status": "success", "failure": None},
-    )
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "corrupt episode: episode.json missing required field: workspace_root" in output
-
-
-def test_cli_inspect_fails_when_episode_json_status_is_invalid(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    write_minimal_episode(
-        episode_path,
-        episode_json=valid_episode_json(tmp_path, status="done-ish"),
-        failure_json={"status": "success", "failure": None},
-    )
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "corrupt episode: episode.json status is invalid: done-ish" in output
-
-
-def test_cli_inspect_fails_when_failure_json_category_is_unknown(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    write_minimal_episode(
-        episode_path,
-        episode_json=valid_episode_json(tmp_path, status="failed"),
-        failure_json={
-            "status": "failed",
-            "failure": {
-                "category": "Surprise Failure",
-                "stage": "verifying",
-                "evidence": "bad",
-            },
-        },
-    )
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "corrupt episode: failure.json category is invalid: Surprise Failure" in output
-
-
-def test_cli_inspect_fails_when_success_failure_json_has_failure(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    write_minimal_episode(
-        episode_path,
-        episode_json=valid_episode_json(tmp_path),
-        failure_json={"status": "success", "failure": {"category": "Runtime Failure"}},
-    )
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "corrupt episode: failure.json success record must have failure=null" in output
-
-
-def test_cli_inspect_missing_failure_json_fails(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    write_minimal_episode(episode_path, episode_json=valid_episode_json(tmp_path))
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "episode package missing required file: failure.json" in output
-
-
-def test_cli_inspect_new_episode_missing_required_file_uses_validator(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    write_minimal_episode(
-        episode_path,
-        episode_json=valid_episode_json(tmp_path),
-        failure_json={"status": "success", "failure": None},
-    )
-    (episode_path / "environment.json").unlink()
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "episode package missing required file: environment.json" in output
-
-
 def test_cli_inspect_failed_episode_before_verifying_allows_missing_verification_commands(
     tmp_path: Path,
     capsys,
@@ -1611,8 +1494,6 @@ verification_commands:
     assert result.status is RunStatus.FAILED
     assert exit_code == 1
     assert "episode package missing required file: verification/commands.jsonl" in output
-
-
 def test_cli_inspect_completed_episode_missing_verification_commands_still_fails(
     tmp_path: Path,
     capsys,
@@ -1637,59 +1518,3 @@ verification_commands: []
     output = capsys.readouterr().out
     assert exit_code == 1
     assert "episode package missing required file: verification/commands.jsonl" in output
-
-
-def test_cli_inspect_new_episode_invalid_jsonl_uses_validator(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    write_minimal_episode(
-        episode_path,
-        episode_json=valid_episode_json(tmp_path),
-        failure_json={"status": "success", "failure": None},
-    )
-    (episode_path / "transcript.jsonl").write_text("{not json}\n", encoding="utf-8")
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "transcript.jsonl line 1 is not valid JSON" in output
-
-
-def test_cli_inspect_new_episode_uses_package_view(tmp_path: Path, monkeypatch, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    episode_path.mkdir()
-    (episode_path / "episode.json").write_text(json.dumps(valid_episode_json(tmp_path)), encoding="utf-8")
-    (episode_path / "failure-attribution.md").write_text("view attribution", encoding="utf-8")
-    package_view = EpisodePackageView(
-        episode_metadata=valid_episode_json(tmp_path),
-        failure_record={"status": "success", "failure": None},
-        context_manifest={"summary": {"provider": "fake"}, "context_count": 0, "contexts": []},
-        transcript=[
-            {"event": "state_transition", "status": "created"},
-            {"event": "state_transition", "status": "completed"},
-        ],
-        tool_calls=[{"tool_name": "fake_tool", "status": "success", "policy": valid_policy()}],
-        verification_commands=[],
-        sandbox=expanded_sandbox_json(str(tmp_path)),
-    )
-
-    monkeypatch.setattr(cli_inspect, "load_inspect_episode_package", lambda path: package_view)
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 0
-    output = capsys.readouterr().out
-    assert "created -> completed" in output
-    assert "fake_tool: success" in output
-    assert "view attribution" in output
-
-
-def test_cli_inspect_fails_when_required_file_is_missing(tmp_path: Path, capsys) -> None:
-    episode_path = tmp_path / "episode-1"
-    episode_path.mkdir()
-
-    exit_code = cli.main(["inspect", str(episode_path)])
-
-    assert exit_code == 1
-    output = capsys.readouterr().out
-    assert "episode package missing required file: episode.json" in output

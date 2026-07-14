@@ -1,5 +1,5 @@
 """
-haagent/tui/path_authorization_flow.py - TUI 路径授权判断与交互编排
+haagent/tui/flows/path_authorization.py - TUI 路径授权判断与交互编排
 
 封装外部绝对路径提及检测、工作区关系判断，以及自然语言 prompt 触发的外部目录授权流程，减少主应用类的分支职责。
 """

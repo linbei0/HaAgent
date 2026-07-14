@@ -24,50 +24,21 @@ def test_failure_taxonomy_contains_current_categories() -> None:
     }
 
 
-def test_tool_not_allowed_is_recoverable_observation() -> None:
-    """模型误用未授权工具名时，应回 observation 让模型自纠，而不是整轮终态失败。"""
-    assert (
-        _tool_error_is_terminal(
+def test_tool_error_terminality_matches_runtime_boundary() -> None:
+    """模型接口误用可自纠；用户拒绝和 policy 拒绝必须终止当前执行。"""
+    expected = {
+        "tool_not_allowed": False,
+        "unknown_tool": False,
+        "approval_denied": True,
+        "policy_denied": True,
+    }
+
+    for error_type, terminal in expected.items():
+        result = _tool_error_is_terminal(
             {
                 "status": "error",
-                "error": {"type": "tool_not_allowed", "message": "tool is not allowed: read_file"},
+                "error": {"type": error_type, "message": "test error"},
             }
         )
-        is False
-    )
 
-
-def test_unknown_tool_is_recoverable_observation() -> None:
-    assert (
-        _tool_error_is_terminal(
-            {
-                "status": "error",
-                "error": {"type": "unknown_tool", "message": "unknown tool: foo"},
-            }
-        )
-        is False
-    )
-
-
-def test_approval_denied_remains_terminal() -> None:
-    assert (
-        _tool_error_is_terminal(
-            {
-                "status": "error",
-                "error": {"type": "approval_denied", "message": "user denied"},
-            }
-        )
-        is True
-    )
-
-
-def test_policy_denied_remains_terminal() -> None:
-    assert (
-        _tool_error_is_terminal(
-            {
-                "status": "error",
-                "error": {"type": "policy_denied", "message": "policy denied"},
-            }
-        )
-        is True
-    )
+        assert result is terminal

@@ -1,5 +1,5 @@
 """
-haagent/tui/file_ref_modal.py - @file 引用选择面板
+haagent/tui/files/overlay.py - @file 引用选择面板
 
 展示 workspace 内文件匹配结果，作为输入框上方的轻量候选列表。
 """

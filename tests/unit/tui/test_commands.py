@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 from haagent.app.assistant_types import AssistantServiceError
 from haagent.prompts.packs import iter_prompt_modes
-from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.application.command_handlers import ChatCommandHandlers
 from haagent.tui.commands import command_registry, parse_slash_command
 

@@ -19,10 +19,6 @@ from haagent.app.assistant_types import (
     AssistantSchedule,
     AssistantScheduleRun,
     AssistantScheduleSummary,
-    BackgroundServiceStatus,
-    RunQuery,
-    ScheduleCreateRequest,
-    SchedulePreviewRequest,
 )
 from haagent.scheduling.models import RetryPolicy
 from haagent.tui.application.app import HaAgentTuiApp

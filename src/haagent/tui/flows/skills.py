@@ -1,5 +1,5 @@
 """
-haagent/tui/skills_flow.py - TUI skills 交互流程
+haagent/tui/flows/skills.py - TUI skills 交互流程
 
 封装 skills 列表、调用、信任、marketplace 搜索与安装确认等交互编排，降低主应用类的分支职责。
 """

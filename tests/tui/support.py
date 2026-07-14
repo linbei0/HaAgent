@@ -6,13 +6,11 @@ tests/tui/support.py - HaAgent TUI 集成测试共享 Fake 与 helpers
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from haagent import cli
 from haagent.app.assistant_types import (
     AssistantSandboxStatus,
     AssistantSchedule,
@@ -34,40 +32,14 @@ from haagent.runtime.events import (
     ApprovalStateEvent,
     AssistantDeltaEvent,
     AssistantMessageEvent,
-    FailureNoticeEvent,
-    MemoryNoticeEvent,
     RuntimeUiEvent,
     RuntimeUiEventMapper,
-    TaskProgressEvent,
     ToolActivityEvent,
     UserInputStateEvent,
 )
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.tui.application.app import HaAgentTuiApp
-from haagent.tui.flows.path_authorization import find_untrusted_absolute_paths
-from haagent.tui.commands import SlashCommandResult, command_registry, parse_slash_command
-from haagent.tui.design.failures import failure_from_payload, failure_next_steps
-from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch, build_file_reference_index, fuzzy_file_matches, path_reference_token
-from haagent.tui.design.keys import APP_BINDINGS, footer_text, help_body, key_help_lines
-from haagent.tui.overlays.models import ModelCatalogLoadingOverlay
-from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
-from haagent.tui.design.renderers import memory_panel_text, status_line
-from haagent.tui.state.search import ConversationSearchState
-from haagent.tui.overlays.sessions import SessionOverlayState
-from haagent.tui.state import ResponsiveLayout, layout_for_size
-from haagent.tui.presentation.progress import ProgressStatusState
-from haagent.tui.design.theme import (
-    SemanticToken,
-    TuiThemeMode,
-    no_color_enabled,
-    select_theme,
-    semantic_tokens,
-    status_semantic,
-)
-from haagent.tui.widgets import ConversationTimeline, ProgressStatusLine, PromptInput
-from haagent.tui.typography.wrap import is_textual_line_breaking_installed
-from textual.widgets import Markdown, OptionList, RichLog, TextArea
-from textual.screen import Screen
+from textual.widgets import RichLog, TextArea
 
 
 class FakeSandbox:

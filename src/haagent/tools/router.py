@@ -32,7 +32,7 @@ from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.skills.catalog import SkillCatalogService
-from haagent.tools.base import ToolHandler, ToolRoutingError, tool_error
+from haagent.tools.base import ToolRoutingError, tool_error
 from haagent.tools.file_tools import apply_patch, apply_patch_set, file_write
 from haagent.tools.handler_factory import build_static_tool_handlers
 from haagent.tools.mcp_tools import run_mcp_tool

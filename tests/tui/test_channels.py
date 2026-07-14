@@ -49,7 +49,6 @@ def test_channels_overlay_render_hides_secrets_and_shows_reauth(tmp_path: Path) 
     assert "perm:auto" in text
     assert "full_access" not in text
     assert "bot-secret" not in text
-    assert "bot_token" not in text or "credential" in text.lower() or True
     # 明确：真实 token 永不出现
     assert "sk-" not in text
     assert "bot-secret-token" not in text
@@ -116,8 +115,6 @@ def test_tui_channels_command_opens_overlay(tmp_path: Path) -> None:
 def test_add_weixin_dismisses_overlay_and_keeps_qr_visible_on_failure(tmp_path: Path) -> None:
     """按 n 后应关闭列表；登录失败不得立刻重新打开 overlay 盖住二维码。"""
     import asyncio
-    from types import SimpleNamespace as NS
-
     from haagent.app.assistant_types import AssistantChannelQrPoll, AssistantChannelQrStart
     from haagent.tui.application.app import HaAgentTuiApp
 

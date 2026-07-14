@@ -16,8 +16,7 @@ from haagent.channels.adapters.weixin.types import WeixinInboundMessage, WeixinU
 from haagent.channels.manager import ChannelManager
 from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.state import ChannelStateStore
-from haagent.channels.types import ChannelAddress, ChannelReplyHandle, InboundChannelMessage
-from tests.support.channel_adapter import FakeChannelAdapter as FakeAdapter
+from haagent.channels.types import InboundChannelMessage
 
 
 def test_delete_binding_public_api(tmp_path: Path) -> None:

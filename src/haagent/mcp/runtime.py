@@ -32,6 +32,10 @@ class SyncMcpRuntime:
         self._thread: Thread | None = None
         self._started = False
 
+    @property
+    def settings(self) -> McpSettings:
+        return self._settings
+
     def start(self) -> None:
         if self._started:
             return

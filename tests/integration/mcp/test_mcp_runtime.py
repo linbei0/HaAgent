@@ -89,6 +89,43 @@ def test_sync_mcp_runtime_records_failed_server_without_raising():
         runtime.close()
 
 
+def test_mcp_client_closes_partially_connected_http_transport_in_same_task(monkeypatch):
+    tasks: dict[str, object] = {}
+
+    class TrackingStreamContext:
+        async def __aenter__(self):
+            tasks["enter"] = asyncio.current_task()
+            return object(), object(), None
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            tasks["exit"] = asyncio.current_task()
+
+    monkeypatch.setattr(
+        "haagent.mcp.client.streamable_http_client",
+        lambda url, http_client: TrackingStreamContext(),
+    )
+    manager = McpClientManager(
+        McpSettings(
+            servers={
+                "remote": McpHttpServerConfig(
+                    name="remote",
+                    url="http://127.0.0.1:9/mcp",
+                )
+            }
+        )
+    )
+
+    async def fail_register(name, stack, read_stream, write_stream):
+        raise RuntimeError("initialize failed")
+
+    monkeypatch.setattr(manager, "_register_session", fail_register)
+
+    asyncio.run(manager.connect_all())
+
+    assert manager.list_statuses()[0].state == "failed"
+    assert tasks["exit"] is tasks["enter"]
+
+
 def test_sync_mcp_runtime_cancels_waiting_call_promptly():
     server_path = Path(__file__).parents[2] / "fixtures" / "fake_mcp_server.py"
     runtime = SyncMcpRuntime(

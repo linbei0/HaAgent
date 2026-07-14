@@ -92,13 +92,14 @@ class SessionRuntimeState:
 
 def bootstrap_mcp(mcp_runtime: Any | None = None) -> tuple[Any, Any, bool, list[str], Any]:
     """启动或接管 MCP，返回 (settings, runtime, owns, tool_names, tool_registry)。"""
-    mcp_settings = load_mcp_settings()
     if mcp_runtime is None:
+        mcp_settings = load_mcp_settings()
         runtime = SyncMcpRuntime(mcp_settings)
         runtime.start()
         owns = True
     else:
         runtime = mcp_runtime
+        mcp_settings = runtime.settings
         owns = False
     mcp_tool_names = [
         mcp_tool_alias(tool.server_name, tool.name)
@@ -216,7 +217,7 @@ def build_resume_state(
         raise ChatSessionError(str(error)) from error
     # 有现成 MCP 时复用（会话切换热路径）；否则自建。不恢复 worker/tool override。
     if mcp_runtime is not None:
-        settings = mcp_settings if mcp_settings is not None else load_mcp_settings()
+        settings = mcp_settings if mcp_settings is not None else mcp_runtime.settings
         names = (
             list(mcp_tool_names)
             if mcp_tool_names is not None

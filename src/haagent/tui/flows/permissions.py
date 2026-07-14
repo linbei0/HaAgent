@@ -1,12 +1,11 @@
 """
-haagent/tui/permissions_flow.py - TUI 权限交互流程
+haagent/tui/flows/permissions.py - TUI 权限交互流程
 
 封装权限设置、外部目录授权和完全信任确认等交互流程，减少主应用类的分支职责。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 

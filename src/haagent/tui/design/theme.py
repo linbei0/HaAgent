@@ -1,5 +1,5 @@
 """
-src/haagent/tui/theme.py - TUI 语义视觉 token 与主题选择
+src/haagent/tui/design/theme.py - TUI 语义视觉 token 与主题选择
 
 定义状态 token、符号、中文标签和内置主题，保证颜色不是唯一状态表达。
 """

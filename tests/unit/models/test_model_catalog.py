@@ -7,7 +7,6 @@ tests/unit/models/test_model_catalog.py - 模型目录层测试
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 

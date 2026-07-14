@@ -1,5 +1,5 @@
 """
-haagent/tui/sessions.py - session overlay 状态与界面
+haagent/tui/overlays/sessions.py - session overlay 状态与界面
 
 提供可搜索、可键盘操作的会话选择 modal，并把实际 session 操作交还 App 调用 service。
 """

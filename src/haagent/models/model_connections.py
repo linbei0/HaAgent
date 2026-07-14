@@ -27,7 +27,7 @@ from haagent.models.credentials import (
 USER_CONFIG_DIR_NAME = ".haagent"
 USER_PROVIDERS_FILE = "providers.json"
 USER_SETTINGS_FILE = "settings.json"
-SUPPORTED_GATEWAY_PROVIDERS = {"openai", "openai-chat"}
+SUPPORTED_GATEWAY_PROVIDERS = {"anthropic", "google", "openai", "openai-chat"}
 SUPPORTED_RUNTIME_KINDS = {"remote", "ollama", "lm_studio"}
 DEFAULT_CREDENTIAL_SOURCE = "keyring"
 DEFAULT_CREDENTIAL_STORE: CredentialStore = KeyringCredentialStore()
