@@ -6,6 +6,9 @@ tests/unit/tui/test_progress_presentation.py - TUI 进度展示投影测试
 
 from __future__ import annotations
 
+from haagent.runtime.execution.human_interaction import HumanInteractionRequest
+from haagent.tui.design.renderers import approval_body, edit_diff_body
+
 from haagent.runtime.events.types import TaskProgressEvent, ToolActivityEvent
 from haagent.tui.presentation.progress import present_task_progress, present_tool_activity
 
@@ -62,7 +65,7 @@ def test_plain_task_step_progress_is_not_displayed() -> None:
     assert presentation.details is None
 
 
-def test_recovery_suggestion_becomes_actionable_notice() -> None:
+def test_recovery_suggestion_is_hidden_from_main_timeline() -> None:
     presentation = present_task_progress(
         _task_event(
             "task_recovery_suggested",
@@ -76,12 +79,9 @@ def test_recovery_suggestion_becomes_actionable_notice() -> None:
         )
     )
 
-    assert presentation.timeline_item is not None
-    assert presentation.timeline_item.kind == "activity"
-    assert presentation.timeline_item.title == "任务遇到问题：验证失败"
-    assert "修复后重新运行测试" in presentation.timeline_item.summary
-    assert presentation.details is not None
-    assert "verification_failed" in "\n".join(presentation.details.lines)
+    assert presentation.status_line is None
+    assert presentation.timeline_item is None
+    assert presentation.details is None
 
 
 def test_started_tools_update_ephemeral_status_only() -> None:
@@ -187,3 +187,22 @@ def test_tool_failure_becomes_actionable_notice_without_full_error() -> None:
     assert presentation.timeline_item.kind == "activity"
     assert presentation.details is not None
     assert long_error not in "\n".join(presentation.details.lines)
+def test_common_approval_surfaces_use_chinese_field_labels() -> None:
+    request = HumanInteractionRequest(
+        interaction_type="approval",
+        tool_name="file_write",
+        question="是否允许写入？",
+        reason="需要保存结果",
+        risk_level="high",
+        args_summary={"path": "notes.md", "change_type": "modified", "additions": 2, "deletions": 1},
+    )
+
+    approval = approval_body(request)
+    edit_diff = edit_diff_body(request)
+
+    for label in ("工具", "请求", "原因", "风险", "参数", "影响"):
+        assert label in approval
+    for label in ("工具", "路径", "变更", "统计", "差异预览"):
+        assert label in edit_diff
+    assert "question" not in approval
+    assert "diff preview" not in edit_diff

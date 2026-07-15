@@ -15,7 +15,8 @@ from textual.widgets import TextArea
 class PromptInput(TextArea):
     BINDINGS = [
         Binding("enter", "submit_from_input", "发送", priority=True),
-        Binding("shift+enter", "insert_newline_from_input", "换行", priority=True),
+        Binding("ctrl+enter", "insert_newline_from_input", "换行", priority=True),
+        Binding("ctrl+j", "insert_newline_from_input", "换行", priority=True),
         Binding("ctrl+f", "open_search_from_input", "搜索", priority=True),
         Binding("ctrl+x", "cancel_current_task_from_input", "取消任务", priority=True),
         Binding("ctrl+v", "paste_image_from_input", "粘贴图片", priority=True),

@@ -24,7 +24,7 @@ Screen > .screen--selection {
     padding: 0 1;
     background: $surface;
     color: $foreground;
-    text-style: bold;
+    text-style: none;
 }
 
 #main {
@@ -34,8 +34,8 @@ Screen > .screen--selection {
 #conversation {
     width: 1fr;
     height: 1fr;
-    padding: 1 2;
-    border: solid $panel;
+    padding: 1 3;
+    border: none;
     background: $background;
     color: $foreground;
     overflow-y: auto;
@@ -62,54 +62,57 @@ ConversationTimeline {
 }
 
 .timeline-item {
-    width: 92%;
+    width: 100%;
     height: auto;
     margin-bottom: 1;
-    padding: 1 2;
-    background: $surface;
+    padding: 0 1;
+    background: $background;
     color: $foreground;
-    border-left: heavy $primary;
+    border: none;
 }
 
 .timeline-user {
-    width: 78%;
+    width: 100%;
+    min-height: 3;
     margin-left: 0;
     margin-top: 1;
+    padding: 1 2 0 2;
     background: $panel;
-    border-left: heavy $secondary;
+    border-left: solid $secondary;
 }
 
 .timeline-assistant {
-    width: 88%;
+    width: 100%;
     margin-left: 0;
     margin-top: 1;
-    background: $surface;
-    border-left: heavy $primary;
+    padding: 0 1;
+    background: $background;
+    border: none;
 }
 
 .timeline-system {
-    width: 84%;
+    width: 100%;
     background: $background;
-    border-left: solid $secondary;
+    border: none;
     color: $text-muted;
 }
 
 .timeline-activity,
 .timeline-effect {
-    width: 84%;
+    width: 100%;
     margin-bottom: 0;
-    padding: 0 2;
+    padding: 0 1;
     background: $background;
-    border-left: solid $primary;
+    border: none;
     color: $text-muted;
 }
 
 .timeline-process {
-    width: 84%;
+    width: 100%;
     margin-bottom: 0;
-    padding: 0 2;
+    padding: 0 1;
     background: $background;
-    border-left: solid $secondary;
+    border: none;
     color: $text-muted;
 }
 
@@ -120,13 +123,13 @@ ConversationTimeline {
 .timeline-failure,
 .timeline-failed {
     background: $surface;
-    border-left: heavy $error;
+    border-left: solid $error;
 }
 
 .timeline-header {
     height: 1;
-    margin-bottom: 1;
-    margin-left: 2;
+    margin-bottom: 0;
+    margin-left: 0;
     color: $primary;
     text-style: bold;
 }
@@ -159,7 +162,7 @@ ConversationTimeline {
 .timeline-answer {
     width: 1fr;
     height: auto;
-    margin-left: 2;
+    margin-left: 0;
     margin-bottom: 1;
 }
 
@@ -175,33 +178,33 @@ ConversationTimeline {
 .timeline-active {
     height: 1;
     margin-top: 1;
-    margin-left: 2;
+    margin-left: 0;
     color: $secondary;
     text-style: bold;
 }
 
 .timeline-streaming {
-    border-left: heavy $secondary;
+    border: none;
 }
 
 .timeline-tools {
     width: 1fr;
     height: auto;
     margin-top: 1;
-    margin-left: 2;
-    padding: 1 2;
-    background: $surface;
-    color: $foreground;
-    border-left: solid $warning;
+    margin-left: 0;
+    padding: 0 1;
+    background: $background;
+    color: $text-muted;
+    border: none;
     overflow: hidden;
-    scrollbar-background: $surface;
-    scrollbar-color: $surface;
+    scrollbar-background: $background;
+    scrollbar-color: $background;
 }
 
 
 #input-panel {
     height: 5;
-    padding: 0 1;
+    padding: 0 3;
 }
 
 #progress-status {
@@ -237,6 +240,17 @@ ConversationTimeline {
 #prompt-input {
     width: 1fr;
     height: 4;
+    padding: 1 2 0 2;
+    border: none;
+    border-left: solid $panel;
+    background: $surface;
+}
+
+#prompt-input:focus,
+#prompt-input.panel-focused {
+    border: none;
+    border-left: solid $primary;
+    background: $panel;
 }
 
 #footer-bar {
@@ -253,79 +267,13 @@ ConversationTimeline {
     border: solid $warning;
 }
 
-#conversation.panel-focused,
-#prompt-input.panel-focused {
-    border: heavy $primary;
-}
-
-.status-default {
-    color: $foreground;
-}
-
-.status-muted {
-    color: $text-muted;
-    text-style: dim;
-}
-
-.status-emphasis,
-.status-focus {
-    color: $primary;
-    text-style: bold;
-}
-
-.status-success {
-    color: $success;
-    text-style: bold;
-}
-
-.status-warning,
-.status-pending {
-    color: $warning;
-    text-style: bold;
-}
-
-.status-error,
-.status-danger {
-    color: $error;
-    text-style: bold;
-}
-
-.status-info,
-.status-running {
-    color: $secondary;
-    text-style: bold;
-}
-
-.status-selection {
-    background: $primary;
-    color: $background;
-    text-style: reverse;
-}
-
-.status-cancelled {
-    color: $warning;
-    text-style: bold;
-}
-
-Screen.theme-monochrome .status-default,
-Screen.theme-monochrome .status-muted,
-Screen.theme-monochrome .status-emphasis,
-Screen.theme-monochrome .status-success,
-Screen.theme-monochrome .status-warning,
-Screen.theme-monochrome .status-error,
-Screen.theme-monochrome .status-info,
-Screen.theme-monochrome .status-selection,
-Screen.theme-monochrome .status-focus,
-Screen.theme-monochrome .status-running,
-Screen.theme-monochrome .status-cancelled,
-Screen.theme-monochrome .status-pending,
-Screen.theme-monochrome .status-danger {
-    color: $foreground;
+#conversation.panel-focused {
+    border: none;
 }
 
 Screen.theme-monochrome #conversation.panel-focused,
 Screen.theme-monochrome #prompt-input.panel-focused {
-    border: heavy $foreground;
+    border-left: solid $foreground;
 }
 
 Screen.theme-monochrome .timeline-item,
@@ -340,7 +288,13 @@ Screen.theme-monochrome .timeline-tools,
 Screen.theme-monochrome .timeline-header,
 Screen.theme-monochrome .timeline-active {
     color: $foreground;
-    border-left: heavy $foreground;
+    border-left: none;
+}
+
+Screen.theme-monochrome .timeline-user,
+Screen.theme-monochrome .timeline-failure,
+Screen.theme-monochrome .timeline-failed {
+    border-left: solid $foreground;
 }
 
 HelpModal,

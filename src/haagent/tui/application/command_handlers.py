@@ -76,12 +76,10 @@ class ChatCommandHandlers:
             return
         allow_fallback = "--allow-fallback" in extra
         status = self._app.service.workspace.sandbox.enable_docker(fail_if_unavailable=not allow_fallback)
-        self._app._sandbox_status = _sandbox_state(status)
         self._block(f"Docker 沙箱已启用；新 session 生效。\n{sandbox_status_text(status)}")
 
     def _disable_sandbox(self) -> None:
         status = self._app.service.workspace.sandbox.disable()
-        self._app._sandbox_status = _sandbox_state(status)
         self._block(f"已恢复 local_subprocess；后续新 session 会使用本机执行。\n{sandbox_status_text(status)}")
 
     # ── /web ─────────────────────────────────────────────────────────────
@@ -170,16 +168,6 @@ class ChatCommandHandlers:
     def _block(self, body: str) -> None:
         self._app._conversation.append_block("Command", body)
         self._app._refresh()
-
-
-def _sandbox_state(status: AssistantSandboxStatus) -> dict[str, object]:
-    return {
-        "backend": status.backend,
-        "availability": {
-            "degraded": status.degraded,
-            "reason": status.reason,
-        },
-    }
 
 
 def sandbox_status_text(status: AssistantSandboxStatus) -> str:

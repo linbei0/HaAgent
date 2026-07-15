@@ -12,6 +12,7 @@ from typing import Any
 from haagent.tui.design.copy import BLOCK_TITLES
 from haagent.tui.design.utils import safe_summary
 from haagent.tui.widgets import ConversationTimeline
+from haagent.tui.widgets.timeline_models import ToolActivity, ToolStatus
 
 
 class ConversationController:
@@ -90,7 +91,8 @@ class ConversationController:
     def finalize_streaming_if_needed(self) -> None:
         if self.streaming_key is None:
             return
-        self._timeline().finalize_assistant(self.streaming_key[0], self.streaming_text)
+        # 失败/取消只是在结束流式占位，并不代表收到了最终回答；过程与失败必须保持可见。
+        self._timeline().finish_assistant_without_final(self.streaming_key[0], self.streaming_text)
         self.streaming_key = None
         self.streaming_text = ""
 
@@ -99,6 +101,30 @@ class ConversationController:
         self.placeholder_rendered = False
         self.streaming_key = None
         self.streaming_text = ""
+
+    def record_tool_activity(
+        self,
+        turn_index: int,
+        tool_name: str,
+        status: str,
+        summary: str,
+    ) -> None:
+        """把 runtime 工具事件写入 timeline.tools，供过程组展开后显示中文工具行。"""
+
+        status_map: dict[str, ToolStatus] = {
+            "started": "running",
+            "finished": "done",
+            "failed": "failed",
+        }
+        mapped = status_map.get(status, "done")
+        self._timeline().add_tool_activity(
+            ToolActivity(
+                tool_name=tool_name,
+                status=mapped,
+                summary=safe_summary(summary, 120) if summary else tool_name,
+                turn_index=turn_index,
+            )
+        )
 
     def record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         self._timeline().add_tool_diagnostic(turn_index, tool_name, safe_summary(message, 120))

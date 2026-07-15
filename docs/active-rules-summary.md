@@ -105,16 +105,21 @@
 - TUI 的目标是个人助手会话工作台，不是 IDE、代码编辑器、文件树主界面或复杂多标签工作台。
 - TUI 应通过 `AssistantService` 驱动会话，复用 `AgentSession`、`ModelGateway`、`ToolRouter`、workspace root 和 episode trace。
 - TUI 信息架构优先级是：当前上下文、对话流、可恢复状态、配置健康度、低频操作。
-- 当前布局以顶部状态栏、主对话 timeline、输入区和快捷键 footer 为核心；低频能力通过 overlay/modal 打开，80x24 应可完成输入、阅读、审批、查看失败和退出。
-- 顶部状态栏展示 workspace、profile、provider/model、API key 可用状态、session 和运行状态；窄屏必须截断或压缩。
-- 主对话区按 `RuntimeUiEvent` 类型映射用户消息、assistant 回复、工具摘要、审批、补充输入、失败和 turn 状态；默认不展示完整 transcript、tool output、stdout、stderr、patch 或 episode trace。
-- 输入区使用多行 `TextArea`：`Enter` 提交，`Shift+Enter` 换行，空输入不提交，`Esc` 关闭当前 modal/overlay 或返回上层交互。
+- 当前布局以顶部状态栏、主对话 timeline、输入区和上下文 footer 为核心；低频能力通过 overlay/modal 打开，80x24 应可完成输入、阅读、审批、查看失败和退出。
+- 顶部状态栏只展示工作区、当前模型、联网开关和当前工作状态。profile、provider、API key、权限、sandbox、session、turn 和原始 state 等诊断字段不得进入常驻状态栏；异常在对应配置、审批、权限或失败界面展示。
+- 状态栏按终端 cell 宽度截断：80–119 列优先保留当前目录名，模型可以截断，联网和工作状态必须完整；只给联网与工作状态片段使用语义色，不整行随状态变色。
+- 主对话区采用非对称安静结构：用户消息使用低对比表面和细左边线，不显示角色标签；assistant 回答直接落在主背景上，不使用卡片、边框或标题；系统、命令、操作和提示使用紧凑行内通知，失败保留明确符号与错误语义。
+- 工具过程运行时显示中文动作摘要，过程标题按秒只刷新当前块的步骤数与耗时，不触发 timeline 全量重绘；最终回答完成后连同本轮工具失败、任务受阻诊断一起折叠为“已完成 N 步 · 本轮耗时 ›”并冻结耗时。没有最终回答的失败、待审批和待补充输入保持可见。普通界面使用中文工具名，详情同时显示中文名与原始标识；完整 transcript、tool output、stdout、stderr、patch 和 episode trace 仍按需打开。
+- 输入区使用多行 `TextArea`：`Enter` 提交，`Ctrl+Enter` 换行，空输入不提交，`Esc` 关闭当前 modal/overlay 或返回上层交互。焦点只使用一格细左边线、轻微背景和光标变化，不显示高亮粗边框。
+- 聊天 footer 固定为 `/ 命令 · Ctrl+F 搜索 · ? 帮助 · Ctrl+Q 退出`，不显示 `Enter 发送`；运行时用 `Ctrl+X 取消任务` 替换 `/ 命令`。其他上下文 footer 最多四组操作，完整键位进入 `?` 帮助。
+- 计划任务未读数不进入顶部状态栏；数量增加时只发一次非持久通知，完整数量留在计划任务界面。
 - 运行时请求用户补充信息时，输入区进入回答状态，提交后继续同一个 turn，不能变成新 prompt。
 - 工具审批 modal 必须展示工具名、影响范围和关键参数摘要；文件修改和命令执行等高影响操作默认焦点应放在 Deny。
 - 审批 modal 是 focus trap；审批结果必须回到同一个 turn。
 - 帮助应以 modal、overlay 或上下文化帮助呈现，不应污染对话流。
 - 记忆候选审查必须支持多候选导航和确认/拒绝目标项。
 - 所有功能必须键盘可达，鼠标只作为增强；颜色不能作为唯一语义，`NO_COLOR` 下仍应可读。
+- 普通用户路径统一使用简体中文；HaAgent、OpenAI、DeepSeek、模型 ID、环境变量、Slash 命令和高级诊断原始值保持原名。
 - Failure 展示必须包含 failed\_stage、failure\_category、reason 和 episode\_path；不要静默 fallback，也不要过度推断。
 
 ## 10. 测试与质量门禁

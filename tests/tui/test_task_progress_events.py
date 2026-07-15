@@ -12,9 +12,11 @@ from textual.app import App, ComposeResult
 
 from haagent.runtime.events.types import TaskProgressEvent
 from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem, present_task_progress
+from haagent.tui.widgets import conversation_timeline as timeline_module
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
-from haagent.tui.widgets.timeline_models import TimelineItem
+from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
 from haagent.tui.widgets.timeline_rendering import render_timeline_item
+from tests.tui.support import _text
 
 
 class TimelineClickTestApp(App[None]):
@@ -34,6 +36,12 @@ class TimelineClickTestApp(App[None]):
 
     .timeline-header {
         height: 1;
+    }
+
+    .timeline-body,
+    .timeline-tools,
+    .timeline-active {
+        height: auto;
     }
     """
 
@@ -64,6 +72,7 @@ class TimelineClickTestApp(App[None]):
             ),
             ExpandableDetail("detail-2", ["文件：src/example.py"]),
         )
+        timeline.add_assistant_message("最终回答", turn_index=1)
 
 
 class NoticeClickTestApp(App[None]):
@@ -85,7 +94,7 @@ class NoticeClickTestApp(App[None]):
         )
 
 
-def test_intermediate_assistant_output_remains_after_final_message() -> None:
+def test_intermediate_assistant_output_is_retained_but_folded_after_final_message() -> None:
     timeline = ConversationTimeline()
 
     timeline.start_assistant_response(turn_index=1)
@@ -96,12 +105,15 @@ def test_intermediate_assistant_output_remains_after_final_message() -> None:
     process_items = [item for item in timeline._items if item.role == "process"]
     assert len(process_items) == 1
     assert process_items[0].content == "完整审查报告"
+    assert process_items[0].title == ""
     assert process_items[0].detail_lines == []
     assert process_items[0].detail_id is None
-    assert "完整审查报告" in timeline.plain_text
+    assert "完整审查报告" not in timeline.plain_text
+    assert "过程" not in timeline.plain_text
+    assert "已完成 1 步" in timeline.plain_text
     assert "详情：点击" not in timeline.plain_text
     assert timeline.toggle_process_group(1) is True
-    assert "完整审查报告" not in timeline.plain_text
+    assert "完整审查报告" in timeline.plain_text
 
 
 def test_plain_task_progress_projection_does_not_add_timeline_item() -> None:
@@ -167,9 +179,7 @@ def test_timeline_updates_grouped_notice_without_moving_assistant_final() -> Non
         ),
         ExpandableDetail("tool:1:web_fetch:failed", ["工具：web_fetch", "状态：failed"]),
     )
-    timeline._items.append(
-        TimelineItem(item_id=next(timeline._ids), role="assistant", turn_index=1, content="最终回答")
-    )
+    timeline.add_assistant_message("最终回答", turn_index=1)
 
     replaced = timeline.replace_presentation_item(
         TimelinePresentationItem(
@@ -185,6 +195,10 @@ def test_timeline_updates_grouped_notice_without_moving_assistant_final() -> Non
 
     text = timeline.plain_text
     assert replaced is True
+    assert "已完成 1 步" in text
+    assert "web_fetch 失败 2 次，已使用已有上下文继续" not in text
+    assert timeline.toggle_process_group(1) is True
+    text = timeline.plain_text
     assert "web_fetch 失败 2 次，已使用已有上下文继续" in text
     assert text.count("web_fetch") == 1
     assert text.index("web_fetch 失败 2 次") < text.index("最终回答")
@@ -193,10 +207,8 @@ def test_timeline_updates_grouped_notice_without_moving_assistant_final() -> Non
 def test_late_presentation_item_is_inserted_before_same_turn_assistant_final() -> None:
     timeline = ConversationTimeline()
 
-    timeline._items.append(TimelineItem(item_id=next(timeline._ids), role="user", turn_index=1, content="查一下资料"))
-    timeline._items.append(
-        TimelineItem(item_id=next(timeline._ids), role="assistant", turn_index=1, content="最终回答")
-    )
+    timeline.add_user("查一下资料", turn_index=1)
+    timeline.add_assistant_message("最终回答", turn_index=1)
     timeline.add_presentation_item(
         TimelinePresentationItem(
             kind="activity",
@@ -210,22 +222,19 @@ def test_late_presentation_item_is_inserted_before_same_turn_assistant_final() -
     )
 
     text = timeline.plain_text
-    assert "已处理 1 项 >" in text
+    assert "已完成 1 步" in text
     assert "web_fetch 失败 2 次" not in text
-    assert text.index("已处理 1 项") < text.index("最终回答")
-
     assert timeline.toggle_process_group(1) is True
     text = timeline.plain_text
+    assert "web_fetch 失败 2 次" in text
     assert text.index("web_fetch 失败 2 次") < text.index("最终回答")
 
 
 def test_replacing_late_presentation_item_keeps_it_before_same_turn_assistant_final() -> None:
     timeline = ConversationTimeline()
 
-    timeline._items.append(TimelineItem(item_id=next(timeline._ids), role="user", turn_index=1, content="查一下资料"))
-    timeline._items.append(
-        TimelineItem(item_id=next(timeline._ids), role="assistant", turn_index=1, content="最终回答")
-    )
+    timeline.add_user("查一下资料", turn_index=1)
+    timeline.add_assistant_message("最终回答", turn_index=1)
     timeline.add_presentation_item(
         TimelinePresentationItem(
             kind="activity",
@@ -252,10 +261,8 @@ def test_replacing_late_presentation_item_keeps_it_before_same_turn_assistant_fi
 
     text = timeline.plain_text
     assert replaced is True
-    assert "已处理 1 项 >" in text
-    assert "web_fetch" not in text
-    assert text.index("已处理 1 项") < text.index("最终回答")
-
+    assert "已完成 1 步" in text
+    assert "web_fetch 失败 2 次" not in text
     assert timeline.toggle_process_group(1) is True
     text = timeline.plain_text
     assert text.count("web_fetch") == 1
@@ -268,6 +275,7 @@ def test_notice_details_are_collapsed_by_default_and_expand_in_place() -> None:
         app = NoticeClickTestApp()
         async with app.run_test(size=(120, 30)) as pilot:
             timeline = app.query_one("#conversation", ConversationTimeline)
+            await pilot.pause(0.1)
             assert "类别：verification_failed" not in timeline.plain_text
 
             await pilot.click(".timeline-notice")
@@ -283,7 +291,7 @@ def test_notice_details_are_collapsed_by_default_and_expand_in_place() -> None:
     asyncio.run(run())
 
 
-def test_process_items_are_folded_into_turn_summary_by_default() -> None:
+def test_process_items_fold_warnings_and_effects_after_final_answer() -> None:
     timeline = ConversationTimeline()
     timeline.add_presentation_item(
         TimelinePresentationItem(
@@ -310,11 +318,11 @@ def test_process_items_are_folded_into_turn_summary_by_default() -> None:
     timeline.add_assistant_message("最终回答", turn_index=1)
 
     text = timeline.plain_text
-    assert "已处理 2 项 >" in text
+    assert "已完成 2 步" in text
     assert "web_fetch 失败 2 次" not in text
     assert "2 个文件有变更" not in text
     assert "请求超时" not in text
-    assert text.index("已处理 2 项") < text.index("最终回答")
+    assert text.index("已完成 2 步") < text.index("最终回答")
 
 
 def test_process_group_toggle_expands_and_collapses_all_process_items() -> None:
@@ -341,17 +349,18 @@ def test_process_group_toggle_expands_and_collapses_all_process_items() -> None:
         ),
         ExpandableDetail("detail-2", ["文件：src/example.py"]),
     )
+    timeline.add_assistant_message("最终回答", turn_index=1)
 
     assert timeline.toggle_process_group(1) is True
     expanded = timeline.plain_text
-    assert "已处理 2 项 v" in expanded
+    assert "已完成 2 步" in expanded
     assert "web_fetch 失败 2 次" in expanded
     assert "2 个文件有变更" in expanded
     assert "请求超时" not in expanded
 
     assert timeline.toggle_process_group(1) is True
     collapsed = timeline.plain_text
-    assert "已处理 2 项 >" in collapsed
+    assert "已完成 2 步" in collapsed
     assert "web_fetch 失败 2 次" not in collapsed
     assert "2 个文件有变更" not in collapsed
 
@@ -360,16 +369,74 @@ def test_clicking_process_group_expands_the_folded_items() -> None:
     async def run() -> None:
         app = TimelineClickTestApp()
         async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause(0.1)
             timeline = app.query_one("#conversation", ConversationTimeline)
-            assert "已处理 2 项 >" in timeline.plain_text
+            assert "已完成 2 步" in timeline.plain_text
             assert "web_fetch 失败 2 次" not in timeline.plain_text
 
-            await pilot.click(".timeline-process")
+            process_block = timeline.query_one(".timeline-process")
+            await pilot.click(process_block, offset=(1, 0))
             await pilot.pause(0.1)
 
-            assert "已处理 2 项 v" in timeline.plain_text
+            assert "已完成 2 步" in timeline.plain_text
             assert "web_fetch 失败 2 次" in timeline.plain_text
             assert "2 个文件有变更" in timeline.plain_text
+
+    asyncio.run(run())
+
+
+def test_process_child_items_do_not_show_generic_process_label() -> None:
+    from haagent.tui.widgets.timeline_rendering import process_group_title
+
+    items = [
+        TimelineItem(1, "process", 1, "让我再试一次，加一些错误处理~", title=""),
+        TimelineItem(
+            item_id=2,
+            role="process",
+            turn_index=1,
+            content="让我直接搜索~",
+            title="",
+            tools=[ToolActivity("web_search", "done", "查询汕头逐小时天气", 1)],
+        ),
+    ]
+    rendered = [render_timeline_item(item, show_tool_details=False) for item in items]
+
+    assert rendered[0] == "让我再试一次，加一些错误处理~"
+    assert "联网搜索 ›" in rendered[1]
+    assert all("过程" not in text and "步骤" not in text for text in rendered)
+    assert process_group_title(items, expanded=False) == "已完成 2 步 ›"
+
+
+def test_completed_process_group_shows_step_count_and_elapsed_time(monkeypatch) -> None:
+    clock = [10.0]
+    monkeypatch.setattr(timeline_module, "monotonic", lambda: clock[0], raising=False)
+    timeline = ConversationTimeline()
+
+    timeline.start_assistant_response(turn_index=1)
+    timeline.add_tool_activity(ToolActivity("web_search", "done", "已找到资料", 1))
+    clock[0] = 88.0
+    timeline.finalize_assistant(1, "整理完成")
+
+    assert "已完成 1 步 · 1分18秒 ›" in timeline.plain_text
+
+
+def test_running_process_group_refreshes_elapsed_time_without_click(monkeypatch) -> None:
+    async def run() -> None:
+        clock = [10.0]
+        monkeypatch.setattr(timeline_module, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(timeline_module, "ELAPSED_REFRESH_INTERVAL_SECONDS", 0.01)
+        app = TimelineClickTestApp()
+        async with app.run_test(size=(120, 30)) as pilot:
+            timeline = app.query_one("#conversation", ConversationTimeline)
+            timeline.start_assistant_response(turn_index=2)
+            timeline.finalize_intermediate(2, 1, "正在搜索")
+            await pilot.pause(0.02)
+
+            assert "已完成 1 步 · 0秒" in _text(app, "#conversation")
+            clock[0] = 88.0
+            await pilot.pause(0.03)
+
+            assert "已完成 1 步 · 1分18秒" in _text(app, "#conversation")
 
     asyncio.run(run())
 

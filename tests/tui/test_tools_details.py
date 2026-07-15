@@ -219,17 +219,17 @@ def test_tui_tool_failure_adds_actionable_notice_and_keeps_answer_readable(tmp_p
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "已处理 1 项 >" in conversation
-            assert "工具运行失败：web_search" not in conversation
-            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            assert "已完成 1 步" in conversation
+            assert "联网搜索失败" not in conversation
+            await pilot.click(".timeline-process")
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
-            assert "工具运行失败：web_search" in conversation
+            assert "联网搜索失败" in conversation
             assert "建议：查看错误摘要后重试或调整命令" in conversation
             assert "详情：点击展开" in conversation
             assert "工具 2 项" not in conversation
             assert "运行中" not in conversation
-            assert "web_search" in conversation
+            assert "web_search" not in conversation
             assert "我已经整理好结论。" in conversation
 
     asyncio.run(run())
@@ -254,12 +254,12 @@ def test_tui_tool_failure_notice_omits_long_read_only_summaries(tmp_path: Path) 
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "已处理 1 项 >" in conversation
-            assert "工具运行失败：web_search" not in conversation
-            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            assert "已完成 1 步" in conversation
+            assert "联网搜索失败" not in conversation
+            await pilot.click(".timeline-process")
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
-            assert "工具运行失败：web_search" in conversation
+            assert "联网搜索失败" in conversation
             assert "工具 2 项" not in conversation
             assert "reading very long local file" not in conversation
             assert "web_search failed with timeout" not in conversation
@@ -291,12 +291,12 @@ def test_tui_read_only_tool_events_do_not_count_calls_in_timeline(tmp_path: Path
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert "已处理 1 项 >" in conversation
-            assert "工具运行失败：web_fetch" not in conversation
-            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
+            assert "已完成 1 步" in conversation
+            assert "读取网页失败" not in conversation
+            await pilot.click(".timeline-process")
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
-            assert "工具运行失败：web_fetch" in conversation
+            assert "读取网页失败" in conversation
             assert "工具 5 项" not in conversation
             assert "3 成功" not in conversation
             assert "1 运行中" not in conversation
@@ -334,18 +334,9 @@ def test_tui_tool_summary_updates_pending_confirmation_on_response_events(tmp_pa
             await pilot.pause(0.4)
 
             conversation = _text(app, "#conversation")
-            assert "已处理 5 项 >" in conversation
-            assert "需要确认：code_run" not in conversation
-            assert "审批已拒绝：code_run" not in conversation
-            assert "需要确认：shell" not in conversation
-            assert "需要确认文件改动" not in conversation
-            assert "文件改动已拒绝" not in conversation
-            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
-            await pilot.pause(0.1)
-            conversation = _text(app, "#conversation")
-            assert "需要确认：code_run" in conversation
-            assert "审批已拒绝：code_run" in conversation
-            assert "需要确认：shell" in conversation
+            assert "需要确认：运行代码" in conversation
+            assert "已拒绝：运行代码" in conversation
+            assert "需要确认：运行命令" in conversation
             assert "需要确认文件改动" in conversation
             assert "文件改动已拒绝" in conversation
             assert "工具 3 项" not in conversation
@@ -391,7 +382,7 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause(0.2)
             compact = _text(app, "#conversation")
-            assert "工具 1 项" in compact
+            assert "已完成 1 步" in compact
             assert "web_fetch" not in compact
             assert "file_read" not in compact
             assert "result compacted" not in compact
@@ -403,7 +394,7 @@ def test_tui_details_command_toggles_full_tool_activity(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             detailed = _text(app, "#conversation")
             assert "工具详情已开启" in detailed
-            assert "工具 web_search ok" in detailed
+            assert "联网搜索（web_search）成功" in detailed
             assert "旧工具消息降级：web_search 1854 chars -> 929 chars" in detailed
             assert "web_fetch" not in detailed
             assert "工具 file_read ok" not in detailed
@@ -435,7 +426,8 @@ def test_tui_tool_details_use_inline_log_widget(tmp_path: Path) -> None:
             assert tool_log.styles.overflow_y == "hidden"
             assert tool_log.show_horizontal_scrollbar is False
             assert tool_log.show_vertical_scrollbar is False
-            assert tool_log.styles.color == app.screen.styles.color
+            assert tool_log.styles.color != app.screen.styles.color
+            assert tool_log.styles.color.a < app.screen.styles.color.a
             selection_style = app.screen.get_component_rich_style("screen--selection")
             assert selection_style.color is not None
             assert selection_style.bgcolor is not None

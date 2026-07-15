@@ -58,8 +58,8 @@ def test_tui_memory_panel_renderer_marks_selection_and_detail() -> None:
     assert "  发现候选" in list_text
     assert "  cand_first" in list_text
     assert "> cand_second" in list_text
-    assert "candidate_id: cand_second" in detail_text
-    assert "candidate_id: cand_first" not in detail_text
+    assert "候选编号：cand_second" in detail_text
+    assert "候选编号：cand_first" not in detail_text
 
 def test_tui_m_key_no_longer_opens_memory_mode(tmp_path: Path) -> None:
     async def run() -> None:
@@ -94,6 +94,7 @@ def test_tui_help_modal_is_contextual_for_memory_modes(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             assert "记忆候选列表" in _all_text(app)
             assert "↑/↓" in _all_text(app)
+            assert "g/G" in _all_text(app)
             assert "j/k" not in _all_text(app)
             await pilot.press("escape")
             await pilot.pause(0.1)
@@ -131,7 +132,9 @@ def test_tui_memory_candidate_event_shows_notice(tmp_path: Path) -> None:
             assert "发现 1 条可记忆候选，已放入候选队列，等待你确认。" in conversation
             assert "记忆候选" in conversation
             assert "cand_abc123" in conversation
-            assert "[a/y]确认" in _text(app, "#footer-bar")
+            footer = _text(app, "#footer-bar")
+            assert "[a/y/r]" in footer
+            assert footer.count("[") <= 4
 
     asyncio.run(run())
 
@@ -151,9 +154,9 @@ def test_tui_memory_panel_lists_and_shows_candidate_details(tmp_path: Path) -> N
             await pilot.press("enter")
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
-            assert "source_summary: 用户明确要求记住自己的名字和爱好。" in conversation
-            assert "basis: 用户说：我叫小明，喜欢唱跳rap篮球，记住我的爱好。" in conversation
-            assert "category_rationale: 这是跨 workspace 可复用的用户偏好和身份信息。" in conversation
+            assert "来源摘要：用户明确要求记住自己的名字和爱好。" in conversation
+            assert "依据：用户说：我叫小明，喜欢唱跳rap篮球，记住我的爱好。" in conversation
+            assert "分类理由：这是跨 workspace 可复用的用户偏好和身份信息。" in conversation
 
     asyncio.run(run())
 
@@ -218,7 +221,7 @@ def test_tui_memory_navigation_supports_home_end_and_keeps_selection_after_detai
 
             await pilot.press("enter")
             await pilot.pause(0.1)
-            assert "candidate_id: cand_last" in _text(app, "#conversation")
+            assert "候选编号：cand_last" in _text(app, "#conversation")
             await pilot.press("escape")
             await pilot.pause(0.1)
             assert "> cand_last" in _text(app, "#conversation")
@@ -229,7 +232,8 @@ def test_tui_memory_navigation_supports_home_end_and_keeps_selection_after_detai
             footer = _text(app, "#footer-bar")
             assert "[↑/↓]移动" in footer
             assert "j/k" not in footer
-            assert "[g/G]首尾" in footer
+            assert "[g/G]" not in footer
+            assert footer.count("[") <= 4
 
     asyncio.run(run())
 
@@ -303,7 +307,7 @@ def test_tui_memory_mode_is_readable_in_conversation(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
             assert "记忆候选详情" in conversation
-            assert "basis: 用户说：我叫小明，喜欢唱跳rap篮球，记住我的爱好。" in conversation
+            assert "依据：用户说：我叫小明，喜欢唱跳rap篮球，记住我的爱好。" in conversation
 
     asyncio.run(run())
 

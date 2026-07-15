@@ -38,12 +38,8 @@ from haagent.tui.design.keys import APP_BINDINGS, footer_text
 from haagent.tui.design.renderers import status_line
 from haagent.tui.design.theme import (
     next_theme,
-    no_color_enabled,
     select_theme,
-    semantic_tokens,
-    status_semantic,
     textual_themes,
-    theme_label,
 )
 from haagent.tui.design.utils import safe_summary
 from haagent.tui.files.refs import FileReferenceIndex, build_file_reference_index
@@ -80,8 +76,7 @@ class HaAgentTuiApp(App[None]):
         self._tool_details_enabled = False
         self._last_failure: FailureView | None = None
         self._pending_interaction: PendingInteraction | None = None
-        self._default_prompt_placeholder = "输入消息；Enter 发送，Shift+Enter 换行"
-        self._sandbox_status: dict[str, object] | None = None
+        self._default_prompt_placeholder = "输入消息；Ctrl+Enter 换行，/ 打开命令"
         self._pending_external_prompt: str | None = None
         self._pending_external_path: Path | None = None
         self._pending_full_trust_prompt: str | None = None
@@ -107,7 +102,6 @@ class HaAgentTuiApp(App[None]):
         self._timeline_widget: ConversationTimeline | None = None
         self._input_dock_widget: InputDock | None = None
         self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
-        self._task_problem_groups: dict[int, dict[str, object]] = {}
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -235,7 +229,6 @@ class HaAgentTuiApp(App[None]):
     ) -> None:
         self._active_turn_index = self._next_turn_index()
         self._tool_failure_groups.clear()
-        self._task_problem_groups.clear()
         self._conversation.stick_to_bottom = True
         timeline = self._timeline()
         timeline.set_stick_to_bottom(True)
@@ -581,10 +574,6 @@ class HaAgentTuiApp(App[None]):
     def action_toggle_theme(self) -> None:
         self._theme_choice = next_theme(self._theme_choice)
         self._apply_theme()
-        if no_color_enabled():
-            self._conversation.append_line("NO_COLOR 已启用，主题保持单色")
-        else:
-            self._conversation.append_line(f"主题已切换：{theme_label(self._theme_choice)}")
         self._refresh()
 
     def action_conversation_page_up(self) -> None:
@@ -659,20 +648,11 @@ class HaAgentTuiApp(App[None]):
         base = status_line(
             status,
             ui_state=self._state,
-            width=self.size.width,
-            sandbox_status=self._sandbox_status,
+            # on_mount 首次刷新时 content_region 尚未完成布局；屏幕宽度减样式 gutter
+            # 在首次渲染和后续 resize 中都稳定，避免宽屏裁右端、窄屏错误回退到 120 列。
+            width=max(1, self.size.width - status_bar.styles.gutter.width),
         )
-        # 未读计划运行 badge：颜色非唯一语义，文案本身可访问。
-        unread = self.schedule_flow.unread_count
-        if unread > 0:
-            badge = f" 计划任务 {unread}"
-            # 窄屏优先保留 badge
-            if self.size.width <= 80:
-                base = f"{badge.strip()} | {base}"
-            else:
-                base = f"{base}{badge}"
         status_bar.update_status(base)
-        self._apply_status_classes(status_bar)
         self._refresh_conversation()
         self.query_one("#footer-bar", FooterBar).update_footer(footer_text(self._help_context()))
         self._apply_focus_classes()
@@ -712,6 +692,8 @@ class HaAgentTuiApp(App[None]):
             return "pending_input" if self._pending_interaction.request.interaction_type == "user_input" else "approval"
         if self.memory_flow.mode:
             return "memory_detail" if self.memory_flow.detail_mode else "memory_list"
+        if self._state == "running":
+            return "running"
         return "chat"
 
     def _apply_theme(self) -> None:
@@ -721,11 +703,6 @@ class HaAgentTuiApp(App[None]):
         self.theme = self._theme_choice.textual_theme
         for choice in ("theme-dark", "theme-light", "theme-monochrome"):
             self.screen.set_class(choice == self._theme_choice.css_class, choice)
-
-    def _apply_status_classes(self, widget: StatusBar) -> None:
-        semantic = status_semantic(self._state)
-        for token in semantic_tokens():
-            widget.set_class(semantic.css_class == f"status-{token.value}", f"status-{token.value}")
 
     def _apply_focus_classes(self) -> None:
         prompt = self._prompt_input()

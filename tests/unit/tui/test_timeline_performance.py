@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from textual.app import App, ComposeResult
 
 import haagent.tui.widgets.timeline_models as timeline_module
+from haagent.tui.widgets import conversation_timeline as conversation_timeline_module
 from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.timeline_block import TimelineBlock
@@ -97,7 +98,25 @@ def test_tool_activity_marks_plain_text_dirty_without_eager_full_rebuild() -> No
     assert timeline.synced_items == []
     assert timeline.scheduled_flush_count == 1
     assert timeline.scheduled_flush_delay == 0.05
-    assert "工具 1 项" in timeline.plain_text
+    assert "已完成 1 项" in timeline.plain_text
+
+
+def test_elapsed_refresh_updates_only_the_process_group_block(monkeypatch) -> None:
+    clock = [10.0]
+    monkeypatch.setattr(conversation_timeline_module, "monotonic", lambda: clock[0])
+    timeline = InstrumentedTimeline()
+    timeline.start_assistant_response(turn_index=1)
+    timeline.finalize_intermediate(1, 1, "正在搜索")
+    timeline.synced_items.clear()
+    timeline.render_timeline_count = 0
+
+    clock[0] = 88.0
+    timeline._refresh_elapsed_process_groups()
+
+    assert "已完成 1 步 · 1分18秒" in timeline.plain_text
+    assert timeline.render_timeline_count == 0
+    assert len(timeline.synced_items) == 1
+    assert timeline.synced_items[0] < 0
     assert timeline.plain_text_sync_count == 1
 
 

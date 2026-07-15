@@ -8,10 +8,12 @@ VerticalScroll 容器，维护 TimelineItem 列表并按需挂载/更新 Timelin
 from __future__ import annotations
 
 from itertools import count
+from time import monotonic
 from typing import Any
 
 from textual import events
 from textual.containers import VerticalScroll
+from textual.timer import Timer
 from textual.widgets import Static
 
 from haagent.app.assistant_types import AssistantSessionTurn
@@ -40,6 +42,7 @@ from haagent.tui.widgets.tool_activity import matching_latest_tool_activity, mer
 
 TIMELINE_WINDOW_SIZE = 200
 TIMELINE_WINDOW_STEP = 100
+ELAPSED_REFRESH_INTERVAL_SECONDS = 1.0
 
 
 class ConversationTimeline(VerticalScroll):
@@ -56,6 +59,8 @@ class ConversationTimeline(VerticalScroll):
         self._detail_items_by_id: dict[str, TimelineItem] = {}
         self._assistant_items_by_turn: dict[int, TimelineItem] = {}
         self._process_items_by_turn: dict[int, list[TimelineItem]] = {}
+        self._turn_started_at: dict[int, float] = {}
+        self._elapsed_timer: Timer | None = None
         self._visible_items_cache: list[TimelineItem] | None = None
         self._tool_details_enabled = False
         self._plain_text = ""
@@ -98,9 +103,10 @@ class ConversationTimeline(VerticalScroll):
 
     def show_placeholder(self) -> None:
         self._clear_items()
-        self._plain_text = "Ready. 输入消息后按 Enter 发送；Shift+Enter 换行；Ctrl+Q 退出。"
+        text = "可以开始了。Ctrl+Enter 换行，输入 / 打开命令。"
+        self._plain_text = text
         self._plain_text_dirty = False
-        self._show_singleton("placeholder", "Ready. 输入消息后按 Enter 发送；Shift+Enter 换行；Ctrl+Q 退出。", "timeline-placeholder")
+        self._show_singleton("placeholder", text, "timeline-placeholder")
 
     def show_memory(self, text: str) -> None:
         self._clear_items()
@@ -138,6 +144,20 @@ class ConversationTimeline(VerticalScroll):
         if self._tool_details_enabled == enabled:
             return
         self._tool_details_enabled = enabled
+        process_turns = set(self._process_items_by_turn)
+        if process_turns:
+            if enabled:
+                self._expanded_process_turns.update(process_turns)
+                self._collapsed_process_turns.difference_update(process_turns)
+            else:
+                self._expanded_process_turns.difference_update(process_turns)
+                self._collapsed_process_turns.update(process_turns)
+                for turn_index in process_turns:
+                    for item in self._process_items_by_turn[turn_index]:
+                        item.expanded = False
+            self._invalidate_visible_items()
+            self._render_timeline()
+            return
         recent_assistants = [item for item in self._items if item.role == "assistant"][-DETAILS_REFRESH_RECENT_TURNS:]
         if not recent_assistants:
             self._render_timeline()
@@ -208,6 +228,8 @@ class ConversationTimeline(VerticalScroll):
             content=item.summary,
             detail_id=item.detail_id,
             detail_lines=details.lines if details else [],
+            status="failed" if item.severity == "error" else "done",
+            pinned=item.severity in {"warning", "error"},
         )
         self._insert_timeline_item(timeline_item)
         self._render_or_mark_dirty()
@@ -229,6 +251,8 @@ class ConversationTimeline(VerticalScroll):
         existing.title = item.title
         existing.content = item.summary
         existing.detail_lines = details.lines if details else []
+        existing.status = "failed" if item.severity == "error" else "done"
+        existing.pinned = item.severity in {"warning", "error"}
         self._index_item(existing)
         self._invalidate_visible_items()
         if self._move_before_same_turn_assistant(existing):
@@ -246,8 +270,9 @@ class ConversationTimeline(VerticalScroll):
         if item is None or not item.detail_lines:
             return False
         item.expanded = not item.expanded
-        if item.expanded and _is_process_item(item):
-            self._expanded_process_turns.add(item.turn_index)
+        if _is_process_item(item):
+            if item.expanded:
+                self._expanded_process_turns.add(item.turn_index)
             self._invalidate_visible_items()
         self._render_or_mark_dirty()
         return True
@@ -275,10 +300,13 @@ class ConversationTimeline(VerticalScroll):
 
     def add_assistant_message(self, content: str, *, turn_index: int) -> None:
         self._append_item(TimelineItem(item_id=next(self._ids), role="assistant", turn_index=turn_index, content=content, status="done", title="HaAgent"))
+        self._collapse_process_turn(turn_index)
         self._render_timeline()
 
     def start_assistant_response(self, *, turn_index: int) -> None:
         item = self._assistant_item(turn_index)
+        self._turn_started_at.setdefault(turn_index, monotonic())
+        self._ensure_elapsed_timer()
         item.status = "streaming"
         self._sync_block(item)
         self._mark_plain_text_dirty()
@@ -298,11 +326,114 @@ class ConversationTimeline(VerticalScroll):
         if content:
             item.content = content
         item.status = "done"
+        self._finish_turn_timing(item)
+        self._move_tools_out_of_final_answer(item)
+        process_items = self._collapse_process_turn(turn_index)
+        if self._interactive_updates_paused:
+            self._pending_assistant_delta_item_ids.add(item.item_id)
+        elif process_items:
+            self._render_timeline()
+        else:
+            self._sync_block(item)
+        self._mark_plain_text_dirty()
+
+    def finish_assistant_without_final(self, turn_index: int, content: str) -> None:
+        """结束流式占位但不触发“最终回答已到达”的过程折叠。"""
+        self.flush_pending_assistant_delta()
+        item = self._assistant_item(turn_index)
+        if content:
+            item.content = content
+        item.status = "done"
+        self._finish_turn_timing(item)
         if self._interactive_updates_paused:
             self._pending_assistant_delta_item_ids.add(item.item_id)
         else:
             self._sync_block(item)
         self._mark_plain_text_dirty()
+
+    def _finish_turn_timing(self, item: TimelineItem) -> None:
+        started_at = self._turn_started_at.pop(item.turn_index, None)
+        if started_at is not None:
+            item.elapsed_seconds = max(0.0, monotonic() - started_at)
+        if not self._turn_started_at and self._elapsed_timer is not None:
+            self._elapsed_timer.pause()
+
+    def _ensure_elapsed_timer(self) -> None:
+        if not self.is_attached or not any(
+            turn_index in self._turn_started_at for turn_index in self._process_items_by_turn
+        ):
+            return
+        if self._elapsed_timer is None:
+            # 单一低频 timer 只刷新过程组标题，不触发 timeline 全量重绘。
+            self._elapsed_timer = self.set_interval(
+                ELAPSED_REFRESH_INTERVAL_SECONDS,
+                self._refresh_elapsed_process_groups,
+            )
+            return
+        self._elapsed_timer.resume()
+
+    def _refresh_elapsed_process_groups(self) -> None:
+        if self._interactive_updates_paused:
+            return
+        now = monotonic()
+        active_turns = [
+            (turn_index, started_at)
+            for turn_index, started_at in self._turn_started_at.items()
+            if self._process_items_by_turn.get(turn_index)
+        ]
+        if not active_turns:
+            if self._elapsed_timer is not None:
+                self._elapsed_timer.pause()
+            return
+        self._invalidate_visible_items()
+        for turn_index, started_at in active_turns:
+            group_item = _process_group_item(
+                turn_index,
+                self._process_items_by_turn[turn_index],
+                expanded=turn_index in self._expanded_process_turns,
+                elapsed_seconds=max(0.0, now - started_at),
+            )
+            self._sync_block(group_item)
+        self._mark_plain_text_dirty()
+
+    def _move_tools_out_of_final_answer(self, item: TimelineItem) -> None:
+        if not item.tools:
+            return
+        # 最终回答已经结束本轮过程；没有结束事件的临时“运行中”状态不再持久化。
+        completed_tools = [tool for tool in item.tools if tool.status != "running"]
+        item.tools = []
+        self._pending_tool_item_ids.discard(item.item_id)
+        if not completed_tools:
+            return
+        existing_process_items = self._process_items_by_turn.get(item.turn_index, [])
+        if existing_process_items:
+            target = existing_process_items[-1]
+            for tool in completed_tools:
+                merge_tool_activity(target.tools, tool)
+            self._sync_block_or_mark_dirty(target)
+            return
+        process_item = TimelineItem(
+            item_id=next(self._ids),
+            role="process",
+            turn_index=item.turn_index,
+            content="",
+            status="done",
+            title="",
+            tools=completed_tools,
+        )
+        assistant_index = self._items.index(item)
+        self._items.insert(assistant_index, process_item)
+        self._index_item(process_item)
+        self._invalidate_visible_items()
+
+    def _collapse_process_turn(self, turn_index: int) -> list[TimelineItem]:
+        process_items = self._process_items_by_turn.get(turn_index, [])
+        self._expanded_process_turns.discard(turn_index)
+        self._collapsed_process_turns.add(turn_index)
+        for process_item in process_items:
+            process_item.expanded = False
+        self._invalidate_visible_items()
+        return process_items
 
     def finalize_intermediate(self, turn_index: int, model_turn: int | None, content: str) -> None:
         """把当前 provisional assistant 项固化为可折叠过程，释放最终回复槽位。"""
@@ -312,7 +443,8 @@ class ConversationTimeline(VerticalScroll):
         self._unindex_item(item)
         item.role = "process"
         item.status = "done"
-        item.title = "过程"
+        # 过程子项不贴「过程」标签；折叠头统一用「已完成 N 项」，正文/工具摘要自解释。
+        item.title = ""
         item.content = resolved
         item.detail_id = None
         item.detail_lines = []
@@ -320,21 +452,49 @@ class ConversationTimeline(VerticalScroll):
         self._render_or_mark_dirty()
 
     def add_tool_activity(self, activity: ToolActivity) -> None:
-        item = self._assistant_item(activity.turn_index)
-        merge_tool_activity(item.tools, activity)
-        self._queue_tool_activity_sync(item)
+        target = self._tool_activity_target(activity.turn_index)
+        merge_tool_activity(target.tools, activity)
+        self._queue_tool_activity_sync(target)
         self._mark_plain_text_dirty()
 
     def add_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
-        item = self._assistant_item(turn_index)
-        activity = matching_latest_tool_activity(item.tools, tool_name)
+        target = self._tool_activity_target(turn_index)
+        activity = matching_latest_tool_activity(target.tools, tool_name)
         if activity is None:
             activity = ToolActivity(tool_name=tool_name, status="done", summary="诊断", turn_index=turn_index)
-            item.tools.append(activity)
+            target.tools.append(activity)
         if message not in activity.diagnostics:
             activity.diagnostics.append(message)
-        self._queue_tool_activity_sync(item)
+        self._queue_tool_activity_sync(target)
         self._mark_plain_text_dirty()
+
+    def _tool_activity_target(self, turn_index: int) -> TimelineItem:
+        """运行中的工具暂挂在 assistant；最终回答到达后再归入过程流。"""
+
+        process_items = self._process_items_by_turn.get(turn_index, [])
+        assistant = self._assistant_items_by_turn.get(turn_index)
+        if assistant is not None and assistant.status != "done" and not process_items:
+            return assistant
+        if process_items:
+            return process_items[-1]
+        if assistant is not None and assistant.status != "done":
+            return assistant
+        process_item = TimelineItem(
+            item_id=next(self._ids),
+            role="process",
+            turn_index=turn_index,
+            content="",
+            status="done",
+            title="",
+        )
+        if assistant is not None:
+            assistant_index = self._items.index(assistant)
+            self._items.insert(assistant_index, process_item)
+        else:
+            self._items.append(process_item)
+        self._index_item(process_item)
+        self._invalidate_visible_items()
+        return process_item
 
     def _assistant_item(self, turn_index: int) -> TimelineItem:
         item = self._assistant_items_by_turn.get(turn_index)
@@ -367,9 +527,14 @@ class ConversationTimeline(VerticalScroll):
         if _is_process_item(item):
             process_items = self._process_items_by_turn.setdefault(item.turn_index, [])
             process_items.append(item)
-            # 只自动展开模型主动输出的过程文本；工具/审批/文件效果继续默认折叠。
-            if item.role == "process" and item.turn_index not in self._collapsed_process_turns:
+            # 模型过程、失败和任务受阻在运行中保持可见；最终回答到达后统一折叠。
+            assistant = self._assistant_items_by_turn.get(item.turn_index)
+            has_final_answer = assistant is not None and assistant.status == "done"
+            if has_final_answer:
+                self._collapse_process_turn(item.turn_index)
+            elif (item.role in {"process", "notice", "failure"} or item.pinned) and item.turn_index not in self._collapsed_process_turns:
                 self._expanded_process_turns.add(item.turn_index)
+            self._ensure_elapsed_timer()
 
     def _unindex_item(self, item: TimelineItem) -> None:
         if self._items_by_id.get(item.item_id) is item:
@@ -390,6 +555,9 @@ class ConversationTimeline(VerticalScroll):
         self._detail_items_by_id.clear()
         self._assistant_items_by_turn.clear()
         self._process_items_by_turn.clear()
+        self._turn_started_at.clear()
+        if self._elapsed_timer is not None:
+            self._elapsed_timer.pause()
         self._invalidate_visible_items()
 
     def _invalidate_visible_items(self) -> None:
@@ -449,6 +617,10 @@ class ConversationTimeline(VerticalScroll):
 
     def _schedule_tool_activity_flush(self) -> None:
         if self._tool_activity_flush_scheduled:
+            return
+        # 未挂载 timeline（单元测试直接写）时不能 set_timer，立即同步 plain_text。
+        if not self.is_attached:
+            self.flush_pending_tool_activity()
             return
         self._tool_activity_flush_scheduled = True
         self.set_timer(
@@ -565,7 +737,8 @@ class ConversationTimeline(VerticalScroll):
 
     def _sync_plain_text(self) -> None:
         self._plain_text = "\n\n".join(
-            _render_timeline_item(item, show_tool_details=self._tool_details_enabled) for item in self._visible_items()
+            _render_timeline_item(item, show_tool_details=self._tool_details_enabled)
+            for item in self._visible_items()
         )
         self._plain_text_dirty = False
 
@@ -582,11 +755,30 @@ class ConversationTimeline(VerticalScroll):
                 continue
             process_turns_rendered.add(item.turn_index)
             process_items = self._process_items_by_turn[item.turn_index]
-            visible.append(_process_group_item(item.turn_index, len(process_items), expanded=item.turn_index in self._expanded_process_turns))
-            if item.turn_index in self._expanded_process_turns:
+            expanded = item.turn_index in self._expanded_process_turns
+            elapsed_seconds = self._turn_elapsed_seconds(item.turn_index)
+            visible.append(
+                _process_group_item(
+                    item.turn_index,
+                    process_items,
+                    expanded=expanded,
+                    elapsed_seconds=elapsed_seconds,
+                )
+            )
+            if expanded:
+                # 展开后直接露出过程子项：叙述正文 + 工具摘要行，不加步骤 chrome。
                 visible.extend(process_items)
         self._visible_items_cache = visible
         return self._visible_items_cache
+
+    def _turn_elapsed_seconds(self, turn_index: int) -> float | None:
+        assistant = self._assistant_items_by_turn.get(turn_index)
+        if assistant is not None and assistant.elapsed_seconds is not None:
+            return assistant.elapsed_seconds
+        started_at = self._turn_started_at.get(turn_index)
+        if started_at is None:
+            return None
+        return max(0.0, monotonic() - started_at)
 
     def _windowed_items(self, visible_items: list[TimelineItem]) -> list[TimelineItem]:
         if len(visible_items) <= TIMELINE_WINDOW_SIZE:

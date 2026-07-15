@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from rich.text import Text
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.design.failures import failure_from_payload, failure_next_steps
 from haagent.tui.design.keys import footer_text, help_body, key_help_lines
@@ -16,12 +17,9 @@ from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
 from haagent.tui.design.renderers import status_line
 from haagent.tui.state import ResponsiveLayout, layout_for_size
 from haagent.tui.design.theme import (
-    SemanticToken,
     TuiThemeMode,
     no_color_enabled,
     select_theme,
-    semantic_tokens,
-    status_semantic,
 )
 from haagent.tui.widgets import ConversationTimeline, PromptInput
 from textual.widgets import TextArea
@@ -38,66 +36,63 @@ def test_tui_status_line_renderer_truncates_to_terminal_width(tmp_path: Path) ->
     line_80 = status_line(status, ui_state="waiting approval", width=80)
     line_120 = status_line(status, ui_state="running", width=120)
 
-    assert len(line_80) <= 80
-    assert len(line_120) <= 120
-    assert "state: waiting approval" in line_80
-    assert "state: running" in line_120
+    assert isinstance(line_80, Text)
+    assert line_80.cell_len <= 80
+    assert line_120.cell_len <= 120
+    assert "工作区" in line_80.plain
+    assert "模型" in line_80.plain
+    assert "待确认" in line_80.plain
+    assert "正在工作" in line_120.plain
+    for internal_label in ("ws:", "profile", "perm:", "sandbox:", "sid:", "turn:", "state:", "key:"):
+        assert internal_label not in line_80.plain
+        assert internal_label not in line_120.plain
 
 def test_tui_status_renderers_show_explicit_web_state(tmp_path: Path) -> None:
     offline = FakeAssistantService(workspace_root=tmp_path / "offline").workspace.status()
     online = FakeAssistantService(workspace_root=tmp_path / "online", enable_web=True).workspace.status()
 
-    assert "web:off" in status_line(offline, ui_state="idle", width=120)
-    assert "web:on" in status_line(online, ui_state="idle", width=120)
+    assert "联网已关" in status_line(offline, ui_state="idle", width=120).plain
+    assert "联网已开" in status_line(online, ui_state="idle", width=120).plain
+
+
+def test_tui_status_line_uses_widget_content_width_without_clipping_work_state(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = HaAgentTuiApp(FakeAssistantService(workspace_root=tmp_path))
+        async with app.run_test(size=(120, 40)):
+            status_bar = app.query_one("#status-bar")
+            initial = status_bar._Static__content
+
+            assert initial.cell_len == status_bar.content_region.width
+            assert initial.plain.endswith("空闲")
+
+            app._state = "running"
+            app._refresh()
+            rendered = status_bar._Static__content
+
+            assert rendered.cell_len == status_bar.content_region.width
+            assert rendered.plain.endswith("正在工作")
+
+    asyncio.run(run())
 
 def test_tui_keymap_help_and_footer_share_context_definitions() -> None:
-    for context in ("chat", "memory_list", "memory_detail", "pending_input", "approval", "too_small"):
+    for context in ("chat", "running", "memory_list", "memory_detail", "pending_input", "approval", "too_small"):
         footer = footer_text(context)
         help_text = help_body(context)
         for key, _description in key_help_lines(context, include_footer_only=False):
             assert key in help_text
         for key, _description in key_help_lines(context, footer_only=True):
             assert key in footer
-    assert "Ctrl+T" in footer_text("chat")
+    assert footer_text("chat") == "[/]命令 [Ctrl+F]搜索 [?]帮助 [Ctrl+Q]退出"
+    assert footer_text("running") == "[Ctrl+X]取消任务 [Ctrl+F]搜索 [?]帮助 [Ctrl+Q]退出"
+    assert "Enter" not in footer_text("chat")
+    assert "Shift+Enter" not in footer_text("chat")
+    assert all(len(key_help_lines(context, footer_only=True)) <= 4 for context in (
+        "chat", "running", "memory_list", "memory_detail", "pending_input", "approval", "edit_diff",
+    ))
     assert "切换主题" in help_body("chat")
     assert "End" not in footer_text("chat")
     assert "End" in help_body("chat")
     assert "回到底部" in help_body("chat")
-
-def test_tui_semantic_tokens_cover_required_statuses() -> None:
-    assert semantic_tokens() == {
-        SemanticToken.DEFAULT,
-        SemanticToken.MUTED,
-        SemanticToken.EMPHASIS,
-        SemanticToken.SUCCESS,
-        SemanticToken.WARNING,
-        SemanticToken.ERROR,
-        SemanticToken.INFO,
-        SemanticToken.SELECTION,
-        SemanticToken.FOCUS,
-        SemanticToken.RUNNING,
-        SemanticToken.CANCELLED,
-        SemanticToken.PENDING,
-        SemanticToken.DANGER,
-    }
-
-    expectations = {
-        "idle": (SemanticToken.DEFAULT, "-", "空闲"),
-        "running": (SemanticToken.RUNNING, "...", "运行中"),
-        "waiting approval": (SemanticToken.WARNING, "?", "待审批"),
-        "waiting input": (SemanticToken.PENDING, "?", "待补充"),
-        "done": (SemanticToken.SUCCESS, "ok", "成功"),
-        "failed": (SemanticToken.ERROR, "!", "失败"),
-        "cancelled": (SemanticToken.CANCELLED, "x", "已取消"),
-        "denied": (SemanticToken.DANGER, "!", "已拒绝"),
-    }
-
-    for raw_status, (token, symbol, label) in expectations.items():
-        semantic = status_semantic(raw_status)
-        assert semantic.token is token
-        assert semantic.symbol == symbol
-        assert semantic.label == label
-        assert semantic.css_class == f"status-{token.value}"
 
 def test_tui_theme_selection_respects_env_and_no_color(monkeypatch) -> None:
     assert not no_color_enabled({})
@@ -114,6 +109,7 @@ def test_tui_theme_selection_respects_env_and_no_color(monkeypatch) -> None:
     assert select_theme().mode is TuiThemeMode.LIGHT
     monkeypatch.setenv("NO_COLOR", "1")
     assert select_theme().mode is TuiThemeMode.MONOCHROME
+
 
 def test_tui_copy_titles_are_chinese_and_keep_protocol_names() -> None:
     assert PANEL_TITLES["conversation"] == "对话"
@@ -165,25 +161,46 @@ def test_tui_app_starts_and_shows_status(tmp_path: Path) -> None:
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
             conversation = _text(app, "#conversation")
-            assert "ws:" in status
+            assert "工作区" in status
             assert str(tmp_path) not in status
-            assert "profile: local" in status
-            assert "openai-chat/deepseek-chat" in status
-            assert "key: ok" in status
+            assert "模型 deepseek-chat" in status
+            assert "联网已关" in status
+            assert "空闲" in status
+            assert "profile" not in status
+            assert "openai-chat" not in status
+            assert "key:" not in status
             assert "DEEPSEEK_API_KEY" not in status
-            assert "session-test" in status
             assert list(app.query("#side-bar")) == []
-            assert "Shift+Enter 换行" in conversation
+            assert "Ctrl+Enter 换行" in conversation
+            assert "/ 打开命令" in conversation
+            assert "Enter 发送" not in conversation
+            assert "Ready." not in conversation
             footer = _text(app, "#footer-bar")
             assert "[Ctrl+Q]退出" in footer
             assert "[q]退出" not in footer
-            assert "[Enter]发送" in str(app.query_one("#footer-bar").render())
-            assert "[Shift+Enter]换行" in str(app.query_one("#footer-bar").render())
+            assert "[Enter]发送" not in str(app.query_one("#footer-bar").render())
+            assert "[Ctrl+Enter]换行" not in str(app.query_one("#footer-bar").render())
             assert isinstance(app.query_one("#prompt-input"), TextArea)
 
     asyncio.run(run())
 
-def test_tui_default_theme_applies_semantic_classes_and_chinese_titles(tmp_path: Path, monkeypatch) -> None:
+
+def test_tui_prompt_focus_uses_only_a_thin_left_edge(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = HaAgentTuiApp(FakeAssistantService(workspace_root=tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(0.1)
+            prompt = app.query_one("#prompt-input", PromptInput)
+
+            assert prompt.has_focus
+            assert prompt.styles.border_left[0] == "solid"
+            assert not prompt.styles.border_top[0]
+            assert not prompt.styles.border_right[0]
+            assert not prompt.styles.border_bottom[0]
+
+    asyncio.run(run())
+
+def test_tui_default_theme_applies_local_status_styles_and_chinese_titles(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.delenv("HAAGENT_TUI_THEME", raising=False)
 
@@ -195,15 +212,15 @@ def test_tui_default_theme_applies_semantic_classes_and_chinese_titles(tmp_path:
 
             assert app.theme == "haagent-dark"
             assert app.screen.has_class("theme-dark")
-            assert status_widget.has_class("status-default")
-            assert "状态: - 空闲" in _text(app, "#status-bar")
+            assert not any(name.startswith("status-") for name in status_widget.classes)
+            assert "空闲" in _text(app, "#status-bar")
             assert list(app.query("#side-bar")) == []
             conversation = _text(app, "#conversation")
-            assert "Shift+Enter 换行" in conversation
+            assert "Ctrl+Enter 换行" in conversation
 
     asyncio.run(run())
 
-def test_tui_light_theme_can_be_enabled_without_losing_status_classes(tmp_path: Path, monkeypatch) -> None:
+def test_tui_light_theme_can_be_enabled_with_local_status_styles(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("HAAGENT_TUI_THEME", "light")
 
@@ -213,8 +230,8 @@ def test_tui_light_theme_can_be_enabled_without_losing_status_classes(tmp_path: 
         async with app.run_test(size=(120, 40)):
             assert app.theme == "haagent-light"
             assert app.screen.has_class("theme-light")
-            assert app.query_one("#status-bar").has_class("status-default")
-            assert "状态: - 空闲" in _text(app, "#status-bar")
+            assert not any(name.startswith("status-") for name in app.query_one("#status-bar").classes)
+            assert "空闲" in _text(app, "#status-bar")
             assert list(app.query("#side-bar")) == []
 
     asyncio.run(run())
@@ -229,24 +246,25 @@ def test_tui_theme_can_be_cycled_with_keyboard_shortcut(tmp_path: Path, monkeypa
         async with app.run_test(size=(120, 40)) as pilot:
             assert app.theme == "haagent-dark"
             assert app.screen.has_class("theme-dark")
+            conversation_before = _text(app, "#conversation")
 
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             assert app.theme == "haagent-light"
             assert app.screen.has_class("theme-light")
-            assert "主题已切换：浅色" in _text(app, "#conversation")
+            assert _text(app, "#conversation") == conversation_before
 
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             assert app.theme == "haagent-monochrome"
             assert app.screen.has_class("theme-monochrome")
-            assert "主题已切换：单色" in _text(app, "#conversation")
+            assert _text(app, "#conversation") == conversation_before
 
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             assert app.theme == "haagent-dark"
             assert app.screen.has_class("theme-dark")
-            assert "主题已切换：暗色" in _text(app, "#conversation")
+            assert _text(app, "#conversation") == conversation_before
 
     asyncio.run(run())
 
@@ -258,12 +276,13 @@ def test_tui_no_color_prevents_keyboard_theme_cycle(tmp_path: Path, monkeypatch)
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             assert app.theme == "haagent-monochrome"
+            conversation_before = _text(app, "#conversation")
 
             await pilot.press("ctrl+t")
             await pilot.pause(0.1)
             assert app.theme == "haagent-monochrome"
             assert app.screen.has_class("theme-monochrome")
-            assert "NO_COLOR 已启用，主题保持单色" in _text(app, "#conversation")
+            assert _text(app, "#conversation") == conversation_before
 
     asyncio.run(run())
 
@@ -277,7 +296,7 @@ def test_tui_no_color_mode_keeps_symbols_text_and_selection(tmp_path: Path, monk
         async with app.run_test(size=(120, 40)) as pilot:
             assert app.theme == "haagent-monochrome"
             assert app.screen.has_class("theme-monochrome")
-            assert "状态: - 空闲" in _text(app, "#status-bar")
+            assert "空闲" in _text(app, "#status-bar")
 
             prompt_input = app.query_one("#prompt-input")
             prompt_input.value = "/memory"
@@ -320,7 +339,7 @@ def test_tui_responsive_minimum_size_and_layout_breakpoints(tmp_path: Path) -> N
             assert app.query_one("#resize-message").has_class("hidden")
             assert not app.query_one("#main").has_class("hidden")
             assert list(app.query("#side-bar")) == []
-            assert "Shift+Enter 换行" in _text(app, "#conversation")
+            assert "Ctrl+Enter 换行" in _text(app, "#conversation")
 
     asyncio.run(run_too_small())
     asyncio.run(run_80())
@@ -357,7 +376,7 @@ def test_tui_api_key_missing_shows_env_name(tmp_path: Path) -> None:
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
             conversation = _text(app, "#conversation")
-            assert "key: missing" in status
+            assert "key:" not in status
             assert "DEEPSEEK_API_KEY" not in status
             assert "DEEPSEEK_API_KEY" in conversation
             assert "/connect" in conversation
@@ -375,8 +394,8 @@ def test_tui_api_key_available_via_env(tmp_path: Path) -> None:
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
             conversation = _text(app, "#conversation")
-            assert "key: ok" in status
-            assert "Shift+Enter 换行" in conversation
+            assert "key:" not in status
+            assert "Ctrl+Enter 换行" in conversation
 
     asyncio.run(run())
 
@@ -436,14 +455,14 @@ def test_tui_q_does_not_exit_while_prompt_input_is_focused(tmp_path: Path) -> No
     asyncio.run(run_empty_input())
     asyncio.run(run_existing_input())
 
-def test_tui_text_area_shift_enter_inserts_newline_and_enter_submits_prompt(tmp_path: Path) -> None:
+def test_tui_text_area_ctrl_enter_inserts_newline_and_enter_submits_prompt(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             input_widget = app.query_one("#prompt-input")
             input_widget.value = "Summarize this folder"
-            await pilot.press("shift+enter")
+            await pilot.press("ctrl+enter")
             await pilot.pause(0.1)
             assert service.prompts == []
             assert input_widget.value == "Summarize this folder\n"
@@ -453,12 +472,13 @@ def test_tui_text_area_shift_enter_inserts_newline_and_enter_submits_prompt(tmp_
             assert service.prompts == ["Summarize this folder\nwith constraints"]
             assert input_widget.value == ""
             conversation = _text(app, "#conversation")
-            assert "你" in conversation
+            assert "[你]" not in conversation
             assert "Summarize this folder" in conversation
             assert "with constraints" in conversation
             assert "assistant: Summarize this folder\nwith constraints" in conversation
 
     asyncio.run(run())
+
 
 def test_tui_text_area_blank_input_does_not_submit(tmp_path: Path) -> None:
     async def run() -> None:
@@ -521,13 +541,13 @@ def test_tui_layout_sizes_do_not_render_side_bar(tmp_path: Path) -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(200, 60)):
             assert list(app.query("#side-bar")) == []
-            assert "Shift+Enter 换行" in _text(app, "#conversation")
+            assert "Ctrl+Enter 换行" in _text(app, "#conversation")
 
     asyncio.run(run_80())
     asyncio.run(run_120())
     asyncio.run(run_200())
 
-def test_tui_no_color_timeline_keeps_role_and_status_labels(tmp_path: Path, monkeypatch) -> None:
+def test_tui_no_color_timeline_keeps_structure_and_failure_labels(tmp_path: Path, monkeypatch) -> None:
     async def run() -> None:
         monkeypatch.setenv("NO_COLOR", "1")
         service = FakeAssistantService(
@@ -542,14 +562,13 @@ def test_tui_no_color_timeline_keeps_role_and_status_labels(tmp_path: Path, monk
             await pilot.press("enter")
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
-            assert "[你]" in conversation
-            assert "[HaAgent]" in conversation
-            assert "[已处理 1 项 >]" in conversation
-            assert "[工具运行失败：web_fetch]" not in conversation
+            assert "[你]" not in conversation
+            assert "[HaAgent]" not in conversation
+            assert "已完成" in conversation and "步" in conversation
             app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
-            await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
-            assert "[工具运行失败：web_fetch]" in conversation
+            assert "! 读取网页失败" in conversation
+            assert "web_fetch" not in conversation
             assert "失败" in conversation
 
     asyncio.run(run())
@@ -563,11 +582,11 @@ def test_tui_running_state_does_not_block_ui(tmp_path: Path) -> None:
             input_widget.value = "Long task"
             await pilot.press("enter")
             await asyncio.to_thread(service.started.wait, 2)
-            assert "state: running" in _text(app, "#status-bar")
+            assert "正在工作" in _text(app, "#status-bar")
             assert app.query_one("#prompt-input") is input_widget
             service.release.set()
             await pilot.pause(0.2)
-            assert "state: idle" in _text(app, "#status-bar")
+            assert "空闲" in _text(app, "#status-bar")
 
     asyncio.run(run())
 

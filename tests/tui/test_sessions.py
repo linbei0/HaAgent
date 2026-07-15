@@ -101,7 +101,8 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             await pilot.press("enter")
             await pilot.pause(0.1)
             assert service.resumed_sessions == [str(sessions[1].session_path)]
-            assert "session-beta" in _text(app, "#status-bar")
+            assert service.current_session_id == "session-beta"
+            assert "session-beta" not in _text(app, "#status-bar")
             conversation = _text(app, "#conversation")
             assert "分析 CSV" in conversation
             assert "用户要分析 sales.csv" in conversation
@@ -129,7 +130,8 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             await pilot.pause(0.1)
             assert service.created_sessions == ["session-new-1"]
             assert "当前会话：session-new-1" not in _text(app, "#conversation")
-            assert "sid:session-n" in _text(app, "#status-bar")
+            assert service.current_session_id == "session-new-1"
+            assert "sid:" not in _text(app, "#status-bar")
 
             input_widget.value = "/sessions"
             await pilot.press("enter")
@@ -163,7 +165,8 @@ def test_tui_new_session_command_clears_previous_timeline(tmp_path: Path) -> Non
             assert "旧问题" not in conversation
             assert "旧回答" not in conversation
             assert "新建会话：session-new-1" not in conversation
-            assert "sid:session-n" in _text(app, "#status-bar")
+            assert service.current_session_id == "session-new-1"
+            assert "sid:" not in _text(app, "#status-bar")
 
     asyncio.run(run())
 
@@ -302,7 +305,7 @@ def test_tui_restores_initial_resume_session_on_mount(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             assert service.resumed_sessions == ["session-from-cli"]
             assert service.current_session_id == "session-from-cli"
-            assert "sid:session-f" in _text(app, "#status-bar")
+            assert "sid:" not in _text(app, "#status-bar")
 
     asyncio.run(run())
 
@@ -317,7 +320,7 @@ def test_tui_continues_initial_latest_session_on_mount(tmp_path: Path) -> None:
             await pilot.pause(0.1)
             assert service.continued_latest_count == 1
             assert service.current_session_id == "session-alpha"
-            assert "sid:session-a" in _text(app, "#status-bar")
+            assert "sid:" not in _text(app, "#status-bar")
 
     asyncio.run(run())
 

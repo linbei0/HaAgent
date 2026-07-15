@@ -51,5 +51,5 @@ def test_memory_panel_presenter_renders_selection_and_detail() -> None:
     ).render()
 
     assert "> cand_second" in list_text
-    assert "candidate_id: cand_second" in detail_text
-    assert "candidate_id: cand_first" not in detail_text
+    assert "候选编号：cand_second" in detail_text
+    assert "候选编号：cand_first" not in detail_text

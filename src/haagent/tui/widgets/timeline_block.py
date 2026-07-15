@@ -26,9 +26,10 @@ from haagent.tui.widgets.timeline_models import (
     ToolActivity,
 )
 from haagent.tui.widgets.timeline_rendering import (
+    process_group_title as _process_group_title,
     render_tool_summary as _render_tool_summary,
-    role_label as _role_label,
     timeline_item_body as _timeline_item_body,
+    timeline_item_label as _timeline_item_label,
 )
 
 
@@ -53,8 +54,8 @@ class ToolActivityLog(Log):
         line = line.crop(scroll_x, scroll_x + width)
         return line.apply_offsets(scroll_x, y)
 
-    def render_tools(self, tools: list[ToolActivity], *, show_details: bool) -> None:
-        lines = _render_tool_summary(tools, show_details=show_details)
+    def render_tools(self, tools: list[ToolActivity], *, show_details: bool, list_names: bool = False) -> None:
+        lines = _render_tool_summary(tools, show_details=show_details, list_names=list_names)
         self._rendered_text = "\n".join(lines)
         if not self.is_attached:
             return
@@ -123,8 +124,10 @@ class TimelineBlock(Vertical):
         if stream is not None:
             await stream.stop()
 
-    def on_click(self, event: events.Click) -> None:
-        if not _is_clickable_item(self._item):
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        # WezTerm/Windows 下 MouseDown/MouseUp 可到达但 Click 不一定被合成；
+        # 在可交互摘要上直接响应左键，Shift+左键继续交给终端文本选择。
+        if event.button != 1 or event.shift or not _is_clickable_item(self._item):
             return
         activate = getattr(self.parent, "activate_item", None)
         if not callable(activate):
@@ -141,9 +144,10 @@ class TimelineBlock(Vertical):
         tools = self._tools_widget
         if header is None or body is None or active is None or tools is None:
             return
-        label = item.title or _role_label(item.role)
-        header.update(f"[{label}]")
-        header.display = True
+        # 过程子项不显示空泛「过程」标签；仅分组头「已完成 N 项」等有标题时展示 header。
+        label = _timeline_item_label(item)
+        header.update(label)
+        header.display = bool(label)
         if isinstance(body, Markdown):
             self._update_markdown_body(body, item)
         else:
@@ -157,7 +161,11 @@ class TimelineBlock(Vertical):
             active_text = ""
         active.update(active_text)
         active.display = bool(active_text)
-        tools.render_tools(item.tools, show_details=self._show_tool_details)
+        tools.render_tools(
+            item.tools,
+            show_details=self._show_tool_details,
+            list_names=item.role == "process",
+        )
         tools.display = bool(item.tools)
         # 清理所有 role/status class 后重新赋值，避免残留旧 class
         self.set_class(item.role == "assistant" and item.status == "streaming", "timeline-streaming")
@@ -303,11 +311,15 @@ def _timeline_item_classes(item: TimelineItem) -> str:
 
 
 def _is_process_item(item: TimelineItem) -> bool:
-    return item.role in {"activity", "effect", "process"}
+    # 失败与任务受阻通知同样属于本轮过程：运行时展开供用户处理，
+    # 最终回答到达后由 ConversationTimeline 统一折叠进过程组。
+    if item.detail_id and item.detail_id.startswith(("approval:", "input:")):
+        return False
+    return item.role in {"activity", "effect", "process", "notice", "failure"}
 
 
 def _is_clickable_item(item: TimelineItem) -> bool:
-    return item.role == "process" or bool(item.detail_lines)
+    return _is_process_group_id(item.item_id) or bool(item.detail_lines)
 
 
 def _process_group_id(turn_index: int) -> int:
@@ -322,13 +334,18 @@ def _process_group_turn_index(item_id: int) -> int:
     return PROCESS_GROUP_ID_BASE - item_id
 
 
-def _process_group_item(turn_index: int, count: int, *, expanded: bool) -> TimelineItem:
-    arrow = "v" if expanded else ">"
+def _process_group_item(
+    turn_index: int,
+    process_items: list[TimelineItem],
+    *,
+    expanded: bool,
+    elapsed_seconds: float | None,
+) -> TimelineItem:
     return TimelineItem(
         item_id=_process_group_id(turn_index),
         role="process",
         turn_index=turn_index,
-        title=f"已处理 {count} 项 {arrow}",
+        title=_process_group_title(process_items, expanded=expanded, elapsed_seconds=elapsed_seconds),
         content="",
     )
 

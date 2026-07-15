@@ -170,11 +170,11 @@ def test_tui_approval_requested_opens_modal_with_deny_focused(tmp_path: Path) ->
             assert "uv run pytest -q" in modal_text
             assert "会执行本地命令" in modal_text
             assert deny_has_focus
-            assert "state: waiting approval" in status
+            assert "待确认" in status
+            assert "state:" not in status
             assert list(app.query("#side-bar")) == []
-            assert "已处理 1 项 >" in conversation
-            assert "需要确认：shell" not in conversation
-            assert "建议：在弹窗中确认或拒绝" not in conversation
+            assert "需要确认：运行命令" in conversation
+            assert "建议：在弹窗中确认或拒绝" in conversation
             assert "工具 1 项" not in conversation
             assert "1 待确认" not in conversation
             assert "shell" not in conversation
@@ -194,11 +194,11 @@ def test_tui_running_task_can_cancel_and_submit_again(tmp_path: Path) -> None:
             await pilot.pause(0.2)
 
             assert service.cancelled_count == 1
-            assert "state: cancelling" in _text(app, "#status-bar")
+            assert "正在取消" in _text(app, "#status-bar")
             assert "任务正在取消" in _text(app, "#conversation")
             service.release.set()
             await pilot.pause(0.2)
-            assert "state: cancelled" in _text(app, "#status-bar")
+            assert "已取消" in _text(app, "#status-bar")
             assert app._pending_interaction is None
             assert "任务已取消" in _text(app, "#conversation")
 
@@ -225,7 +225,7 @@ def test_tui_cancel_returns_idle_when_no_active_run_remains(tmp_path: Path) -> N
             await asyncio.sleep(0)
 
             assert service.cancelled_count == 1
-            assert "state: idle" in _text(app, "#status-bar")
+            assert "空闲" in _text(app, "#status-bar")
             assert "当前没有仍在运行的任务" in _text(app, "#conversation")
 
     asyncio.run(run())
@@ -262,10 +262,10 @@ def test_tui_approval_deny_returns_approved_false_to_same_prompt(tmp_path: Path)
             assert service.prompts == ["Run checks"]
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
             conversation = app.query_one("#conversation", ConversationTimeline)
-            assert "审批已拒绝：shell" not in conversation.plain_text
-            assert conversation.toggle_process_group(1) is True
-            assert "审批已拒绝：shell" in conversation.plain_text
-            assert "state: failed" in _text(app, "#status-bar")
+            assert "已拒绝：运行命令" in conversation.plain_text
+            status = _text(app, "#status-bar")
+            assert "失败" in status
+            assert "state:" not in status
 
     asyncio.run(run())
 
@@ -287,7 +287,8 @@ def test_tui_user_input_requested_enters_answer_required_state(tmp_path: Path) -
             if app._pending_interaction is not None:
                 app._complete_interaction(HumanInteractionResponse(approved=False, answer=""))
                 await pilot.pause(0.1)
-            assert "state: waiting input" in status
+            assert "待补充" in status
+            assert "state:" not in status
             assert "需要补充" in conversation
             assert "Which file should I inspect?" in conversation
             assert "回答 Agent 的问题" in placeholder
@@ -333,17 +334,14 @@ def test_tui_user_input_cancel_returns_explicit_denial(tmp_path: Path) -> None:
             await pilot.pause(0.2)
             assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
             conversation = _text(app, "#conversation")
-            assert "回答已取消：request_user_input" in conversation
-            assert "已处理 1 项 >" in conversation
-            assert "工具运行失败：request_user_input" not in conversation
-            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
-            await pilot.pause(0.1)
-            conversation = _text(app, "#conversation")
-            assert "工具运行失败：request_user_input" in conversation
+            assert "回答已取消：运行工具" in conversation
+            assert "运行工具失败" in conversation
             assert "工具 1 项" not in conversation
-            assert "request_user_input" in conversation
+            assert "request_user_input" not in conversation
             assert "失败" in conversation
-            assert "state: failed" in _text(app, "#status-bar")
+            status = _text(app, "#status-bar")
+            assert "失败" in status
+            assert "state:" not in status
 
     asyncio.run(run())
 
@@ -370,7 +368,7 @@ def test_tui_interaction_reused_event_does_not_enter_pending_interaction(tmp_pat
             assert service.interaction_responses == []
             assert "需要补充" not in _text(app, "#conversation")
             assert "pending approval" not in _text(app, "#conversation")
-            assert "state: idle" in _text(app, "#status-bar")
+            assert "空闲" in _text(app, "#status-bar")
 
     asyncio.run(run())
 

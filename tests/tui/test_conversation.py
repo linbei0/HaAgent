@@ -133,7 +133,8 @@ def test_tui_slash_command_suggestions_filter_execute_and_do_not_pollute_convers
             await pilot.pause(0.1)
             assert "快捷命令" in _all_text(app)
             assert "/help" in _all_text(app)
-            assert "/memory" in _all_text(app)
+            suggestions = app.query_one("#command-suggestions-dialog").state.visible_commands
+            assert any(command.token == "/memory" for command in suggestions)
             assert "/resume" not in _all_text(app)
             assert app.command_suggestions_is_open()
             assert app.query_one("#command-suggestions-dialog").parent.id == "input-panel"
@@ -236,28 +237,28 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
-            assert "已处理 4 项 >" in conversation
+            # 审批状态保持可见；侧效与工具失败进过程组，折叠后显示步骤数与耗时。
+            assert "已完成" in conversation and "步" in conversation
             assert "已写入文件" not in conversation
-            assert "需要确认：shell" not in conversation
-            assert "审批已拒绝：shell" not in conversation
+            assert "运行命令失败" not in conversation
+            assert "需要确认：运行命令" in conversation
+            assert "已拒绝：运行命令" in conversation
             assert "file_write" not in conversation
             app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
-            activity = next(iter(app.query(".timeline-activity")))
-            effect = app.query_one(".timeline-effect")
-            assert activity.styles.background == effect.styles.background
-            assert activity.styles.border_left == effect.styles.border_left
-            assert activity.styles.padding == effect.styles.padding
-            assert activity.styles.margin == effect.styles.margin
+            assert app.query(".timeline-effect")
             assert "已写入文件" in conversation
             assert "文件已写入" in conversation
+            assert "运行命令失败" in conversation or "写入文件" in conversation
+            assert "步骤" not in conversation
+            assert "过程" not in conversation
             assert "工具 1 项" not in conversation
             assert "1 失败" not in conversation
             assert "file_write" not in conversation
-            assert "shell" in conversation
-            assert "需要确认：shell" in conversation
-            assert "审批已拒绝：shell" in conversation
+            assert "shell" not in conversation
+            assert "需要确认：运行命令" in conversation
+            assert "已拒绝：运行命令" in conversation
             assert "查看工具详情" not in conversation
             assert "任务工作台" not in conversation
             assert "工具时间线" not in conversation
@@ -486,8 +487,8 @@ def test_tui_merges_assistant_delta_events_into_single_response_block(tmp_path: 
             await pilot.pause(0.2)
 
             conversation = _text(app, "#conversation")
-            assert conversation.count("[HaAgent]") == 1
-            assert "HaAgent" in conversation
+            assert "[HaAgent]" not in conversation
+            assert conversation.count("HaAgent") == 1
 
     asyncio.run(run())
 
@@ -569,7 +570,7 @@ def test_tui_streaming_turn_keeps_existing_widget_instances_stable(tmp_path: Pat
             rendered = _text(app, "#conversation")
             assert "正在阅读文件..." in _text(app, "#progress-status")
             assert "file_read" not in rendered
-            assert "生成中" in rendered
+            assert "生成中" not in rendered
             assert list(conversation.query(".timeline-assistant"))[-1] is assistant_block
             assert list(conversation.children) == children_before
 
@@ -613,7 +614,7 @@ def test_tui_streaming_assistant_shows_rotating_cursor_and_cleans_up(tmp_path: P
             assistant_body = conversation.query_one(".timeline-assistant .timeline-body", Markdown)
             assert first_frame in {"|", "/", "-", "\\"}
             assert assistant_body.source == "正在整理"
-            assert "生成中" in conversation.plain_text
+            assert "生成中" not in conversation.plain_text
 
             await pilot.pause(0.3)
             second_frame = str(active.content)
@@ -661,8 +662,11 @@ def test_tui_streaming_cursor_keeps_text_semantics_in_no_color_mode(tmp_path: Pa
 
             conversation = app.query_one("#conversation", ConversationTimeline)
             active = conversation.query_one(".timeline-assistant .timeline-active")
-            assert "生成中" in str(active.content)
-            assert "生成中" in conversation.plain_text
+            frame, label = str(active.content).split(" ", maxsplit=1)
+            assert frame in {"|", "/", "-", "\\"}
+            assert label == "生成中"
+            assert "处理中" in conversation.plain_text
+            assert "生成中" not in conversation.plain_text
 
             release_event.set()
             await pilot.pause(0.2)
@@ -688,6 +692,35 @@ def test_tui_user_and_assistant_blocks_keep_spacing_and_alignment(tmp_path: Path
             assert assistant.region.x <= conversation.region.x + 4
             assert assistant.region.y >= user.region.y + user.region.height
             assert assistant.region.y > user.region.y
+
+    asyncio.run(run())
+
+
+def test_tui_conversation_uses_asymmetric_quiet_layout(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, assistant_content="这是回答。")
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "这是问题"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            conversation = app.query_one("#conversation", ConversationTimeline)
+            user = conversation.query_one(".timeline-user")
+            assistant = conversation.query_one(".timeline-assistant")
+
+            assert user.query_one(".timeline-header").display is False
+            assert assistant.query_one(".timeline-header").display is False
+            assert user.styles.background != assistant.styles.background
+            assert assistant.styles.background == conversation.styles.background
+            assert user.styles.border_left[0] == "solid"
+            assert not assistant.styles.border_left[0]
+            assert user.region.x == assistant.region.x
+            assert user.region.width == assistant.region.width
+            assert input_widget.region.x == user.region.x
+            assert input_widget.region.width == user.region.width
+            assert input_widget.content_region.x == user.content_region.x
 
     asyncio.run(run())
 
@@ -769,7 +802,9 @@ def test_tui_failure_event_shows_reason_episode_in_conversation(tmp_path: Path) 
             assert "category=Loop Limit Failure" in conversation
             assert "reason=exceeded max_turns=20" in conversation
             assert str(episode_path) in conversation.replace("\n", "")
-            assert "state: failed" in _text(app, "#status-bar")
+            status = _text(app, "#status-bar")
+            assert "失败" in status
+            assert "state:" not in status
             assert list(app.query("#side-bar")) == []
             assistant = next(item for item in app._timeline()._items if item.role == "assistant")
             assert assistant.status == "done"
@@ -787,8 +822,11 @@ def test_tui_shows_assistant_placeholder_immediately_after_submit(tmp_path: Path
             await asyncio.to_thread(service.started.wait, 2)
 
             conversation = _text(app, "#conversation")
-            assert "[你]" in conversation
-            assert "[HaAgent]" in conversation
+            assert "Search slowly" in conversation
+            assert "[你]" not in conversation
+            assert "[HaAgent]" not in conversation
+            assert len(list(app.query(".timeline-user"))) == 1
+            assert len(list(app.query(".timeline-assistant"))) == 1
 
             service.release.set()
             await pilot.pause(0.2)

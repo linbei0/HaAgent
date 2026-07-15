@@ -36,6 +36,42 @@ def test_tool_detail_renderer_keeps_recent_items_and_reports_collapsed_count() -
     assert "diagnostic_11" in text
 
 
+def test_tool_summary_uses_chinese_names_and_collapses_completed_items() -> None:
+    tools = [
+        ToolActivity("file_read", "done", "读取 pyproject.toml", 1),
+        ToolActivity("shell", "done", "运行 pytest", 1),
+    ]
+
+    compact = "\n".join(render_tool_summary(tools, show_details=False))
+    process_list = "\n".join(render_tool_summary(tools, show_details=False, list_names=True))
+    details = "\n".join(render_tool_summary(tools, show_details=True))
+
+    assert compact == "  已完成 2 项 ›"
+    assert process_list == "  读取文件 · 运行命令 ›"
+    assert "file_read" not in compact
+    assert "读取文件（file_read）" in details
+    assert "运行命令（shell）" in details
+
+
+def test_running_and_failed_tool_summaries_remain_visible() -> None:
+    running = "\n".join(
+        render_tool_summary(
+            [ToolActivity("file_read", "running", "正在读取", 1)],
+            show_details=False,
+        ),
+    )
+    failed = "\n".join(
+        render_tool_summary(
+            [ToolActivity("web_search", "failed", "请求超时", 1)],
+            show_details=False,
+        ),
+    )
+
+    assert running == "  正在读取文件 · 1 项"
+    assert failed == "  联网搜索失败"
+    assert "web_search" not in failed
+
+
 def test_tool_activity_log_uses_textual_log_with_budgeted_lines() -> None:
     log_cls = ToolActivityLog
 

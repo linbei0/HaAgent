@@ -17,12 +17,13 @@ from haagent.tui.widgets import PromptInput
 
 from tests.tui.support import FakeAssistantService, _all_text, _text
 
-def test_tui_status_renderer_shows_sandbox_state(tmp_path: Path) -> None:
+def test_tui_status_renderer_hides_sandbox_state(tmp_path: Path) -> None:
     status = FakeAssistantService(workspace_root=tmp_path / "sandbox").workspace.status()
 
     line = status_line(status, ui_state="idle", width=140)
 
-    assert "sandbox:degraded" in line
+    assert "工作区" in line
+    assert "sandbox:" not in line
 
 def test_tui_slash_command_registry_parses_known_and_unknown_commands() -> None:
     registry = command_registry()
@@ -129,7 +130,7 @@ def test_tui_sandbox_command_shows_status_doctor_and_updates_settings(tmp_path: 
             assert service.sandbox_enabled_count == 1
             assert "Docker 沙箱已启用" in conversation
             assert "新 session 生效" in conversation
-            assert "sandbox:docker" in _text(app, "#status-bar")
+            assert "sandbox:" not in _text(app, "#status-bar")
 
             input_widget.value = "/sandbox disable"
             await pilot.press("enter")
@@ -137,7 +138,7 @@ def test_tui_sandbox_command_shows_status_doctor_and_updates_settings(tmp_path: 
             conversation = _text(app, "#conversation")
             assert service.sandbox_disabled_count == 1
             assert "已恢复 local_subprocess" in conversation
-            assert "sandbox:degraded" in _text(app, "#status-bar")
+            assert "sandbox:" not in _text(app, "#status-bar")
 
     asyncio.run(run())
 
@@ -442,7 +443,7 @@ def test_tui_web_command_toggles_networking_inside_app(tmp_path: Path) -> None:
     async def run() -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
-            assert "web:off" in _text(app, "#status-bar")
+            assert "联网已关" in _text(app, "#status-bar")
 
             prompt_input = app.query_one("#prompt-input")
             prompt_input.value = "/web on"
@@ -457,7 +458,7 @@ def test_tui_web_command_toggles_networking_inside_app(tmp_path: Path) -> None:
             await pilot.pause(0.1)
 
             assert service.enable_web is True
-            assert "web:on" in _text(app, "#status-bar")
+            assert "联网已开" in _text(app, "#status-bar")
             assert "联网已开启" in _text(app, "#conversation")
 
             prompt_input.value = "/web"
@@ -465,7 +466,7 @@ def test_tui_web_command_toggles_networking_inside_app(tmp_path: Path) -> None:
             await pilot.pause(0.1)
 
             assert service.enable_web is False
-            assert "web:off" in _text(app, "#status-bar")
+            assert "联网已关" in _text(app, "#status-bar")
             assert "联网已关闭" in _text(app, "#conversation")
 
     asyncio.run(run())
@@ -485,13 +486,10 @@ def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None
         async with app.run_test(size=(80, 24)):
             status = _text(app, "#status-bar")
             assert len(status) <= 80
-            assert "ws:" in status
-            assert "profile: local" in status
-            assert "openai-chat/" in status
-            assert "key: ok" in status
-            assert "sid:" in status
-            assert "turn:" in status
-            assert "state: idle" in status
+            assert "工作区" in status
+            assert "模型" in status
+            assert "联网已关" in status
+            assert "空闲" in status
             assert str(long_workspace) not in status
             assert long_model not in status
             assert long_session not in status
@@ -508,14 +506,15 @@ def test_tui_status_bar_is_compact_at_80_and_120_columns(tmp_path: Path) -> None
         async with app.run_test(size=(120, 40)):
             status = _text(app, "#status-bar")
             assert len(status) <= 120
-            assert "ws:" in status
-            assert "profile: local" in status
-            assert "key: ok" in status
-            assert "sid:" in status
+            assert "工作区" in status
+            assert "模型" in status
+            assert "联网已关" in status
+            assert "空闲" in status
             assert str(long_workspace) not in status
             assert long_model not in status
             assert long_session not in status
             assert "DEEPSEEK_API_KEY" not in status
+            assert all(token not in status for token in ("profile:", "key:", "sid:", "turn:", "state:", "sandbox:"))
             assert list(app.query("#side-bar")) == []
 
     asyncio.run(run_80())

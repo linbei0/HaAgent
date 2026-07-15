@@ -46,3 +46,5 @@ class TimelineItem:
     detail_id: str | None = None
     detail_lines: list[str] = field(default_factory=list)
     expanded: bool = False
+    pinned: bool = False
+    elapsed_seconds: float | None = None

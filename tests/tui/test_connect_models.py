@@ -63,7 +63,7 @@ def test_tui_connect_overlay_deletes_connection_after_confirmation(tmp_path: Pat
             text = _all_text(app)
             assert "模型连接已删除：router" in text
             assert all(_connection_record(connection).id != "router" for connection in service.model_connections)
-            assert "local" in text
+            assert [_connection_record(connection).id for connection in service.model_connections] == ["local"]
 
     asyncio.run(run())
 

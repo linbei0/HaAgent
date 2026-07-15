@@ -79,6 +79,9 @@ uv run haagent
 - 不为了旧实验 artifact 增加复杂兼容逻辑。
 - 不靠自然语言匹配实现 slash commands、安全边界、上下文选择或 runtime 决策；命令、工具、session、workspace 都应走结构化 service 方法和明确状态字段。
 - 不把完整 stdout、patch、episode trace 或工具详情默认塞进主对话；默认展示摘要，详情按需打开。
+- TUI 顶部常驻状态只展示工作区、模型、联网开关和当前工作状态，不泄漏 profile、provider、API key、权限、sandbox、session、turn 或原始 state 字段。
+- TUI 对话保持安静的非对称层级：用户消息使用低对比表面，assistant 正文直接落在主背景；本轮过程（包括工具失败和任务受阻诊断）在最终回答后折叠，无最终回答的失败、审批和补充输入保持可见，工具主名称使用简体中文。
+- 聊天 footer 固定保留 `/ 命令`、`Ctrl+F 搜索`、`? 帮助`、`Ctrl+Q 退出`，不展示 `Enter 发送`；其他上下文 footer 最多四组，低频键位只进入帮助。
 
 ## 常用命令
 

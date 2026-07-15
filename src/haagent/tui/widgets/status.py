@@ -11,9 +11,9 @@ from textual.widgets import Static
 
 
 class StatusBar(Static):
-    """顶部状态栏，展示 workspace/profile/model/session/运行状态。"""
+    """顶部状态栏，只展示工作区、模型、联网开关与当前工作状态。"""
 
-    def update_status(self, text: str) -> None:
+    def update_status(self, text: str | Text) -> None:
         self.update(text)
 
 

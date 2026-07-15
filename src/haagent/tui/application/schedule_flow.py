@@ -160,8 +160,12 @@ class ScheduleFlow:
         self._badge_error = None
         if count == self.unread_count:
             return
+        previous_count = self.unread_count
         self.unread_count = count
         if self._app.is_mounted:
+            # 未读计划结果属于低频通知，不再挤占只承载当前上下文的顶部状态栏。
+            if count > previous_count and count > 0:
+                self._app.notify(f"有 {count} 条计划任务结果", title="计划任务")
             self._app._refresh()
 
     def open_schedules(self, *, initial_tab: SchedulesTab | None = None) -> None:

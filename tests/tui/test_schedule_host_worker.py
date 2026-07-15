@@ -17,6 +17,7 @@ class _AppStub:
         self.service = service
         self.is_mounted = True
         self._intervals: list = []
+        self.notifications: list[tuple[str, str | None]] = []
 
     def set_interval(self, seconds: float, callback) -> object:
         handle = SimpleNamespace(seconds=seconds, callback=callback, stopped=False)
@@ -37,6 +38,9 @@ class _AppStub:
 
     def _refresh(self) -> None:
         return None
+
+    def notify(self, message: str, *, title: str | None = None) -> None:
+        self.notifications.append((message, title))
 
 
 def test_schedule_flow_starts_and_stops_host_with_badge_timer(tmp_path) -> None:
@@ -71,6 +75,7 @@ def test_open_overlay_badge_counts_older_unread_runs(tmp_path) -> None:
     )
 
     assert flow.unread_count == 50
+    assert app.notifications == [("有 50 条计划任务结果", "计划任务")]
 
 
 def test_stale_refresh_does_not_update_replaced_overlay(tmp_path) -> None:

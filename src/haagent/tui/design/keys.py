@@ -10,7 +10,7 @@ from typing import Literal
 
 from textual.binding import Binding
 
-KeyContext = Literal["chat", "memory_list", "memory_detail", "pending_input", "approval", "edit_diff", "too_small"]
+KeyContext = Literal["chat", "running", "memory_list", "memory_detail", "pending_input", "approval", "edit_diff", "too_small"]
 
 APP_BINDINGS = [
     ("ctrl+q", "quit", "退出"),
@@ -45,7 +45,7 @@ HELP_DISMISS_BINDINGS = [("escape", "dismiss_help", "关闭")]
 _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
     "chat": [
         ("Enter", "发送当前输入"),
-        ("Shift+Enter", "插入换行"),
+        ("Ctrl+Enter", "插入换行"),
         ("PgUp/PgDn", "滚动对话"),
         ("End", "回到底部"),
         ("/", "打开快捷命令"),
@@ -59,25 +59,39 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("?", "打开此帮助"),
         ("Ctrl+Q", "退出 TUI"),
     ],
+    "running": [
+        ("Ctrl+X", "取消当前任务"),
+        ("Enter", "发送当前输入"),
+        ("Ctrl+Enter", "插入换行"),
+        ("PgUp/PgDn", "滚动对话"),
+        ("End", "回到底部"),
+        ("/", "打开快捷命令"),
+        ("Ctrl+F", "搜索当前对话"),
+        ("Ctrl+T", "切换主题"),
+        ("Ctrl+P", "打开权限设置"),
+        ("/sessions", "打开 session 列表"),
+        ("/schedules", "打开计划任务"),
+        ("/memory", "打开记忆候选审查"),
+        ("?", "打开此帮助"),
+        ("Ctrl+Q", "退出 TUI"),
+    ],
     "memory_list": [
         ("↑/↓", "移动选中项"),
         ("g/G", "跳到首项/末项"),
         ("Enter", "查看当前候选详情"),
-        ("a 或 y", "确认当前候选"),
-        ("r", "拒绝当前候选"),
+        ("a/y/r", "a 或 y 确认，r 拒绝当前候选"),
         ("Esc", "返回聊天模式"),
         ("Ctrl+Q", "退出 TUI"),
     ],
     "memory_detail": [
         ("Esc", "返回列表，并保留当前选中项"),
-        ("a 或 y", "确认当前候选"),
-        ("r", "拒绝当前候选"),
+        ("a/y/r", "a 或 y 确认，r 拒绝当前候选"),
         ("?", "打开此帮助"),
         ("Ctrl+Q", "退出 TUI"),
     ],
     "pending_input": [
         ("Enter", "提交回答并继续同一轮任务"),
-        ("Shift+Enter", "插入换行"),
+        ("Ctrl+Enter", "插入换行"),
         ("Esc", "取消回答"),
         ("?", "打开此帮助"),
         ("Ctrl+Q", "退出 TUI"),
@@ -104,6 +118,7 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
 
 _HELP_TITLES: dict[KeyContext, str] = {
     "chat": "聊天模式",
+    "running": "任务运行中",
     "memory_list": "记忆候选列表",
     "memory_detail": "记忆候选详情",
     "pending_input": "等待补充输入",
@@ -113,12 +128,13 @@ _HELP_TITLES: dict[KeyContext, str] = {
 }
 
 _FOOTER_KEYS: dict[KeyContext, list[str]] = {
-    "chat": ["Enter", "Shift+Enter", "/", "Ctrl+F", "Ctrl+P", "Ctrl+T", "/schedules", "/memory", "?", "Ctrl+Q"],
-    "memory_list": ["↑/↓", "g/G", "Enter", "a/y", "r", "Esc", "?", "Ctrl+Q"],
-    "memory_detail": ["Esc", "a/y", "r", "?", "Ctrl+Q"],
-    "pending_input": ["Enter", "Shift+Enter", "Esc", "?", "Ctrl+Q"],
-    "approval": ["y", "n", "Esc", "?", "Ctrl+Q"],
-    "edit_diff": ["y", "a", "n", "Esc", "?", "Ctrl+Q"],
+    "chat": ["/", "Ctrl+F", "?", "Ctrl+Q"],
+    "running": ["Ctrl+X", "Ctrl+F", "?", "Ctrl+Q"],
+    "memory_list": ["↑/↓", "Enter", "a/y/r", "Esc"],
+    "memory_detail": ["a/y/r", "Esc", "?"],
+    "pending_input": ["Esc", "?", "Ctrl+Q"],
+    "approval": ["y", "n", "?"],
+    "edit_diff": ["y", "a", "n", "?"],
     "too_small": ["Ctrl+Q"],
 }
 
@@ -202,6 +218,8 @@ def _footer_label(description: str) -> str:
         return "换行"
     if description.startswith("提交"):
         return "提交回答"
+    if description.startswith("取消当前任务"):
+        return "取消任务"
     if description.startswith("取消"):
         return "取消"
     if description.startswith("返回聊天"):

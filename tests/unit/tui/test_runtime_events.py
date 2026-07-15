@@ -14,7 +14,6 @@ from haagent.runtime.events import (
     FailureNoticeEvent,
     MemoryNoticeEvent,
     RUNTIME_UI_EVENT_TYPES,
-    SessionLifecycleEvent,
     TaskProgressEvent,
     ToolActivityEvent,
     UserInputStateEvent,
@@ -22,7 +21,6 @@ from haagent.runtime.events import (
 )
 from haagent.tui.application.runtime_events import RUNTIME_UI_EVENT_HANDLERS, handle_runtime_ui_event
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
-from haagent.tui.widgets.timeline_models import TimelineItem
 
 
 def test_runtime_ui_event_handler_registry_covers_protocol_types() -> None:
@@ -44,6 +42,9 @@ class _FakeConversation:
         del model_turn
         self._app.assistant_messages.append((turn_index, content))
         self._app.presentation_texts.append(f"助手\n{content}")
+
+    def record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
+        del turn_index, tool_name, status, summary
 
     def record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
         self._app.tool_diagnostics.append((turn_index, tool_name, message))
@@ -74,10 +75,8 @@ class FakeRuntimeEventApp:
     def __init__(self) -> None:
         self._state = "idle"
         self._last_failure = None
-        self._sandbox_status = None
         self._active_turn_index = 0
         self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
-        self._task_problem_groups: dict[int, dict[str, object]] = {}
         self.assistant_deltas: list[tuple[int, str]] = []
         self.assistant_intermediates: list[tuple[int, int | None, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
@@ -147,18 +146,35 @@ class TimelineRuntimeEventApp(FakeRuntimeEventApp):
         self.timeline = ConversationTimeline()
 
         class _TimelineConversation(_FakeConversation):
+            def finalize_intermediate_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
+                self._app.assistant_intermediates.append((turn_index, model_turn, content))
+                self._app.timeline.finalize_intermediate(turn_index, model_turn, content)
+
             def finalize_assistant_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
                 del model_turn
                 self._app.assistant_messages.append((turn_index, content))
-                self._app.timeline._items.append(
-                    TimelineItem(
-                        item_id=next(self._app.timeline._ids),
-                        role="assistant",
+                self._app.timeline.finalize_assistant(turn_index, content)
+
+            def record_tool_activity(self, turn_index: int, tool_name: str, status: str, summary: str) -> None:
+                from haagent.tui.widgets.timeline_models import ToolActivity, ToolStatus
+
+                status_map: dict[str, ToolStatus] = {
+                    "started": "running",
+                    "finished": "done",
+                    "failed": "failed",
+                }
+                self._app.timeline.add_tool_activity(
+                    ToolActivity(
+                        tool_name=tool_name,
+                        status=status_map.get(status, "done"),
+                        summary=summary or tool_name,
                         turn_index=turn_index,
-                        content=content,
                     )
                 )
-                self._app.timeline._mark_plain_text_dirty()
+
+            def record_tool_diagnostic(self, turn_index: int, tool_name: str, message: str) -> None:
+                self._app.tool_diagnostics.append((turn_index, tool_name, message))
+                self._app.timeline.add_tool_diagnostic(turn_index, tool_name, message)
 
         self._conversation = _TimelineConversation(self)
 
@@ -229,12 +245,27 @@ def test_runtime_ui_event_handler_routes_intermediate_assistant_message() -> Non
     assert app.refreshes == 1
 
 
-def test_runtime_ui_event_handler_does_not_add_read_tool_to_timeline() -> None:
-    app = FakeRuntimeEventApp()
+def test_runtime_ui_event_handler_shows_tool_chips_after_process_expand() -> None:
+    app = TimelineRuntimeEventApp()
 
-    handle_runtime_ui_event(app, ToolActivityEvent("session-1", 1, 2, "file_read", "finished", "读取 README"))
+    handle_runtime_ui_event(app, ToolActivityEvent("session-1", 1, 1, "web_search", "started", "searching"))
+    handle_runtime_ui_event(app, ToolActivityEvent("session-1", 1, 1, "web_search", "finished", "found results"))
+    handle_runtime_ui_event(app, AssistantIntermediateEvent("session-1", 1, 1, "好的，我来帮你查一下。"))
+    handle_runtime_ui_event(app, ToolActivityEvent("session-1", 1, 2, "web_fetch", "started", "fetching"))
+    handle_runtime_ui_event(app, ToolActivityEvent("session-1", 1, 2, "web_fetch", "finished", "ok"))
+    handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 1, 2, "最终回答"))
 
-    assert app.plain_text == ""
+    collapsed = app.plain_text
+    assert "已完成" in collapsed and "步" in collapsed
+    assert "联网搜索" not in collapsed
+    assert "读取网页" not in collapsed
+
+    assert app.timeline.toggle_process_group(1) is True
+    expanded = app.plain_text
+    assert "联网搜索" in expanded
+    assert "读取网页" in expanded
+    assert "最终回答" in expanded
+    assert "任务遇到问题" not in expanded
 
 
 def test_runtime_ui_event_handler_routes_read_tool_to_progress_status() -> None:
@@ -334,9 +365,9 @@ def test_runtime_ui_event_handler_groups_tool_failures_before_assistant_final() 
     handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 1, 2, "最终回答"))
 
     text = app.plain_text
-    assert "web_fetch 失败 2 次，已使用已有上下文继续" in text
-    assert app.count_presentations_containing("web_fetch 失败") == 1
-    assert text.index("web_fetch 失败 2 次") < text.index("最终回答")
+    assert "读取网页失败 2 次，已使用已有上下文继续" in text
+    assert app.count_presentations_containing("读取网页失败") == 1
+    assert text.index("读取网页失败 2 次") < text.index("最终回答")
     assert "example.com" not in text
     assert first_error not in text
     assert "step-001" not in text
@@ -376,18 +407,18 @@ def test_runtime_ui_event_handler_inserts_late_tool_failures_before_assistant_fi
     )
 
     text = app.plain_text
-    assert "已处理 1 项 >" in text
-    assert "web_fetch 失败 2 次，已使用已有上下文继续" not in text
-    assert text.index("已处理 1 项") < text.index("最终回答")
-
-    app.timeline.toggle_process_group(1)
+    # 失败既写 tools 又写聚合 notice，折叠后只见步骤数与耗时。
+    assert "已完成" in text and "步" in text
+    assert "读取网页失败 2 次，已使用已有上下文继续" not in text
+    assert app.timeline.toggle_process_group(1) is True
     text = app.plain_text
-    assert "web_fetch 失败 2 次，已使用已有上下文继续" in text
-    assert text.count("web_fetch") == 1
-    assert text.index("web_fetch 失败 2 次") < text.index("最终回答")
+    assert "读取网页失败 2 次，已使用已有上下文继续" in text
+    assert text.count("读取网页失败 2 次") == 1
+    assert text.index("读取网页失败 2 次") < text.index("最终回答")
+    assert "web_fetch" not in text
 
 
-def test_runtime_ui_event_handler_groups_late_task_problems_before_assistant_final() -> None:
+def test_runtime_ui_event_handler_hides_task_blocked_noise_from_timeline() -> None:
     app = TimelineRuntimeEventApp()
 
     handle_runtime_ui_event(app, AssistantMessageEvent("session-1", 1, 2, "最终回答"))
@@ -423,17 +454,9 @@ def test_runtime_ui_event_handler_groups_late_task_problems_before_assistant_fin
     )
 
     text = app.plain_text
-    assert "已处理 1 项 >" in text
-    assert "任务遇到问题 2 项：工具超时、工具失败" not in text
-    assert text.index("已处理 1 项") < text.index("最终回答")
-    assert "step-timeout" not in text
-    assert "step-blocked" not in text
-
-    app.timeline.toggle_process_group(1)
-    text = app.plain_text
-    assert "任务遇到问题 2 项：工具超时、工具失败" in text
-    assert text.count("任务遇到问题") == 1
-    assert text.index("任务遇到问题 2 项") < text.index("最终回答")
+    assert "最终回答" in text
+    assert "任务遇到问题" not in text
+    assert "resume_or_replan" not in text
     assert "step-timeout" not in text
     assert "step-blocked" not in text
 
@@ -454,7 +477,7 @@ def test_runtime_ui_event_handler_tracks_approval_state() -> None:
         ),
     )
 
-    assert "需要确认：shell" in app.plain_text
+    assert "需要确认：运行命令" in app.plain_text
     assert "建议：在弹窗中确认或拒绝" in app.plain_text
     assert app._state == "waiting approval"
 
@@ -477,7 +500,7 @@ def test_runtime_ui_event_handler_keeps_approval_denials_visible() -> None:
     )
 
     assert app.lines == []
-    assert "审批已拒绝：shell" in app.plain_text
+    assert "已拒绝：运行命令" in app.plain_text
     assert "建议：调整请求或选择其他方案" in app.plain_text
 
 
@@ -599,7 +622,7 @@ def test_runtime_ui_event_handler_shows_cancelled_user_input_notice() -> None:
     )
 
     assert app.lines == []
-    assert "回答已取消：request_user_input" in app.plain_text
+    assert "回答已取消：运行工具" in app.plain_text
     assert "建议：补充信息后重试或调整任务" in app.plain_text
 
 
@@ -684,34 +707,6 @@ def test_runtime_ui_event_handler_does_not_route_task_step_progress_to_timeline(
     assert "model_turn_started" not in app.plain_text
 
 
-def test_runtime_ui_event_handler_routes_recovery_to_notice() -> None:
-    app = FakeRuntimeEventApp()
-    event = TaskProgressEvent(
-        session_id="session-1",
-        turn_index=1,
-        model_turn=None,
-        event_name="task_recovery_suggested",
-        step_id="step-001",
-        title="运行测试",
-        status="blocked",
-        summary="",
-        category="verification_failed",
-        suggested_action="修复后重新运行测试",
-        evidence_count=1,
-        checkpoint_count=1,
-        reason_chars=140,
-    )
-
-    handle_runtime_ui_event(app, event)
-
-    assert app.task_progress_events == []
-    assert "任务遇到问题：验证失败" in app.plain_text
-    assert "建议：修复后重新运行测试" in app.plain_text
-    assert "详情：" not in app.plain_text
-    assert app.presentation_detail_ids == ["task:1:problems"]
-    assert "reason_chars" not in app.plain_text
-
-
 def test_runtime_ui_event_handler_opens_memory_notice() -> None:
     app = FakeRuntimeEventApp()
 
@@ -722,29 +717,3 @@ def test_runtime_ui_event_handler_opens_memory_notice() -> None:
     assert app.memory_flow.mode is True
     assert app.memory_flow.detail_mode is False
     assert app.memory_loads == 1
-
-
-def test_runtime_ui_event_handler_tracks_sandbox_status_from_session_lifecycle() -> None:
-    app = FakeRuntimeEventApp()
-
-    handle_runtime_ui_event(
-        app,
-        SessionLifecycleEvent(
-            session_id="session-1",
-            turn_index=1,
-            state="turn_started",
-            message="started",
-            details={
-                "sandbox": {
-                    "backend": "docker",
-                    "availability": {"degraded": False, "reason": ""},
-                },
-            },
-        ),
-    )
-
-    assert app._sandbox_status == {
-        "backend": "docker",
-        "degraded": False,
-        "reason": "",
-    }

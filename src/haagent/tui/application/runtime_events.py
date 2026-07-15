@@ -27,7 +27,6 @@ from haagent.tui.design.failures import failure_from_payload
 from haagent.tui.presentation.progress import (
     ProgressPresentation,
     present_approval_state,
-    present_grouped_task_problem,
     present_grouped_tool_failure,
     present_task_progress,
     present_tool_activity,
@@ -70,6 +69,13 @@ def _handle_assistant_intermediate(app, event: AssistantIntermediateEvent) -> No
 
 
 def _handle_tool_activity(app, event: ToolActivityEvent) -> None:
+    # 成功/失败工具都写入 timeline.tools；折叠后只见「已完成 N 项」，展开见中文工具行。
+    app._conversation.record_tool_activity(
+        event.turn_index,
+        event.tool_name,
+        event.status,
+        event.summary or event.error_message or "",
+    )
     presentation = present_tool_activity(event)
     if event.status == "failed":
         presentation = _aggregate_tool_failure(app, event, presentation)
@@ -126,9 +132,8 @@ def _handle_failure_notice(app, event: FailureNoticeEvent) -> None:
 
 
 def _handle_task_progress(app, event: TaskProgressEvent) -> None:
+    # task_step_blocked / task_recovery_suggested 故意不投影进主时间线（见 present_task_progress）。
     presentation = present_task_progress(event)
-    if presentation.timeline_item is not None and event.event_name in {"task_recovery_suggested", "task_step_blocked"}:
-        presentation = _aggregate_task_problem(app, event, presentation)
     _apply_progress_presentation(app, presentation)
 
 
@@ -148,20 +153,6 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
 def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:
     if event.state in {"turn_finished", "session_finished"}:
         app.clear_progress_status()
-    sandbox = event.details.get("sandbox")
-    if not isinstance(sandbox, dict):
-        return
-    backend = sandbox.get("backend")
-    availability = sandbox.get("availability", {})
-    if not isinstance(availability, dict):
-        availability = {}
-    if isinstance(backend, str) and backend:
-        app._sandbox_status = {
-            "backend": backend,
-            "degraded": availability.get("degraded") is True,
-            "reason": availability.get("reason") if isinstance(availability.get("reason"), str) else "",
-        }
-    return
 
 
 def _warning_tool_name(event: WarningNoticeEvent) -> str:
@@ -203,46 +194,6 @@ def _aggregate_tool_failure(
     if count <= 1:
         return presentation
     return present_grouped_tool_failure(event, count=count)
-
-
-def _aggregate_task_problem(
-    app,
-    event: TaskProgressEvent,
-    presentation: ProgressPresentation,
-) -> ProgressPresentation:
-    if presentation.timeline_item is None:
-        return presentation
-    group = app._task_problem_groups.setdefault(
-        event.turn_index,
-        {"count": 0, "labels": [], "actions": []},
-    )
-    group["count"] += 1
-    label = _task_problem_label(presentation.timeline_item.title)
-    if label and label not in group["labels"]:
-        group["labels"].append(label)
-    action = _task_problem_action(event.suggested_action)
-    if action and action not in group["actions"]:
-        group["actions"].append(action)
-    return present_grouped_task_problem(
-        event,
-        count=group["count"],
-        labels=group["labels"] or [label or "任务受阻"],
-        actions=group["actions"],
-    )
-
-
-def _task_problem_label(title: str) -> str:
-    prefix = "任务遇到问题："
-    if title.startswith(prefix):
-        return title[len(prefix) :].strip()
-    return title.strip()
-
-
-def _task_problem_action(value: str) -> str:
-    stripped = value.strip()
-    if not stripped or stripped.lower() in {"none", "null", "n/a"}:
-        return ""
-    return stripped
 
 
 RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {

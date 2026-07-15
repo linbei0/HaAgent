@@ -16,33 +16,6 @@ from textual.theme import Theme
 THEME_ENV_VAR = "HAAGENT_TUI_THEME"
 
 
-class SemanticToken(str, Enum):
-    DEFAULT = "default"
-    MUTED = "muted"
-    EMPHASIS = "emphasis"
-    SUCCESS = "success"
-    WARNING = "warning"
-    ERROR = "error"
-    INFO = "info"
-    SELECTION = "selection"
-    FOCUS = "focus"
-    RUNNING = "running"
-    CANCELLED = "cancelled"
-    PENDING = "pending"
-    DANGER = "danger"
-
-
-@dataclass(frozen=True)
-class SemanticStatus:
-    token: SemanticToken
-    symbol: str
-    label: str
-
-    @property
-    def css_class(self) -> str:
-        return f"status-{self.token.value}"
-
-
 class TuiThemeMode(str, Enum):
     DARK = "dark"
     LIGHT = "light"
@@ -58,52 +31,6 @@ class TuiThemeChoice:
 
 
 _THEME_CYCLE = (TuiThemeMode.DARK, TuiThemeMode.LIGHT, TuiThemeMode.MONOCHROME)
-_THEME_LABELS = {
-    TuiThemeMode.DARK: "暗色",
-    TuiThemeMode.LIGHT: "浅色",
-    TuiThemeMode.MONOCHROME: "单色",
-}
-
-_STATUS_MAP = {
-    "default": SemanticStatus(SemanticToken.DEFAULT, "-", "普通"),
-    "idle": SemanticStatus(SemanticToken.DEFAULT, "-", "空闲"),
-    "muted": SemanticStatus(SemanticToken.MUTED, "-", "次要"),
-    "emphasis": SemanticStatus(SemanticToken.EMPHASIS, "*", "重点"),
-    "success": SemanticStatus(SemanticToken.SUCCESS, "ok", "成功"),
-    "done": SemanticStatus(SemanticToken.SUCCESS, "ok", "成功"),
-    "completed": SemanticStatus(SemanticToken.SUCCESS, "ok", "完成"),
-    "warning": SemanticStatus(SemanticToken.WARNING, "!", "警告"),
-    "waiting approval": SemanticStatus(SemanticToken.WARNING, "?", "待审批"),
-    "error": SemanticStatus(SemanticToken.ERROR, "!", "错误"),
-    "failed": SemanticStatus(SemanticToken.ERROR, "!", "失败"),
-    "info": SemanticStatus(SemanticToken.INFO, "i", "提示"),
-    "selection": SemanticStatus(SemanticToken.SELECTION, ">", "选中"),
-    "focus": SemanticStatus(SemanticToken.FOCUS, "*", "焦点"),
-    "running": SemanticStatus(SemanticToken.RUNNING, "...", "运行中"),
-    "started": SemanticStatus(SemanticToken.RUNNING, "...", "运行中"),
-    "cancelled": SemanticStatus(SemanticToken.CANCELLED, "x", "已取消"),
-    "pending": SemanticStatus(SemanticToken.PENDING, "?", "待处理"),
-    "pending approval": SemanticStatus(SemanticToken.WARNING, "?", "待审批"),
-    "waiting input": SemanticStatus(SemanticToken.PENDING, "?", "待补充"),
-    "approved": SemanticStatus(SemanticToken.SUCCESS, "ok", "已允许"),
-    "denied": SemanticStatus(SemanticToken.DANGER, "!", "已拒绝"),
-    "danger": SemanticStatus(SemanticToken.DANGER, "!", "危险"),
-}
-
-
-def semantic_tokens() -> set[SemanticToken]:
-    return set(SemanticToken)
-
-
-def status_semantic(status: str | None) -> SemanticStatus:
-    key = (status or "default").strip().casefold()
-    return _STATUS_MAP.get(key, SemanticStatus(SemanticToken.INFO, "i", status or "未知"))
-
-
-def status_badge(status: str | None) -> str:
-    semantic = status_semantic(status)
-    return f"{semantic.symbol} {semantic.label}"
-
 
 def no_color_enabled(env: Mapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
@@ -129,38 +56,34 @@ def next_theme(choice: TuiThemeChoice, env: Mapping[str, str] | None = None) -> 
     return select_theme(_THEME_CYCLE[(index + 1) % len(_THEME_CYCLE)].value, env)
 
 
-def theme_label(choice: TuiThemeChoice) -> str:
-    return _THEME_LABELS.get(choice.mode, choice.mode.value)
-
-
 def textual_themes() -> tuple[Theme, Theme, Theme]:
     return (
         Theme(
             name="haagent-dark",
-            primary="#7aa2f7",
-            secondary="#7dcfff",
-            warning="#e0af68",
-            error="#f7768e",
-            success="#9ece6a",
-            accent="#bb9af7",
-            foreground="#c0caf5",
-            background="#16161e",
-            surface="#24283b",
-            panel="#1f2335",
+            primary="#6f93a6",
+            secondary="#78a89e",
+            warning="#c49a55",
+            error="#c86f6f",
+            success="#78a17d",
+            accent="#9184aa",
+            foreground="#d7dce2",
+            background="#111315",
+            surface="#181b1f",
+            panel="#20242a",
             dark=True,
         ),
         Theme(
             name="haagent-light",
-            primary="#2459a6",
-            secondary="#0f766e",
-            warning="#9a5b00",
-            error="#b42318",
-            success="#287233",
-            accent="#7a3db8",
-            foreground="#202124",
-            background="#f7f7f2",
+            primary="#456a7d",
+            secondary="#4f7d73",
+            warning="#8a6428",
+            error="#9e4d4d",
+            success="#52785a",
+            accent="#695f7c",
+            foreground="#25292f",
+            background="#f5f6f7",
             surface="#ffffff",
-            panel="#eef2f6",
+            panel="#eaedf0",
             dark=False,
         ),
         Theme(

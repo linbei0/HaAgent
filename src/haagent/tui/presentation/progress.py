@@ -11,25 +11,13 @@ from dataclasses import dataclass
 from typing import Literal
 
 from haagent.runtime.events.types import ApprovalStateEvent, TaskProgressEvent, ToolActivityEvent, UserInputStateEvent
+from haagent.tui.design.copy import tool_display_name
 
 Severity = Literal["info", "warning", "error"]
 TimelineKind = Literal["activity", "notice", "effect"]
 
 TEXT_LIMIT = 160
 DETAIL_LIMIT = 240
-
-_CATEGORY_LABELS = {
-    "verification_failed": "验证失败",
-    "tool_failed": "工具失败",
-    "tool_timeout": "工具超时",
-    "policy_denied": "权限被拒绝",
-    "approval_denied": "审批被拒绝",
-    "context_build_error": "上下文准备失败",
-    "loop_limit": "任务轮次接近上限",
-    "model_error": "模型调用失败",
-    "worker_failure": "子任务失败",
-    "cancelled": "任务已取消",
-}
 
 _READ_ONLY_TOOL_STATUS = {
     "file_read": "正在阅读文件...",
@@ -83,8 +71,9 @@ class ProgressPresentation:
 
 
 def present_task_progress(event: TaskProgressEvent) -> ProgressPresentation:
+    # 受阻/恢复建议对普通用户是内部噪音（resume_or_replan 等），不进主对话过程组。
     if event.event_name in {"task_recovery_suggested", "task_step_blocked"}:
-        return _task_recovery_notice(event)
+        return ProgressPresentation()
     if event.event_name == "task_budget_warning":
         return _task_budget_notice(event)
     return ProgressPresentation()
@@ -113,43 +102,9 @@ def present_grouped_tool_failure(event: ToolActivityEvent, *, count: int) -> Pro
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
             kind="activity",
-            title=f"{_bounded(event.tool_name, 48)} 失败 {count} 次，已使用已有上下文继续",
+            title=f"{tool_display_name(event.tool_name)}失败 {count} 次，已使用已有上下文继续",
             summary="",
             severity="warning",
-            turn_index=event.turn_index,
-            detail_id=detail.detail_id,
-        ),
-        details=detail,
-    )
-
-
-def present_grouped_task_problem(
-    event: TaskProgressEvent,
-    *,
-    count: int,
-    labels: list[str],
-    actions: list[str],
-) -> ProgressPresentation:
-    visible_labels = labels[:3]
-    label_text = "、".join(visible_labels)
-    if len(labels) > len(visible_labels):
-        label_text = f"{label_text}等"
-    title = f"任务遇到问题 {count} 项：{label_text}" if count > 1 else f"任务遇到问题：{label_text}"
-    action = actions[-1] if actions else "查看详情后继续处理"
-    detail = ExpandableDetail(
-        detail_id=f"task:{event.turn_index}:problems",
-        lines=[
-            f"问题数：{count}",
-            f"类型：{'、'.join(labels)}",
-            f"建议：{_bounded(action)}",
-        ],
-    )
-    return ProgressPresentation(
-        timeline_item=TimelinePresentationItem(
-            kind="activity",
-            title=title,
-            summary=f"建议：{_bounded(action)}",
-            severity="warning" if count > 1 else "error",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
         ),
@@ -171,24 +126,6 @@ def present_user_input_state(event: UserInputStateEvent) -> ProgressPresentation
     if event.approved is False:
         return _user_input_cancelled_notice(event)
     return ProgressPresentation()
-
-
-def _task_recovery_notice(event: TaskProgressEvent) -> ProgressPresentation:
-    category = _meaningful(event.category)
-    label = _CATEGORY_LABELS.get(category, "任务受阻")
-    detail = _task_detail(event)
-    action = _meaningful(event.suggested_action) or "查看详情后继续处理"
-    return ProgressPresentation(
-        timeline_item=TimelinePresentationItem(
-            kind="activity",
-            title=f"任务遇到问题：{label}",
-            summary=f"建议：{_bounded(action)}",
-            severity="error",
-            turn_index=event.turn_index,
-            detail_id=detail.detail_id,
-        ),
-        details=detail,
-    )
 
 
 def _task_budget_notice(event: TaskProgressEvent) -> ProgressPresentation:
@@ -241,7 +178,7 @@ def _tool_failure_notice(event: ToolActivityEvent) -> ProgressPresentation:
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
             kind="activity",
-            title=f"工具运行失败：{_bounded(event.tool_name, 48)}",
+            title=f"{tool_display_name(event.tool_name)}失败",
             summary="建议：查看错误摘要后重试或调整命令",
             severity="error",
             turn_index=event.turn_index,
@@ -253,7 +190,7 @@ def _tool_failure_notice(event: ToolActivityEvent) -> ProgressPresentation:
 
 def _approval_requested_notice(event: ApprovalStateEvent) -> ProgressPresentation:
     detail = _approval_detail(event)
-    title = "需要确认文件改动" if event.approval_kind == "edit_diff" else f"需要确认：{_bounded(event.tool_name, 48)}"
+    title = "需要确认文件改动" if event.approval_kind == "edit_diff" else f"需要确认：{tool_display_name(event.tool_name)}"
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
             kind="activity",
@@ -269,7 +206,7 @@ def _approval_requested_notice(event: ApprovalStateEvent) -> ProgressPresentatio
 
 def _approval_denied_notice(event: ApprovalStateEvent) -> ProgressPresentation:
     detail = _approval_detail(event)
-    label = "文件改动已拒绝" if event.approval_kind == "edit_diff" else f"审批已拒绝：{_bounded(event.tool_name, 48)}"
+    label = "文件改动已拒绝" if event.approval_kind == "edit_diff" else f"已拒绝：{tool_display_name(event.tool_name)}"
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
             kind="activity",
@@ -304,7 +241,7 @@ def _user_input_cancelled_notice(event: UserInputStateEvent) -> ProgressPresenta
     return ProgressPresentation(
         timeline_item=TimelinePresentationItem(
             kind="notice",
-            title=f"回答已取消：{_bounded(event.tool_name, 48)}",
+            title=f"回答已取消：{tool_display_name(event.tool_name)}",
             summary="建议：补充信息后重试或调整任务",
             severity="warning",
             turn_index=event.turn_index,

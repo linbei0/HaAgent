@@ -33,7 +33,7 @@ from haagent.tui.overlays.schedules import (
     SchedulesOverlay,
     SchedulesOverlayState,
 )
-from tests.tui.support import FakeAssistantService, FakeSchedules, _all_text
+from tests.tui.support import FakeAssistantService, FakeSchedules, _all_text, _text
 
 
 def _summary(
@@ -528,7 +528,7 @@ def test_tui_create_editor_four_steps_and_preview(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_status_bar_badge_shows_unread(tmp_path: Path) -> None:
+def test_unread_schedule_uses_transient_notice_not_status_bar(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path)
     fake = FakeSchedules(service)
     service.schedules = fake
@@ -554,9 +554,9 @@ def test_status_bar_badge_shows_unread(tmp_path: Path) -> None:
             await pilot.pause()
             app._refresh()
             await pilot.pause()
-            body = _all_text(app)
-            assert "计划任务" in body
-            assert "1" in body
+            messages = [notification.message for notification in app._notifications]
+            assert "有 1 条计划任务结果" in messages
+            assert "计划任务 1" not in _text(app, "#status-bar")
 
     asyncio.run(_run())
 

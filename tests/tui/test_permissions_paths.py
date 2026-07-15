@@ -15,11 +15,13 @@ from haagent.tui.design.renderers import status_line
 
 from tests.tui.support import FakeAssistantService, _all_text, _text
 
-def test_status_line_shows_permission_mode(tmp_path: Path) -> None:
+def test_status_line_hides_permission_mode(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path, permission_mode="auto_approve")
     status = service.workspace.status()
 
-    assert "perm:auto" in status_line(status, ui_state="idle", width=120)
+    line = status_line(status, ui_state="idle", width=120)
+    assert "工作区" in line
+    assert "perm:" not in line
 
 def test_untrusted_absolute_path_detection_ignores_authorized_roots(tmp_path: Path) -> None:
     project = tmp_path / "project"
@@ -111,7 +113,7 @@ def test_tui_permissions_modal_changes_permission_modes(tmp_path: Path) -> None:
             await pilot.pause()
 
             assert service.permission_mode == "auto_approve"
-            assert "perm:auto" in _text(app, "#status-bar")
+            assert "perm:" not in _text(app, "#status-bar")
 
             await pilot.press("ctrl+p")
             await pilot.pause()
@@ -123,7 +125,7 @@ def test_tui_permissions_modal_changes_permission_modes(tmp_path: Path) -> None:
             await pilot.press("y")
             await pilot.pause()
             assert service.permission_mode == "full_access"
-            assert "perm:full" in _text(app, "#status-bar")
+            assert "perm:" not in _text(app, "#status-bar")
 
     asyncio.run(run())
 
