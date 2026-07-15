@@ -13,6 +13,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import OptionList
 
+from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.application.commands import CommandDispatcher
 from haagent.tui.application.conversation import ConversationController
 from haagent.tui.commands import SlashCommand, SlashCommandResult
@@ -132,6 +133,15 @@ def test_file_reference_overlay_uses_option_list_without_rescanning_preloaded_in
     asyncio.run(run())
 
 
+def test_file_reference_index_callback_ignores_unmounted_input_dock(tmp_path: Path) -> None:
+    index = FileReferenceIndex(root=tmp_path.resolve(), files=())
+    app = _FileReferenceCallbackApp()
+
+    HaAgentTuiApp._set_file_reference_index(app, index)
+
+    assert app._file_ref_index is index
+
+
 class _DispatchConversation:
     def __init__(self, app: "_DispatchApp") -> None:
         self._app = app
@@ -189,6 +199,17 @@ class _ConversationApp:
     def query_one(self, selector: str, widget_type):
         assert selector == "#conversation"
         return self.timeline
+
+
+class _FileReferenceCallbackApp:
+    """模拟 App 尚在退出、但输入区已卸载的生命周期窗口。"""
+
+    is_mounted = True
+    _file_ref_index = None
+    _input_dock_widget = None
+
+    def _input_dock(self):
+        raise AssertionError("已卸载输入区不应被再次查询")
 
 
 class _InputDockApp(App[None]):

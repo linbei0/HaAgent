@@ -373,8 +373,11 @@ class HaAgentTuiApp(App[None]):
 
     def _set_file_reference_index(self, index: FileReferenceIndex) -> None:
         self._file_ref_index = index
-        if self.is_mounted:
-            self._input_dock().file_reference_index = index
+        input_dock = self._input_dock_widget
+        # 后台索引可能在 default screen 已卸载后才回调；App 此时仍可能是 mounted，
+        # 只能更新 on_mount 缓存且仍挂载的输入区，不能重新查询已移除的节点。
+        if input_dock is not None and input_dock.is_mounted:
+            input_dock.file_reference_index = index
 
     # ── 会话切换后台 worker（磁盘/MCP 不得阻塞 UI 线程）──────────────────
     @work(thread=True, exclusive=True, group="session-ops")
