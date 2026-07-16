@@ -30,6 +30,8 @@ def test_tui_compact_command_compacts_session_without_running_prompt(tmp_path: P
             assert service.compacted_count == 1
             assert service.prompts == []
             assert "已压缩当前会话" in _text(app, "#conversation")
+            await pilot.press("up")
+            assert input_widget.value == ""
 
     asyncio.run(run())
 
@@ -109,9 +111,26 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             assert "当前会话：session-beta" not in conversation
             assert "整理会议纪要" not in conversation
             assert "输入过滤  ↑/↓ 移动  Enter 恢复" not in _all_text(app)
+            await pilot.press("up")
+            assert input_widget.value == "分析 CSV"
 
     async def run_continue_new_escape() -> None:
-        service = FakeAssistantService(workspace_root=tmp_path, sessions=sessions)
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            sessions=sessions,
+            session_histories={
+                "session-alpha": [
+                    AssistantSessionTurn(
+                        turn_index=1,
+                        request="整理会议纪要",
+                        summary="用户要整理会议纪要。",
+                        status="completed",
+                        episode_path=tmp_path / ".runs" / "episode-alpha",
+                        verification_status="success",
+                    ),
+                ],
+            },
+        )
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             input_widget = app.query_one("#prompt-input")
@@ -122,6 +141,8 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             await pilot.pause(0.1)
             assert service.continued_latest_count == 1
             assert service.current_session_id == "session-alpha"
+            await pilot.press("up")
+            assert input_widget.value == "整理会议纪要"
 
             input_widget.value = "/sessions"
             await pilot.press("enter")
@@ -132,6 +153,8 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             assert "当前会话：session-new-1" not in _text(app, "#conversation")
             assert service.current_session_id == "session-new-1"
             assert "sid:" not in _text(app, "#status-bar")
+            await pilot.press("up")
+            assert input_widget.value == ""
 
             input_widget.value = "/sessions"
             await pilot.press("enter")

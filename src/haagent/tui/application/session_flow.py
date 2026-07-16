@@ -97,6 +97,13 @@ class SessionFlow:
     def apply_continue_success(self, status: AssistantSessionStatus) -> None:
         self._busy = False
         self._app._reset_image_input_state()
+        try:
+            history = list(self._app.service.sessions.history())
+        except Exception as error:
+            self._app._prompt_input().clear_request_history()
+            self._app._conversation.append_block("Session warning", f"恢复会话历史读取失败：{error}")
+        else:
+            self._set_prompt_history(history)
         self._app._conversation.append_line(f"已恢复会话：{status.session_id}")
         self._app._refresh()
         self._app._defer_prompt_focus()
@@ -128,12 +135,19 @@ class SessionFlow:
         else:
             # 批量装载只同步一次 DOM，避免 N 轮 2N 次全量渲染。
             conversation.load_session_history(history)
+        self._set_prompt_history(history)
         self._app._conversation.reset_streaming_state()
 
     def clear_conversation_for_new_session(self) -> None:
         self._app._conversation.reset_streaming_state()
         self._app._active_turn_index = None
+        self._app._prompt_input().clear_request_history()
         self._timeline().clear_timeline()
+
+    def _set_prompt_history(self, history: list[AssistantSessionTurn]) -> None:
+        # Session turn 是持久化事实源，输入组件只保存当前会话的可浏览请求文本。
+        requests = [turn.request for turn in history if turn.request]
+        self._app._prompt_input().set_request_history(requests)
 
     def _timeline(self) -> ConversationTimeline:
         return self._app.query_one("#conversation", ConversationTimeline)

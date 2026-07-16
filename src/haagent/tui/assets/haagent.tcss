@@ -175,6 +175,54 @@ ConversationTimeline {
     margin-top: 1;
 }
 
+.answer-copy-actions {
+    width: 1fr;
+    height: 1;
+    margin: 0 0 1 0;
+    align-horizontal: right;
+}
+
+.copy-button {
+    width: auto;
+    min-width: 10;
+    height: 1;
+    min-height: 1;
+    margin: 0;
+    padding: 0 1;
+    background: $surface;
+    color: $text-muted;
+    border: none;
+}
+
+.copy-button:hover {
+    background: $panel;
+    color: $foreground;
+}
+
+.copy-button:focus {
+    background: $primary;
+    color: $text;
+    text-style: bold;
+}
+
+.copyable-code-block > .code-block-toolbar {
+    width: 1fr;
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+}
+
+.code-block-language {
+    width: 1fr;
+    height: 1;
+    color: $text-muted;
+    overflow: hidden;
+}
+
+.code-copy-button {
+    min-width: 10;
+}
+
 .timeline-active {
     height: 1;
     margin-top: 1;

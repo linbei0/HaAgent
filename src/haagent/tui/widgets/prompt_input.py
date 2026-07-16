@@ -22,6 +22,12 @@ class PromptInput(TextArea):
         Binding("ctrl+v", "paste_image_from_input", "粘贴图片", priority=True),
     ]
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._request_history: list[str] = []
+        self._request_history_index: int | None = None
+        self._recalled_request: str | None = None
+
     class Submitted(Message):
         def __init__(self, input: PromptInput, value: str) -> None:
             self.input = input
@@ -34,8 +40,29 @@ class PromptInput(TextArea):
 
     @value.setter
     def value(self, text: str) -> None:
+        self._reset_request_history_navigation()
         self.load_text(text)
         self.move_cursor(_end_location(text))
+
+    def set_request_history(self, requests: list[str]) -> None:
+        self._request_history = list(requests)
+        self._reset_request_history_navigation()
+
+    def append_request_history(self, request: str) -> None:
+        if not request:
+            return
+        self._request_history.append(request)
+        self._reset_request_history_navigation()
+
+    def clear_request_history(self) -> None:
+        self._request_history.clear()
+        self._reset_request_history_navigation()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area is not self or self._request_history_index is None:
+            return
+        if self.value != self._recalled_request:
+            self._reset_request_history_navigation()
 
     def on_key(self, event: events.Key) -> None:
         app = self.app
@@ -65,6 +92,15 @@ class PromptInput(TextArea):
                 event.stop()
                 event.prevent_default()
                 return
+        if (
+            app._pending_interaction is None
+            and event.key in {"up", "down"}
+            and self._navigate_request_history(event.key)
+        ):
+            # 补全与交互模式优先；普通输入仅从空值启动历史，避免覆盖多行光标移动。
+            event.stop()
+            event.prevent_default()
+            return
         if event.key == "@" or event.character == "@":
             event.stop()
             event.prevent_default()
@@ -108,6 +144,37 @@ class PromptInput(TextArea):
 
     def action_insert_newline_from_input(self) -> None:
         self.insert("\n")
+
+    def _navigate_request_history(self, key: str) -> bool:
+        if not self._request_history:
+            return False
+        if self._request_history_index is None:
+            if key == "down" or self.value:
+                return False
+            self._show_request_history(len(self._request_history) - 1)
+            return True
+        if key == "up":
+            self._show_request_history(max(0, self._request_history_index - 1))
+            return True
+        next_index = self._request_history_index + 1
+        if next_index < len(self._request_history):
+            self._show_request_history(next_index)
+        else:
+            self._reset_request_history_navigation()
+            self.load_text("")
+            self.move_cursor((0, 0))
+        return True
+
+    def _show_request_history(self, index: int) -> None:
+        request = self._request_history[index]
+        self._request_history_index = index
+        self._recalled_request = request
+        self.load_text(request)
+        self.move_cursor(_end_location(request))
+
+    def _reset_request_history_navigation(self) -> None:
+        self._request_history_index = None
+        self._recalled_request = None
 
 
 def _end_location(text: str) -> tuple[int, int]:

@@ -17,7 +17,7 @@ from haagent.tui.commands import command_registry
 from haagent.tui.state.search import ConversationSearchState
 from haagent.tui.widgets import ConversationTimeline, PromptInput
 from haagent.tui.typography.wrap import is_textual_line_breaking_installed
-from textual.widgets import Markdown
+from textual.widgets import Button, Markdown
 
 from tests.tui.support import (
     FakeAssistantService,
@@ -347,6 +347,52 @@ def test_tui_end_key_keeps_prompt_cursor_behavior_when_prompt_has_text(tmp_path:
 
     asyncio.run(run())
 
+
+def test_tui_prompt_history_navigates_requests_and_preserves_text_editing(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            input_widget = app.query_one("#prompt-input", PromptInput)
+
+            input_widget.value = "第一个请求"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            input_widget.value = "第二个请求"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            await pilot.press("up")
+            assert input_widget.value == "第二个请求"
+            assert input_widget.cursor_location == (0, 5)
+            await pilot.press("up")
+            assert input_widget.value == "第一个请求"
+            await pilot.press("up")
+            assert input_widget.value == "第一个请求"
+            await pilot.press("down")
+            assert input_widget.value == "第二个请求"
+            await pilot.press("down")
+            assert input_widget.value == ""
+            await pilot.press("down")
+            assert input_widget.value == ""
+
+            await pilot.press("up")
+            await pilot.press("!")
+            await pilot.pause()
+            await pilot.press("up")
+            assert input_widget.value == "第二个请求!"
+
+            input_widget.value = "第一行\n第二行"
+            input_widget.cursor_location = (1, 2)
+            await pilot.press("up")
+            assert input_widget.value == "第一行\n第二行"
+            assert input_widget.cursor_location == (0, 2)
+            await pilot.press("down")
+            assert input_widget.cursor_location == (1, 2)
+
+    asyncio.run(run())
+
+
 def test_tui_conversation_wraps_long_messages_for_scroll_height(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
@@ -401,6 +447,94 @@ def test_tui_assistant_body_renders_markdown_without_opening_links(tmp_path: Pat
             assert markdown_reply in conversation.plain_text
 
     asyncio.run(run())
+
+
+def test_tui_final_answer_copy_button_copies_original_markdown(tmp_path: Path) -> None:
+    async def run() -> None:
+        markdown_reply = "# 结果\n\n- **重点**\n\n```python\nprint('ok')\n```"
+        service = FakeAssistantService(workspace_root=tmp_path, assistant_content=markdown_reply)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "生成结果"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            button = app.query_one(".answer-copy-button", Button)
+            assert button.display is True
+            button.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.clipboard == markdown_reply
+            assert str(button.label) == "已复制"
+
+    asyncio.run(run())
+
+
+def test_tui_code_copy_buttons_copy_each_code_block(tmp_path: Path) -> None:
+    async def run() -> None:
+        markdown_reply = (
+            "```python\nprint('one')\n```\n\n"
+            "说明\n\n"
+            "```javascript\nconsole.log('two')\n```"
+        )
+        service = FakeAssistantService(workspace_root=tmp_path, assistant_content=markdown_reply)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "生成代码"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            buttons = list(app.query(".code-copy-button"))
+            assert len(buttons) == 2
+            assert all(isinstance(button, Button) for button in buttons)
+
+            buttons[0].focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.clipboard == "print('one')"
+
+            buttons[1].press()
+            await pilot.pause()
+            assert app.clipboard == "console.log('two')"
+
+    asyncio.run(run())
+
+
+def test_tui_copy_buttons_stay_hidden_while_assistant_streams(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            extra_events=[_assistant_event("assistant_delta", 1, "```python\nprint('draft')\n```")],
+            assistant_content="```python\nprint('final')\n```",
+            block_until_released=True,
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "生成代码"
+            await pilot.press("enter")
+            await asyncio.to_thread(service.started.wait, 2)
+            await pilot.pause(0.2)
+
+            answer_button = app.query_one(".answer-copy-button", Button)
+            code_button = app.query_one(".code-copy-button", Button)
+            assert answer_button.display is False
+            assert code_button.display is False
+
+            service.release.set()
+            await pilot.pause(0.2)
+            assert answer_button.display is True
+            final_code_button = app.query_one(".code-copy-button", Button)
+            assert final_code_button.display is True
+            final_code_button.press()
+            await pilot.pause()
+            assert app.clipboard == "print('final')"
+
+    asyncio.run(run())
+
 
 def test_tui_assistant_final_message_replaces_streamed_markdown(tmp_path: Path) -> None:
     async def run() -> None:

@@ -13,10 +13,11 @@ from typing import Any
 from textual import events
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.strip import Strip
 from textual.timer import Timer
-from textual.widgets import Log, Markdown, Static
+from textual.widgets import Button, Label, Log, Markdown, Static
+from textual.widgets.markdown import MarkdownBlock, MarkdownFence
 
 from haagent.tui.presentation.progress import TimelinePresentationItem
 from haagent.tui.widgets.timeline_models import (
@@ -64,8 +65,87 @@ class ToolActivityLog(Log):
             self.write_lines(lines, scroll_end=False)
 
 
+class CopyButton(Button):
+    """复制操作按钮；成功反馈留在按钮内，不污染对话流。"""
+
+    def __init__(self, label: str, *, classes: str) -> None:
+        super().__init__(label, classes=f"copy-button {classes}", compact=True)
+        self._default_label = label
+        self._feedback_timer: Timer | None = None
+
+    def show_copied(self) -> None:
+        if self._feedback_timer is not None:
+            self._feedback_timer.stop()
+        self.label = "已复制"
+        self._feedback_timer = self.set_timer(1.5, self._restore_label)
+
+    def _restore_label(self) -> None:
+        self._feedback_timer = None
+        self.label = self._default_label
+
+
+class CopyableMarkdownFence(MarkdownFence):
+    """保留 Textual 代码高亮，并提供当前代码块的独立复制按钮。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._copy_enabled = False
+        self._copy_button: CopyButton | None = None
+        self._language_widget: Static | None = None
+        self.add_class("copyable-code-block")
+
+    def compose(self) -> ComposeResult:
+        markdown = self._markdown_ref()
+        self._copy_enabled = bool(getattr(markdown, "copy_enabled", False))
+        self._copy_button = CopyButton("复制代码", classes="code-copy-button")
+        self._copy_button.display = self._copy_enabled
+        self._language_widget = Static((self.lexer or "代码").strip(), classes="code-block-language")
+        toolbar = Horizontal(classes="code-block-toolbar")
+        toolbar.styles.height = 1
+        with toolbar:
+            yield self._language_widget
+            yield self._copy_button
+        yield Label(self._highlighted_code, id="code-content", expand=True)
+
+    async def _update_from_block(self, block: MarkdownBlock) -> None:
+        await super()._update_from_block(block)
+        if self._language_widget is not None:
+            self._language_widget.update((self.lexer or "代码").strip())
+
+    def set_copy_enabled(self, enabled: bool) -> None:
+        self._copy_enabled = enabled
+        if self._copy_button is not None:
+            self._copy_button.display = enabled
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is not self._copy_button or not self._copy_enabled:
+            return
+        event.stop()
+        self.app.copy_to_clipboard(self.code)
+        self._copy_button.show_copied()
+
+
 class AssistantMarkdown(Markdown):
     """对话区 Markdown：保留渲染，禁用表格悬停浮窗。"""
+
+    BLOCKS = {
+        **Markdown.BLOCKS,
+        "fence": CopyableMarkdownFence,
+        "code_block": CopyableMarkdownFence,
+    }
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._copy_enabled = False
+        super().__init__(*args, **kwargs)
+
+    @property
+    def copy_enabled(self) -> bool:
+        return self._copy_enabled
+
+    def set_copy_enabled(self, enabled: bool) -> None:
+        self._copy_enabled = enabled
+        for fence in self.query(CopyableMarkdownFence):
+            fence.set_copy_enabled(enabled)
 
     def update(self, markdown: str) -> AwaitComplete:
         return AwaitComplete(self._clear_table_tooltips_after(super().update(markdown)))
@@ -76,6 +156,8 @@ class AssistantMarkdown(Markdown):
     async def _clear_table_tooltips_after(self, update: AwaitComplete) -> None:
         await update
         self.clear_table_tooltips()
+        for fence in self.query(CopyableMarkdownFence):
+            fence.set_copy_enabled(self._copy_enabled)
 
     def clear_table_tooltips(self) -> None:
         for widget in self.walk_children():
@@ -93,6 +175,8 @@ class TimelineBlock(Vertical):
         self._body_widget: Markdown | Static | None = None
         self._active_widget: Static | None = None
         self._tools_widget: ToolActivityLog | None = None
+        self._answer_actions_widget: Horizontal | None = None
+        self._answer_copy_button: CopyButton | None = None
         self._markdown_stream: Any | None = None
         self._markdown_stream_content = ""
         self._markdown_update_version = 0
@@ -104,6 +188,13 @@ class TimelineBlock(Vertical):
         self._header_widget = Static("", classes="timeline-header")
         if self._item.role == "assistant":
             self._body_widget = AssistantMarkdown("", classes="timeline-body timeline-answer", open_links=False)
+            self._answer_copy_button = CopyButton("复制回答", classes="answer-copy-button")
+            self._answer_actions_widget = Horizontal(
+                self._answer_copy_button,
+                classes="answer-copy-actions",
+            )
+            # 组件也会在不加载主 TCSS 的测试/嵌入 App 中使用，必须自行约束伸展高度。
+            self._answer_actions_widget.styles.height = 1
         else:
             self._body_widget = Static("", classes="timeline-body")
         self._active_widget = Static("", classes="timeline-active")
@@ -111,6 +202,8 @@ class TimelineBlock(Vertical):
         yield self._header_widget
         yield self._tools_widget
         yield self._body_widget
+        if self._answer_actions_widget is not None:
+            yield self._answer_actions_widget
         yield self._active_widget
 
     def on_mount(self) -> None:
@@ -135,6 +228,15 @@ class TimelineBlock(Vertical):
         event.stop()
         activate(self._item.item_id)
 
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button is not self._answer_copy_button:
+            return
+        if self._item.role != "assistant" or self._item.status != "done" or not self._item.content:
+            return
+        event.stop()
+        self.app.copy_to_clipboard(self._item.content)
+        self._answer_copy_button.show_copied()
+
     def update_item(self, item: TimelineItem, *, show_tool_details: bool) -> None:
         self._item = item
         self._show_tool_details = show_tool_details
@@ -150,9 +252,16 @@ class TimelineBlock(Vertical):
         header.display = bool(label)
         if isinstance(body, Markdown):
             self._update_markdown_body(body, item)
+            if isinstance(body, AssistantMarkdown):
+                body.set_copy_enabled(item.status == "done" and bool(item.content))
         else:
             body.update(_timeline_item_body(item))
         body.display = bool(_timeline_item_body(item))
+        copy_answer = item.role == "assistant" and item.status == "done" and bool(item.content)
+        if self._answer_actions_widget is not None:
+            self._answer_actions_widget.display = copy_answer
+        if self._answer_copy_button is not None:
+            self._answer_copy_button.display = copy_answer
         if item.role == "assistant" and item.status == "streaming":
             self._start_streaming_indicator()
             active_text = self._streaming_indicator_text()

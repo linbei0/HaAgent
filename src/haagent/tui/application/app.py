@@ -58,7 +58,6 @@ from haagent.tui.widgets import (
     PromptInput,
     ResizeMessage,
     StatusBar,
-    _end_location,
 )
 
 class HaAgentTuiApp(App[None]):
@@ -227,6 +226,7 @@ class HaAgentTuiApp(App[None]):
         attachments: list[ImageAttachment] | None = None,
         display_prompt: str | None = None,
     ) -> None:
+        self._prompt_input().append_request_history(prompt)
         self._active_turn_index = self._next_turn_index()
         self._tool_failure_groups.clear()
         self._conversation.stick_to_bottom = True
@@ -763,8 +763,7 @@ class HaAgentTuiApp(App[None]):
         return prompt_input.text
 
     def _set_prompt_value(self, prompt_input: PromptInput, value: str) -> None:
-        prompt_input.load_text(value)
-        prompt_input.move_cursor(_end_location(value))
+        prompt_input.value = value
 
     def _restore_prompt_focus(self, _result: object | None = None) -> None:
         # 延迟回调可能在 Textual 卸载 default screen 后才执行；此时不应让焦点恢复中断退出。

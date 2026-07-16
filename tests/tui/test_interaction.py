@@ -138,6 +138,8 @@ def test_tui_pending_input_answer_uses_enter_and_continues_same_turn(tmp_path: P
             input_widget.value = "Inspect"
             await pilot.press("enter")
             await pilot.pause(0.2)
+            await pilot.press("up")
+            assert input_widget.value == ""
             input_widget.value = "README.md\nand docs"
             await pilot.press("enter")
             await pilot.pause(0.2)
@@ -146,6 +148,10 @@ def test_tui_pending_input_answer_uses_enter_and_continues_same_turn(tmp_path: P
                 HumanInteractionResponse(approved=True, answer="README.md\nand docs"),
             ]
             assert input_widget.value == ""
+            await pilot.press("up")
+            assert input_widget.value == "Inspect"
+            await pilot.press("up")
+            assert input_widget.value == "Inspect"
 
     asyncio.run(run())
 
