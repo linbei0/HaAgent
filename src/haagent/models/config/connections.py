@@ -103,10 +103,33 @@ class ProvidersConfigSnapshot:
             if item_connection_id == connection_id
         )
 
-    def bind_available_models(self, available_models: Mapping[str, set[str]]) -> "ProvidersConfigSnapshot":
-        validated = set(available_models)
-        invalid = {item for item in self.invalid_model_configs if item[0] not in validated}
+    def bind_available_models(
+        self,
+        available_models: Mapping[str, set[str]],
+        *,
+        source: str | None = None,
+    ) -> "ProvidersConfigSnapshot":
+        # remote catalog / local discovery 分批绑定：同来源整批替换（可清空下线结果），跨来源保留。
+        if source == "remote":
+            scoped_ids = {record.id for record in self.records if record.runtime_kind == "remote"}
+        elif source == "local":
+            scoped_ids = {record.id for record in self.records if record.runtime_kind != "remote"}
+        elif source is None:
+            scoped_ids = set(available_models)
+        else:
+            raise ValueError(f"unsupported available_models source: {source}")
+
+        merged: dict[str, tuple[str, ...]] = {
+            key: tuple(value)
+            for key, value in self.available_models.items()
+            if key not in scoped_ids
+        }
+        for key, value in available_models.items():
+            merged[key] = tuple(sorted(value))
+        invalid = {item for item in self.invalid_model_configs if item[0] not in scoped_ids}
         for record in self.records:
+            if record.id not in scoped_ids:
+                continue
             available = available_models.get(record.id)
             if available is not None:
                 invalid.update((record.id, model) for model in record.models if model not in available)
@@ -116,7 +139,7 @@ class ProvidersConfigSnapshot:
             digest=self.digest,
             load_error=self.load_error,
             invalid_model_configs=frozenset(invalid),
-            available_models={key: tuple(sorted(value)) for key, value in available_models.items()},
+            available_models=merged,
         )
 
 

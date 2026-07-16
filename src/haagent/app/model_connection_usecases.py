@@ -102,7 +102,10 @@ class AssistantModels:
             )
             if discovery is not None:
                 available[connection.id] = {model.id for model in discovery.models}
-        self._runtime.snapshot = self._runtime.snapshot.bind_available_models(available)
+        self._runtime.snapshot = self._runtime.snapshot.bind_available_models(
+            available,
+            source="local",
+        )
         return discoveries
 
     def save_local_model(self, discovery: LocalRuntimeDiscovery, model: LocalRuntimeModel) -> ModelRef:
@@ -220,7 +223,10 @@ def bind_catalog_snapshot(context: AssistantContext, catalog: CatalogFetchResult
         for connection in context.model_runtime.snapshot.records
         if connection.runtime_kind == "remote" and connection.provider_id in providers
     }
-    context.model_runtime.snapshot = context.model_runtime.snapshot.bind_available_models(available)
+    context.model_runtime.snapshot = context.model_runtime.snapshot.bind_available_models(
+        available,
+        source="remote",
+    )
 
 
 def _ref(request: ModelSelectionRequest) -> ModelRef:

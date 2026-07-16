@@ -257,7 +257,8 @@ class OpenAIChatCompletionsGateway:
             payload["parallel_tool_calls"] = True
         if event_sink is not None:
             payload["stream"] = True
-        payload = merge_provider_payload(payload, invocation.settings.options)
+        # settings 以 gateway 绑定为准；协议/模型 fallback 不得沿用调用方带入的 primary options。
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

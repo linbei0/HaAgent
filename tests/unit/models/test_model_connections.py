@@ -66,6 +66,83 @@ def test_snapshot_binds_catalog_and_lists_choices_in_order(tmp_path) -> None:
     assert choices[1].variants == ("fast", "deep")
 
 
+def test_bind_available_models_merges_remote_and_local_in_any_order(tmp_path) -> None:
+    store = ModelConfigStore(tmp_path / "providers.json")
+    snapshot = store.save_connection(
+        _record(connection_id="remote", models={"gpt-5": ModelParameterConfig({}, {})}),
+        expected_digest=store.load().digest,
+    )
+    local = ProviderConnectionRecord(
+        id="local-ollama",
+        name="local-ollama",
+        provider_id="ollama",
+        provider_name="Ollama",
+        gateway_provider="openai",
+        base_url="http://127.0.0.1:11434/v1",
+        api_key_env="",
+        credential_source="none",
+        runtime_kind="ollama",
+        models={"llama3": ModelParameterConfig({}, {})},
+    )
+    snapshot = store.save_connection(local, expected_digest=snapshot.digest)
+
+    remote_only = {"remote": {"gpt-5", "gpt-4.1"}}
+    local_only = {"local-ollama": {"llama3", "qwen2.5"}}
+
+    catalog_first = snapshot.bind_available_models(remote_only, source="remote").bind_available_models(
+        local_only,
+        source="local",
+    )
+    local_first = snapshot.bind_available_models(local_only, source="local").bind_available_models(
+        remote_only,
+        source="remote",
+    )
+
+    assert dict(catalog_first.available_models) == dict(local_first.available_models)
+    assert catalog_first.available_models == {
+        "remote": ("gpt-4.1", "gpt-5"),
+        "local-ollama": ("llama3", "qwen2.5"),
+    }
+
+
+def test_bind_available_models_source_refresh_clears_stale_results(tmp_path) -> None:
+    store = ModelConfigStore(tmp_path / "providers.json")
+    snapshot = store.save_connection(
+        _record(connection_id="remote", models={"gpt-5": ModelParameterConfig({}, {})}),
+        expected_digest=store.load().digest,
+    )
+    local = ProviderConnectionRecord(
+        id="local-ollama",
+        name="local-ollama",
+        provider_id="ollama",
+        provider_name="Ollama",
+        gateway_provider="openai",
+        base_url="http://127.0.0.1:11434/v1",
+        api_key_env="",
+        credential_source="none",
+        runtime_kind="ollama",
+        models={"llama3": ModelParameterConfig({}, {})},
+    )
+    snapshot = store.save_connection(local, expected_digest=snapshot.digest)
+    bound = snapshot.bind_available_models(
+        {"remote": {"gpt-5", "gpt-4.1"}},
+        source="remote",
+    ).bind_available_models(
+        {"local-ollama": {"llama3", "qwen2.5"}},
+        source="local",
+    )
+
+    # local 下线后空映射必须清掉旧 Ollama 结果，且不影响 remote。
+    after_local_down = bound.bind_available_models({}, source="local")
+    assert "local-ollama" not in after_local_down.available_models
+    assert after_local_down.available_models["remote"] == ("gpt-4.1", "gpt-5")
+
+    # remote catalog 移除 provider 后必须清掉旧 remote 结果，且不影响 local。
+    after_remote_gone = bound.bind_available_models({}, source="remote")
+    assert "remote" not in after_remote_gone.available_models
+    assert after_remote_gone.available_models["local-ollama"] == ("llama3", "qwen2.5")
+
+
 def test_runtime_resolves_variant_and_unconfigured_model_keeps_defaults(tmp_path) -> None:
     runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
     runtime.snapshot = runtime.config_store.save_connection(

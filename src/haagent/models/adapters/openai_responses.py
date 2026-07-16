@@ -261,8 +261,8 @@ class OpenAIResponsesGateway:
             payload["parallel_tool_calls"] = True
         if event_sink is not None:
             payload["stream"] = True
-        # 未配置时 merge 为空操作，payload 与改动前逐字段一致。
-        payload = merge_provider_payload(payload, invocation.settings.options)
+        # settings 以 gateway 绑定为准；invocation 上的 primary options 不得泄漏到本 adapter。
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

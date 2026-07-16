@@ -45,6 +45,29 @@ _SECRET_FIELD_PATTERN = re.compile(
     r"(api[_-]?key|apikey|authorization|credential|password|secret)",
     re.IGNORECASE,
 )
+# 预算类 token 参数允许进入 options；与 credential token 拒绝规则分开维护。
+_BUDGET_TOKEN_FIELD_NAMES = frozenset(
+    {
+        "max_tokens",
+        "max_output_tokens",
+        "budget_tokens",
+        "token_budget",
+        "input_tokens",
+        "output_tokens",
+    }
+)
+_CREDENTIAL_TOKEN_FIELD_NAMES = frozenset(
+    {
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "auth_token",
+        "session_token",
+        "bearer_token",
+        "oauth_token",
+    }
+)
 _VARIANT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _DEFAULT_VARIANT_NAME = "default"
 
@@ -179,6 +202,28 @@ def merge_provider_payload(
     return deep_merge_options(payload, options)
 
 
+def _is_credential_token_field(key: str) -> bool:
+    """仅预算白名单可放行 token 相关字段；其余 *_token / *_tokens 按凭据拒绝。"""
+
+    normalized = str(key).replace("-", "_").casefold()
+    if normalized in _BUDGET_TOKEN_FIELD_NAMES:
+        return False
+    if normalized in _CREDENTIAL_TOKEN_FIELD_NAMES:
+        return True
+    return normalized.endswith("_token") or normalized.endswith("_tokens")
+
+
+def _reject_value_secrets(value: Any, *, path: str) -> None:
+    """递归检查任意深度 object / array 中的保留字段与 secret-like 键名。"""
+
+    if isinstance(value, Mapping):
+        _reject_reserved_and_secrets(value, path=path)
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_value_secrets(item, path=f"{path}[{index}]")
+
+
 def _reject_reserved_and_secrets(
     options: Mapping[str, Any],
     *,
@@ -188,21 +233,9 @@ def _reject_reserved_and_secrets(
         key_path = f"{path}.{key}"
         if key in RESERVED_TOP_LEVEL_FIELDS:
             raise ModelOptionsError(f"{key_path} is managed by HaAgent")
-        normalized_key = str(key).replace("-", "_").casefold()
-        if (
-            _SECRET_FIELD_PATTERN.search(str(key))
-            or normalized_key in {"token", "access_token", "refresh_token"}
-        ):
+        if _SECRET_FIELD_PATTERN.search(str(key)) or _is_credential_token_field(str(key)):
             raise ModelOptionsError(f"{key_path} looks like a secret field and is not allowed")
-        if isinstance(value, dict):
-            _reject_reserved_and_secrets(value, path=key_path)
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                if isinstance(item, dict):
-                    _reject_reserved_and_secrets(
-                        item,
-                        path=f"{key_path}[{index}]",
-                    )
+        _reject_value_secrets(value, path=key_path)
 
 
 def _json_key_paths(value: Any, prefix: str = "") -> list[str]:

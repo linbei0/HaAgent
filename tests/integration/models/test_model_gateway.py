@@ -540,12 +540,101 @@ def test_responses_options_do_not_leak_into_chat_protocol_fallback() -> None:
         "https://api.openai.com/v1",
         settings=_request_config({"reasoning": {"effort": "high"}, "max_output_tokens": 12000}),
     )
+    captured: dict[str, object] = {}
+
+    def chat_transport(payload, api_key):
+        del api_key
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "ok"}}]}
 
     gateway = gateway_from_route(profile)
     try:
         assert gateway._primary.metadata().request_config["configured"] is True
         assert gateway._primary_chat.metadata().request_config["configured"] is False
         assert gateway._primary_chat.metadata().request_config["options_summary"] == {}
+        # 真实协议 fallback：即使 invocation 带 primary Responses options，Chat payload 也不得包含它们。
+        primary = gateway._primary
+        if hasattr(primary, "_gateway"):
+            primary = primary._gateway
+        primary_chat = gateway._primary_chat
+        if hasattr(primary_chat, "_gateway"):
+            primary_chat = primary_chat._gateway
+        primary._transport = lambda payload, api_key, **_: (_ for _ in ()).throw(
+            ModelCallError(
+                "not implemented",
+                details=ModelFailureDetails(category="client", status_code=501),
+            )
+        )
+        primary_chat._transport = chat_transport
+        response = gateway.generate(
+            ModelInvocation(
+                [{"role": "user", "content": "hi"}],
+                [],
+                profile.settings,
+            )
+        )
+        assert response.content == "ok"
+        payload = captured["payload"]
+        assert "reasoning" not in payload
+        assert "max_output_tokens" not in payload
+        assert payload["model"] == "test-model"
+    finally:
+        gateway.close()
+
+
+def test_model_fallback_uses_target_settings_only() -> None:
+    primary = _resolved(
+        "openai-chat",
+        "https://primary.example/v1",
+        settings=_request_config({"temperature": 0.9, "max_tokens": 111}),
+    )
+    fallback = _resolved(
+        "openai-chat",
+        "https://fallback.example/v1",
+        settings=_request_config({"temperature": 0.1, "max_tokens": 222}),
+    )
+    fallback = ResolvedModel(
+        ref=ModelRef("fallback-main", "fallback-model"),
+        provider=fallback.provider,
+        base_url=fallback.base_url,
+        runtime_kind=fallback.runtime_kind,
+        settings=fallback.settings,
+        credential=fallback.credential,
+    )
+    captured: dict[str, object] = {}
+
+    def fallback_transport(payload, api_key):
+        del api_key
+        captured["payload"] = payload
+        return {"choices": [{"message": {"content": "fallback-ok"}}]}
+
+    gateway = gateway_from_route(primary, fallback_model=fallback)
+    try:
+        primary_gateway = gateway._primary
+        fallback_gateway = gateway._fallback
+        if hasattr(primary_gateway, "_gateway"):
+            primary_gateway = primary_gateway._gateway
+        if hasattr(fallback_gateway, "_gateway"):
+            fallback_gateway = fallback_gateway._gateway
+        primary_gateway._transport = lambda payload, api_key, **_: (_ for _ in ()).throw(
+            ModelCallError(
+                "network down",
+                details=ModelFailureDetails(category="network", retryable=True),
+            )
+        )
+        fallback_gateway._transport = fallback_transport
+        response = gateway.generate(
+            ModelInvocation(
+                [{"role": "user", "content": "hi"}],
+                [],
+                primary.settings,
+            )
+        )
+        assert response.content == "fallback-ok"
+        payload = captured["payload"]
+        assert payload["temperature"] == 0.1
+        assert payload["max_tokens"] == 222
+        assert payload["model"] == "fallback-model"
     finally:
         gateway.close()
 

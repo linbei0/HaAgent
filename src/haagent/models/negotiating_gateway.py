@@ -295,6 +295,14 @@ class NegotiatingModelGateway:
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
         telemetry_sink=None,
     ) -> ModelResponse:
+        # 每个目标 gateway 自行绑定 settings，避免 primary options 泄漏到 chat/备用模型。
+        target_settings = getattr(gateway, "model_settings", None)
+        if target_settings is not None and target_settings is not invocation.settings:
+            invocation = ModelInvocation(
+                messages=invocation.messages,
+                tool_schemas=invocation.tool_schemas,
+                settings=target_settings,
+            )
         kwargs = {
             "event_sink": event_sink,
             "cancellation_token": cancellation_token,

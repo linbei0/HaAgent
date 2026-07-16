@@ -68,11 +68,42 @@ def test_explicit_null_models_options_and_variants_are_rejected() -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["token", "access_token"],
+    [
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "auth_token",
+        "session_token",
+        "bearer_token",
+        "oauth_token",
+        "custom_token",
+        "auth_tokens",
+        "session_tokens",
+        "access_tokens",
+    ],
 )
 def test_credential_token_fields_are_rejected(field: str) -> None:
     with pytest.raises(ModelOptionsError, match="secret"):
         validate_options_object({field: "credential"}, path="options")
+
+
+def test_nested_credential_token_fields_are_rejected() -> None:
+    with pytest.raises(ModelOptionsError, match="secret"):
+        validate_options_object(
+            {"auth": {"session_token": "x"}},
+            path="options",
+        )
+    with pytest.raises(ModelOptionsError, match="secret"):
+        validate_options_object(
+            {"providers": [{"id_token": "x"}]},
+            path="options",
+        )
+    with pytest.raises(ModelOptionsError, match="secret"):
+        validate_options_object(
+            {"items": [[{"session_token": "secret"}]]},
+            path="options",
+        )
 
 
 def test_model_settings_resolve_and_empty() -> None:

@@ -7,6 +7,7 @@ src/haagent/multi_agent/runtime.py - 进程内 worker 调度运行时
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -99,11 +100,12 @@ class MultiAgentRuntime:
         self.tool_registry = tool_registry
         self.mcp_runtime = mcp_runtime
         self.worker_max_turns = worker_max_turns
-        self.environ = environ
+        # 未显式注入时继承进程环境；空映射会让 env 凭据连接在 worker 中解析失败。
+        self.environ = os.environ if environ is None else environ
         self.gateway_factory = gateway_factory
         self.model_runtime = ModelRuntime.load(
             config_dir=user_config_dir(),
-            environ=environ or {},
+            environ=self.environ,
             gateway_builder=gateway_factory,
         )
         self.parent_task_step_id = parent_task_step_id

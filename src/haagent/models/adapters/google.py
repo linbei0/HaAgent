@@ -357,7 +357,8 @@ class GoogleGeminiGateway:
             payload["tools"] = _gemini_tool_schemas(tool_schemas)
         if event_sink is not None:
             payload["stream"] = True
-        payload = merge_provider_payload(payload, invocation.settings.options)
+        # settings 以 gateway 绑定为准；fallback 目标不得继承其他模型的 options。
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

@@ -180,3 +180,55 @@ def test_local_to_remote_fallback_requires_consent_and_fallback_capabilities() -
     incapable = _ok("incapable", caps=_caps(tools="unsupported"))
     with pytest.raises(ModelCallError, match="primary missing.*fallback missing"):
         _invoke(NegotiatingModelGateway(primary=primary, fallback=incapable), [{"name": "shell"}])
+
+
+@dataclass
+class CapturingGateway(StubGateway):
+    last_settings: ModelSettings | None = None
+
+    def generate(
+        self,
+        invocation: ModelInvocation,
+        event_sink: Callable[[str], None] | None = None,
+        **kwargs: object,
+    ) -> ModelResponse:
+        self.last_settings = invocation.settings
+        return super().generate(invocation, event_sink=event_sink, **kwargs)
+
+
+def test_protocol_and_model_fallback_rebind_target_settings() -> None:
+    primary_settings = ModelSettings.from_options({"reasoning": {"effort": "high"}})
+    chat_settings = ModelSettings.empty()
+    fallback_settings = ModelSettings.from_options({"temperature": 0.1})
+
+    primary = CapturingGateway(
+        "responses",
+        _caps(protocols={"responses", "chat_completions"}),
+        ModelCallError(
+            "not implemented",
+            details=ModelFailureDetails(category="client", status_code=501),
+        ),
+    )
+    primary.model_settings = primary_settings
+    chat = CapturingGateway("chat", _caps(protocols={"chat_completions"}), ModelResponse(content="chat"))
+    chat.model_settings = chat_settings
+    fallback = CapturingGateway("fallback", _caps(), ModelResponse(content="fallback"))
+    fallback.model_settings = fallback_settings
+
+    protocol_gateway = NegotiatingModelGateway(primary=primary, primary_chat=chat)
+    protocol_gateway.generate(
+        ModelInvocation([], [], primary_settings),
+    )
+    assert chat.last_settings is chat_settings
+    assert chat.last_settings.options == {}
+
+    failing_primary = CapturingGateway(
+        "primary",
+        _caps(),
+        ModelCallError("down", details=ModelFailureDetails(category="network", retryable=True)),
+    )
+    failing_primary.model_settings = primary_settings
+    model_gateway = NegotiatingModelGateway(primary=failing_primary, fallback=fallback)
+    model_gateway.generate(ModelInvocation([], [], primary_settings))
+    assert fallback.last_settings is fallback_settings
+    assert fallback.last_settings.options == {"temperature": 0.1}
