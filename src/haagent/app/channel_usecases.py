@@ -30,8 +30,8 @@ from haagent.channels.settings import (
     save_channel_settings,
 )
 from haagent.channels.state import ChannelStateStore
-from haagent.models.credentials import KEYRING_SERVICE_NAME, CredentialStore, KeyringCredentialStore
-from haagent.models.model_connections import user_config_dir
+from haagent.models.config.connections import user_config_dir
+from haagent.models.config.credentials import KEYRING_SERVICE_NAME, CredentialStore, KeyringCredentialStore
 
 ProtocolFactory = Callable[..., Any]
 

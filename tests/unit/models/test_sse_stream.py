@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 
-from haagent.models import transport
+from haagent.models.adapters import transport
 
 
 def test_iter_sse_events_yields_before_response_is_exhausted() -> None:

@@ -28,6 +28,7 @@ from haagent.app.assistant_types import (
     ScheduleUpdateRequest,
 )
 from haagent.memory import CandidateEvidence, MemoryCandidate, MemoryRecord
+from haagent.models.model_ref import ModelChoice, ModelRef
 from haagent.runtime.events import (
     ApprovalStateEvent,
     AssistantDeltaEvent,
@@ -184,10 +185,25 @@ class FakeModels:
     def switch_current_session_selection(self, request):
         return self._owner._switch_current_session_model_selection(request)
 
-    def list_model_variants(self, connection_id, model_id):
-        if self._owner.model_variant_error is not None:
-            raise self._owner.model_variant_error
-        return list(self._owner.model_variants.get((connection_id, model_id), []))
+    def list_choices(self):
+        providers = {provider.id: provider for provider in self._owner.catalog_providers}
+        choices = []
+        for connection in self._owner.model_connections:
+            provider = providers.get(connection.provider_id)
+            if provider is None:
+                continue
+            for model in provider.models:
+                choices.append(
+                    ModelChoice(
+                        ref=ModelRef(connection.id, model.id),
+                        connection_name=connection.name,
+                        provider_name=connection.provider_name,
+                        model_name=model.name,
+                        variants=tuple(self._owner.model_variants.get((connection.id, model.id), [])),
+                        diagnostics=((str(self._owner.model_variant_error),) if self._owner.model_variant_error else ()),
+                    )
+                )
+        return choices
 
 
 class FakeSkills:

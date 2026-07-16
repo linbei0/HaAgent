@@ -7,9 +7,9 @@ tests/unit/models/test_retry.py - 统一重试内核测试
 import httpx
 import pytest
 
-from haagent.models import transport
+from haagent.models.adapters import transport
 from haagent.models.http_transport import ModelHttpTransport
-from haagent.models.transport import _invoke_transport
+from haagent.models.adapters.transport import _invoke_transport
 from haagent.models.types import ModelFailureDetails
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.retry import (

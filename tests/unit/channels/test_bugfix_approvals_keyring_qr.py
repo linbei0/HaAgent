@@ -25,7 +25,7 @@ from haagent.channels.runtime import ChannelGatewayRuntime
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.types import ChannelAddress
 from tests.support.model_credentials import FakeCredentialStore
-from haagent.models.gateway_registry import gateway_from_profile
+from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 from haagent.runtime.session.agent import AgentSession
 
@@ -156,7 +156,7 @@ def test_list_instances_surfaces_credential_store_error(tmp_path: Path) -> None:
             workspace_root=workspace,
             runs_root=workspace / ".runs",
             environ={},
-            gateway_factory=gateway_from_profile,
+            gateway_factory=gateway_from_resolved,
             session_factory=AgentSession,
             max_turns=4,
             enable_web=False,
@@ -228,7 +228,7 @@ def test_qr_login_failed_status_closes_client(tmp_path: Path) -> None:
             workspace_root=workspace,
             runs_root=workspace / ".runs",
             environ={},
-            gateway_factory=gateway_from_profile,
+            gateway_factory=gateway_from_resolved,
             session_factory=AgentSession,
             max_turns=4,
             enable_web=False,
@@ -262,7 +262,7 @@ def test_qr_login_restart_closes_previous_client(tmp_path: Path) -> None:
             workspace_root=workspace,
             runs_root=workspace / ".runs",
             environ={},
-            gateway_factory=gateway_from_profile,
+            gateway_factory=gateway_from_resolved,
             session_factory=AgentSession,
             max_turns=4,
             enable_web=False,
@@ -295,7 +295,7 @@ def test_cancel_weixin_qr_login_closes_client(tmp_path: Path) -> None:
             workspace_root=workspace,
             runs_root=workspace / ".runs",
             environ={},
-            gateway_factory=gateway_from_profile,
+            gateway_factory=gateway_from_resolved,
             session_factory=AgentSession,
             max_turns=4,
             enable_web=False,

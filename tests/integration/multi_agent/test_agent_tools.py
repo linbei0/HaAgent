@@ -19,7 +19,9 @@ from haagent.tools.router import ToolRouter
 class _FileReadGateway:
     provider_name = "fake"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if not any(message.get("role") == "tool" for message in messages):
             return ModelResponse(
                 content="read README",
@@ -34,7 +36,9 @@ class _NeverFinishGateway:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         paths = [".", "tests", "src", "docs", "examples", "src/haagent", "tests/unit"]
         path = paths[self.calls % len(paths)]
         self.calls += 1
@@ -50,7 +54,9 @@ class _SequenceGateway:
     def __init__(self, *responses: ModelResponse) -> None:
         self._responses = list(responses)
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if not self._responses:
             return ModelResponse(content="", tool_calls=[])
         return self._responses.pop(0)

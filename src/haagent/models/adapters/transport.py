@@ -1,5 +1,5 @@
 """
-src/haagent/models/transport.py - 模型网关 HTTP/SSE 传输与共享解析
+src/haagent/models/adapters/transport.py - 模型网关 HTTP/SSE 传输与共享解析
 
 提供 endpoint 规范化、HTTP 请求、SSE 解析和跨厂商共用的小工具。
 """

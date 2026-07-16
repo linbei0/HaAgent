@@ -15,8 +15,8 @@ import pytest
 
 from haagent.models.gateway_registry import gateway_from_route
 from haagent.models.http_transport import ModelHttpTransport, close_model_gateway
-from haagent.models.model_connections import ProviderProfile
-from haagent.models.model_options import empty_resolved_config
+from haagent.models.model_ref import ModelInvocation, ModelRef, ResolvedCredential, ResolvedModel
+from haagent.models.model_settings import ModelSettings
 from haagent.models.types import ModelCallError
 
 
@@ -76,21 +76,14 @@ def local_chat_server():
         thread.join(timeout=2.0)
 
 
-def _local_chat_profile(base_url: str) -> ProviderProfile:
-    return ProviderProfile(
-        name="local:chat",
+def _local_chat_profile(base_url: str) -> ResolvedModel:
+    return ResolvedModel(
+        ref=ModelRef("local", "local-model"),
         provider="openai-chat",
-        model="local-model",
         base_url=base_url,
-        api_key_env="OPENAI_API_KEY",
-        credential_source="keyring",
-        credential_source_used="direct",
-        api_key="test-key",
-        request_config=empty_resolved_config(
-            connection_id="local",
-            model_id="local-model",
-        ),
         runtime_kind="remote",
+        settings=ModelSettings.empty(),
+        credential=ResolvedCredential("test-key", "OPENAI_API_KEY", "env", "env"),
     )
 
 
@@ -99,8 +92,8 @@ def test_shared_route_reuses_http11_connection(local_chat_server) -> None:
     profile = _local_chat_profile(base_url)
     gateway = gateway_from_route(profile)
     try:
-        first = gateway.generate([{"role": "user", "content": "one"}], [])
-        second = gateway.generate([{"role": "user", "content": "two"}], [])
+        first = gateway.generate(ModelInvocation([{"role": "user", "content": "one"}], [], gateway.model_settings))
+        second = gateway.generate(ModelInvocation([{"role": "user", "content": "two"}], [], gateway.model_settings))
         assert first.content == "ok"
         assert second.content == "ok"
         assert server.accepted_connection_count == 1
@@ -115,7 +108,7 @@ def test_closed_gateway_rejects_later_requests(local_chat_server) -> None:
     close_model_gateway(gateway)
     close_model_gateway(gateway)
     with pytest.raises(ModelCallError):
-        gateway.generate([{"role": "user", "content": "after close"}], [])
+        gateway.generate(ModelInvocation([{"role": "user", "content": "after close"}], [], gateway.model_settings))
     assert server.accepted_connection_count == 0
 
 

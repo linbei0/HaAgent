@@ -89,7 +89,7 @@ class ChannelGatewayRuntime:
         """读取 bot token；凭据库故障显式抛错，不伪装成 missing credential。"""
         if self._credential_store is None:
             return ""
-        from haagent.models.credentials import KEYRING_SERVICE_NAME, CredentialError
+        from haagent.models.config.credentials import KEYRING_SERVICE_NAME, CredentialError
 
         try:
             return self._credential_store.get_password(KEYRING_SERVICE_NAME, item.credential_username) or ""

@@ -340,7 +340,7 @@ def run_schedule_worker(
     """CLI/系统服务入口：打开 store，运行 once 或 forever。"""
     from pathlib import Path
 
-    from haagent.models.model_connections import user_config_dir
+    from haagent.models.config.connections import user_config_dir
     from haagent.scheduling.executor import ScheduledRunExecutor
 
     path = Path(db_path) if db_path is not None else user_config_dir() / "schedules.sqlite3"

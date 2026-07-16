@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from haagent.models.credentials import CredentialError
+from haagent.models.config.credentials import CredentialError
 
 
 class FakeCredentialStore:

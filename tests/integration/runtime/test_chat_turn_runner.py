@@ -20,7 +20,9 @@ from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 class _Gateway:
     provider_name = "test"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         return ModelResponse("done", [])
 
 

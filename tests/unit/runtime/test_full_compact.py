@@ -20,8 +20,8 @@ class RecordingGateway:
         self.response = response
         self.calls: list[dict[str, object]] = []
 
-    def generate(self, messages, tool_schemas):
-        self.calls.append({"messages": copy.deepcopy(messages), "tool_schemas": copy.deepcopy(tool_schemas)})
+    def generate(self, invocation, **kwargs):
+        self.calls.append({"messages": copy.deepcopy(invocation.messages), "tool_schemas": copy.deepcopy(invocation.tool_schemas)})
         if isinstance(self.response, Exception):
             raise self.response
         return self.response

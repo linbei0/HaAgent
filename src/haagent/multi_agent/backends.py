@@ -80,7 +80,7 @@ def _subprocess_config(runtime: Any, worker: Any, prompt: str, result_path: Path
         "prompt": prompt,
         "result_path": str(result_path),
         "session_id": session.session_id,
-        "model_profile": session.model_profile_name,
+        "model_profile": session.model_ref.connection_id if session.model_ref else None,
         "max_turns": session.max_turns,
         "enable_web": session.enable_web,
         "allowed_tools": session._allowed_tools_override,

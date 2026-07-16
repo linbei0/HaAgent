@@ -15,7 +15,7 @@ from haagent.context.compression.messages import compress_historical_tool_messag
 from haagent.context.builder import ContextBuildError, ContextBuilder
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelCallError, ModelGateway
-from haagent.models.model_connections import user_config_dir
+from haagent.models.config.connections import user_config_dir
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.episodes.writer import EpisodeWriter

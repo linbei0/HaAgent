@@ -10,6 +10,7 @@ import asyncio
 from types import SimpleNamespace
 
 from haagent.app.assistant_types import AssistantModelConnection
+from haagent.models.model_ref import ModelChoice, ModelRef
 from haagent.tui.overlays.connections import ConnectionCenterOverlay, ConnectionSetupWizard
 from haagent.tui.overlays.models import ModelSwitchOverlay, ModelSwitchState
 from textual.app import App
@@ -102,24 +103,13 @@ def test_connection_center_header_guides_new_connection_for_all_providers() -> N
 
 
 def test_model_switch_state_expands_catalog_models_for_each_connection() -> None:
-    connections = [
-        _connection("requesty-personal", "personal", "requesty"),
-        _connection("requesty-work", "work", "requesty"),
-    ]
-    providers = [
-        SimpleNamespace(
-            id="requesty",
-            name="Requesty",
-            models=[
-                SimpleNamespace(id="openai/gpt-5.2-chat", name="GPT 5.2 Chat"),
-                SimpleNamespace(id="anthropic/claude-sonnet-4.5", name="Claude Sonnet 4.5"),
-            ],
-        )
-    ]
+    state = ModelSwitchState(choices=[
+        _choice(connection, model)
+        for connection in ("requesty-personal", "requesty-work")
+        for model in ("openai/gpt-5.2-chat", "anthropic/claude-sonnet-4.5")
+    ])
 
-    state = ModelSwitchState(connections=connections, providers=providers)
-
-    assert [(row.connection_id, row.model) for row in state.visible_rows] == [
+    assert [(row.ref.connection_id, row.ref.model) for row in state.visible_rows] == [
         ("requesty-personal", "openai/gpt-5.2-chat"),
         ("requesty-personal", "anthropic/claude-sonnet-4.5"),
         ("requesty-work", "openai/gpt-5.2-chat"),
@@ -130,19 +120,8 @@ def test_model_switch_state_expands_catalog_models_for_each_connection() -> None
 
 
 def test_model_switch_state_renders_only_a_small_visible_window() -> None:
-    providers = [
-        SimpleNamespace(
-            id="requesty",
-            name="Requesty",
-            models=[
-                SimpleNamespace(id=f"model-{index:03d}", name=f"Model {index:03d}")
-                for index in range(80)
-            ],
-        )
-    ]
     state = ModelSwitchState(
-        connections=[_connection("requesty-personal", "personal", "requesty")],
-        providers=providers,
+        choices=[_choice("requesty-personal", f"model-{index:03d}") for index in range(80)],
     )
 
     rendered = state.render()
@@ -159,17 +138,7 @@ def test_model_switch_state_renders_only_a_small_visible_window() -> None:
 
 def test_model_switch_overlay_ignores_escape_after_it_is_already_closed() -> None:
     async def run() -> None:
-        overlay = ModelSwitchOverlay(
-            [_connection("requesty-personal", "personal", "requesty")],
-            [
-                SimpleNamespace(
-                    id="requesty",
-                    name="Requesty",
-                    models=[SimpleNamespace(id="model-001", name="Model 001")],
-                )
-            ],
-            variant_lookup=lambda _connection_id, _model_id: [],
-        )
+        overlay = ModelSwitchOverlay([_choice("requesty-personal", "model-001")])
         app = App()
         async with app.run_test(size=(80, 24)) as pilot:
             app.push_screen(overlay)
@@ -190,6 +159,15 @@ class _FakeKeyEvent:
 
     def stop(self) -> None:
         self.stopped = True
+
+
+def _choice(connection_id: str, model: str) -> ModelChoice:
+    return ModelChoice(
+        ref=ModelRef(connection_id, model),
+        connection_name="personal" if connection_id.endswith("personal") else "work",
+        provider_name="Requesty",
+        model_name=model,
+    )
 
 
 def _connection(connection_id: str, name: str, provider_id: str) -> AssistantModelConnection:

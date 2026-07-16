@@ -13,6 +13,8 @@ import pytest
 
 from haagent.models.capabilities import ModelCapabilities
 from haagent.models.negotiating_gateway import NegotiatingModelGateway, RouteFallbackEvent
+from haagent.models.model_ref import ModelInvocation
+from haagent.models.model_settings import ModelSettings
 from haagent.models.types import (
     ModelCallError,
     ModelFailureDetails,
@@ -31,6 +33,7 @@ class StubGateway:
     calls: int = 0
 
     provider_name = "stub"
+    model_settings = ModelSettings.empty()
 
     def capabilities(self) -> ModelCapabilities:
         return self.model_capabilities
@@ -40,8 +43,7 @@ class StubGateway:
 
     def generate(
         self,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
         event_sink: Callable[[str], None] | None = None,
         **_: object,
     ) -> ModelResponse:
@@ -67,6 +69,10 @@ def _ok(name: str, *, caps: ModelCapabilities | None = None) -> StubGateway:
     return StubGateway(name, caps or _caps(), ModelResponse(content=name))
 
 
+def _invoke(gateway, tools=None, **kwargs):
+    return gateway.generate(ModelInvocation([], tools or [], ModelSettings.empty()), **kwargs)
+
+
 def test_explicit_missing_capability_uses_fallback() -> None:
     primary = _ok("primary", caps=_caps(tools="unsupported"))
     fallback = _ok("fallback")
@@ -79,7 +85,7 @@ def test_explicit_missing_capability_uses_fallback() -> None:
         route_event_sink=events.append,
     )
 
-    response = gateway.generate([], [{"name": "file_read"}])
+    response = _invoke(gateway, [{"name": "file_read"}])
 
     assert response.content == "fallback"
     assert primary.calls == 0
@@ -92,7 +98,7 @@ def test_unknown_capability_does_not_trigger_fallback() -> None:
     fallback = _ok("fallback")
     gateway = NegotiatingModelGateway(primary=primary, fallback=fallback)
 
-    assert gateway.generate([], [{"name": "file_read"}]).content == "primary"
+    assert _invoke(gateway, [{"name": "file_read"}]).content == "primary"
     assert fallback.calls == 0
 
 
@@ -113,7 +119,7 @@ def test_responses_unsupported_status_falls_back_to_chat_before_output() -> None
         route_event_sink=events.append,
     )
 
-    assert gateway.generate([], []).content == "chat"
+    assert _invoke(gateway).content == "chat"
     assert events[0].kind == "model_protocol_fallback"
 
 
@@ -131,7 +137,7 @@ def test_retry_exhausted_transient_failure_uses_fallback(details: ModelFailureDe
     fallback = _ok("fallback")
     gateway = NegotiatingModelGateway(primary=primary, fallback=fallback)
 
-    assert gateway.generate([], []).content == "fallback"
+    assert _invoke(gateway).content == "fallback"
 
 
 def test_partial_output_auth_and_cancellation_never_use_fallback() -> None:
@@ -146,17 +152,17 @@ def test_partial_output_auth_and_cancellation_never_use_fallback() -> None:
         delta="started",
     )
     with pytest.raises(ModelCallError, match="interrupted"):
-        NegotiatingModelGateway(primary=partial, fallback=fallback).generate([], [], event_sink=lambda _: None)
+        _invoke(NegotiatingModelGateway(primary=partial, fallback=fallback), event_sink=lambda _: None)
     auth = StubGateway(
         "auth",
         _caps(),
         ModelCallError("unauthorized", details=ModelFailureDetails(category="auth", status_code=401)),
     )
     with pytest.raises(ModelCallError, match="unauthorized"):
-        NegotiatingModelGateway(primary=auth, fallback=fallback).generate([], [])
+        _invoke(NegotiatingModelGateway(primary=auth, fallback=fallback))
     cancelled = StubGateway("cancelled", _caps(), RunCancelled("cancelled"))
     with pytest.raises(RunCancelled):
-        NegotiatingModelGateway(primary=cancelled, fallback=fallback).generate([], [])
+        _invoke(NegotiatingModelGateway(primary=cancelled, fallback=fallback))
     assert fallback.calls == 0
 
 
@@ -164,16 +170,13 @@ def test_local_to_remote_fallback_requires_consent_and_fallback_capabilities() -
     primary = _ok("primary", caps=_caps(tools="unsupported"))
     remote = _ok("remote")
     with pytest.raises(ModelCallError, match="cloud fallback consent"):
-        NegotiatingModelGateway(
+        _invoke(NegotiatingModelGateway(
             primary=primary,
             fallback=remote,
             primary_runtime_kind="ollama",
             fallback_runtime_kind="remote",
-        ).generate([], [{"name": "shell"}])
+        ), [{"name": "shell"}])
 
     incapable = _ok("incapable", caps=_caps(tools="unsupported"))
     with pytest.raises(ModelCallError, match="primary missing.*fallback missing"):
-        NegotiatingModelGateway(primary=primary, fallback=incapable).generate(
-            [],
-            [{"name": "shell"}],
-        )
+        _invoke(NegotiatingModelGateway(primary=primary, fallback=incapable), [{"name": "shell"}])

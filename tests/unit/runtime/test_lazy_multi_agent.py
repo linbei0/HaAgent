@@ -18,7 +18,9 @@ from haagent.runtime.orchestration.state import RunStatus
 class _DoneGateway:
     provider_name = "lazy-agent-test"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         del messages, tool_schemas
         return ModelResponse("done without workers", [])
 

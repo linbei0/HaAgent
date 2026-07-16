@@ -14,9 +14,9 @@ from haagent.models.model_options import (
     merge_provider_payload,
     parse_connection_models,
     redact_model_options,
-    resolve_model_request_config,
     validate_options_object,
 )
+from haagent.models.model_settings import ModelSettings
 
 
 def test_deep_merge_objects_recursive_scalars_and_arrays_replace() -> None:
@@ -75,13 +75,8 @@ def test_credential_token_fields_are_rejected(field: str) -> None:
         validate_options_object({field: "credential"}, path="options")
 
 
-def test_resolve_unconfigured_and_missing_variant_errors() -> None:
-    empty = resolve_model_request_config(
-        connection_id="c1",
-        model_id="m1",
-        variant=None,
-        model_config=None,
-    )
+def test_model_settings_resolve_and_empty() -> None:
+    empty = ModelSettings.empty()
     assert empty.configured is False
     assert empty.options == {}
 
@@ -94,23 +89,9 @@ def test_resolve_unconfigured_and_missing_variant_errors() -> None:
         },
         path="models",
     )
-    resolved = resolve_model_request_config(
-        connection_id="c1",
-        model_id="m1",
-        variant="fast",
-        model_config=models["m1"],
-    )
+    resolved = ModelSettings.from_options(models["m1"].options).resolve(models["m1"].variants["fast"])
     assert resolved.configured is True
     assert resolved.options == {"temperature": 0.9}
-    assert resolved.variant == "fast"
-
-    with pytest.raises(ModelOptionsError, match="not available"):
-        resolve_model_request_config(
-            connection_id="c1",
-            model_id="m1",
-            variant="gone",
-            model_config=models["m1"],
-        )
 
 
 def test_merge_provider_payload_skips_empty_and_blocks_reserved() -> None:
@@ -129,15 +110,9 @@ def test_audit_summary_includes_digest_and_key_paths() -> None:
         {"m1": {"options": {"temperature": 0.2, "reasoning": {"effort": "low"}}}},
         path="models",
     )
-    resolved = resolve_model_request_config(
-        connection_id="c1",
-        model_id="m1",
-        variant=None,
-        model_config=models["m1"],
-    )
-    summary = resolved.audit_summary()
+    resolved = ModelSettings.from_options(models["m1"].options)
+    summary = resolved.to_traceable_dict()
     assert summary["configured"] is True
-    assert summary["connection_id"] == "c1"
     assert summary["options_digest"]
     assert "temperature" in summary["options_key_paths"]
     assert redact_model_options({"temperature": 0.2}) == {"temperature": 0.2}

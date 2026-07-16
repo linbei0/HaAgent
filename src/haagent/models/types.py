@@ -7,9 +7,10 @@ src/haagent/models/types.py - 模型网关协议与公共 DTO
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol
 
 from haagent.models.capabilities import ModelCapabilities
+from haagent.models.model_ref import ModelInvocation
 from haagent.models.telemetry import ModelTransportEvent
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.retry import RetryEvent, RetryFailure
@@ -91,8 +92,14 @@ class ModelResponse:
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: ModelUsage | None = None
-    # 前端不可见的 provider 续轮状态（如 reasoning/thinking）；不得进入主对话展示。
-    provider_continuation: dict[str, Any] | None = None
+    # runtime 只保存和透传；provider adapter 独占 payload 语义。
+    provider_turn_state: "ProviderTurnState | None" = None
+
+
+@dataclass(frozen=True)
+class ProviderTurnState:
+    provider: str
+    payload: Mapping[str, Any]
 
 
 class ModelGateway(Protocol):
@@ -100,8 +107,8 @@ class ModelGateway(Protocol):
 
     def generate(
         self,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
+        *,
         event_sink: Callable[[str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,

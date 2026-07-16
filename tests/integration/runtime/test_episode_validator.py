@@ -82,7 +82,9 @@ class OneShotGateway:
     def __init__(self, response: ModelResponse) -> None:
         self._response = response
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         return self._response
 
 

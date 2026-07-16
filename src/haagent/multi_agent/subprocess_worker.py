@@ -7,6 +7,7 @@ src/haagent/multi_agent/subprocess_worker.py - subprocess worker 入口
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -16,14 +17,9 @@ from haagent.models.fake import FakeModelGateway
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.types import McpSettings
 from haagent.models.types import ModelResponse, ToolCall
-from haagent.models.gateway_registry import gateway_from_profile
-from haagent.models.model_connections import (
-    ModelSelection,
-    load_active_model_selection,
-    load_model_selection_profile,
-    load_providers_config_snapshot,
-    user_config_dir,
-)
+from haagent.models.config.connections import user_config_dir
+from haagent.models.model_ref import ModelRef
+from haagent.models.model_runtime import ModelRuntime
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.execution.retry import RetryController
 from haagent.runtime.settings import load_runtime_settings
@@ -66,7 +62,7 @@ def run_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         workspace_root=Path(str(payload["workspace_root"])),
         runs_root=Path(str(payload["runs_root"])),
         model_gateway=_build_gateway(payload),
-        model_profile_name=_optional_str(payload.get("model_profile")),
+        model_ref=_build_model_ref(payload),
         max_turns=_optional_int(payload.get("max_turns")),
         session_id=str(payload["session_id"]),
         memory_extraction_enabled=False,
@@ -112,13 +108,17 @@ def _build_gateway(payload: dict[str, Any]):
     model_profile = _optional_str(payload.get("model_profile"))
     if model_profile is None:
         raise ValueError("subprocess worker requires a serializable gateway or model_profile")
-    active_selection = load_active_model_selection(config_dir=user_config_dir())
-    selection = ModelSelection(connection_id=model_profile, model=active_selection.model)
-    snapshot = load_providers_config_snapshot(user_config_dir() / "providers.json")
-    return gateway_from_profile(
-        load_model_selection_profile(selection, snapshot=snapshot),
-        retry_controller=RetryController(load_runtime_settings().model_retry),
-    )
+    runtime = ModelRuntime.load(config_dir=user_config_dir(), environ=os.environ)
+    active = runtime.selection_store.load_active()
+    return runtime.create_gateway(ModelRef(model_profile, active.model))
+
+
+def _build_model_ref(payload: dict[str, Any]) -> ModelRef | None:
+    model_profile = _optional_str(payload.get("model_profile"))
+    if model_profile is None:
+        return None
+    runtime = ModelRuntime.load(config_dir=user_config_dir(), environ=os.environ)
+    return ModelRef(model_profile, runtime.selection_store.load_active().model)
 
 
 def _write_result(path: Path, payload: dict[str, Any]) -> None:

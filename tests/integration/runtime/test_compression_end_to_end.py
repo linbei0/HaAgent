@@ -21,7 +21,9 @@ class LongFileGateway:
         self.turn = 0
         self.model_inputs: list[str] = []
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.turn += 1
         self.model_inputs.append("\n".join(str(message.get("content", "")) for message in messages))
         if self.turn == 1:

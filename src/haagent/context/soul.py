@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from haagent.models.model_connections import user_config_dir
+from haagent.models.config.connections import user_config_dir
 from haagent.runtime.settings import SoulSettings
 
 

@@ -61,48 +61,6 @@ class ModelParameterConfig:
     variants: dict[str, dict[str, Any]]
 
 
-@dataclass(frozen=True)
-class ResolvedModelRequestConfig:
-    """绑定到当前 ModelSelection 的不可变有效请求参数。"""
-
-    connection_id: str
-    model_id: str
-    variant: str | None
-    configured: bool
-    options: dict[str, Any]
-    options_digest: str
-
-    def audit_summary(self) -> dict[str, Any]:
-        """episode 可复现字段：选择状态、digest 与脱敏参数摘要。"""
-
-        redacted = redact_model_options(self.options)
-        return {
-            "connection_id": self.connection_id,
-            "model": self.model_id,
-            "variant": self.variant,
-            "configured": self.configured,
-            "options_digest": self.options_digest,
-            "options_key_paths": sorted(_json_key_paths(redacted)),
-            "options_summary": redacted,
-        }
-
-
-def empty_resolved_config(
-    *,
-    connection_id: str,
-    model_id: str,
-    variant: str | None = None,
-) -> ResolvedModelRequestConfig:
-    return ResolvedModelRequestConfig(
-        connection_id=connection_id,
-        model_id=model_id,
-        variant=variant,
-        configured=False,
-        options={},
-        options_digest=options_digest({}),
-    )
-
-
 def deep_merge_options(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
     """object 递归合并；scalar 与 array 整体替换。null 是显式值，不表示删除。"""
 
@@ -204,43 +162,6 @@ def parse_connection_models(
     return result
 
 
-def resolve_model_request_config(
-    *,
-    connection_id: str,
-    model_id: str,
-    variant: str | None,
-    model_config: ModelParameterConfig | None,
-) -> ResolvedModelRequestConfig:
-    """按 空对象 <- options <- variant 合并；未配置时 configured=false。"""
-
-    if model_config is None:
-        if variant is not None:
-            raise ModelOptionsError(
-                f"model variant is not available: connection={connection_id} "
-                f"model={model_id} variant={variant}",
-            )
-        return empty_resolved_config(connection_id=connection_id, model_id=model_id)
-
-    if variant is not None:
-        if variant not in model_config.variants:
-            raise ModelOptionsError(
-                f"model variant is not available: connection={connection_id} "
-                f"model={model_id} variant={variant}",
-            )
-        merged = deep_merge_options(model_config.options, model_config.variants[variant])
-    else:
-        merged = dict(model_config.options)
-
-    return ResolvedModelRequestConfig(
-        connection_id=connection_id,
-        model_id=model_id,
-        variant=variant,
-        configured=bool(model_config.options or model_config.variants),
-        options=merged,
-        options_digest=options_digest(merged),
-    )
-
-
 def merge_provider_payload(
     payload: dict[str, Any],
     options: Mapping[str, Any],
@@ -270,8 +191,7 @@ def _reject_reserved_and_secrets(
         normalized_key = str(key).replace("-", "_").casefold()
         if (
             _SECRET_FIELD_PATTERN.search(str(key))
-            or normalized_key == "token"
-            or normalized_key.endswith("_token")
+            or normalized_key in {"token", "access_token", "refresh_token"}
         ):
             raise ModelOptionsError(f"{key_path} looks like a secret field and is not allowed")
         if isinstance(value, dict):

@@ -24,7 +24,9 @@ class ScriptedGateway:
         self._steps = steps
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.calls.append(
             {

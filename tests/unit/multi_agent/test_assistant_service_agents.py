@@ -5,11 +5,8 @@ tests/unit/multi_agent/test_assistant_service_agents.py - 服务层 worker 状�
 """
 
 from pathlib import Path
-from types import SimpleNamespace
-
-from haagent.app import session_usecases, workspace_usecases
+from haagent.app import workspace_usecases
 from haagent.app.assistant_service import AssistantService
-from haagent.models.model_connections import ModelSelection
 from haagent.multi_agent.team_store import TeamStore, WorkerRecord
 
 
@@ -61,27 +58,12 @@ def test_assistant_service_lists_agents_for_current_session(tmp_path: Path, monk
             status="completed",
         ),
     )
-    monkeypatch.setattr(
-        session_usecases,
-        "load_active_model_selection",
-        lambda **kwargs: ModelSelection("test", "test-model"),
-    )
-    monkeypatch.setattr(
-        session_usecases,
-        "load_model_selection_profile",
-        lambda selection, **kwargs: SimpleNamespace(
-            name=selection.connection_id,
-            provider="openai-chat",
-            model=selection.model,
-            base_url="https://example.test",
-        ),
-    )
     service = AssistantService(
         workspace_root=tmp_path,
         gateway_factory=lambda profile: object(),
         session_cls=_Session,  # type: ignore[arg-type]
     )
-    service.sessions.create()
+    service._context.session = _Session(workspace_root=tmp_path, runs_root=tmp_path / ".runs")
 
     agents = service.workspace.list_agents()
 

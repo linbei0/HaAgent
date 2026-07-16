@@ -13,34 +13,28 @@ import pytest
 
 from haagent.models.catalog import ModelCatalogProvider
 from haagent.models.fake import FakeModelGateway
-from haagent.models.anthropic import AnthropicMessagesGateway
-from haagent.models.transport import DEFAULT_CHAT_COMPLETIONS_ENDPOINT, DEFAULT_RESPONSES_ENDPOINT
-from haagent.models.google import GoogleGeminiGateway
+from haagent.models.adapters.anthropic import AnthropicMessagesGateway
+from haagent.models.adapters.google import GoogleGeminiGateway
+from haagent.models.adapters.openai_chat import OpenAIChatCompletionsGateway
+from haagent.models.adapters.openai_responses import OpenAIResponsesGateway
+from haagent.models.adapters.transport import DEFAULT_CHAT_COMPLETIONS_ENDPOINT, DEFAULT_RESPONSES_ENDPOINT
 from haagent.models.types import ModelCallError, ModelFailureDetails, ModelResponse, ModelUsage, ToolCall
-from haagent.models.openai_chat import OpenAIChatCompletionsGateway
-from haagent.models.openai_responses import OpenAIResponsesGateway
 from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.gateway_registry import (
     catalog_provider_capability,
-    gateway_from_profile,
+    gateway_from_resolved,
     gateway_from_route,
 )
-from haagent.models.model_connections import (
-    ModelSelection,
+from haagent.models.config.connections import (
     ProviderConnectionRecord,
-    ProviderProfile,
     ProviderProfileError,
-    load_model_selection_profile,
-    load_providers_config_snapshot,
     provider_connection_credential_status,
-    save_provider_connection,
-    save_provider_connection_with_key,
+    save_connection_api_key,
 )
-from haagent.models.model_options import (
-    ResolvedModelRequestConfig,
-    empty_resolved_config,
-    options_digest,
-)
+from haagent.models.config.config_store import ModelConfigStore
+from haagent.models.model_ref import ModelInvocation, ModelRef, ResolvedCredential, ResolvedModel
+from haagent.models.model_resolution import resolve_model
+from haagent.models.model_settings import ModelSettings
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
@@ -75,10 +69,7 @@ def generate(
                     "name": obs.get("tool_name", ""),
                     "content": str(obs.get("result", "")),
                 })
-    return gateway.generate(
-        messages,
-        tool_schemas or [],
-    )
+    return gateway.generate(ModelInvocation(messages, tool_schemas or [], gateway.model_settings))
 
 
 def _retry_controller() -> RetryController:
@@ -89,26 +80,48 @@ def _retry_controller() -> RetryController:
     )
 
 
-def _request_config(options: dict[str, object]) -> ResolvedModelRequestConfig:
-    return ResolvedModelRequestConfig(
-        connection_id="test",
-        model_id="model",
-        variant=None,
-        configured=True,
-        options=options,
-        options_digest=options_digest(options),
+def _request_config(options: dict[str, object]) -> ModelSettings:
+    return ModelSettings.from_options(options)
+
+
+def _resolved(provider: str, base_url: str, *, settings: ModelSettings | None = None) -> ResolvedModel:
+    return ResolvedModel(
+        ref=ModelRef(f"{provider}-main", "test-model"),
+        provider=provider,
+        base_url=base_url,
+        runtime_kind="remote",
+        settings=settings or ModelSettings.empty(),
+        credential=ResolvedCredential("test-key", "TEST_API_KEY", "env", "env"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _provider_invocation_test_adapter(monkeypatch):
+    """本文件的 payload 测试用统一 invocation 调用 provider adapter。"""
+    for gateway_type in (
+        OpenAIResponsesGateway,
+        OpenAIChatCompletionsGateway,
+        AnthropicMessagesGateway,
+        GoogleGeminiGateway,
+    ):
+        original = gateway_type.generate
+
+        def adapted(self, invocation, tool_schemas=None, _original=original, **kwargs):
+            if not isinstance(invocation, ModelInvocation):
+                invocation = ModelInvocation(invocation, tool_schemas or [], self.model_settings)
+            return _original(self, invocation, **kwargs)
+
+        monkeypatch.setattr(gateway_type, "generate", adapted)
 
 
 def _snapshot(config_path: Path):
-    return load_providers_config_snapshot(config_path)
+    return ModelConfigStore(config_path).load()
 
 
 def _save_connection(config_dir: Path, connection: ProviderConnectionRecord) -> Path:
-    return save_provider_connection(
-        connection,
-        snapshot=_snapshot(config_dir / "providers.json"),
-    )
+    store = ModelConfigStore(config_dir / "providers.json")
+    store.save_connection(connection, expected_digest=store.load().digest)
+    return store.path
 
 
 def test_openai_responses_gateway_retries_once_then_returns_response() -> None:
@@ -170,7 +183,7 @@ def test_openai_responses_replays_interleaved_reasoning_and_calls_in_original_or
                 "role": "assistant",
                 "content": first.content,
                 "tool_calls": tool_calls,
-                "provider_continuation": first.provider_continuation,
+                "provider_turn_state": {"provider": first.provider_turn_state.provider, "payload": dict(first.provider_turn_state.payload)},
             },
             {"role": "tool", "tool_call_id": "c1", "content": "a"},
             {"role": "tool", "tool_call_id": "c2", "content": "b"},
@@ -273,7 +286,7 @@ def test_google_gateway_hides_thought_text_and_replays_signed_parts_in_order() -
                         "function": {"name": "read", "arguments": '{"path":"a"}'},
                     }
                 ],
-                "provider_continuation": first.provider_continuation,
+                "provider_turn_state": {"provider": first.provider_turn_state.provider, "payload": dict(first.provider_turn_state.payload)},
             },
             {"role": "tool", "name": "read", "content": "a"},
         ],
@@ -516,39 +529,16 @@ def test_gateway_registry_builds_supported_provider_gateways() -> None:
     ]
 
     for provider, base_url, expected_type in cases:
-        gateway = gateway_from_profile(
-            ProviderProfile(
-                name=f"{provider}-main",
-                provider=provider,
-                base_url=base_url,
-                model="test-model",
-                api_key_env="TEST_API_KEY",
-                credential_source="keyring",
-                credential_source_used="direct",
-                api_key="test-key",
-                request_config=empty_resolved_config(
-                    connection_id=f"{provider}-main",
-                    model_id="test-model",
-                ),
-            )
-        )
+        gateway = gateway_from_resolved(_resolved(provider, base_url))
 
         assert isinstance(gateway, expected_type)
 
 
 def test_responses_options_do_not_leak_into_chat_protocol_fallback() -> None:
-    profile = ProviderProfile(
-        name="openai-main:gpt-test",
-        provider="openai",
-        base_url="https://api.openai.com/v1",
-        model="gpt-test",
-        api_key_env="OPENAI_API_KEY",
-        credential_source="env",
-        credential_source_used="env",
-        api_key="test",
-        request_config=_request_config(
-            {"reasoning": {"effort": "high"}, "max_output_tokens": 12000}
-        ),
+    profile = _resolved(
+        "openai",
+        "https://api.openai.com/v1",
+        settings=_request_config({"reasoning": {"effort": "high"}, "max_output_tokens": 12000}),
     )
 
     gateway = gateway_from_route(profile)
@@ -644,7 +634,7 @@ def test_anthropic_gateway_replays_interleaved_thinking_and_tool_blocks_in_origi
             }
             for call in first.tool_calls
         ],
-        "provider_continuation": first.provider_continuation,
+        "provider_turn_state": {"provider": first.provider_turn_state.provider, "payload": dict(first.provider_turn_state.payload)},
     }
     gateway.generate(
         [
@@ -1302,18 +1292,17 @@ def test_model_selection_loads_connection_and_api_key_env(tmp_path: Path) -> Non
         encoding="utf-8",
     )
 
-    profile = load_model_selection_profile(
-        ModelSelection("deepseek", "deepseek-v4-pro"),
+    profile = resolve_model(
+        ModelRef("deepseek", "deepseek-v4-pro"),
         snapshot=_snapshot(config_path),
         environ={"DEEPSEEK_API_KEY": "secret-key"},
     )
 
-    assert profile.name == "deepseek:deepseek-v4-pro"
     assert profile.provider == "openai-chat"
     assert profile.base_url == "https://api.deepseek.com"
-    assert profile.model == "deepseek-v4-pro"
-    assert profile.api_key_env == "DEEPSEEK_API_KEY"
-    assert profile.api_key == "secret-key"
+    assert profile.ref.model == "deepseek-v4-pro"
+    assert profile.credential.api_key_env == "DEEPSEEK_API_KEY"
+    assert profile.credential.api_key == "secret-key"
 
 
 def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: Path) -> None:
@@ -1340,16 +1329,16 @@ def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: P
         encoding="utf-8",
     )
 
-    profile = load_model_selection_profile(
-        ModelSelection("deepseek", "deepseek-v4-pro"),
+    profile = resolve_model(
+        ModelRef("deepseek", "deepseek-v4-pro"),
         snapshot=_snapshot(config_path),
         environ={},
         credential_store=FakeCredentialStore({"connection:deepseek": "keyring-secret"}),
     )
 
-    assert profile.api_key == "keyring-secret"
-    assert profile.credential_source == "keyring"
-    assert profile.credential_source_used == "keyring"
+    assert profile.credential.api_key == "keyring-secret"
+    assert profile.credential.source == "keyring"
+    assert profile.credential.source_used == "keyring"
 
 
 def test_provider_connections_can_be_listed_without_secrets(tmp_path: Path) -> None:
@@ -1399,8 +1388,7 @@ def test_provider_connection_credential_status_for_named_connection(tmp_path: Pa
 def test_model_selection_loads_api_key_from_explicit_insecure_file(tmp_path: Path) -> None:
     config_dir = tmp_path / ".haagent"
     config_path = config_dir / "providers.json"
-    save_provider_connection_with_key(
-        ProviderConnectionRecord(
+    connection = ProviderConnectionRecord(
             id="deepseek",
             name="deepseek",
             provider_id="deepseek",
@@ -1409,21 +1397,25 @@ def test_model_selection_loads_api_key_from_explicit_insecure_file(tmp_path: Pat
             base_url="https://api.deepseek.com",
             api_key_env="DEEPSEEK_API_KEY",
             credential_source="insecure_file",
-        ),
+        )
+    store = ModelConfigStore(config_path)
+    store.save_connection(connection, expected_digest=store.load().digest)
+    save_connection_api_key(
+        connection,
         "plain-secret",
-        snapshot=_snapshot(config_path),
+        config_dir=config_dir,
     )
 
-    profile = load_model_selection_profile(
-        ModelSelection("deepseek", "deepseek-v4-pro"),
+    profile = resolve_model(
+        ModelRef("deepseek", "deepseek-v4-pro"),
         snapshot=_snapshot(config_path),
         environ={},
         credential_store=FakeCredentialStore({}),
     )
 
-    assert profile.api_key == "plain-secret"
-    assert profile.credential_source == "insecure_file"
-    assert profile.credential_source_used == "insecure_file"
+    assert profile.credential.api_key == "plain-secret"
+    assert profile.credential.source == "insecure_file"
+    assert profile.credential.source_used == "insecure_file"
 
 
 def test_model_selection_missing_connection_fails_explicitly(tmp_path: Path) -> None:
@@ -1450,8 +1442,8 @@ def test_model_selection_missing_connection_fails_explicitly(tmp_path: Path) -> 
     )
 
     with pytest.raises(ProviderProfileError, match="provider connection not found: deepseek"):
-        load_model_selection_profile(
-            ModelSelection("deepseek", "deepseek-v4-pro"),
+        resolve_model(
+            ModelRef("deepseek", "deepseek-v4-pro"),
             snapshot=_snapshot(config_path),
             environ={"OPENAI_API_KEY": "key"},
         )
@@ -1481,8 +1473,8 @@ def test_model_selection_missing_api_key_fails_explicitly(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ProviderProfileError, match="API key is not available"):
-        load_model_selection_profile(
-            ModelSelection("deepseek", "deepseek-v4-pro"),
+        resolve_model(
+            ModelRef("deepseek", "deepseek-v4-pro"),
             snapshot=_snapshot(config_path),
             environ={},
             credential_store=FakeCredentialStore({}),
@@ -2255,8 +2247,8 @@ def test_full_compact_failure_is_written_to_transcript_and_original_messages_con
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
-        def generate(self, messages, tool_schemas):
-            self.calls.append({"messages": messages, "tool_schemas": tool_schemas})
+        def generate(self, invocation, **kwargs):
+            self.calls.append({"messages": invocation.messages, "tool_schemas": invocation.tool_schemas})
             if len(self.calls) == 1:
                 return ModelResponse(content=json.dumps({"task_focus": "missing fields"}), tool_calls=[])
             return ModelResponse(content="continue after compact failure", tool_calls=[])
@@ -2325,9 +2317,9 @@ def test_orchestrator_microcompacts_old_tool_result_messages(tmp_path: Path) -> 
             self.model_inputs: list[str] = []
             self._turn = 0
 
-        def generate(self, messages, tool_schemas):
+        def generate(self, invocation, **kwargs):
             self._turn += 1
-            self.model_inputs.append("\n".join(str(m.get("content", "")) for m in messages))
+            self.model_inputs.append("\n".join(str(m.get("content", "")) for m in invocation.messages))
             if self._turn == 1:
                 return ModelResponse("read", [ToolCall("file_read", {"path": "large.txt", "limit": 80})])
             return ModelResponse("done", [])

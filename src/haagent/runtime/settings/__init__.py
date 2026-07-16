@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from haagent.models.model_connections import user_settings_path
+from haagent.models.config.connections import user_settings_path
 from haagent.runtime.execution.retry import RetryPolicy
 from haagent.runtime.sandbox.settings import (
     SandboxSettings,

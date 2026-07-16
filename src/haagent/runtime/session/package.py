@@ -15,6 +15,7 @@ from pathlib import Path
 
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.execution.path_policy import PathPolicy, serialize_path_policy
+from haagent.models.model_ref import ModelRef
 
 ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT = 4000
 
@@ -277,10 +278,7 @@ def write_session_metadata(
     workspace_root: Path,
     path_policy: PathPolicy,
     provider: str,
-    model_profile_name: str | None,
-    model_connection_id: str | None,
-    model_name: str | None,
-    model_base_url: str | None,
+    model_ref: ModelRef | None,
     enable_web: bool,
     last_user_image_attachments: list[ImageAttachment],
     image_attachment_history: list[ImageAttachment],
@@ -288,7 +286,6 @@ def write_session_metadata(
     turn_count: int,
     edit_diff_session_always: bool = False,
     first_request: str | None = None,
-    model_variant: str | None = None,
 ) -> str:
     """写入 session.json；返回实际保留的 created_at。"""
     session_path.mkdir(parents=True, exist_ok=True)
@@ -308,11 +305,7 @@ def write_session_metadata(
         # 仅布尔标志，不保存完整 diff；新 session 默认 False
         "edit_diff_session_always": bool(edit_diff_session_always),
         "provider": provider,
-        "model_profile_name": model_profile_name,
-        "model_connection_id": model_connection_id,
-        "model": model_name,
-        "model_variant": model_variant,
-        "base_url": model_base_url,
+        "model_ref": model_ref.to_dict() if model_ref is not None else None,
         "enable_web": enable_web,
         "last_user_image_attachments": [
             attachment.to_dict() for attachment in last_user_image_attachments

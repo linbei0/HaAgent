@@ -7,7 +7,6 @@ src/haagent/runtime/orchestration/turns.py - Run 单轮执行流程
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -23,6 +22,8 @@ from haagent.context.messages import (
     generate_tool_call_id,
 )
 from haagent.models.telemetry import ModelTransportEvent
+from haagent.models.model_ref import ModelInvocation
+from haagent.models.model_settings import ModelSettings
 from haagent.models.types import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.cancellation import RunCancelled
@@ -217,80 +218,80 @@ def run_turn_loop(
 
             set_route_event_sink(emit_model_route_event)
 
-        generate_kwargs: dict[str, object] = {"messages": state.messages, "tool_schemas": tool_schemas}
-        if _supports_generate_parameter(deps.model_gateway, "event_sink"):
-            generate_kwargs["event_sink"] = emit_assistant_delta
-        if _supports_generate_parameter(deps.model_gateway, "retry_event_sink"):
-            def emit_retry(retry_event) -> None:
-                nonlocal model_attempt
-                deps.writer.append_transcript(
-                    {
-                        "event": "model_attempt_failed",
-                        "turn": turn,
-                        "attempt": retry_event.attempt,
-                        "category": retry_event.category,
-                    },
-                )
-                model_attempt = retry_event.next_attempt
-                retry_record = {
-                    "event": "model_retry_scheduled",
+        settings = getattr(deps.model_gateway, "model_settings", ModelSettings.empty())
+        invocation = ModelInvocation(messages=state.messages, tool_schemas=tool_schemas, settings=settings)
+        generate_kwargs: dict[str, object] = {
+            "invocation": invocation,
+            "event_sink": emit_assistant_delta,
+            "cancellation_token": deps.cancellation_token,
+        }
+
+        def emit_retry(retry_event) -> None:
+            nonlocal model_attempt
+            deps.writer.append_transcript(
+                {
+                    "event": "model_attempt_failed",
                     "turn": turn,
                     "attempt": retry_event.attempt,
-                    "next_attempt": retry_event.next_attempt,
                     "category": retry_event.category,
-                    "delay_seconds": retry_event.delay_seconds,
-                    "source": retry_event.source,
-                    "retry_after_ignored": retry_event.retry_after_ignored,
-                }
-                deps.writer.append_transcript(retry_record)
-                deps.emit_event({"event_type": "model_retry_scheduled", **{key: value for key, value in retry_record.items() if key != "event"}})
-                deps.writer.append_transcript(
-                    {
-                        "event": "model_call",
-                        "provider": deps.model_gateway.provider_name,
-                        "context_id": state.context_id,
-                        "turn": turn,
-                        "attempt": model_attempt,
-                        "max_attempts": max_attempts,
-                        "goal": deps.task_goal,
-                    },
-                )
-                if deps.persist_performance is not None:
-                    deps.persist_performance()
-            generate_kwargs["retry_event_sink"] = emit_retry
-        if _supports_generate_parameter(deps.model_gateway, "retry_exhausted_sink"):
-            def emit_retry_exhausted(failure, attempt: int) -> None:
-                deps.writer.append_transcript(
-                    {
-                        "event": "model_attempt_failed",
-                        "turn": turn,
-                        "attempt": attempt,
-                        "category": failure.category,
-                        "status_code": failure.status_code,
-                        "request_id": failure.request_id,
-                    },
-                )
-                if failure.category == "stream_interrupted":
-                    return
-                retry_record = {
-                    "event": "model_retry_exhausted",
+                },
+            )
+            model_attempt = retry_event.next_attempt
+            retry_record = {
+                "event": "model_retry_scheduled",
+                "turn": turn,
+                "attempt": retry_event.attempt,
+                "next_attempt": retry_event.next_attempt,
+                "category": retry_event.category,
+                "delay_seconds": retry_event.delay_seconds,
+                "source": retry_event.source,
+                "retry_after_ignored": retry_event.retry_after_ignored,
+            }
+            deps.writer.append_transcript(retry_record)
+            deps.emit_event({"event_type": "model_retry_scheduled", **{key: value for key, value in retry_record.items() if key != "event"}})
+            deps.writer.append_transcript(
+                {
+                    "event": "model_call",
+                    "provider": deps.model_gateway.provider_name,
+                    "context_id": state.context_id,
+                    "turn": turn,
+                    "attempt": model_attempt,
+                    "max_attempts": max_attempts,
+                    "goal": deps.task_goal,
+                },
+            )
+            if deps.persist_performance is not None:
+                deps.persist_performance()
+
+        def emit_retry_exhausted(failure, attempt: int) -> None:
+            deps.writer.append_transcript(
+                {
+                    "event": "model_attempt_failed",
                     "turn": turn,
                     "attempt": attempt,
                     "category": failure.category,
                     "status_code": failure.status_code,
                     "request_id": failure.request_id,
-                }
-                deps.writer.append_transcript(retry_record)
-                deps.emit_event({"event_type": "model_retry_exhausted", **{key: value for key, value in retry_record.items() if key != "event"}})
-                if deps.persist_performance is not None:
-                    deps.persist_performance()
-            generate_kwargs["retry_exhausted_sink"] = emit_retry_exhausted
-        if _supports_generate_parameter(deps.model_gateway, "cancellation_token"):
-            generate_kwargs["cancellation_token"] = deps.cancellation_token
-        if deps.performance_trace is not None and _supports_generate_parameter(
-            deps.model_gateway,
-            "telemetry_sink",
-        ):
+                },
+            )
+            if failure.category == "stream_interrupted":
+                return
+            retry_record = {
+                "event": "model_retry_exhausted",
+                "turn": turn,
+                "attempt": attempt,
+                "category": failure.category,
+                "status_code": failure.status_code,
+                "request_id": failure.request_id,
+            }
+            deps.writer.append_transcript(retry_record)
+            deps.emit_event({"event_type": "model_retry_exhausted", **{key: value for key, value in retry_record.items() if key != "event"}})
+            if deps.persist_performance is not None:
+                deps.persist_performance()
+
+        generate_kwargs["retry_event_sink"] = emit_retry
+        generate_kwargs["retry_exhausted_sink"] = emit_retry_exhausted
+        if deps.performance_trace is not None:
             def emit_transport(event: ModelTransportEvent) -> None:
                 assert deps.performance_trace is not None
                 deps.performance_trace.record_transport_event(event)
@@ -395,7 +396,7 @@ def run_turn_loop(
             build_assistant_message(
                 model_response.content,
                 assistant_tool_calls,
-                provider_continuation=model_response.provider_continuation,
+                provider_turn_state=model_response.provider_turn_state,
             ),
         )
 
@@ -1314,16 +1315,8 @@ def _tool_visible_result_fingerprint(tool_name: str, args: dict[str, Any], resul
     )
 
 
-def _supports_generate_parameter(model_gateway: ModelGateway, parameter: str) -> bool:
-    try:
-        signature = inspect.signature(model_gateway.generate)
-    except (TypeError, ValueError):
-        return False
-    return parameter in signature.parameters
-
-
 def _retry_max_attempts(model_gateway: ModelGateway) -> int | None:
-    """从 session 注入的 controller 读取审计上限；旧测试替身不强行声明该字段。"""
+    """从 session 注入的 controller 读取审计上限；无重试网关返回 None。"""
 
     controller = getattr(model_gateway, "_retry_controller", None)
     policy = getattr(controller, "policy", None)

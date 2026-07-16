@@ -621,7 +621,9 @@ class _GatewayWithContextWindow:
         object.__setattr__(metadata, "context_window_tokens", self._context_window_tokens)
         return metadata
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         raise AssertionError("generate is not used")
 
 

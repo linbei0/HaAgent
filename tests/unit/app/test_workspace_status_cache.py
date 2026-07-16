@@ -11,7 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent.app.workspace_usecases import AssistantWorkspace
-from haagent.models.model_connections import ProviderConnectionRecord, ProvidersConfigSnapshot
+from haagent.models.config.connections import ProviderConnectionRecord, ProvidersConfigSnapshot
+from haagent.models.model_ref import ModelRef
 
 
 class _CountingCredentialStatus:
@@ -40,6 +41,18 @@ def _workspace(tmp_path: Path, monkeypatch, credential_counter: _CountingCredent
         base_url="https://example.test/v1",
         api_key_env="TEST_API_KEY",
     )
+    snapshot = ProvidersConfigSnapshot(
+        path=tmp_path / "config" / "providers.json",
+        records=(connection,),
+        digest="test",
+    )
+    model_runtime = SimpleNamespace(
+        snapshot=snapshot,
+        selection_store=SimpleNamespace(
+            load_active=lambda: ModelRef("conn-1", "gpt-test")
+        ),
+        credential_status=credential_counter,
+    )
     # 只测 status 缓存边界，不依赖完整 AssistantContext 构造。
     context = SimpleNamespace(
         workspace_root=tmp_path,
@@ -49,22 +62,10 @@ def _workspace(tmp_path: Path, monkeypatch, credential_counter: _CountingCredent
         max_turns=16,
         session=None,
         status_generation=0,
-        providers_snapshot=ProvidersConfigSnapshot(
-            path=tmp_path / "config" / "providers.json",
-            records=(connection,),
-            digest="test",
-        ),
+        model_runtime=model_runtime,
     )
     workspace = AssistantWorkspace(context)
 
-    monkeypatch.setattr(
-        "haagent.app.workspace_usecases.load_active_model_selection",
-        lambda config_dir=None: SimpleNamespace(connection_id="conn-1", model="gpt-test", variant=None),
-    )
-    monkeypatch.setattr(
-        "haagent.app.workspace_usecases.provider_connection_credential_status",
-        credential_counter,
-    )
     monkeypatch.setattr(
         "haagent.app.workspace_usecases.sandbox_status",
         lambda: SimpleNamespace(backend="local_subprocess", degraded=True, reason="test"),

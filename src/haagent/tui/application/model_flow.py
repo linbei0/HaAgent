@@ -191,15 +191,13 @@ class ModelFlow:
     def open_switch_overlay(self, providers: list[object]) -> None:
         self.dismiss_loading_overlay()
         try:
-            connections = self._app.service.models.list_connections()
+            choices = self._app.service.models.list_choices()
         except Exception as error:
             self.handle_catalog_error(error)
             return
         self._app.push_screen(
             ModelSwitchOverlay(
-                connections,
-                providers,
-                variant_lookup=self._app.service.models.list_model_variants,
+                choices,
             ),
             self.handle_switch_result,
         )

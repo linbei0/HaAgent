@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from haagent.models.types import ModelGateway
-from haagent.models.model_connections import user_config_dir
+from haagent.models.model_ref import ModelRef
+from haagent.models.config.connections import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken
@@ -23,7 +24,6 @@ from haagent.runtime.session.attachments import (
     save_clipboard_image,
 )
 from haagent.runtime.session.lifecycle import (
-    MODEL_VARIANT_UNSET,
     SessionRuntimeState,
     apply_state,
     build_create_state,
@@ -126,11 +126,7 @@ class AgentSession:
         workspace_root: Path,
         runs_root: Path,
         model_gateway: ModelGateway | None = None,
-        model_profile_name: str | None = None,
-        model_connection_id: str | None = None,
-        model_name: str | None = None,
-        model_base_url: str | None = None,
-        model_variant: str | None = None,
+        model_ref: ModelRef | None = None,
         max_turns: int | None = CHAT_MAX_TURNS,
         session_id: str | None = None,
         memory_extraction_enabled: bool = True,
@@ -149,11 +145,7 @@ class AgentSession:
             workspace_root=workspace_root,
             runs_root=runs_root,
             model_gateway=model_gateway,
-            model_profile_name=model_profile_name,
-            model_connection_id=model_connection_id,
-            model_name=model_name,
-            model_base_url=model_base_url,
-            model_variant=model_variant,
+            model_ref=model_ref,
             max_turns=max_turns,
             session_id=session_id,
             memory_extraction_enabled=memory_extraction_enabled,
@@ -181,11 +173,7 @@ class AgentSession:
         *,
         runs_root: Path | None = None,
         model_gateway: ModelGateway | None = None,
-        model_profile_name: str | None = None,
-        model_connection_id: str | None = None,
-        model_name: str | None = None,
-        model_base_url: str | None = None,
-        model_variant: str | None | object = MODEL_VARIANT_UNSET,
+        model_ref: ModelRef | None = None,
         max_turns: int | None = CHAT_MAX_TURNS,
         enable_web: bool = False,
         mcp_runtime: Any | None = None,
@@ -201,11 +189,7 @@ class AgentSession:
             session,
             runs_root=runs_root,
             model_gateway=model_gateway,
-            model_profile_name=model_profile_name,
-            model_connection_id=model_connection_id,
-            model_name=model_name,
-            model_base_url=model_base_url,
-            model_variant=model_variant,
+            model_ref=model_ref,
             max_turns=max_turns,
             enable_web=enable_web,
             mcp_runtime=mcp_runtime,
@@ -227,11 +211,7 @@ class AgentSession:
         *,
         runs_root: Path | None = None,
         model_gateway: ModelGateway | None = None,
-        model_profile_name: str | None = None,
-        model_connection_id: str | None = None,
-        model_name: str | None = None,
-        model_base_url: str | None = None,
-        model_variant: str | None | object = MODEL_VARIANT_UNSET,
+        model_ref: ModelRef | None = None,
         max_turns: int | None = None,
         enable_web: bool | None = None,
     ) -> None:
@@ -245,11 +225,7 @@ class AgentSession:
             session,
             runs_root=self.runs_root if runs_root is None else runs_root,
             model_gateway=next_gateway,
-            model_profile_name=self.model_profile_name if model_profile_name is None else model_profile_name,
-            model_connection_id=self.model_connection_id if model_connection_id is None else model_connection_id,
-            model_name=self.model_name if model_name is None else model_name,
-            model_base_url=self.model_base_url if model_base_url is None else model_base_url,
-            model_variant=self.model_variant if model_variant is MODEL_VARIANT_UNSET else model_variant,
+            model_ref=self.model_ref if model_ref is None else model_ref,
             max_turns=self.max_turns if max_turns is None else max_turns,
             enable_web=self.enable_web if enable_web is None else enable_web,
             mcp_runtime=self._mcp_runtime,
@@ -509,42 +485,21 @@ class AgentSession:
 
     def switch_model_gateway(
         self,
-        *,
-        profile_name: str,
-        model_connection_id: str | None = None,
-        model: str,
-        base_url: str,
+        model_ref: ModelRef,
         gateway: ModelGateway,
-        model_variant: str | None = None,
     ) -> None:
         if self._current_cancellation_token is not None:
             raise ChatSessionError("current task is running")
         # 仅在成功安装新 gateway 后关闭旧 route，安装失败时保留旧连接可用。
         previous = self.model_gateway
-        previous_selection = (
-            self.model_profile_name,
-            self.model_connection_id,
-            self.model_name,
-            self.model_base_url,
-            self.model_variant,
-        )
+        previous_selection = self.model_ref
         self.model_gateway = gateway
-        self.model_profile_name = profile_name
-        self.model_connection_id = model_connection_id
-        self.model_name = model
-        self.model_base_url = base_url
-        self.model_variant = model_variant
+        self.model_ref = model_ref
         try:
             self._write_session_metadata()
         except Exception as error:
             self.model_gateway = previous
-            (
-                self.model_profile_name,
-                self.model_connection_id,
-                self.model_name,
-                self.model_base_url,
-                self.model_variant,
-            ) = previous_selection
+            self.model_ref = previous_selection
             from haagent.models.http_transport import close_model_gateway
 
             try:
@@ -666,11 +621,7 @@ class AgentSession:
             path_policy=self.path_policy,
             runs_root=self.runs_root,
             model_gateway=self.model_gateway,
-            model_profile_name=self.model_profile_name,
-            model_connection_id=self.model_connection_id,
-            model_name=self.model_name,
-            model_base_url=self.model_base_url,
-            model_variant=self.model_variant,
+            model_ref=self.model_ref,
             max_turns=self.max_turns,
             memory_extraction_enabled=self.memory_extraction_enabled,
             enable_web=self.enable_web,
@@ -857,11 +808,7 @@ class AgentSession:
             workspace_root=self.workspace_root,
             path_policy=self.path_policy,
             provider=self.provider_name,
-            model_profile_name=self.model_profile_name,
-            model_connection_id=self.model_connection_id,
-            model_name=self.model_name,
-            model_base_url=self.model_base_url,
-            model_variant=self.model_variant,
+            model_ref=self.model_ref,
             enable_web=self.enable_web,
             last_user_image_attachments=self._last_user_image_attachments,
             image_attachment_history=self._image_attachment_history,

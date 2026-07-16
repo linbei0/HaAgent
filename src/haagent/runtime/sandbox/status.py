@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from haagent.models.model_connections import user_settings_path
+from haagent.models.config.connections import user_settings_path
 from haagent.runtime.sandbox.docker_image import image_exists
 from haagent.runtime.sandbox.settings import DockerSandboxSettings, SandboxSettings
 from haagent.runtime.settings import RuntimeSettingsError, load_runtime_settings

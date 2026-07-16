@@ -20,7 +20,9 @@ from haagent.runtime.orchestration.state import RunStatus
 class BadFileReadGateway:
     provider_name = "bad-file-read"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
 
@@ -30,7 +32,9 @@ class GrepFileRootGateway:
     def __init__(self) -> None:
         self.call_count = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.call_count += 1
         if self.call_count == 1:
             return ModelResponse("", [ToolCall("grep", {"pattern": "needle", "root": "alpha.txt"})])
@@ -43,7 +47,9 @@ class UnexpectedArgumentGateway:
     def __init__(self) -> None:
         self.call_count = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.call_count += 1
         if self.call_count == 1:
             return ModelResponse("", [ToolCall("grep", {"pattern": "needle", "root": ".", "path": "src"})])
@@ -56,7 +62,9 @@ class ParallelToolCallsGateway:
     def __init__(self) -> None:
         self.call_count = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.call_count += 1
         if self.call_count == 1:
             return ModelResponse(
@@ -75,7 +83,9 @@ class FileWriteGateway:
     def __init__(self) -> None:
         self.call_count = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.call_count += 1
         if self.call_count == 1:
             return ModelResponse(

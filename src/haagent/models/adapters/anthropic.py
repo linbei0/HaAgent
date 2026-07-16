@@ -1,5 +1,5 @@
 """
-src/haagent/models/anthropic.py - Anthropic Messages 网关
+src/haagent/models/adapters/anthropic.py - Anthropic Messages 网关
 
 把 Anthropic Messages API 请求与输出归一化为统一 ModelResponse。
 """
@@ -11,8 +11,10 @@ from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.http_transport import ModelHttpTransport
-from haagent.models.model_options import ResolvedModelRequestConfig, empty_resolved_config, merge_provider_payload
-from haagent.models.transport import (
+from haagent.models.model_options import merge_provider_payload
+from haagent.models.model_ref import ModelInvocation
+from haagent.models.model_settings import ModelSettings
+from haagent.models.adapters.transport import (
     _anthropic_stream_transport,
     _anthropic_transport,
     _endpoint_base_url,
@@ -31,6 +33,7 @@ from haagent.models.types import (
     ModelGatewayMetadata,
     ModelResponse,
     ModelUsage,
+    ProviderTurnState,
     ToolCall,
 )
 from haagent.models.capabilities import ModelCapabilities
@@ -60,7 +63,7 @@ def _anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, lis
                 _anthropic_assistant_message(
                     content,
                     message.get("tool_calls"),
-                    message.get("provider_continuation"),
+                    message.get("provider_turn_state"),
                 ),
             )
             continue
@@ -107,12 +110,13 @@ def _anthropic_user_content(content: object) -> str | list[dict[str, Any]]:
 def _anthropic_assistant_message(
     content: str,
     raw_tool_calls: object,
-    provider_continuation: object = None,
+    provider_turn_state: object = None,
 ) -> dict[str, Any]:
     blocks: list[dict[str, Any]] = []
     # continuation 保存完整原始 block 序列；存在时不能再从规范化字段重组。
-    if isinstance(provider_continuation, dict):
-        continuation_blocks = provider_continuation.get("blocks")
+    if isinstance(provider_turn_state, dict) and provider_turn_state.get("provider") == "anthropic":
+        payload = provider_turn_state.get("payload")
+        continuation_blocks = payload.get("blocks") if isinstance(payload, dict) else None
         if isinstance(continuation_blocks, list):
             return {
                 "role": "assistant",
@@ -234,7 +238,7 @@ def _parse_anthropic_response(response: dict[str, object]) -> ModelResponse:
         content="".join(text_parts),
         tool_calls=tool_calls,
         usage=_parse_anthropic_usage(response),
-        provider_continuation=continuation,
+        provider_turn_state=(ProviderTurnState("anthropic", continuation) if continuation else None),
     )
 
 
@@ -271,14 +275,12 @@ class AnthropicMessagesGateway:
         stream_transport: AnthropicStreamTransport | None = None,
         retry_controller: RetryController | None = None,
         http_transport: ModelHttpTransport | None = None,
-        request_config: ResolvedModelRequestConfig | None = None,
+        request_config: ModelSettings | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._model = model
-        self._request_config = request_config or empty_resolved_config(
-            connection_id="",
-            model_id=model,
-        )
+        self._request_config = request_config or ModelSettings.empty()
+        self.model_settings = self._request_config
         self._messages_endpoint = _normalize_anthropic_messages_endpoint(base_url)
         # 仅在需要默认 HTTP path 时创建/绑定 transport；外部注入不越权关闭。
         self._owns_http_transport = False
@@ -332,13 +334,12 @@ class AnthropicMessagesGateway:
             model=self._model,
             endpoint=_redact_url(self._messages_endpoint),
             base_url=_endpoint_base_url(self._messages_endpoint),
-            request_config=self._request_config.audit_summary(),
+            request_config=self._request_config.to_traceable_dict(),
         )
 
     def generate(
         self,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
         event_sink: Callable[[str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
@@ -346,6 +347,8 @@ class AnthropicMessagesGateway:
         telemetry_sink=None,
     ) -> ModelResponse:
         """调用 Anthropic Messages API，并归一化为统一 ModelResponse。"""
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if not self._api_key:
             raise ModelCallError("ANTHROPIC_API_KEY is required for AnthropicMessagesGateway")
 
@@ -362,7 +365,7 @@ class AnthropicMessagesGateway:
             payload["tools"] = _anthropic_tool_schemas(tool_schemas)
         if event_sink is not None:
             payload["stream"] = True
-        payload = merge_provider_payload(payload, self._request_config.options)
+        payload = merge_provider_payload(payload, invocation.settings.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

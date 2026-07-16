@@ -8,9 +8,9 @@ from pathlib import Path
 
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelResponse
-from haagent.models.model_connections import ModelSelection, ProviderProfile, ProviderProfileError
-from haagent.models.model_options import empty_resolved_config
-import haagent.multi_agent.runtime as runtime_module
+from haagent.models.config.connections import ProviderProfileError
+from haagent.models.model_ref import ModelRef as ModelSelection, ResolvedCredential, ResolvedModel as ProviderProfile
+from haagent.models.model_settings import ModelSettings
 from haagent.multi_agent.profiles import WorkerProfileRuntime
 from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.runtime.execution.path_policy import default_path_policy
@@ -68,14 +68,10 @@ def test_spawn_worker_rejects_unknown_model_profile(tmp_path: Path, monkeypatch)
         mcp_runtime=None,
         team_root=tmp_path / ".haagent" / "teams",
     )
+    monkeypatch.setattr(runtime.model_runtime.selection_store, "load_active", lambda: ModelSelection("local", "gpt-test"))
     monkeypatch.setattr(
-        runtime_module,
-        "load_active_model_selection",
-        lambda *args, **kwargs: ModelSelection("local", "gpt-test"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "load_model_selection_profile",
+        runtime.model_runtime,
+        "resolve",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             ProviderProfileError("provider connection not found: missing-profile")
         ),
@@ -127,27 +123,17 @@ def test_spawn_worker_profile_overrides_session_settings_and_model_input(tmp_pat
         backend="in_process",
         worktree=False,
     )
+    monkeypatch.setattr(runtime.model_runtime.selection_store, "load_active", lambda: ModelSelection("writer-model", "gpt-test"))
     monkeypatch.setattr(
-        runtime_module,
-        "load_active_model_selection",
-        lambda *args, **kwargs: ModelSelection("writer-model", "gpt-test"),
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "load_model_selection_profile",
-        lambda *args, **kwargs: ProviderProfile(
-            name="writer-model",
+        runtime.model_runtime,
+        "resolve",
+        lambda ref: ProviderProfile(
+            ref=ref,
             provider="openai",
             base_url="https://example.test/v1",
-            model="gpt-test",
-            api_key_env="OPENAI_API_KEY",
-            credential_source="env",
-            credential_source_used="env",
-            api_key="test-key",
-            request_config=empty_resolved_config(
-                connection_id="writer-model",
-                model_id="gpt-test",
-            ),
+            runtime_kind="remote",
+            settings=ModelSettings.empty(),
+            credential=ResolvedCredential("test-key", "OPENAI_API_KEY", "env", "env"),
         ),
     )
 
@@ -162,7 +148,7 @@ def test_spawn_worker_profile_overrides_session_settings_and_model_input(tmp_pat
     assert worker is not None
     assert worker.session.max_turns == 2
     assert worker.session.enable_web is False
-    assert worker.session.model_profile_name == "writer-model"
+    assert worker.session.model_ref == ModelSelection("writer-model", "gpt-test")
     assert worker.session.model_gateway is profile_gateway
     assert worker.session._allowed_tools_override == ["file_read", "shell"]
     assert worker.session._approval_allowed_tools_override == ["shell"]
@@ -171,5 +157,5 @@ def test_spawn_worker_profile_overrides_session_settings_and_model_input(tmp_pat
     finished = runtime.wait_for_task(result["task_id"], timeout=5)
 
     assert finished["status"] == "completed"
-    assert seen_profiles[0].name == "writer-model"
+    assert seen_profiles[0].ref.connection_id == "writer-model"
     assert "你是验证助手。" in profile_gateway.calls[0]["model_input"]

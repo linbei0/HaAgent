@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from haagent.models.model_connections import (
-    ModelSelection,
-    ProviderProfile,
-    load_providers_config_snapshot,
-)
-from haagent.models.model_options import empty_resolved_config
+from haagent.models.fake import FakeModelGateway
+from haagent.models.model_ref import ModelRef
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.session.package import (
     list_sessions,
@@ -25,6 +22,17 @@ from haagent.runtime.session.package import (
 )
 from haagent.runtime.execution.path_policy import default_path_policy
 from haagent.runtime.session.turn_completion import ChatTurnResult
+
+
+_MODEL_REF = ModelRef("test", "test-model")
+
+
+def _model_runtime():
+    return SimpleNamespace(
+        selection_store=SimpleNamespace(load_active=lambda: _MODEL_REF),
+        resolve=lambda ref: ref,
+        create_route_gateway=lambda ref, **kwargs: FakeModelGateway(),
+    )
 
 
 def _write_session_package(
@@ -43,10 +51,7 @@ def _write_session_package(
         workspace_root=workspace_root,
         path_policy=default_path_policy(workspace_root),
         provider="fake",
-        model_profile_name=None,
-        model_connection_id=None,
-        model_name=None,
-        model_base_url=None,
+        model_ref=_MODEL_REF,
         enable_web=False,
         last_user_image_attachments=[],
         image_attachment_history=[],
@@ -125,9 +130,7 @@ def test_assistant_create_reuses_existing_session_package(tmp_path: Path) -> Non
         enable_web=False,
         initial_resume=None,
         initial_continue=False,
-        providers_snapshot=load_providers_config_snapshot(
-            tmp_path / ".haagent" / "providers.json"
-        ),
+        model_runtime=_model_runtime(),
         session=first,
     )
     sessions = AssistantSessions(context)
@@ -158,6 +161,8 @@ def test_assistant_resume_reuses_existing_mcp_runtime(tmp_path: Path) -> None:
     first = AgentSession(
         workspace_root=tmp_path,
         runs_root=tmp_path / ".runs",
+        model_gateway=FakeModelGateway(),
+        model_ref=_MODEL_REF,
         memory_extraction_enabled=False,
     )
     result = ChatTurnResult(
@@ -184,35 +189,12 @@ def test_assistant_resume_reuses_existing_mcp_runtime(tmp_path: Path) -> None:
         enable_web=False,
         initial_resume=None,
         initial_continue=False,
-        providers_snapshot=load_providers_config_snapshot(
-            tmp_path / ".haagent" / "providers.json"
-        ),
+        model_runtime=_model_runtime(),
         session=first,
     )
     sessions = AssistantSessions(context)
     mcp_before = first._mcp_runtime
-    resume_profile = ProviderProfile(
-        name="test",
-        provider="openai",
-        base_url="https://example.invalid/v1",
-        model="test-model",
-        api_key_env="TEST_API_KEY",
-        credential_source="env",
-        credential_source_used="env",
-        api_key="test-key",
-        request_config=empty_resolved_config(
-            connection_id="test",
-            model_id="test-model",
-        ),
-    )
-
     with patch(
-        "haagent.app.session_usecases.load_active_model_selection",
-        return_value=ModelSelection("test", "test-model"),
-    ), patch(
-        "haagent.app.session_usecases.load_model_selection_profile",
-        return_value=resume_profile,
-    ), patch(
         "haagent.runtime.session.lifecycle.bootstrap_mcp",
         side_effect=AssertionError("resume must reuse existing MCP runtime"),
     ), patch(

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from haagent import cli
 from haagent.models.types import ModelResponse
+from haagent.models.model_ref import ModelRef
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.contracts.task import load_task
 
@@ -21,21 +22,27 @@ class RecordingGateway:
     def __init__(self) -> None:
         self.model_inputs: list[str] = []
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
         return ModelResponse(f"done: {' '.join(m.get('content', '') for m in messages if m.get('role') == 'user')}", [])
 
 
 class ConciseRecordingGateway(RecordingGateway):
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
         return ModelResponse("done", [])
 
 
 class SmartCompactGateway(RecordingGateway):
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
         if "HaAgent full compact summarizer" in model_input:
@@ -274,23 +281,17 @@ def test_session_metadata_records_model_profile_without_api_key(tmp_path: Path) 
         workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         model_gateway=RecordingGateway(),
-        model_profile_name="router",
-        model_name="openai/gpt-5.2-chat",
-        model_base_url="https://openrouter.ai/api/v1",
+        model_ref=ModelRef("router", "openai/gpt-5.2-chat"),
     )
     session.switch_model_gateway(
-        profile_name="requesty",
-        model="openai/gpt-5.2",
-        base_url="https://router.requesty.ai/v1",
-        gateway=RecordingGateway(),
+        ModelRef("requesty", "openai/gpt-5.2"),
+        RecordingGateway(),
     )
 
     metadata_text = (session.session_path / "session.json").read_text(encoding="utf-8")
     metadata = json.loads(metadata_text)
 
-    assert metadata["model_profile_name"] == "requesty"
-    assert metadata["model"] == "openai/gpt-5.2"
-    assert metadata["base_url"] == "https://router.requesty.ai/v1"
+    assert metadata["model_ref"] == {"connection_id": "requesty", "model": "openai/gpt-5.2"}
     assert "api_key" not in metadata
     assert "sk-" not in metadata_text
 

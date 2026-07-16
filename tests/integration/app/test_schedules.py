@@ -60,7 +60,9 @@ def _write_connection(home: Path, *, name: str = "local", model: str = "m1") -> 
 class RecordingGateway:
     provider_name = "openai-chat"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         return ModelResponse("ok", [])
 
 

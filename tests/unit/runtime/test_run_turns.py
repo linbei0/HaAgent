@@ -462,8 +462,8 @@ def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
-            del messages, tool_schemas
+        def generate(self, invocation, **kwargs):
+            del invocation, kwargs
             return ModelResponse(content="done", tool_calls=[])
 
     deps = _deps(
@@ -509,8 +509,8 @@ def test_turn_loop_emits_intermediate_assistant_content_before_tool_followup(tmp
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
-            del messages, tool_schemas
+        def generate(self, invocation, **kwargs):
+            del invocation, kwargs
             return next(responses)
 
     state_history = [RunStatus.PLANNING]
@@ -571,8 +571,8 @@ def test_turn_loop_preserves_short_tool_narration_as_process_output(tmp_path: Pa
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
-            del messages, tool_schemas
+        def generate(self, invocation, **kwargs):
+            del invocation, kwargs
             return next(responses)
 
     state_history = [RunStatus.PLANNING]
@@ -610,9 +610,9 @@ def test_turn_loop_keeps_full_response_final_when_only_memory_settlement_tool_is
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
+        def generate(self, invocation, **kwargs):
             nonlocal model_calls
-            del messages, tool_schemas
+            del invocation, kwargs
             model_calls += 1
             if model_calls > 1:
                 raise AssertionError("memory settlement must not force a redundant final model turn")
@@ -1026,8 +1026,8 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
-            del tool_schemas
+        def generate(self, invocation, **kwargs):
+            messages = invocation.messages
             model_messages.append(list(messages))
             if len(model_messages) == 1:
                 return ModelResponse(
@@ -1113,9 +1113,8 @@ def test_turn_loop_adds_loaded_image_attachment_to_next_model_call(tmp_path: Pat
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
-            del tool_schemas
-            model_messages.append(list(messages))
+        def generate(self, invocation, **kwargs):
+            model_messages.append(list(invocation.messages))
             if len(model_messages) == 1:
                 return ModelResponse(
                     content="",
@@ -1166,8 +1165,8 @@ def test_turn_loop_allows_unlimited_max_turns(tmp_path: Path) -> None:
     class _ModelGateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas):
-            del messages, tool_schemas
+        def generate(self, invocation, **kwargs):
+            del invocation, kwargs
             return ModelResponse(content="done", tool_calls=[])
 
     deps = _deps(
@@ -1215,15 +1214,14 @@ verification_commands: []
 
         def generate(
             self,
-            messages,
-            tool_schemas,
+            invocation,
             event_sink=None,
             cancellation_token=None,
             retry_event_sink=None,
             retry_exhausted_sink=None,
             telemetry_sink=None,
         ):
-            del tool_schemas, event_sink, cancellation_token, retry_event_sink, retry_exhausted_sink
+            del invocation, event_sink, cancellation_token, retry_event_sink, retry_exhausted_sink
             self.calls += 1
             if telemetry_sink is not None:
                 telemetry_sink(
@@ -1315,15 +1313,14 @@ verification_commands: []
 
         def generate(
             self,
-            messages,
-            tool_schemas,
+            invocation,
             event_sink=None,
             cancellation_token=None,
             retry_event_sink=None,
             retry_exhausted_sink=None,
             telemetry_sink=None,
         ):
-            del messages, tool_schemas
+            del invocation
 
             def invoke(on_delta: Callable[[str], None] | None, attempt: int) -> ModelResponse:
                 del on_delta
@@ -1404,8 +1401,8 @@ def test_turn_loop_records_tool_performance_via_router_sink(tmp_path: Path) -> N
     class _Gateway:
         provider_name = "fake"
 
-        def generate(self, *, messages, tool_schemas, telemetry_sink=None):
-            del messages, tool_schemas, telemetry_sink
+        def generate(self, invocation, telemetry_sink=None, **kwargs):
+            del invocation, telemetry_sink, kwargs
             return ModelResponse(
                 "",
                 [ToolCall(name="file_read", args={"path": "README.md"})],

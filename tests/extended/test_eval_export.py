@@ -21,7 +21,9 @@ from haagent.tools import handler_factory as handler_factory_module
 class BadArgsGateway:
     provider_name = "bad-args"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
@@ -33,7 +35,9 @@ class ShellOnceGateway:
     def __init__(self) -> None:
         self._called = False
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if self._called or any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         self._called = True

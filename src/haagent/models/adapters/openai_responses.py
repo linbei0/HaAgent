@@ -1,5 +1,5 @@
 """
-src/haagent/models/openai_responses.py - OpenAI Responses API 网关
+src/haagent/models/adapters/openai_responses.py - OpenAI Responses API 网关
 
 把 Responses API 请求与输出归一化为统一 ModelResponse。
 """
@@ -12,8 +12,10 @@ from typing import Any, Callable
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.capabilities import ModelCapabilities
 from haagent.models.http_transport import ModelHttpTransport
-from haagent.models.model_options import ResolvedModelRequestConfig, empty_resolved_config, merge_provider_payload
-from haagent.models.transport import (
+from haagent.models.model_options import merge_provider_payload
+from haagent.models.model_ref import ModelInvocation
+from haagent.models.model_settings import ModelSettings
+from haagent.models.adapters.transport import (
     _endpoint_base_url,
     _image_data_url,
     _invoke_transport,
@@ -29,6 +31,7 @@ from haagent.models.types import (
     ModelGatewayMetadata,
     ModelResponse,
     ModelUsage,
+    ProviderTurnState,
     StreamTransport,
     ToolCall,
     Transport,
@@ -94,10 +97,11 @@ def _messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[st
         elif role == "user":
             result.append({"role": "user", "content": _responses_user_content(msg.get("content", ""))})
         elif role == "assistant":
-            continuation = msg.get("provider_continuation")
+            continuation = msg.get("provider_turn_state")
             replayed = False
-            if isinstance(continuation, dict):
-                items = continuation.get("items")
+            if isinstance(continuation, dict) and continuation.get("provider") == "openai":
+                payload = continuation.get("payload")
+                items = payload.get("items") if isinstance(payload, dict) else None
                 if isinstance(items, list):
                     for cont_item in items:
                         if isinstance(cont_item, dict):
@@ -154,15 +158,13 @@ class OpenAIResponsesGateway:
         retry_controller: RetryController | None = None,
         require_api_key: bool = True,
         http_transport: ModelHttpTransport | None = None,
-        request_config: ResolvedModelRequestConfig | None = None,
+        request_config: ModelSettings | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._require_api_key = require_api_key
         self._model = model
-        self._request_config = request_config or empty_resolved_config(
-            connection_id="",
-            model_id=model,
-        )
+        self._request_config = request_config or ModelSettings.empty()
+        self.model_settings = self._request_config
         configured_base_url = (
             base_url
             if base_url is not None
@@ -221,7 +223,7 @@ class OpenAIResponsesGateway:
             model=self._model,
             endpoint=_redact_url(self._responses_endpoint),
             base_url=_endpoint_base_url(self._responses_endpoint),
-            request_config=self._request_config.audit_summary(),
+            request_config=self._request_config.to_traceable_dict(),
         )
 
     def capabilities(self) -> ModelCapabilities:
@@ -236,14 +238,15 @@ class OpenAIResponsesGateway:
 
     def generate(
         self,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
         event_sink: Callable[[str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
         telemetry_sink=None,
     ) -> ModelResponse:
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         """调用 OpenAI Responses API，并把 provider 输出收敛成统一 ModelResponse。"""
         if self._require_api_key and not self._api_key:
             raise ModelCallError("OPENAI_API_KEY is required for OpenAIResponsesGateway")
@@ -259,7 +262,7 @@ class OpenAIResponsesGateway:
         if event_sink is not None:
             payload["stream"] = True
         # 未配置时 merge 为空操作，payload 与改动前逐字段一致。
-        payload = merge_provider_payload(payload, self._request_config.options)
+        payload = merge_provider_payload(payload, invocation.settings.options)
         try:
             response = execute_model_request(
                 self._retry_controller,
@@ -299,5 +302,5 @@ class OpenAIResponsesGateway:
             content=output_text,
             tool_calls=tool_calls,
             usage=_parse_openai_responses_usage(response),
-            provider_continuation=continuation,
+            provider_turn_state=(ProviderTurnState("openai", continuation) if continuation else None),
         )

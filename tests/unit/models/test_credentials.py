@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from haagent.models.credentials import (
+from haagent.models.config.credentials import (
     CredentialRecord,
     resolve_api_key,
 )

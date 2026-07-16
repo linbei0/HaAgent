@@ -15,6 +15,7 @@ from haagent.models.capabilities import (
     missing_capabilities,
 )
 from haagent.models.http_transport import ModelHttpTransport, close_model_gateway
+from haagent.models.model_ref import ModelInvocation
 from haagent.models.types import (
     ModelCallError,
     ModelGateway,
@@ -97,10 +98,14 @@ class NegotiatingModelGateway:
     def metadata(self) -> ModelGatewayMetadata:
         return self._active.metadata()
 
+    @property
+    def model_settings(self):
+        return self._active.model_settings
+
     def generate(
         self,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
+        *,
         event_sink: Callable[[str], None] | None = None,
         cancellation_token: CancellationToken | None = None,
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
@@ -114,8 +119,8 @@ class NegotiatingModelGateway:
                 details=None,
             )
         requirements = build_model_requirements(
-            messages=messages,
-            tool_schemas=tool_schemas,
+            messages=invocation.messages,
+            tool_schemas=invocation.tool_schemas,
             streaming=event_sink is not None,
         )
         required = _required_names(requirements)
@@ -125,8 +130,7 @@ class NegotiatingModelGateway:
                 reason="primary_missing_capabilities",
                 required=required,
                 primary_missing=primary_missing,
-                messages=messages,
-                tool_schemas=tool_schemas,
+                invocation=invocation,
                 event_sink=event_sink,
                 cancellation_token=cancellation_token,
                 retry_event_sink=retry_event_sink,
@@ -151,8 +155,7 @@ class NegotiatingModelGateway:
         try:
             return self._call(
                 gateway,
-                messages,
-                tool_schemas,
+                invocation,
                 sink,
                 cancellation_token,
                 retry_event_sink,
@@ -172,8 +175,7 @@ class NegotiatingModelGateway:
                 try:
                     return self._call(
                         self._primary_chat,
-                        messages,
-                        tool_schemas,
+                        invocation,
                         sink,
                         cancellation_token,
                         retry_event_sink,
@@ -190,8 +192,7 @@ class NegotiatingModelGateway:
                 reason=_failure_reason(error),
                 required=required,
                 primary_missing=(),
-                messages=messages,
-                tool_schemas=tool_schemas,
+                invocation=invocation,
                 event_sink=event_sink,
                 cancellation_token=cancellation_token,
                 retry_event_sink=retry_event_sink,
@@ -212,8 +213,7 @@ class NegotiatingModelGateway:
         reason: str,
         required: tuple[str, ...],
         primary_missing: tuple[str, ...],
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
         event_sink: Callable[[str], None] | None,
         cancellation_token: CancellationToken | None,
         retry_event_sink: Callable[[RetryEvent], None] | None,
@@ -256,8 +256,7 @@ class NegotiatingModelGateway:
         self._active = self._fallback
         return self._call(
             self._fallback,
-            messages,
-            tool_schemas,
+            invocation,
             event_sink,
             cancellation_token,
             retry_event_sink,
@@ -289,23 +288,21 @@ class NegotiatingModelGateway:
     @staticmethod
     def _call(
         gateway: ModelGateway,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
         event_sink: Callable[[str], None] | None,
         cancellation_token: CancellationToken | None,
         retry_event_sink: Callable[[RetryEvent], None] | None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
         telemetry_sink=None,
     ) -> ModelResponse:
-        return gateway.generate(
-            messages,
-            tool_schemas,
-            event_sink=event_sink,
-            cancellation_token=cancellation_token,
-            retry_event_sink=retry_event_sink,
-            retry_exhausted_sink=retry_exhausted_sink,
-            telemetry_sink=telemetry_sink,
-        )
+        kwargs = {
+            "event_sink": event_sink,
+            "cancellation_token": cancellation_token,
+            "retry_event_sink": retry_event_sink,
+            "retry_exhausted_sink": retry_exhausted_sink,
+            "telemetry_sink": telemetry_sink,
+        }
+        return gateway.generate(invocation, **kwargs)
 
 
 def _capabilities(gateway: ModelGateway) -> ModelCapabilities:

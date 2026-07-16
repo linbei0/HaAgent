@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from haagent.models.types import ModelCallError, ModelResponse
+from haagent.models.model_ref import ModelRef
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.session.turn_completion import ChatTurnResult
 from haagent.runtime.session.task_ledger import load_task_ledger
@@ -21,16 +22,16 @@ from haagent.runtime.orchestration.state import RunStatus
 class _FinalAnswerGateway:
     provider_name = "fake"
 
-    def generate(self, *, messages, tool_schemas):
-        del messages, tool_schemas
+    def generate(self, invocation, **kwargs):
+        del invocation, kwargs
         return ModelResponse(content="done", tool_calls=[])
 
 
 class _FailingGateway:
     provider_name = "fake"
 
-    def generate(self, *, messages, tool_schemas):
-        del messages, tool_schemas
+    def generate(self, invocation, **kwargs):
+        del invocation, kwargs
         raise ModelCallError("rate limit")
 
 
@@ -428,11 +429,7 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
     session = object.__new__(AgentSession)
     session._current_cancellation_token = None
     session.model_gateway = previous
-    session.model_profile_name = "old-profile"
-    session.model_connection_id = "old-connection"
-    session.model_name = "old-model"
-    session.model_base_url = "https://old.invalid"
-    session.model_variant = "old-variant"
+    session.model_ref = ModelRef("old-connection", "old-model", "old-variant")
 
     def fail_metadata_write() -> None:
         raise OSError("disk full")
@@ -440,39 +437,28 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
     session._write_session_metadata = fail_metadata_write
 
     with pytest.raises(OSError, match="disk full"):
-        session.switch_model_gateway(
-            profile_name="new-profile",
-            model_connection_id="new-connection",
-            model="new-model",
-            base_url="https://new.invalid",
-            gateway=rejected,
-            model_variant="new-variant",
-        )
+        session.switch_model_gateway(ModelRef("new-connection", "new-model", "new-variant"), rejected)
 
     assert session.model_gateway is previous
-    assert session.model_profile_name == "old-profile"
-    assert session.model_connection_id == "old-connection"
-    assert session.model_name == "old-model"
-    assert session.model_base_url == "https://old.invalid"
-    assert session.model_variant == "old-variant"
+    assert session.model_ref == ModelRef("old-connection", "old-model", "old-variant")
     assert rejected.closed is True
     assert previous.closed is False
 
 
-def test_reload_can_explicitly_clear_model_variant(tmp_path) -> None:
+def test_reload_replaces_model_ref_atomically(tmp_path) -> None:
     session = AgentSession(
         workspace_root=tmp_path,
         runs_root=tmp_path / ".runs",
-        model_variant="deep",
+        model_ref=ModelRef("main", "model", "deep"),
         memory_extraction_enabled=False,
     )
     target = AgentSession(
         workspace_root=tmp_path,
         runs_root=tmp_path / ".runs",
-        model_variant="old",
+        model_ref=ModelRef("main", "model", "old"),
         memory_extraction_enabled=False,
     )
 
-    session.reload(target.session_path, model_variant=None)
+    session.reload(target.session_path, model_ref=ModelRef("main", "model"))
 
-    assert session.model_variant is None
+    assert session.model_ref == ModelRef("main", "model")

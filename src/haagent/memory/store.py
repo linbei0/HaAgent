@@ -36,7 +36,7 @@ from haagent.memory.schema import (
     MemoryRecord,
     MemoryTombstone,
 )
-from haagent.models.model_connections import user_config_dir
+from haagent.models.config.connections import user_config_dir
 
 
 WORKSPACE_FILE_BY_CATEGORY = {

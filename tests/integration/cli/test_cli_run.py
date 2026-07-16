@@ -22,11 +22,11 @@ def _cli_gateway_from_profile(profile, gateway_cls):
     params = inspect.signature(gateway_cls.__init__).parameters
     kwargs = {}
     if "model" in params:
-        kwargs["model"] = profile.model
+        kwargs["model"] = profile.ref.model
     if "base_url" in params:
         kwargs["base_url"] = profile.base_url or None
     if "api_key" in params:
-        kwargs["api_key"] = profile.api_key or None
+        kwargs["api_key"] = profile.credential.api_key or None
     return gateway_cls(**kwargs)
 
 
@@ -44,7 +44,9 @@ class FakeResult:
 class OneShotGateway:
     provider_name = "one-shot"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
@@ -56,7 +58,9 @@ class ShellOnceGateway:
     def __init__(self) -> None:
         self._called = False
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         if self._called or any(m.get("role") == "tool" for m in messages):
             return ModelResponse("done", [])
         self._called = True
@@ -1003,7 +1007,8 @@ verification_commands: []
             assert model == "deepseek-v4-pro"
             assert base_url == "https://api.deepseek.com"
 
-        def generate(self, messages, tool_schemas):
+        def generate(self, invocation, **kwargs):
+            messages = invocation.messages
             model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
             assert secret not in model_input
             return ModelResponse("done", [])

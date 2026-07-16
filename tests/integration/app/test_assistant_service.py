@@ -21,45 +21,73 @@ from haagent.app.assistant_types import (
 )
 from haagent.models.catalog import ModelCatalogProvider
 from tests.support.model_credentials import FakeCredentialStore
-from haagent.models.types import ModelResponse
-from haagent.models import model_connections
-from haagent.models.model_connections import (
-    ModelSelection,
-    ProviderConnectionRecord,
-    load_providers_config_snapshot,
-    load_active_model_selection,
-    save_active_model_selection,
-    save_provider_connection,
-)
+from haagent.models.types import ModelGatewayMetadata, ModelResponse
+from haagent.models.model_settings import ModelSettings
+from haagent.models.config import connections as model_connections
+from haagent.models.config.config_store import ModelConfigStore
+from haagent.models.config.connections import ProviderConnectionRecord
+from haagent.models.model_ref import ModelRef
+from haagent.models.config.selection_store import ModelSelectionStore
 from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent, TaskProgressEvent
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills.marketplace import MarketplaceProvider, MarketplaceSearchResult, MarketplaceSkillCard
 
+ModelSelection = ModelRef
+
+
+def _resolved_name(model) -> str:
+    return f"{model.ref.connection_id}:{model.ref.model}"
+
+
+def load_providers_config_snapshot(path: Path):
+    return ModelConfigStore(path).load()
+
+
+def load_active_model_selection(*, config_dir: Path):
+    return ModelSelectionStore(config_dir).load_active()
+
+
+def save_active_model_selection(ref: ModelRef, *, config_dir: Path):
+    return ModelSelectionStore(config_dir).save_active(ref)
+
+
+def save_provider_connection(record: ProviderConnectionRecord, *, snapshot):
+    return ModelConfigStore(snapshot.path).save_connection(record, expected_digest=snapshot.digest).path
+
 
 class RecordingGateway:
     provider_name = "openai-chat"
+    model_settings = ModelSettings.empty()
 
     def __init__(self, profile_name: str = "local") -> None:
         self.profile_name = profile_name
         self.model_inputs: list[object] = []
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
         task_content = next((m["content"] for m in messages if m.get("role") == "user"), "")
         self.model_inputs.append(task_content)
         return ModelResponse("done", [])
 
+    def metadata(self):
+        return ModelGatewayMetadata(self.provider_name, self.profile_name, None)
+
 
 class BlockingGateway:
     provider_name = "openai-chat"
+    model_settings = ModelSettings.empty()
 
     def __init__(self, entered: threading.Event, release: threading.Event) -> None:
         self.entered = entered
         self.release = release
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
         self.entered.set()
         self.release.wait(timeout=2)
         return ModelResponse("done", [])
+
+    def metadata(self):
+        return ModelGatewayMetadata(self.provider_name, "blocking", None)
 
 
 class RecordingSession:
@@ -72,11 +100,7 @@ class RecordingSession:
         workspace_root: Path,
         runs_root: Path,
         model_gateway,
-        model_profile_name: str | None = None,
-        model_connection_id: str | None = None,
-        model_name: str | None = None,
-        model_base_url: str | None = None,
-        model_variant: str | None = None,
+        model_ref: ModelRef | None = None,
         max_turns: int | None,
         enable_web: bool = False,
         **_kwargs,
@@ -86,31 +110,18 @@ class RecordingSession:
         self.workspace_root = workspace_root
         self.runs_root = runs_root
         self.model_gateway = model_gateway
-        self.model_profile_name = model_profile_name
-        self.model_connection_id = model_connection_id
-        self.model_name = model_name
-        self.model_base_url = model_base_url
-        self.model_variant = model_variant
+        self.model_ref = model_ref
         self.max_turns = max_turns
         self.enable_web = enable_web
         self.session_path = runs_root / self.session_id
 
     def switch_model_gateway(
         self,
-        *,
-        profile_name: str,
-        model_connection_id: str | None = None,
-        model: str,
-        base_url: str,
+        model_ref: ModelRef,
         gateway,
-        model_variant: str | None = None,
     ) -> None:
         self.model_gateway = gateway
-        self.model_profile_name = profile_name
-        self.model_connection_id = model_connection_id
-        self.model_name = model
-        self.model_base_url = base_url
-        self.model_variant = model_variant
+        self.model_ref = model_ref
 
     def compact_current_session(self):
         return type(
@@ -262,7 +273,7 @@ def _service(
         workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         environ=environ or {},
-        gateway_factory=gateway_factory or (lambda profile: RecordingGateway(profile.name)),
+        gateway_factory=gateway_factory or (lambda model: RecordingGateway(_resolved_name(model))),
         **kwargs,
     )
 
@@ -301,7 +312,7 @@ def test_assistant_service_keeps_startup_providers_snapshot(tmp_path: Path, monk
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert service.models.list_model_variants("local", "model") == ["startup"]
+    assert service.models.list_choices()[0].variants == ("startup",)
     with pytest.raises(AssistantServiceError, match="changed after HaAgent started"):
         service.models.configure_connection(
             ModelConnectionConfigureRequest(
@@ -318,7 +329,7 @@ def test_assistant_service_keeps_startup_providers_snapshot(tmp_path: Path, monk
         )
     assert "changed" in path.read_text(encoding="utf-8")
     restarted = AssistantService(workspace_root=tmp_path)
-    assert restarted.models.list_model_variants("local", "model") == ["changed"]
+    assert restarted.models.list_choices()[0].variants == ("changed",)
 
 
 def test_service_lists_model_connections_with_credential_status(
@@ -504,7 +515,7 @@ def test_service_compacts_current_session_through_session_boundary(tmp_path: Pat
         workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         environ={"DEEPSEEK_API_KEY": "sk-test"},
-        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        gateway_factory=lambda model: RecordingGateway(_resolved_name(model)),
         session_cls=RecordingSession,
     )
     service.sessions.create()
@@ -722,14 +733,15 @@ def test_service_connection_test_uses_gateway_factory_and_redacts_secret(
 
     class ConnectionGateway:
         provider_name = "openai-chat"
+        model_settings = ModelSettings.empty()
 
-        def generate(self, messages, tool_schemas):
-            calls.append((messages, tool_schemas))
+        def generate(self, invocation, **kwargs):
+            calls.append((invocation.messages, invocation.tool_schemas))
             return ModelResponse(content="OK")
 
     def gateway_factory(profile):
-        assert profile.api_key == "sk-test-secret"
-        assert profile.model == "openai/gpt-5.2-chat"
+        assert profile.credential.api_key == "sk-test-secret"
+        assert profile.ref.model == "openai/gpt-5.2-chat"
         return ConnectionGateway()
 
     home = tmp_path / "home"
@@ -927,11 +939,10 @@ def test_create_and_resume_session_inject_same_retry_policy_into_compatible_fact
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     settings["model_retry"] = {"max_attempts": 2}
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
-    controllers = []
+    resolved_models = []
 
-    def gateway_factory(profile, *, retry_controller):
-        del profile
-        controllers.append(retry_controller)
+    def gateway_factory(model):
+        resolved_models.append(model)
         return RecordingGateway("retry")
 
     service = _service(tmp_path, environ={"DEEPSEEK_API_KEY": "secret"}, gateway_factory=gateway_factory)
@@ -939,7 +950,7 @@ def test_create_and_resume_session_inject_same_retry_policy_into_compatible_fact
     # 同模型 resume 复用 gateway，不二次注入；仅 create 走 factory。
     service.sessions.resume(created.session_path)
 
-    assert [controller.policy.max_attempts for controller in controllers] == [2]
+    assert [item.ref.model for item in resolved_models] == ["deepseek-chat"]
 
 
 def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, monkeypatch) -> None:
@@ -951,7 +962,7 @@ def test_service_web_flag_is_reported_and_passed_to_new_session(tmp_path: Path, 
         workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         environ={"DEEPSEEK_API_KEY": "secret"},
-        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        gateway_factory=lambda model: RecordingGateway(_resolved_name(model)),
         session_cls=RecordingSession,
         enable_web=True,
     )
@@ -1021,7 +1032,7 @@ def test_service_can_toggle_web_for_current_and_future_sessions(tmp_path: Path, 
         workspace_root=workspace,
         runs_root=tmp_path / ".runs",
         environ={"DEEPSEEK_API_KEY": "secret"},
-        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        gateway_factory=lambda model: RecordingGateway(_resolved_name(model)),
         session_cls=RecordingSession,
     )
 
@@ -1043,7 +1054,7 @@ def test_service_saves_interactive_turn_limit_and_updates_current_session(
     service = _service(
         tmp_path,
         environ={"DEEPSEEK_API_KEY": "secret"},
-        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        gateway_factory=lambda model: RecordingGateway(_resolved_name(model)),
         session_cls=RecordingSession,
     )
     service.sessions.create()
@@ -1068,7 +1079,7 @@ def test_service_sets_current_session_unlimited_without_persisting(
     service = _service(
         tmp_path,
         environ={"DEEPSEEK_API_KEY": "secret"},
-        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        gateway_factory=lambda model: RecordingGateway(_resolved_name(model)),
         session_cls=RecordingSession,
     )
     service.sessions.create()
@@ -1173,9 +1184,9 @@ def test_service_rejects_model_switch_while_current_run_is_active(
     release = threading.Event()
 
     def gateway_factory(profile):
-        if profile.name == "local:deepseek-chat":
+        if _resolved_name(profile) == "local:deepseek-chat":
             return BlockingGateway(entered, release)
-        return RecordingGateway(profile.name)
+        return RecordingGateway(_resolved_name(profile))
 
     service = _service(
         tmp_path,
@@ -1311,7 +1322,7 @@ def test_list_sessions_only_lists_current_workspace(tmp_path: Path, monkeypatch)
         workspace_root=other_workspace,
         runs_root=tmp_path / ".runs",
         environ={"DEEPSEEK_API_KEY": "secret"},
-        gateway_factory=lambda profile: RecordingGateway(profile.name),
+        gateway_factory=lambda model: RecordingGateway(_resolved_name(model)),
     )
     other_service.sessions.run_prompt_events("other workspace")
 
@@ -1353,7 +1364,7 @@ def test_service_reuses_last_sent_image_attachments_for_followup_turn(
     gateways: list[RecordingGateway] = []
 
     def gateway_factory(profile):
-        gateway = RecordingGateway(profile.name)
+        gateway = RecordingGateway(_resolved_name(profile))
         gateways.append(gateway)
         return gateway
 
@@ -1380,7 +1391,7 @@ def test_service_replaces_auto_reused_images_when_new_images_are_sent(
     gateways: list[RecordingGateway] = []
 
     def gateway_factory(profile):
-        gateway = RecordingGateway(profile.name)
+        gateway = RecordingGateway(_resolved_name(profile))
         gateways.append(gateway)
         return gateway
 
@@ -1410,7 +1421,7 @@ def test_resumed_session_reuses_last_sent_image_attachments_for_followup_turn(
     gateways: list[RecordingGateway] = []
 
     def gateway_factory(profile):
-        gateway = RecordingGateway(profile.name)
+        gateway = RecordingGateway(_resolved_name(profile))
         gateways.append(gateway)
         return gateway
 

@@ -6,7 +6,6 @@ haagent/app/session_usecases.py - 会话与权限应用 Module
 
 from __future__ import annotations
 
-import inspect
 import json
 from pathlib import Path
 
@@ -20,14 +19,7 @@ from haagent.app.assistant_types import (
     AssistantSessionTurn,
     EventSink,
 )
-from haagent.models.model_connections import (
-    ModelSelection,
-    ProviderProfile,
-    load_active_model_selection,
-    load_model_selection_profile,
-    load_model_route,
-)
-from haagent.models.gateway_registry import gateway_from_profile, gateway_from_route
+from haagent.models.model_ref import ModelRef
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.path_policy import PathAccess, PermissionMode
 from haagent.runtime.execution.retry import RetryController
@@ -120,28 +112,17 @@ class AssistantSessions:
             # 已有 session 时复用 MCP/gateway，避免 /new 每次重建 runtime。
             if existing is not None:
                 if self._context.pending_model_selection is not None:
-                    selection, profile = self._load_session_profile()
-                    existing.switch_model_gateway(
-                        profile_name=profile.name,
-                        model_connection_id=selection.connection_id,
-                        model=profile.model,
-                        base_url=profile.base_url or "",
-                        gateway=self._gateway_for_profile(profile),
-                        model_variant=selection.variant,
-                    )
+                    ref = self._load_session_ref()
+                    existing.switch_model_gateway(ref, self._gateway_for_ref(ref))
                     self._context.pending_model_selection = None
                 existing.new()
             else:
-                selection, profile = self._load_session_profile()
+                ref = self._load_session_ref()
                 self._context.session = self._context.session_factory(
                     workspace_root=self._context.workspace_root,
                     runs_root=self._context.runs_root,
-                    model_gateway=self._gateway_for_profile(profile),
-                    model_profile_name=profile.name,
-                    model_connection_id=selection.connection_id,
-                    model_name=profile.model,
-                    model_base_url=profile.base_url,
-                    model_variant=selection.variant,
+                    model_gateway=self._gateway_for_ref(ref),
+                    model_ref=ref,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
                     skill_catalog=self._context.skill_catalog,
@@ -157,19 +138,15 @@ class AssistantSessions:
     def resume(self, session: str | Path) -> AssistantSessionStatus:
         try:
             existing = self._context.session
-            selection, profile = self._load_resume_profile(session)
+            ref = self._load_resume_ref(session)
             # 已有 live session 时就地 reload package，复用 MCP（避免 5–10s 进程级重建）。
             if existing is not None:
-                gateway = self._gateway_for_resume(existing, profile, selection)
+                gateway = self._gateway_for_resume(existing, ref)
                 existing.reload(
                     session,
                     runs_root=self._context.runs_root,
                     model_gateway=gateway,
-                    model_profile_name=profile.name,
-                    model_connection_id=selection.connection_id,
-                    model_name=profile.model,
-                    model_base_url=profile.base_url,
-                    model_variant=selection.variant,
+                    model_ref=ref,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
                 )
@@ -177,12 +154,8 @@ class AssistantSessions:
                 self._context.session = self._context.session_factory.resume(
                     session,
                     runs_root=self._context.runs_root,
-                    model_gateway=self._gateway_for_profile(profile),
-                    model_profile_name=profile.name,
-                    model_connection_id=selection.connection_id,
-                    model_name=profile.model,
-                    model_base_url=profile.base_url,
-                    model_variant=selection.variant,
+                    model_gateway=self._gateway_for_ref(ref),
+                    model_ref=ref,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
                     skill_catalog=self._context.skill_catalog,
@@ -272,76 +245,41 @@ class AssistantSessions:
         assert self._context.session is not None
         return self._context.session
 
-    def _gateway_for_profile(self, profile: ProviderProfile):
-        """为每个 session 创建独立 retry controller，并兼容一参数 Factory Adapter。"""
+    def _gateway_for_ref(self, ref: ModelRef):
+        """每个 session 独占 retry controller；所有模型解析统一经过 ModelRuntime。"""
+        assert self._context.model_runtime is not None
         controller = RetryController(load_runtime_settings().model_retry)
-        factory = self._context.gateway_factory
-        if factory is gateway_from_profile:
-            config_dir = self._context.providers_snapshot.path.parent
-            route = load_model_route(config_dir=config_dir)
-            fallback_profile = (
-                load_model_selection_profile(
-                    route.fallback,
-                    snapshot=self._context.providers_snapshot,
-                    environ=self._context.environ,
-                )
-                if route.fallback is not None
-                else None
-            )
-            return gateway_from_route(
-                profile,
-                fallback_profile=fallback_profile,
-                cloud_fallback_consent=route.cloud_fallback_consent,
-                retry_controller=controller,
-            )
-        if "retry_controller" in inspect.signature(factory).parameters:
-            return factory(profile, retry_controller=controller)
-        return factory(profile)
+        return self._context.model_runtime.create_route_gateway(ref, retry_controller=controller)
 
     def _gateway_for_resume(
         self,
         existing: AgentSession,
-        profile: ProviderProfile,
-        selection: ModelSelection,
+        ref: ModelRef,
     ):
         """模型/variant 未变则复用 gateway；变更时才重建。"""
-        same_connection = (
-            getattr(existing, "model_connection_id", None) == selection.connection_id
-            and getattr(existing, "model_name", None) == profile.model
-            and (getattr(existing, "model_base_url", None) or "") == (profile.base_url or "")
-            and existing.model_variant == selection.variant
-        )
-        if same_connection and existing.model_gateway is not None:
+        if existing.model_ref == ref and existing.model_gateway is not None:
             return existing.model_gateway
-        return self._gateway_for_profile(profile)
+        return self._gateway_for_ref(ref)
 
-    def _load_session_profile(self) -> tuple[ModelSelection, ProviderProfile]:
-        selection = self._context.pending_model_selection or load_active_model_selection(
-            config_dir=self._context.providers_snapshot.path.parent,
-        )
-        profile = load_model_selection_profile(
-            selection,
-            snapshot=self._context.providers_snapshot,
-            environ=self._context.environ,
-        )
-        return selection, profile
+    def _load_session_ref(self) -> ModelRef:
+        assert self._context.model_runtime is not None
+        ref = self._context.pending_model_selection or self._context.model_runtime.selection_store.load_active()
+        self._context.model_runtime.resolve(ref)
+        return ref
 
-    def _load_resume_profile(self, session: str | Path) -> tuple[ModelSelection, ProviderProfile]:
-        selection = _session_model_selection(session, self._context.runs_root)
-        if selection is None:
-            selection = load_active_model_selection(
-                config_dir=self._context.providers_snapshot.path.parent,
-            )
-        profile = load_model_selection_profile(
-            selection,
-            snapshot=self._context.providers_snapshot,
-            environ=self._context.environ,
-        )
-        return selection, profile
+    def _load_resume_ref(self, session: str | Path) -> ModelRef:
+        assert self._context.model_runtime is not None
+        ref = _session_model_selection(session, self._context.runs_root)
+        self._context.model_runtime.resolve(ref)
+        return ref
 
 
 def session_status(session: AgentSession) -> AssistantSessionStatus:
     from haagent.app.workspace_usecases import sandbox_status
+
+    metadata_method = getattr(session.model_gateway, "metadata", None)
+    metadata = metadata_method() if callable(metadata_method) else None
+    ref = session.model_ref
 
     return AssistantSessionStatus(
         session_id=session.session_id,
@@ -351,11 +289,11 @@ def session_status(session: AgentSession) -> AssistantSessionStatus:
         turn_count=session.turn_count,
         max_turns=getattr(session, "max_turns", None),
         provider=session.provider_name,
-        model_profile_name=getattr(session, "model_profile_name", None),
-        model_connection_id=getattr(session, "model_connection_id", None),
-        model=getattr(session, "model_name", None),
-        model_variant=session.model_variant,
-        base_url=getattr(session, "model_base_url", None),
+        model_profile_name=(f"{ref.connection_id}:{ref.model}" if ref else None),
+        model_connection_id=ref.connection_id if ref else None,
+        model=ref.model if ref else None,
+        model_variant=ref.variant if ref else None,
+        base_url=metadata.base_url if metadata else None,
         web_enabled=getattr(session, "enable_web", False),
         external_roots=_external_root_summaries(session),
         permission_mode=_session_permission_mode(session),
@@ -405,22 +343,22 @@ def _session_permission_mode(session: AgentSession) -> PermissionMode:
     return "request_approval"
 
 
-def _session_model_selection(session: str | Path, runs_root: Path) -> ModelSelection | None:
+def _session_model_selection(session: str | Path, runs_root: Path) -> ModelRef:
     raw = Path(session)
     session_path = raw.resolve() if raw.is_absolute() or raw.exists() or raw.name != str(session) else (runs_root / "sessions" / str(session)).resolve()
     metadata_path = session_path / "session.json"
     if not metadata_path.exists():
-        return None
+        raise ChatSessionError(f"session metadata not found: {metadata_path}")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as error:
+        raise ChatSessionError(f"session metadata is invalid JSON: {metadata_path}") from error
     if not isinstance(metadata, dict):
-        return None
-    connection_id = metadata.get("model_connection_id")
-    model = metadata.get("model")
-    if isinstance(connection_id, str) and connection_id and isinstance(model, str) and model:
-        raw_variant = metadata["model_variant"]
-        variant = raw_variant if isinstance(raw_variant, str) and raw_variant else None
-        return ModelSelection(connection_id=connection_id, model=model, variant=variant)
-    return None
+        raise ChatSessionError(f"session metadata must be an object: {metadata_path}")
+    value = metadata.get("model_ref")
+    if not isinstance(value, dict):
+        raise ChatSessionError(f"session metadata must contain model_ref: {metadata_path}")
+    try:
+        return ModelRef.from_dict(value)
+    except ValueError as error:
+        raise ChatSessionError(str(error)) from error

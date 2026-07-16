@@ -14,13 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from haagent.app.assistant_service import AssistantService
-from haagent.models.model_connections import (
-    ModelSelection,
-    ProviderProfileError,
-    load_model_selection_profile,
-    load_providers_config_snapshot,
-    user_config_dir,
-)
+from haagent.models.config.connections import ProviderProfileError, user_config_dir
+from haagent.models.model_ref import ModelRef
 from haagent.models.types import ModelCallError
 from haagent.runtime.execution.command import redact_secret_like_text
 from haagent.runtime.session.agent import AgentSession
@@ -115,6 +110,13 @@ def _map_exception(error: BaseException) -> tuple[RunStatus, FailureCategory, st
         return "needs_attention", "workspace_unavailable", _bounded_summary(str(error))
     if isinstance(error, OSError):
         return "needs_attention", "workspace_unavailable", _bounded_summary(str(error))
+    # 应用服务会把底层模型配置错误包装为 AssistantServiceError；计划执行必须沿
+    # 显式异常链保留原失败分类，不能退化为 internal_error 或依赖错误文案判断。
+    cause = error.__cause__
+    if cause is not None and cause is not error:
+        status, category, summary = _map_exception(cause)
+        if category != "internal_error":
+            return status, category, summary
     return "failed", "internal_error", _bounded_summary(str(error))
 
 
@@ -262,27 +264,6 @@ class ScheduledRunExecutor:
         environ = dict(self._environ) if self._environ is not None else dict(os.environ)
         runs_root = self._runs_root if self._runs_root is not None else resolved / ".runs"
 
-        # 预检 connection/credential（在创建 session 前给出稳定分类）
-        try:
-            selection = ModelSelection(connection_id=definition.connection_id, model=definition.model)
-            config_dir = self._config_dir or user_config_dir()
-            load_model_selection_profile(
-                selection,
-                snapshot=load_providers_config_snapshot(config_dir / "providers.json"),
-                environ=environ,
-            )
-        except ProviderProfileError as error:
-            status, category, summary = _map_exception(error)
-            return self._finish(
-                run_id,
-                status=status,
-                now=now,
-                summary=summary,
-                failure_category=category,
-                needs_attention_reason=summary if status == "needs_attention" else None,
-                claim=claim,
-            )
-
         service = self._service_factory(
             workspace_root=resolved,
             runs_root=runs_root,
@@ -290,7 +271,7 @@ class ScheduledRunExecutor:
             enable_web=definition.web_enabled,
         )
         # 计划指定模型连接，不继承 TUI 当前选择之外的偶然状态
-        service._context.pending_model_selection = ModelSelection(
+        service._context.pending_model_selection = ModelRef(
             connection_id=definition.connection_id,
             model=definition.model,
         )

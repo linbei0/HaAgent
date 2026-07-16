@@ -167,9 +167,11 @@ def maybe_full_compact_messages(
     older_messages = copy.deepcopy(messages[: plan.preserved_start_index])
     preserved_recent = copy.deepcopy(messages[plan.preserved_start_index :])
     try:
+        from haagent.models.model_ref import ModelInvocation
+        from haagent.models.model_settings import ModelSettings
+
         response = gateway.generate(
-            messages=_build_summary_request_messages(older_messages),
-            tool_schemas=[],
+            ModelInvocation(messages=_build_summary_request_messages(older_messages), tool_schemas=[], settings=ModelSettings.empty())
         )
     except ModelCallError as error:
         return _not_applied(

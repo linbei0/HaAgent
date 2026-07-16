@@ -7,15 +7,14 @@ haagent/tui/overlays/models.py - 模型切换弹窗
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from functools import cached_property
-from typing import Callable, Literal
+from typing import Literal
 
 from textual import events
 from textual.app import ComposeResult, ScreenStackError
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from haagent.app.assistant_types import AssistantModelConnection, ModelSelectionRequest
+from haagent.models.model_ref import ModelChoice, ModelRef
 from haagent.tui.design.utils import safe_summary
 from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel
 
@@ -30,60 +29,29 @@ MODEL_SWITCH_PAGE_SIZE = 15
 
 
 @dataclass(frozen=True)
-class ModelSwitchRow:
-    connection_id: str
-    connection_name: str
-    provider_id: str
-    provider_name: str
-    model: str
-    model_name: str
-
-
-@dataclass(frozen=True)
 class ModelSwitchResult:
     action: ModelSwitchAction
-    selection: ModelSelectionRequest | None = None
+    selection: ModelRef | None = None
 
 
 @dataclass(frozen=True)
 class ModelSwitchState:
-    connections: list[AssistantModelConnection]
-    providers: list[object]
+    choices: list[ModelChoice]
     query: str = ""
     selected_index: int = 0
     # None：模型列表；非 None：variant 子步骤（已选模型 + 可选 variants）
-    variant_step: ModelSwitchRow | None = None
+    variant_step: ModelChoice | None = None
     # None 表示 TUI 中的「默认」，即不传 variant。
     variant_options: tuple[str | None, ...] = ()
     variant_selected_index: int = 0
     variant_error: str | None = None
 
-    @cached_property
-    def rows(self) -> list[ModelSwitchRow]:
-        providers_by_id = {str(getattr(provider, "id", "")): provider for provider in self.providers}
-        rows: list[ModelSwitchRow] = []
-        for connection in self.connections:
-            provider = providers_by_id.get(connection.provider_id)
-            if provider is None:
-                continue
-            for model in list(getattr(provider, "models", []) or []):
-                model_id = str(getattr(model, "id", ""))
-                if not model_id:
-                    continue
-                rows.append(
-                    ModelSwitchRow(
-                        connection_id=connection.id,
-                        connection_name=connection.name,
-                        provider_id=connection.provider_id,
-                        provider_name=connection.provider_name,
-                        model=model_id,
-                        model_name=str(getattr(model, "name", model_id)),
-                    )
-                )
-        return rows
+    @property
+    def rows(self) -> list[ModelChoice]:
+        return self.choices
 
-    @cached_property
-    def visible_rows(self) -> list[ModelSwitchRow]:
+    @property
+    def visible_rows(self) -> list[ModelChoice]:
         needle = self.query.casefold()
         if not needle:
             return self.rows
@@ -92,20 +60,20 @@ class ModelSwitchState:
             for row in self.rows
             if needle in row.provider_name.casefold()
             or needle in row.connection_name.casefold()
-            or needle in row.connection_id.casefold()
-            or needle in row.model.casefold()
+            or needle in row.ref.connection_id.casefold()
+            or needle in row.ref.model.casefold()
             or needle in row.model_name.casefold()
         ]
 
     @property
-    def selected_row(self) -> ModelSwitchRow | None:
+    def selected_row(self) -> ModelChoice | None:
         visible = self.visible_rows
         if not visible:
             return None
         return visible[min(max(self.selected_index, 0), len(visible) - 1)]
 
     @property
-    def visible_window(self) -> tuple[int, list[ModelSwitchRow]]:
+    def visible_window(self) -> tuple[int, list[ModelChoice]]:
         visible = self.visible_rows
         if not visible:
             return 0, []
@@ -129,11 +97,11 @@ class ModelSwitchState:
         next_index = min(max(self.selected_index + delta, 0), len(visible) - 1)
         return replace(self, selected_index=next_index)
 
-    def enter_variant_step(self, row: ModelSwitchRow, variant_names: list[str]) -> ModelSwitchState:
+    def enter_variant_step(self, row: ModelChoice) -> ModelSwitchState:
         return replace(
             self,
             variant_step=row,
-            variant_options=(None, *variant_names),
+            variant_options=(None, *row.variants),
             variant_selected_index=0,
         )
 
@@ -150,7 +118,7 @@ class ModelSwitchState:
         if self.variant_step is not None:
             return self._render_variant_step()
         lines = ["模型切换", f"搜索: {self.query or '-'}", ""]
-        if not self.connections:
+        if not self.choices:
             lines.extend(["请先 /connect 配置供应商连接", "", "Esc 关闭"])
             return "\n".join(lines)
         visible = self.visible_rows
@@ -164,7 +132,7 @@ class ModelSwitchState:
             index = start + offset
             selected = ">" if index == min(max(self.selected_index, 0), len(visible) - 1) else " "
             provider_connection = safe_summary(f"{row.provider_name} / {row.connection_name}", 34)
-            model = safe_summary(row.model, 48)
+            model = safe_summary(row.ref.model, 48)
             lines.append(f"{selected} {provider_connection:<34} {model}")
         lines.extend(["", "输入过滤  ↑/↓ 移动  Enter 当前会话  p 默认  b 备用  c 云端备用  l 扫描本机  Esc 关闭"])
         if self.variant_error:
@@ -176,7 +144,7 @@ class ModelSwitchState:
         assert row is not None
         lines = [
             "模型参数变体",
-            f"{row.provider_name} / {row.connection_name} · {row.model}",
+            f"{row.provider_name} / {row.connection_name} · {row.ref.model}",
             "",
         ]
         for index, option in enumerate(self.variant_options):
@@ -189,14 +157,10 @@ class ModelSwitchState:
 class ModelSwitchOverlay(ModalScreen[ModelSwitchResult | None]):
     def __init__(
         self,
-        connections: list[AssistantModelConnection],
-        providers: list[object],
-        *,
-        variant_lookup: Callable[[str, str], list[str]],
+        choices: list[ModelChoice],
     ) -> None:
         super().__init__()
-        self.state = ModelSwitchState(connections=connections, providers=providers)
-        self._variant_lookup = variant_lookup
+        self.state = ModelSwitchState(choices=choices)
         self._pending_action: ModelSwitchAction = "switch_current"
 
     def compose(self) -> ComposeResult:
@@ -270,15 +234,11 @@ class ModelSwitchOverlay(ModalScreen[ModelSwitchResult | None]):
         row = self.state.selected_row
         if row is None:
             return
-        try:
-            variants = self._variant_lookup(row.connection_id, row.model)
-        except Exception as error:
-            # 配置错误必须留在模型选择界面，不能当作无 variant 继续发送。
-            self._set_state(replace(self.state, variant_error=str(error)))
+        if row.diagnostics:
+            self._set_state(replace(self.state, variant_error="；".join(row.diagnostics)))
             return
-        # 仅当配置了 variants 时进入子步骤；首项始终为「默认」。
-        if variants:
-            self._set_state(self.state.enter_variant_step(row, variants))
+        if row.variants:
+            self._set_state(self.state.enter_variant_step(row))
             self._pending_action = action
             return
         self._dismiss_selection(action, row=row, variant=None)
@@ -287,7 +247,7 @@ class ModelSwitchOverlay(ModalScreen[ModelSwitchResult | None]):
         self,
         action: ModelSwitchAction,
         *,
-        row: ModelSwitchRow | None = None,
+        row: ModelChoice | None = None,
         variant: str | None = None,
     ) -> None:
         if self.state.variant_step is not None:
@@ -300,11 +260,7 @@ class ModelSwitchOverlay(ModalScreen[ModelSwitchResult | None]):
         self._safe_dismiss(
             ModelSwitchResult(
                 action=action,
-                selection=ModelSelectionRequest(
-                    connection_id=row.connection_id,
-                    model=row.model,
-                    variant=variant,
-                ),
+                selection=ModelRef(row.ref.connection_id, row.ref.model, variant),
             )
         )
 

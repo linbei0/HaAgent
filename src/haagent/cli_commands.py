@@ -28,8 +28,8 @@ from haagent.cli_render import (
 from haagent.app.assistant_service import AssistantService
 from haagent.channels.process_lock import GatewayInstanceLock
 from haagent.cli_runtime import CliRuntime, SmokeDefinition
-from haagent.models.credentials import KEYRING_SERVICE_NAME, KeyringCredentialStore
-from haagent.models.model_connections import ProviderProfileError, user_config_dir
+from haagent.models.config.connections import ProviderProfileError, user_config_dir
+from haagent.models.config.credentials import KEYRING_SERVICE_NAME, KeyringCredentialStore
 from haagent.runtime.evaluation.checks import run_quality_checks
 from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks, skipped_dogfood_report
 from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package

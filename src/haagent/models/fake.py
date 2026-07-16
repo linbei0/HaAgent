@@ -9,11 +9,14 @@ from __future__ import annotations
 from typing import Any
 
 from haagent.models.types import ModelGatewayMetadata, ModelResponse, ToolCall
+from haagent.models.model_ref import ModelInvocation
+from haagent.models.model_settings import ModelSettings
 from haagent.models.capabilities import ModelCapabilities
 
 
 class FakeModelGateway:
     provider_name = "fake"
+    model_settings = ModelSettings.empty()
 
     def __init__(self, response: ModelResponse | None = None) -> None:
         self._response = response or ModelResponse(
@@ -24,14 +27,15 @@ class FakeModelGateway:
 
     def generate(
         self,
-        messages: list[dict[str, Any]],
-        tool_schemas: list[dict[str, Any]],
+        invocation: ModelInvocation,
+        **_: object,
     ) -> ModelResponse:
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.calls.append(
             {
                 "messages": list(messages),
                 "tool_schemas": list(tool_schemas),
-                # legacy key kept for tests that read model_input
                 "model_input": _extract_model_input(messages),
             },
         )
@@ -72,7 +76,6 @@ def _tool_schema_available(tool_schemas: list[dict[str, Any]], tool_name: str) -
 
 
 def _extract_model_input(messages: list[dict[str, Any]]) -> str:
-    """Return concatenated text content of all messages for backward-compat test inspection."""
     parts: list[str] = []
     for msg in messages:
         content = msg.get("content")

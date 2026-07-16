@@ -20,7 +20,9 @@ class _TurnSequencedGateway:
         self.first_turn_started = threading.Event()
         self.allow_first_turn_finish = threading.Event()
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         model_input = "\n".join(
             content
             for content in (message.get("content") for message in messages)

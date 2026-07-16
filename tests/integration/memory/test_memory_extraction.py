@@ -30,7 +30,9 @@ class RecordingGateway:
         self.response = response
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.calls.append({"messages": list(messages), "tool_schemas": list(tool_schemas)})
         return ModelResponse(self.response, [])
 
@@ -42,7 +44,9 @@ class SequentialGateway:
         self.responses = responses
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.calls.append({"messages": list(messages), "tool_schemas": list(tool_schemas)})
         index = min(len(self.calls) - 1, len(self.responses) - 1)
         return self.responses[index]

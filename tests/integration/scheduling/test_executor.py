@@ -102,7 +102,9 @@ class RecordingGateway:
         self.text = text
         self.calls = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.calls += 1
         return ModelResponse(self.text, [])
 
@@ -110,7 +112,9 @@ class RecordingGateway:
 class PolicyDeniedGateway:
     provider_name = "openai-chat"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         from haagent.models.types import ToolCall
 
         return ModelResponse("", [ToolCall(name="shell", args={"command": "echo hi"}, id="1")])
@@ -119,7 +123,9 @@ class PolicyDeniedGateway:
 class TransientGateway:
     provider_name = "openai-chat"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         raise ModelCallError(
             "rate limited for sk-abcdefghijklmnopqrstuvwxyz",
             details=ModelFailureDetails(category="rate_limited", retryable=True, status_code=429),
@@ -153,11 +159,7 @@ class InteractionTriggerSession(ToolPolicySessionMixin):
         self.workspace_root = kwargs["workspace_root"]
         self.runs_root = kwargs["runs_root"]
         self.model_gateway = kwargs.get("model_gateway")
-        self.model_profile_name = kwargs.get("model_profile_name")
-        self.model_connection_id = kwargs.get("model_connection_id")
-        self.model_name = kwargs.get("model_name")
-        self.model_base_url = kwargs.get("model_base_url")
-        self.model_variant = kwargs.get("model_variant")
+        self.model_ref = kwargs.get("model_ref")
         self.max_turns = kwargs.get("max_turns")
         self.enable_web = kwargs.get("enable_web", False)
         self.session_path = self.runs_root / "sessions" / self.session_id
@@ -196,11 +198,7 @@ class CancelAwareSession(ToolPolicySessionMixin):
         self.workspace_root = kwargs["workspace_root"]
         self.runs_root = kwargs["runs_root"]
         self.model_gateway = kwargs.get("model_gateway")
-        self.model_profile_name = kwargs.get("model_profile_name")
-        self.model_connection_id = kwargs.get("model_connection_id")
-        self.model_name = kwargs.get("model_name")
-        self.model_base_url = kwargs.get("model_base_url")
-        self.model_variant = kwargs.get("model_variant")
+        self.model_ref = kwargs.get("model_ref")
         self.max_turns = kwargs.get("max_turns")
         self.enable_web = kwargs.get("enable_web", False)
         self.session_path = self.runs_root / "sessions" / self.session_id
@@ -653,11 +651,7 @@ def test_passes_tool_overrides_into_session(
             self.workspace_root = kwargs["workspace_root"]
             self.runs_root = kwargs["runs_root"]
             self.model_gateway = kwargs.get("model_gateway")
-            self.model_profile_name = kwargs.get("model_profile_name")
-            self.model_connection_id = kwargs.get("model_connection_id")
-            self.model_name = kwargs.get("model_name")
-            self.model_base_url = kwargs.get("model_base_url")
-            self.model_variant = kwargs.get("model_variant")
+            self.model_ref = kwargs.get("model_ref")
             self.max_turns = kwargs.get("max_turns")
             self.enable_web = kwargs.get("enable_web", False)
             self.session_path = self.runs_root / "sessions" / self.session_id

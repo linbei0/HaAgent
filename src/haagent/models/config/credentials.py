@@ -1,5 +1,5 @@
 """
-haagent/models/credentials.py - 用户级 API key 凭据解析
+haagent/models/config/credentials.py - 用户级 API key 凭据解析
 
 封装环境变量、系统凭据库和显式明文 fallback 的读取与状态检查。
 """

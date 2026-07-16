@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from haagent.models.model_ref import ModelInvocation
 from haagent.models.types import ModelGateway, ModelResponse, ToolCall
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.types import McpSettings
@@ -426,9 +427,10 @@ class DeterministicEvalGateway:
 
     def generate(
         self,
-        messages,
-        tool_schemas,
+        invocation: ModelInvocation,
+        **_: object,
     ) -> ModelResponse:
+        del invocation
         if self._index >= len(self._responses):
             return ModelResponse("deterministic eval responses exhausted", [])
         raw = self._responses[self._index]

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from haagent.models.model_connections import user_config_dir
+from haagent.models.config.connections import user_config_dir
 
 
 VALID_SUBAGENT_TYPES = {"explorer", "worker", "verification"}

@@ -14,7 +14,9 @@ from haagent.runtime.execution.path_policy import default_path_policy
 class _ShellApprovalGateway:
     provider_name = "fake"
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         return ModelResponse(
             content="run shell",
             tool_calls=[
@@ -33,7 +35,9 @@ class _ApprovalResumeGateway:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, messages, tool_schemas):
+    def generate(self, invocation, **kwargs):
+        messages = invocation.messages
+        tool_schemas = invocation.tool_schemas
         self.calls += 1
         if any(message.get("role") == "tool" for message in messages):
             return ModelResponse(content="completed after approved shell", tool_calls=[])

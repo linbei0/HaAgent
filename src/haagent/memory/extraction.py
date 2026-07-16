@@ -203,9 +203,11 @@ class MemoryExtractor:
 def _model_candidates(request: MemoryExtractionRequest) -> list[ExtractedMemoryCandidate]:
     prompt = _build_model_prompt(request)
     try:
+        from haagent.models.model_ref import ModelInvocation
+        from haagent.models.model_settings import ModelSettings
+
         response = request.model_gateway.generate(
-            messages=[{"role": "user", "content": prompt}],
-            tool_schemas=[],
+            ModelInvocation(messages=[{"role": "user", "content": prompt}], tool_schemas=[], settings=ModelSettings.empty())
         )
     except ModelCallError:
         return []

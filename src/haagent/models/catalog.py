@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.request import Request
 from urllib.request import urlopen
 
-from haagent.models.model_connections import user_config_dir
+from haagent.models.config.connections import user_config_dir
 
 MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_USER_AGENT = "HaAgent/0.1 (+https://models.dev)"

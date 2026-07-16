@@ -24,7 +24,7 @@ from haagent.channels.presenter import ChannelPresenter, SendText
 from haagent.channels.session_actor import ChannelSessionActor
 from haagent.channels.settings import ChannelInstanceConfig, ChannelSettings, save_channel_settings
 from haagent.channels.state import ChannelStateStore
-from haagent.models.gateway_registry import gateway_from_profile
+from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.runtime.events.types import (
     SessionLifecycleEvent,
     ToolActivityEvent,
@@ -73,7 +73,7 @@ def _context(workspace: Path) -> AssistantContext:
         workspace_root=workspace,
         runs_root=workspace / ".runs",
         environ={},
-        gateway_factory=gateway_from_profile,
+            gateway_factory=gateway_from_resolved,
         session_factory=AgentSession,
         max_turns=8,
         enable_web=False,

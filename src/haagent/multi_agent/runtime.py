@@ -7,7 +7,6 @@ src/haagent/multi_agent/runtime.py - 进程内 worker 调度运行时
 from __future__ import annotations
 
 import json
-import inspect
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -18,16 +17,10 @@ from typing import Any
 from haagent.models.types import ModelGateway
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.types import McpSettings
-from haagent.models.gateway_registry import gateway_from_profile
-from haagent.models.model_connections import (
-    ModelSelection,
-    ProviderProfile,
-    ProviderProfileError,
-    load_active_model_selection,
-    load_model_selection_profile,
-    load_providers_config_snapshot,
-    user_config_dir,
-)
+from haagent.models.gateway_registry import gateway_from_resolved
+from haagent.models.config.connections import ProviderProfileError, user_config_dir
+from haagent.models.model_ref import ModelRef, ResolvedModel
+from haagent.models.model_runtime import ModelRuntime
 from haagent.multi_agent.backends import BACKEND_REGISTRY, WorkerBackend
 from haagent.multi_agent.messages import WorkerMessage, WorkerNotification, WorkerPermissionRequest
 from haagent.multi_agent.permissions import WorkerType, worker_tool_policy
@@ -45,7 +38,7 @@ from haagent.runtime.execution.retry import RetryController
 
 
 RESTART_STATUS_NOTE = "Task restarted; prior interactive context was not preserved."
-GatewayFactory = Callable[[ProviderProfile], ModelGateway]
+GatewayFactory = Callable[[ResolvedModel], ModelGateway]
 
 
 @dataclass
@@ -88,7 +81,7 @@ class MultiAgentRuntime:
         team_root: Path | None = None,
         worker_max_turns: int | None = DEFAULT_INTERACTIVE_MAX_TURNS,
         environ: Mapping[str, str] | None = None,
-        gateway_factory: GatewayFactory = gateway_from_profile,
+        gateway_factory: GatewayFactory = gateway_from_resolved,
         parent_task_step_id: str = "",
     ) -> None:
         self.runs_root = runs_root
@@ -108,6 +101,11 @@ class MultiAgentRuntime:
         self.worker_max_turns = worker_max_turns
         self.environ = environ
         self.gateway_factory = gateway_factory
+        self.model_runtime = ModelRuntime.load(
+            config_dir=user_config_dir(),
+            environ=environ or {},
+            gateway_builder=gateway_factory,
+        )
         self.parent_task_step_id = parent_task_step_id
         self.store = TeamStore(team_root or (user_config_dir() / "teams"))
         self._profile_resolver = resolve_worker_profile
@@ -657,7 +655,7 @@ class MultiAgentRuntime:
             workspace_root=resolved_workspace_root,
             runs_root=self.runs_root,
             model_gateway=self._worker_gateway(worker_profile.model_profile),
-            model_profile_name=worker_profile.model_profile,
+            model_ref=self._worker_model_ref(worker_profile.model_profile),
             max_turns=worker_profile.max_turns or self.worker_max_turns,
             session_id=f"{self.leader_session_id}-{agent_id}{suffix}",
             memory_extraction_enabled=False,
@@ -742,20 +740,18 @@ class MultiAgentRuntime:
         if model_profile is None:
             return self.model_gateway
         try:
-            active_selection = load_active_model_selection(config_dir=user_config_dir())
-            snapshot = load_providers_config_snapshot(user_config_dir() / "providers.json")
-            profile = load_model_selection_profile(
-                ModelSelection(connection_id=model_profile, model=active_selection.model),
-                snapshot=snapshot,
-                environ=self.environ,
-            )
+            active_selection = self.model_runtime.selection_store.load_active()
+            ref = ModelRef(model_profile, active_selection.model)
+            self.model_runtime.resolve(ref)
         except ProviderProfileError as error:
             raise ValueError(str(error)) from error
-        controller = RetryController(load_runtime_settings().model_retry)
-        signature = inspect.signature(self.gateway_factory)
-        if "retry_controller" in signature.parameters:
-            return self.gateway_factory(profile, retry_controller=controller)
-        return self.gateway_factory(profile)
+        return self.model_runtime.create_gateway(ref)
+
+    def _worker_model_ref(self, model_profile: str | None) -> ModelRef | None:
+        if model_profile is None:
+            return None
+        active = self.model_runtime.selection_store.load_active()
+        return ModelRef(model_profile, active.model)
 
     def _emit_worker_event(
         self,

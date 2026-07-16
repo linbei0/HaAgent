@@ -25,9 +25,9 @@ from haagent.channels.settings import (
     save_channel_settings,
 )
 from haagent.channels.state import ChannelStateStore
-from haagent.models.credentials import KEYRING_SERVICE_NAME
+from haagent.models.config.credentials import KEYRING_SERVICE_NAME
 from tests.support.model_credentials import FakeCredentialStore
-from haagent.models.gateway_registry import gateway_from_profile
+from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.runtime.session.agent import AgentSession
 
 
@@ -72,7 +72,7 @@ def _context(workspace: Path) -> AssistantContext:
         workspace_root=workspace,
         runs_root=workspace / ".runs",
         environ={},
-        gateway_factory=gateway_from_profile,
+            gateway_factory=gateway_from_resolved,
         session_factory=AgentSession,
         max_turns=8,
         enable_web=False,

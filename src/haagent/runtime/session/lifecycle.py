@@ -16,6 +16,7 @@ from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.settings import load_mcp_settings
 from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.types import ModelGateway
+from haagent.models.model_ref import ModelRef
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, load_path_policy
@@ -23,7 +24,6 @@ from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.session.package import (
     ChatSessionError,
     new_session_id,
-    optional_string,
     read_image_attachment_history,
     read_manual_compaction_state,
     read_session_image_attachments,
@@ -46,9 +46,6 @@ from haagent.runtime.session.working_state import (
 from haagent.tools.registry import default_tool_runtime_registry
 
 
-MODEL_VARIANT_UNSET = object()
-
-
 @dataclass
 class SessionRuntimeState:
     """AgentSession 的可序列化/可装配运行时字段快照。"""
@@ -57,11 +54,7 @@ class SessionRuntimeState:
     path_policy: PathPolicy
     runs_root: Path
     model_gateway: ModelGateway | None
-    model_profile_name: str | None
-    model_connection_id: str | None
-    model_name: str | None
-    model_base_url: str | None
-    model_variant: str | None
+    model_ref: ModelRef | None
     max_turns: int | None
     memory_extraction_enabled: bool
     enable_web: bool
@@ -120,11 +113,7 @@ def build_create_state(
     workspace_root: Path,
     runs_root: Path,
     model_gateway: ModelGateway | None = None,
-    model_profile_name: str | None = None,
-    model_connection_id: str | None = None,
-    model_name: str | None = None,
-    model_base_url: str | None = None,
-    model_variant: str | None = None,
+    model_ref: ModelRef | None = None,
     max_turns: int | None,
     session_id: str | None = None,
     memory_extraction_enabled: bool = True,
@@ -144,11 +133,7 @@ def build_create_state(
         path_policy=default_path_policy(resolved_workspace),
         runs_root=runs_root,
         model_gateway=model_gateway,
-        model_profile_name=model_profile_name,
-        model_connection_id=model_connection_id,
-        model_name=model_name,
-        model_base_url=model_base_url,
-        model_variant=model_variant,
+        model_ref=model_ref,
         max_turns=max_turns,
         memory_extraction_enabled=memory_extraction_enabled,
         enable_web=enable_web,
@@ -190,11 +175,7 @@ def build_resume_state(
     *,
     runs_root: Path | None = None,
     model_gateway: ModelGateway | None = None,
-    model_profile_name: str | None = None,
-    model_connection_id: str | None = None,
-    model_name: str | None = None,
-    model_base_url: str | None = None,
-    model_variant: str | None | object = MODEL_VARIANT_UNSET,
+    model_ref: ModelRef | None = None,
     max_turns: int | None,
     enable_web: bool = False,
     mcp_runtime: Any | None = None,
@@ -247,14 +228,12 @@ def build_resume_state(
         path_policy=path_policy,
         runs_root=session_path.parent.parent,
         model_gateway=model_gateway,
-        model_profile_name=model_profile_name or optional_string(metadata.get("model_profile_name")),
-        model_connection_id=model_connection_id or optional_string(metadata.get("model_connection_id")),
-        model_name=model_name or optional_string(metadata.get("model")),
-        model_base_url=model_base_url or optional_string(metadata.get("base_url")),
-        model_variant=(
-            optional_string(metadata["model_variant"])
-            if model_variant is MODEL_VARIANT_UNSET
-            else model_variant
+        model_ref=(
+            model_ref
+            if model_ref is not None
+            else ModelRef.from_dict(metadata["model_ref"])
+            if isinstance(metadata.get("model_ref"), dict)
+            else None
         ),
         max_turns=max_turns,
         memory_extraction_enabled=True,
@@ -299,11 +278,7 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         path_policy=default_path_policy(state.workspace_root),
         runs_root=state.runs_root,
         model_gateway=state.model_gateway,
-        model_profile_name=state.model_profile_name,
-        model_connection_id=state.model_connection_id,
-        model_name=state.model_name,
-        model_base_url=state.model_base_url,
-        model_variant=state.model_variant,
+        model_ref=state.model_ref,
         max_turns=state.max_turns,
         memory_extraction_enabled=state.memory_extraction_enabled,
         enable_web=state.enable_web,
@@ -343,11 +318,7 @@ def apply_state(instance: Any, state: SessionRuntimeState) -> None:
     instance.path_policy = state.path_policy
     instance.runs_root = state.runs_root
     instance.model_gateway = state.model_gateway
-    instance.model_profile_name = state.model_profile_name
-    instance.model_connection_id = state.model_connection_id
-    instance.model_name = state.model_name
-    instance.model_base_url = state.model_base_url
-    instance.model_variant = state.model_variant
+    instance.model_ref = state.model_ref
     instance.max_turns = state.max_turns
     instance.memory_extraction_enabled = state.memory_extraction_enabled
     instance.enable_web = state.enable_web

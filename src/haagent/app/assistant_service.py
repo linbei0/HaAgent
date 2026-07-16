@@ -21,9 +21,10 @@ from haagent.app import (
 )
 from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import GatewayFactory
-from haagent.models.gateway_registry import gateway_from_profile
+from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.models.catalog import load_cached_model_catalog
-from haagent.models.model_connections import load_providers_config_snapshot, user_provider_connections_path
+from haagent.models.config.connections import user_provider_connections_path
+from haagent.models.model_runtime import ModelRuntime
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
@@ -44,17 +45,22 @@ class AssistantService:
         initial_continue: bool = False,
     ) -> None:
         # 所有 Module 共享同一私有状态，避免配置与当前 session 在层间漂移。
+        model_runtime = ModelRuntime.load(
+            config_dir=user_provider_connections_path().parent,
+            environ=os.environ if environ is None else environ,
+            gateway_builder=gateway_factory or gateway_from_resolved,
+        )
         self._context = AssistantContext(
             workspace_root=(workspace_root or Path.cwd()).resolve(),
             runs_root=runs_root,
             environ=os.environ if environ is None else environ,
-            gateway_factory=gateway_factory or gateway_from_profile,
+            gateway_factory=gateway_factory or gateway_from_resolved,
             session_factory=session_cls,
             max_turns=max_turns,
             enable_web=enable_web,
             initial_resume=initial_resume,
             initial_continue=initial_continue,
-            providers_snapshot=load_providers_config_snapshot(user_provider_connections_path()),
+            model_runtime=model_runtime,
         )
         cached_catalog = load_cached_model_catalog()
         if cached_catalog is not None:

@@ -15,13 +15,7 @@ from haagent.app.assistant_types import (
     SandboxDoctorReport,
 )
 from haagent.mcp.settings import load_mcp_settings
-from haagent.models.model_connections import (
-    ModelSelection,
-    ProviderProfileError,
-    load_active_model_selection,
-    provider_connection_credential_status,
-    user_config_dir,
-)
+from haagent.models.config.connections import ProviderProfileError, user_config_dir
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.settings import RuntimeSettingsError, load_runtime_settings, set_interactive_max_turns
 from haagent.runtime.sandbox.status import (
@@ -175,9 +169,7 @@ class AssistantWorkspace:
             self._context.status_generation,
             session.session_id,
             session.turn_count,
-            getattr(session, "model_connection_id", None),
-            getattr(session, "model_name", None),
-            session.model_variant,
+            session.model_ref,
             permission,
             external,
             self._context.enable_web,
@@ -190,15 +182,7 @@ class AssistantWorkspace:
         from haagent.app.session_usecases import session_status
 
         session = session_status(self._context.session) if self._context.session is not None else None
-        override = (
-            ModelSelection(
-                connection_id=session.model_connection_id,
-                model=session.model or "",
-                variant=session.model_variant,
-            )
-            if session is not None and session.model_connection_id is not None
-            else None
-        )
+        override = self._context.session.model_ref if self._context.session is not None else None
         profile_name = provider = base_url = model = api_key_env = None
         model_variant = None
         credential_source_configured = credential_source_used = None
@@ -206,10 +190,9 @@ class AssistantWorkspace:
         credential_store_error = profile_error = None
         api_key_available = False
         try:
-            snapshot = self._context.providers_snapshot
-            selection = override or load_active_model_selection(
-                config_dir=snapshot.path.parent,
-            )
+            assert self._context.model_runtime is not None
+            selection = override or self._context.model_runtime.selection_store.load_active()
+            snapshot = self._context.model_runtime.snapshot
             connection = snapshot.connection(selection.connection_id)
             profile_name = connection.id
             provider = connection.gateway_provider
@@ -217,11 +200,7 @@ class AssistantWorkspace:
             model = selection.model
             model_variant = selection.variant
             api_key_env = connection.api_key_env
-            credential = provider_connection_credential_status(
-                connection,
-                environ=self._context.environ,
-                config_dir=snapshot.path.parent,
-            )
+            credential = self._context.model_runtime.credential_status(connection.id)
             api_key_available = credential.api_key_available
             credential_source_configured = credential.credential_source_configured
             credential_source_used = credential.credential_source_used
