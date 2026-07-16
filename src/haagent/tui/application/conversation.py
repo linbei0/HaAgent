@@ -136,6 +136,7 @@ class ConversationController:
     def refresh(self) -> None:
         """把 timeline 的粘底状态与 placeholder 同步到最新内容。"""
         conversation = self._timeline()
+        conversation.hide_memory()
         if not conversation.plain_text:
             if not self.placeholder_rendered:
                 conversation.show_placeholder()

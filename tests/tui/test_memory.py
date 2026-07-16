@@ -81,6 +81,45 @@ def test_tui_m_key_no_longer_opens_memory_mode(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
+
+def test_tui_escape_closes_memory_mode_and_restores_empty_chat(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _open_memory_panel(app, pilot)
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+
+            conversation = _text(app, "#conversation")
+            assert "记忆候选" not in conversation
+            assert "可以开始了" in conversation
+            assert _text(app, "#footer-bar") == footer_text("chat")
+            assert app.query_one("#prompt-input").has_focus
+
+    asyncio.run(run())
+
+
+def test_tui_escape_closes_memory_mode_and_restores_existing_chat(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._conversation.append_line("原有对话内容")
+            await pilot.pause(0.1)
+            await _open_memory_panel(app, pilot)
+
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+
+            conversation = _text(app, "#conversation")
+            assert "记忆候选" not in conversation
+            assert "原有对话内容" in conversation
+
+    asyncio.run(run())
+
+
 def test_tui_help_modal_is_contextual_for_memory_modes(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])

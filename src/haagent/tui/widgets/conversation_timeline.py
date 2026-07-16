@@ -109,10 +109,17 @@ class ConversationTimeline(VerticalScroll):
         self._show_singleton("placeholder", text, "timeline-placeholder")
 
     def show_memory(self, text: str) -> None:
-        self._clear_items()
+        # 记忆候选只是临时覆盖层；保留 timeline 数据，Esc 返回时才能恢复原对话。
         self._plain_text = text
         self._plain_text_dirty = False
         self._show_singleton("memory", text, "timeline-memory")
+
+    def hide_memory(self) -> None:
+        """关闭记忆候选覆盖层，并从保留的数据模型恢复对话节点。"""
+        if self._memory_widget is None:
+            return
+        self._remove_singletons()
+        self._render_timeline()
 
     @property
     def plain_text(self) -> str:
