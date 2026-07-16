@@ -22,6 +22,8 @@ from haagent.app import (
 from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import GatewayFactory
 from haagent.models.gateway_registry import gateway_from_profile
+from haagent.models.catalog import load_cached_model_catalog
+from haagent.models.model_connections import load_providers_config_snapshot, user_provider_connections_path
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
@@ -52,7 +54,11 @@ class AssistantService:
             enable_web=enable_web,
             initial_resume=initial_resume,
             initial_continue=initial_continue,
+            providers_snapshot=load_providers_config_snapshot(user_provider_connections_path()),
         )
+        cached_catalog = load_cached_model_catalog()
+        if cached_catalog is not None:
+            model_connection_usecases.bind_catalog_snapshot(self._context, cached_catalog)
         self.workspace = workspace_usecases.AssistantWorkspace(self._context)
         self.sessions = session_usecases.AssistantSessions(self._context)
         self.models = model_connection_usecases.AssistantModels(self._context)

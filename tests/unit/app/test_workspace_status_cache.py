@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent.app.workspace_usecases import AssistantWorkspace
+from haagent.models.model_connections import ProviderConnectionRecord, ProvidersConfigSnapshot
 
 
 class _CountingCredentialStatus:
@@ -30,6 +31,15 @@ class _CountingCredentialStatus:
 
 
 def _workspace(tmp_path: Path, monkeypatch, credential_counter: _CountingCredentialStatus) -> AssistantWorkspace:
+    connection = ProviderConnectionRecord(
+        id="conn-1",
+        name="test",
+        provider_id="openai",
+        provider_name="OpenAI",
+        gateway_provider="openai",
+        base_url="https://example.test/v1",
+        api_key_env="TEST_API_KEY",
+    )
     # 只测 status 缓存边界，不依赖完整 AssistantContext 构造。
     context = SimpleNamespace(
         workspace_root=tmp_path,
@@ -39,29 +49,21 @@ def _workspace(tmp_path: Path, monkeypatch, credential_counter: _CountingCredent
         max_turns=16,
         session=None,
         status_generation=0,
+        providers_snapshot=ProvidersConfigSnapshot(
+            path=tmp_path / "config" / "providers.json",
+            records=(connection,),
+            digest="test",
+        ),
     )
     workspace = AssistantWorkspace(context)
 
     monkeypatch.setattr(
         "haagent.app.workspace_usecases.load_active_model_selection",
-        lambda config_dir=None: SimpleNamespace(connection_id="conn-1", model="gpt-test"),
-    )
-    monkeypatch.setattr(
-        "haagent.app.workspace_usecases.load_provider_connection_record",
-        lambda connection_id, config_path=None: SimpleNamespace(
-            id=connection_id,
-            gateway_provider="openai",
-            base_url="https://example.test/v1",
-            api_key_env="TEST_API_KEY",
-        ),
+        lambda config_dir=None: SimpleNamespace(connection_id="conn-1", model="gpt-test", variant=None),
     )
     monkeypatch.setattr(
         "haagent.app.workspace_usecases.provider_connection_credential_status",
         credential_counter,
-    )
-    monkeypatch.setattr(
-        "haagent.app.workspace_usecases.user_config_dir",
-        lambda: tmp_path / "config",
     )
     monkeypatch.setattr(
         "haagent.app.workspace_usecases.sandbox_status",

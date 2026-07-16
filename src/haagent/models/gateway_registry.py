@@ -14,6 +14,7 @@ from haagent.models.catalog import ModelCatalogProvider
 from haagent.models.google import GoogleGeminiGateway
 from haagent.models.http_transport import ModelHttpTransport, close_model_gateway
 from haagent.models.model_connections import ProviderProfile, ProviderProfileError
+from haagent.models.model_options import empty_resolved_config
 from haagent.models.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models.openai_responses import OpenAIResponsesGateway
 from haagent.models.types import ModelGateway
@@ -69,10 +70,12 @@ def gateway_from_profile(
     http_transport: ModelHttpTransport | None = None,
 ) -> ModelGateway:
     # 空字符串与未配置等价，便于 CLI 临时 profile 回落到环境变量默认值。
+    # request_config 在构造时绑定；切换 variant 时走新 gateway，不热改 payload。
     gateway_kwargs: dict[str, object] = {
         "api_key": profile.api_key or None,
         "model": profile.model,
         "base_url": profile.base_url or None,
+        "request_config": profile.request_config,
     }
     if retry_controller is not None:
         gateway_kwargs["retry_controller"] = retry_controller
@@ -132,6 +135,7 @@ def gateway_from_route(
     )
     primary_chat = None
     if primary_profile.provider == "openai":
+        # Responses 原生参数不能透传到 Chat Completions；协议 fallback 使用原有默认 payload。
         primary_chat = _with_discovered_capabilities(
             OpenAIChatCompletionsGateway(
                 api_key=primary_profile.api_key or None,
@@ -140,6 +144,11 @@ def gateway_from_route(
                 retry_controller=retry_controller,
                 require_api_key=primary_profile.runtime_kind == "remote",
                 http_transport=shared_transport,
+                request_config=empty_resolved_config(
+                    connection_id=primary_profile.name.split(":", 1)[0],
+                    model_id=primary_profile.model,
+                    variant=primary_profile.variant,
+                ),
             ),
             primary_profile,
             protocol="chat_completions",

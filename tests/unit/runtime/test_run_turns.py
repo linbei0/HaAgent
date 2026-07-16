@@ -13,7 +13,13 @@ import threading
 import time
 
 from haagent.models.gateway_retry import execute_model_request
-from haagent.models.types import ModelCallError, ModelFailureDetails, ModelUsage, ToolCall
+from haagent.models.types import (
+    ModelCallError,
+    ModelFailureDetails,
+    ModelGatewayMetadata,
+    ModelUsage,
+    ToolCall,
+)
 from haagent.models.types import ModelResponse
 from haagent.runtime.execution.retry import RetryController, RetryPolicy
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
@@ -1242,8 +1248,13 @@ verification_commands: []
                 )
             return ModelResponse("done", [], usage=ModelUsage(input_tokens=80, output_tokens=2, total_tokens=82, raw_source="test"))
 
-        def metadata(self):
-            return SimpleNamespace(provider="performance-tool", model="m", endpoint=None, base_url=None, profile_name=None)
+            def metadata(self):
+                return ModelGatewayMetadata(
+                    provider="performance-tool",
+                    model="m",
+                    endpoint=None,
+                    request_config=None,
+                )
 
         def capabilities(self):
             from haagent.models.capabilities import ModelCapabilities
@@ -1333,8 +1344,13 @@ verification_commands: []
                 telemetry_sink=telemetry_sink,
             )
 
-        def metadata(self):
-            return SimpleNamespace(provider=self.provider_name, model="m", endpoint=None, base_url=None, profile_name=None)
+            def metadata(self):
+                return ModelGatewayMetadata(
+                    provider=self.provider_name,
+                    model="m",
+                    endpoint=None,
+                    request_config=None,
+                )
 
         def capabilities(self):
             from haagent.models.capabilities import ModelCapabilities

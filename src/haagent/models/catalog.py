@@ -114,6 +114,22 @@ def fetch_model_catalog(
     )
 
 
+def load_cached_model_catalog(*, cache_path: Path | None = None) -> CatalogFetchResult | None:
+    """只读现有目录缓存，不联网；供 AssistantService 启动快照匹配模型。"""
+
+    cache_file = cache_path or (user_config_dir() / MODEL_CATALOG_CACHE_FILE)
+    cached = _load_cached_catalog(cache_file)
+    if cached is None:
+        return None
+    return CatalogFetchResult(
+        providers=_parse_providers(cached.catalog),
+        source=str(cache_file),
+        fetched_at=(cached.fetched_at.isoformat() if cached.fetched_at is not None else _now_iso()),
+        used_cache=True,
+        error=None,
+    )
+
+
 def _default_transport() -> dict[str, object]:
     request = Request(
         MODELS_DEV_URL,

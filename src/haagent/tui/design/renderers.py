@@ -31,10 +31,11 @@ def status_line(
     web_label = "联网已开" if status.web_enabled else "联网已关"
     workspace_value = _workspace_status_value(status.workspace_root, width=width)
 
+    model_display = _model_display_label(status.model, status.model_variant)
     fixed_right = f"模型  · {web_label} · {state_label}"
     remaining_for_values = max(2, width - cell_len(f"工作区 {workspace_value}  {fixed_right}"))
-    model_limit = max(2, min(cell_len(status.model or "未配置"), remaining_for_values))
-    model_value = _truncate_cells_end(status.model or "未配置", model_limit)
+    model_limit = max(2, min(cell_len(model_display), remaining_for_values))
+    model_value = _truncate_cells_end(model_display, model_limit)
     right = f"模型 {model_value} · {web_label} · {state_label}"
 
     workspace_limit = max(2, width - cell_len(right) - cell_len("工作区 ") - 2)
@@ -65,6 +66,14 @@ _WORK_STATE_LABELS = {
     "cancelling": "正在取消",
     "cancelled": "已取消",
 }
+
+
+def _model_display_label(model: str | None, variant: str | None) -> str:
+    # 状态栏只在有 variant 时追加 · variant，未配置仍显示「未配置」。
+    base = model or "未配置"
+    if variant:
+        return f"{base} · {variant}"
+    return base
 
 
 def _workspace_status_value(path: Path, *, width: int) -> str:

@@ -31,7 +31,7 @@ def _write_connection(home: Path, *, name: str = "local", model: str = "m1") -> 
     (config_dir / "providers.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": name,
@@ -44,7 +44,6 @@ def _write_connection(home: Path, *, name: str = "local", model: str = "m1") -> 
                         "credential_source": "env",
                     }
                 ],
-                "custom_models": [],
             }
         ),
         encoding="utf-8",
@@ -158,6 +157,7 @@ class InteractionTriggerSession(ToolPolicySessionMixin):
         self.model_connection_id = kwargs.get("model_connection_id")
         self.model_name = kwargs.get("model_name")
         self.model_base_url = kwargs.get("model_base_url")
+        self.model_variant = kwargs.get("model_variant")
         self.max_turns = kwargs.get("max_turns")
         self.enable_web = kwargs.get("enable_web", False)
         self.session_path = self.runs_root / "sessions" / self.session_id
@@ -200,6 +200,7 @@ class CancelAwareSession(ToolPolicySessionMixin):
         self.model_connection_id = kwargs.get("model_connection_id")
         self.model_name = kwargs.get("model_name")
         self.model_base_url = kwargs.get("model_base_url")
+        self.model_variant = kwargs.get("model_variant")
         self.max_turns = kwargs.get("max_turns")
         self.enable_web = kwargs.get("enable_web", False)
         self.session_path = self.runs_root / "sessions" / self.session_id
@@ -656,6 +657,7 @@ def test_passes_tool_overrides_into_session(
             self.model_connection_id = kwargs.get("model_connection_id")
             self.model_name = kwargs.get("model_name")
             self.model_base_url = kwargs.get("model_base_url")
+            self.model_variant = kwargs.get("model_variant")
             self.max_turns = kwargs.get("max_turns")
             self.enable_web = kwargs.get("enable_web", False)
             self.session_path = self.runs_root / "sessions" / self.session_id

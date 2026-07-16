@@ -21,6 +21,7 @@ from haagent.models.model_connections import (
     ModelSelection,
     load_active_model_selection,
     load_model_selection_profile,
+    load_providers_config_snapshot,
     user_config_dir,
 )
 from haagent.runtime.session.agent import AgentSession
@@ -113,8 +114,9 @@ def _build_gateway(payload: dict[str, Any]):
         raise ValueError("subprocess worker requires a serializable gateway or model_profile")
     active_selection = load_active_model_selection(config_dir=user_config_dir())
     selection = ModelSelection(connection_id=model_profile, model=active_selection.model)
+    snapshot = load_providers_config_snapshot(user_config_dir() / "providers.json")
     return gateway_from_profile(
-        load_model_selection_profile(selection, config_dir=user_config_dir()),
+        load_model_selection_profile(selection, snapshot=snapshot),
         retry_controller=RetryController(load_runtime_settings().model_retry),
     )
 

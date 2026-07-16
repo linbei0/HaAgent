@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://haagent.local/schemas/providers-v4.schema.json",
+  "title": "HaAgent providers.json v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "connections"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "version": {"const": 4},
+    "connections": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/connection"}
+    }
+  },
+  "$defs": {
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "provider_id",
+        "provider_name",
+        "gateway_provider",
+        "base_url",
+        "api_key_env"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "provider_id": {"type": "string", "minLength": 1},
+        "provider_name": {"type": "string", "minLength": 1},
+        "gateway_provider": {
+          "enum": ["anthropic", "google", "openai", "openai-chat"]
+        },
+        "base_url": {"type": "string", "minLength": 1},
+        "api_key_env": {"type": "string"},
+        "credential_source": {
+          "enum": ["env", "keyring", "insecure_file", "none"]
+        },
+        "runtime_kind": {"enum": ["remote", "ollama", "lm_studio"]},
+        "models": {
+          "type": "object",
+          "propertyNames": {"type": "string", "minLength": 1},
+          "additionalProperties": {"$ref": "#/$defs/modelConfig"}
+        }
+      }
+    },
+    "modelConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "options": {"$ref": "#/$defs/optionsObject"},
+        "variants": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^(?!default$)[A-Za-z0-9._-]{1,64}$"
+          },
+          "additionalProperties": {"$ref": "#/$defs/optionsObject"}
+        }
+      }
+    },
+    "optionsObject": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?!(model|input|messages|contents|system|systemInstruction|tools|tool_choice|parallel_tool_calls|stream|previous_response_id|conversation|store|api_key|apiKey|authorization|headers|base_url|baseURL|endpoint)$)(?!(token|.*[_-]token)$)(?!.*(api[_-]?key|apikey|authorization|credential|password|secret)).+$"
+      },
+      "additionalProperties": {"$ref": "#/$defs/optionValue"}
+    },
+    "optionValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/optionsObject"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/optionValue"}
+        },
+        {"type": ["string", "number", "boolean", "null"]}
+      ]
+    }
+  }
+}

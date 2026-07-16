@@ -28,7 +28,6 @@ from haagent.app.assistant_types import (
 )
 from haagent.models.model_connections import (
     ProviderProfileError,
-    load_provider_connection_record,
     user_config_dir,
 )
 from haagent.scheduling.models import (
@@ -640,7 +639,7 @@ class AssistantSchedules:
 
     def _validate_connection(self, connection_id: str) -> None:
         try:
-            load_provider_connection_record(connection_id, config_path=user_config_dir() / "providers.json")
+            self._context.providers_snapshot.connection(connection_id)
         except ProviderProfileError as error:
             raise AssistantServiceError(f"模型连接不存在或不可用：{connection_id}") from error
 

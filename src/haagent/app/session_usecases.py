@@ -26,7 +26,6 @@ from haagent.models.model_connections import (
     load_active_model_selection,
     load_model_selection_profile,
     load_model_route,
-    user_config_dir,
 )
 from haagent.models.gateway_registry import gateway_from_profile, gateway_from_route
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
@@ -128,6 +127,7 @@ class AssistantSessions:
                         model=profile.model,
                         base_url=profile.base_url or "",
                         gateway=self._gateway_for_profile(profile),
+                        model_variant=selection.variant,
                     )
                     self._context.pending_model_selection = None
                 existing.new()
@@ -141,6 +141,7 @@ class AssistantSessions:
                     model_connection_id=selection.connection_id,
                     model_name=profile.model,
                     model_base_url=profile.base_url,
+                    model_variant=selection.variant,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
                     skill_catalog=self._context.skill_catalog,
@@ -159,7 +160,7 @@ class AssistantSessions:
             selection, profile = self._load_resume_profile(session)
             # 已有 live session 时就地 reload package，复用 MCP（避免 5–10s 进程级重建）。
             if existing is not None:
-                gateway = self._gateway_for_resume(existing, profile, selection.connection_id)
+                gateway = self._gateway_for_resume(existing, profile, selection)
                 existing.reload(
                     session,
                     runs_root=self._context.runs_root,
@@ -168,6 +169,7 @@ class AssistantSessions:
                     model_connection_id=selection.connection_id,
                     model_name=profile.model,
                     model_base_url=profile.base_url,
+                    model_variant=selection.variant,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
                 )
@@ -180,6 +182,7 @@ class AssistantSessions:
                     model_connection_id=selection.connection_id,
                     model_name=profile.model,
                     model_base_url=profile.base_url,
+                    model_variant=selection.variant,
                     max_turns=self._context.max_turns,
                     enable_web=self._context.enable_web,
                     skill_catalog=self._context.skill_catalog,
@@ -274,12 +277,13 @@ class AssistantSessions:
         controller = RetryController(load_runtime_settings().model_retry)
         factory = self._context.gateway_factory
         if factory is gateway_from_profile:
-            route = load_model_route(config_dir=user_config_dir())
+            config_dir = self._context.providers_snapshot.path.parent
+            route = load_model_route(config_dir=config_dir)
             fallback_profile = (
                 load_model_selection_profile(
                     route.fallback,
+                    snapshot=self._context.providers_snapshot,
                     environ=self._context.environ,
-                    config_dir=user_config_dir(),
                 )
                 if route.fallback is not None
                 else None
@@ -298,35 +302,40 @@ class AssistantSessions:
         self,
         existing: AgentSession,
         profile: ProviderProfile,
-        connection_id: str,
+        selection: ModelSelection,
     ):
-        """模型未变则复用 gateway；变更时才重建。"""
+        """模型/variant 未变则复用 gateway；变更时才重建。"""
         same_connection = (
-            getattr(existing, "model_connection_id", None) == connection_id
+            getattr(existing, "model_connection_id", None) == selection.connection_id
             and getattr(existing, "model_name", None) == profile.model
             and (getattr(existing, "model_base_url", None) or "") == (profile.base_url or "")
+            and existing.model_variant == selection.variant
         )
         if same_connection and existing.model_gateway is not None:
             return existing.model_gateway
         return self._gateway_for_profile(profile)
 
     def _load_session_profile(self) -> tuple[ModelSelection, ProviderProfile]:
-        selection = self._context.pending_model_selection or load_active_model_selection(config_dir=user_config_dir())
+        selection = self._context.pending_model_selection or load_active_model_selection(
+            config_dir=self._context.providers_snapshot.path.parent,
+        )
         profile = load_model_selection_profile(
             selection,
+            snapshot=self._context.providers_snapshot,
             environ=self._context.environ,
-            config_dir=user_config_dir(),
         )
         return selection, profile
 
     def _load_resume_profile(self, session: str | Path) -> tuple[ModelSelection, ProviderProfile]:
         selection = _session_model_selection(session, self._context.runs_root)
         if selection is None:
-            selection = load_active_model_selection(config_dir=user_config_dir())
+            selection = load_active_model_selection(
+                config_dir=self._context.providers_snapshot.path.parent,
+            )
         profile = load_model_selection_profile(
             selection,
+            snapshot=self._context.providers_snapshot,
             environ=self._context.environ,
-            config_dir=user_config_dir(),
         )
         return selection, profile
 
@@ -345,6 +354,7 @@ def session_status(session: AgentSession) -> AssistantSessionStatus:
         model_profile_name=getattr(session, "model_profile_name", None),
         model_connection_id=getattr(session, "model_connection_id", None),
         model=getattr(session, "model_name", None),
+        model_variant=session.model_variant,
         base_url=getattr(session, "model_base_url", None),
         web_enabled=getattr(session, "enable_web", False),
         external_roots=_external_root_summaries(session),
@@ -410,5 +420,7 @@ def _session_model_selection(session: str | Path, runs_root: Path) -> ModelSelec
     connection_id = metadata.get("model_connection_id")
     model = metadata.get("model")
     if isinstance(connection_id, str) and connection_id and isinstance(model, str) and model:
-        return ModelSelection(connection_id=connection_id, model=model)
+        raw_variant = metadata["model_variant"]
+        variant = raw_variant if isinstance(raw_variant, str) and raw_variant else None
+        return ModelSelection(connection_id=connection_id, model=model, variant=variant)
     return None

@@ -18,6 +18,7 @@ from haagent.models.model_connections import (
     ModelSelection,
     ProviderProfileError,
     load_model_selection_profile,
+    load_providers_config_snapshot,
     user_config_dir,
 )
 from haagent.models.types import ModelCallError
@@ -264,10 +265,11 @@ class ScheduledRunExecutor:
         # 预检 connection/credential（在创建 session 前给出稳定分类）
         try:
             selection = ModelSelection(connection_id=definition.connection_id, model=definition.model)
+            config_dir = self._config_dir or user_config_dir()
             load_model_selection_profile(
                 selection,
+                snapshot=load_providers_config_snapshot(config_dir / "providers.json"),
                 environ=environ,
-                config_dir=self._config_dir or user_config_dir(),
             )
         except ProviderProfileError as error:
             status, category, summary = _map_exception(error)

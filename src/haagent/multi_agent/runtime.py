@@ -25,6 +25,7 @@ from haagent.models.model_connections import (
     ProviderProfileError,
     load_active_model_selection,
     load_model_selection_profile,
+    load_providers_config_snapshot,
     user_config_dir,
 )
 from haagent.multi_agent.backends import BACKEND_REGISTRY, WorkerBackend
@@ -742,10 +743,11 @@ class MultiAgentRuntime:
             return self.model_gateway
         try:
             active_selection = load_active_model_selection(config_dir=user_config_dir())
+            snapshot = load_providers_config_snapshot(user_config_dir() / "providers.json")
             profile = load_model_selection_profile(
                 ModelSelection(connection_id=model_profile, model=active_selection.model),
+                snapshot=snapshot,
                 environ=self.environ,
-                config_dir=user_config_dir(),
             )
         except ProviderProfileError as error:
             raise ValueError(str(error)) from error

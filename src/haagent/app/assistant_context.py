@@ -12,10 +12,11 @@ from pathlib import Path
 
 from haagent.app.assistant_types import GatewayFactory
 from haagent.context.instruction_cache import InstructionCache
-from haagent.models.model_connections import ModelSelection
+from haagent.models.model_connections import ModelSelection, ProvidersConfigSnapshot
 from haagent.runtime.session.agent import AgentSession
 from haagent.skills.catalog import SkillCatalogService
 from haagent.tools.schema_cache import ToolSchemaCache
+
 
 @dataclass
 class AssistantContext:
@@ -30,6 +31,7 @@ class AssistantContext:
     initial_continue: bool
     session: AgentSession | None = None
     pending_model_selection: ModelSelection | None = None
+    providers_snapshot: ProvidersConfigSnapshot | None = None
     # workspace.status 缓存世代；session/模型/权限/凭据变化时 +1。
     status_generation: int = 0
     # 交互延迟优化：跨 session/turn 共享的只读缓存服务。

@@ -799,7 +799,7 @@ def test_cli_run_connection_creates_gateway_from_local_config(
     (tmp_path / "home" / ".haagent" / "providers.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "deepseek",
@@ -811,7 +811,6 @@ def test_cli_run_connection_creates_gateway_from_local_config(
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -883,7 +882,7 @@ def test_cli_run_connection_missing_name_fails_explicitly(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "home" / ".haagent").mkdir(parents=True)
     (tmp_path / "home" / ".haagent" / "providers.json").write_text(
-        json.dumps({"version": 2, "connections": [], "custom_models": []}),
+        json.dumps({"version": 4, "connections": []}),
         encoding="utf-8",
     )
     (tmp_path / "home" / ".haagent" / "settings.json").write_text(
@@ -913,7 +912,7 @@ def test_cli_run_connection_missing_api_key_env_fails_explicitly(
     (tmp_path / "home" / ".haagent" / "providers.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "deepseek",
@@ -925,7 +924,6 @@ def test_cli_run_connection_missing_api_key_env_fails_explicitly(
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -959,7 +957,7 @@ def test_cli_run_connection_secret_stays_out_of_episode_inspect_eval_and_model_i
     (tmp_path / "home" / ".haagent" / "providers.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "deepseek",
@@ -971,7 +969,6 @@ def test_cli_run_connection_secret_stays_out_of_episode_inspect_eval_and_model_i
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",

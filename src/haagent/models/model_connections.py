@@ -2,14 +2,16 @@
 haagent/models/model_connections.py - 用户级模型连接与选择
 
 读取和写入供应商连接、默认模型选择，并解析运行时模型 profile。
+providers.json v4 支持 per-model options/variants；写入时保留未修改连接的完整 models。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from haagent.models.credentials import (
     CredentialError,
@@ -22,6 +24,13 @@ from haagent.models.credentials import (
     save_connection_insecure_api_key,
     save_connection_keyring_api_key,
 )
+from haagent.models.model_options import (
+    ModelOptionsError,
+    ModelParameterConfig,
+    ResolvedModelRequestConfig,
+    parse_connection_models,
+    resolve_model_request_config,
+)
 
 
 USER_CONFIG_DIR_NAME = ".haagent"
@@ -31,6 +40,7 @@ SUPPORTED_GATEWAY_PROVIDERS = {"anthropic", "google", "openai", "openai-chat"}
 SUPPORTED_RUNTIME_KINDS = {"remote", "ollama", "lm_studio"}
 DEFAULT_CREDENTIAL_SOURCE = "keyring"
 DEFAULT_CREDENTIAL_STORE: CredentialStore = KeyringCredentialStore()
+PROVIDERS_CONFIG_VERSION = 4
 
 
 class ProviderProfileError(RuntimeError):
@@ -47,7 +57,9 @@ class ProviderProfile:
     credential_source: str
     credential_source_used: str
     api_key: str = field(repr=False)
+    request_config: ResolvedModelRequestConfig
     runtime_kind: str = "remote"
+    variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,9 +73,10 @@ class ProviderConnectionRecord:
     api_key_env: str
     credential_source: str = DEFAULT_CREDENTIAL_SOURCE
     runtime_kind: str = "remote"
+    models: dict[str, ModelParameterConfig] = field(default_factory=dict)
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "provider_id": self.provider_id,
@@ -74,15 +87,25 @@ class ProviderConnectionRecord:
             "credential_source": self.credential_source,
             "runtime_kind": self.runtime_kind,
         }
+        if self.models:
+            payload["models"] = {
+                model_id: _model_parameter_config_to_dict(config)
+                for model_id, config in self.models.items()
+            }
+        return payload
 
 
 @dataclass(frozen=True)
 class ModelSelection:
     connection_id: str
     model: str
+    variant: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
-        return {"connection_id": self.connection_id, "model": self.model}
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"connection_id": self.connection_id, "model": self.model}
+        if self.variant is not None:
+            payload["variant"] = self.variant
+        return payload
 
 
 @dataclass(frozen=True)
@@ -90,6 +113,120 @@ class ModelRoute:
     primary: ModelSelection
     fallback: ModelSelection | None
     cloud_fallback_consent: bool
+
+
+@dataclass(frozen=True)
+class ProvidersConfigSnapshot:
+    """单个 AssistantService 生命周期内共享的 providers.json 不可变快照。"""
+
+    path: Path
+    records: tuple[ProviderConnectionRecord, ...]
+    digest: str
+    load_error: str | None = None
+    invalid_model_configs: frozenset[tuple[str, str]] = frozenset()
+
+    def require_valid(self) -> None:
+        if self.load_error is not None:
+            raise ProviderProfileError(self.load_error)
+
+    def list_connections(self) -> list[ProviderConnectionRecord]:
+        self.require_valid()
+        return list(self.records)
+
+    def connection(self, connection_id: str) -> ProviderConnectionRecord:
+        self.require_valid()
+        for record in self.records:
+            if record.id == connection_id:
+                return record
+        raise ProviderProfileError(f"provider connection not found: {connection_id}")
+
+    def diagnostics_for(self, connection_id: str) -> tuple[str, ...]:
+        return tuple(
+            f"connection={connection_id} model={model_id} is not available in catalog/discovery"
+            for item_connection_id, model_id in sorted(self.invalid_model_configs)
+            if item_connection_id == connection_id
+        )
+
+    def bind_available_models(
+        self,
+        available_models: Mapping[str, set[str]],
+    ) -> "ProvidersConfigSnapshot":
+        """目录/发现结果可用后原子绑定；没有结果的连接保持未判定。"""
+
+        validated_connections = set(available_models)
+        invalid: set[tuple[str, str]] = {
+            item for item in self.invalid_model_configs if item[0] not in validated_connections
+        }
+        for record in self.records:
+            available = available_models.get(record.id)
+            if available is None:
+                continue
+            for model_id in record.models:
+                if model_id in available:
+                    continue
+                invalid.add((record.id, model_id))
+        return ProvidersConfigSnapshot(
+            path=self.path,
+            records=self.records,
+            digest=self.digest,
+            load_error=self.load_error,
+            invalid_model_configs=frozenset(invalid),
+        )
+
+
+def load_providers_config_snapshot(path: Path | None = None) -> ProvidersConfigSnapshot:
+    """读取一次 providers.json；错误也固化到快照，避免后续静默回退。"""
+
+    config_path = path or user_provider_connections_path()
+    if not config_path.exists():
+        return ProvidersConfigSnapshot(path=config_path, records=(), digest=_snapshot_digest(b""))
+    try:
+        raw_bytes = config_path.read_bytes()
+    except OSError as error:
+        return ProvidersConfigSnapshot(
+            path=config_path,
+            records=(),
+            digest=_snapshot_digest(b""),
+            load_error=f"cannot read provider connection config: {config_path}: {error}",
+        )
+    try:
+        records = tuple(_parse_connection_records(raw_bytes.decode("utf-8"), config_path))
+    except UnicodeDecodeError:
+        load_error = f"provider connection config must be UTF-8: {config_path}"
+    except ProviderProfileError as error:
+        load_error = str(error)
+    else:
+        return ProvidersConfigSnapshot(
+            path=config_path,
+            records=records,
+            digest=_snapshot_digest(raw_bytes),
+        )
+    return ProvidersConfigSnapshot(
+        path=config_path,
+        records=(),
+        digest=_snapshot_digest(raw_bytes),
+        load_error=load_error,
+    )
+
+
+def _snapshot_digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()[:16]
+
+
+def ensure_providers_snapshot_current(snapshot: ProvidersConfigSnapshot) -> None:
+    """写入前检测外部修改，避免旧快照覆盖用户刚编辑的配置。"""
+
+    try:
+        current = snapshot.path.read_bytes() if snapshot.path.exists() else b""
+    except OSError as error:
+        raise ProviderProfileError(
+            f"cannot verify provider connection config before writing: {snapshot.path}: {error}",
+        ) from error
+    if _snapshot_digest(current) != snapshot.digest:
+        raise ProviderProfileError(
+            f"providers.json changed after HaAgent started: {snapshot.path}. "
+            "Restart HaAgent before changing connections.",
+        )
 
 
 def user_config_dir() -> Path:
@@ -108,15 +245,18 @@ def save_provider_connection_with_key(
     record: ProviderConnectionRecord,
     api_key: str | None,
     *,
+    snapshot: ProvidersConfigSnapshot,
     credential_store: CredentialStore | None = None,
-    config_dir: Path | None = None,
 ) -> Path:
     has_api_key = api_key is not None and bool(api_key.strip())
     if record.credential_source in {"env", "none"} and has_api_key:
         raise ProviderProfileError(
             f"{record.credential_source} credential_source does not allow saving api_key",
         )
-    path = save_provider_connection(record, config_dir=config_dir)
+    path = save_provider_connection(
+        record,
+        snapshot=snapshot,
+    )
     if not has_api_key:
         return path
     if record.credential_source == "keyring":
@@ -130,91 +270,84 @@ def save_provider_connection_with_key(
         save_connection_insecure_api_key(
             record.id,
             api_key,
-            config_dir=config_dir or user_config_dir(),
+            config_dir=snapshot.path.parent,
         )
         return path
     raise ProviderProfileError(f"unsupported credential_source in connection: {record.credential_source}")
 
 
-def save_provider_connection(record: ProviderConnectionRecord, *, config_dir: Path | None = None) -> Path:
+def save_provider_connection(
+    record: ProviderConnectionRecord,
+    *,
+    snapshot: ProvidersConfigSnapshot,
+) -> Path:
     _validate_connection_record(record.to_dict())
-    directory = config_dir or user_config_dir()
-    path = directory / USER_PROVIDERS_FILE
+    snapshot.require_valid()
+    ensure_providers_snapshot_current(snapshot)
+    path = snapshot.path
+    directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
-    records = _load_connection_records(path) if path.exists() else []
+    loaded_records = list(snapshot.records)
+    # TUI 连接向导通常不携带 models；更新时保留该连接已有 models 配置。
+    preserved_models = record.models
+    if not preserved_models:
+        for existing in loaded_records:
+            if existing.id == record.id and existing.models:
+                preserved_models = existing.models
+                break
+    write_record = ProviderConnectionRecord(
+        id=record.id,
+        name=record.name,
+        provider_id=record.provider_id,
+        provider_name=record.provider_name,
+        gateway_provider=record.gateway_provider,
+        base_url=record.base_url,
+        api_key_env=record.api_key_env,
+        credential_source=record.credential_source,
+        runtime_kind=record.runtime_kind,
+        models=preserved_models,
+    )
     updated = False
-    next_records = []
-    for existing in records:
-        if existing.id == record.id:
-            next_records.append(record)
+    next_records: list[ProviderConnectionRecord] = []
+    for existing in loaded_records:
+        if existing.id == write_record.id:
+            next_records.append(write_record)
             updated = True
         else:
             next_records.append(existing)
     if not updated:
-        next_records.append(record)
-    _write_json(
-        path,
-        {
-            "version": 3,
-            "connections": [connection.to_dict() for connection in next_records],
-            "custom_models": [],
-        },
-    )
+        next_records.append(write_record)
+    _write_providers_file(path, next_records)
     return path
 
 
-def delete_provider_connection(connection_id: str, *, config_dir: Path | None = None) -> Path:
+def delete_provider_connection(
+    connection_id: str,
+    *,
+    snapshot: ProvidersConfigSnapshot,
+) -> Path:
     if not connection_id.strip():
         raise ProviderProfileError("provider connection id is required")
-    directory = config_dir or user_config_dir()
-    path = directory / USER_PROVIDERS_FILE
-    records = _load_connection_records(path)
+    snapshot.require_valid()
+    ensure_providers_snapshot_current(snapshot)
+    directory = snapshot.path.parent
+    path = snapshot.path
+    records = list(snapshot.records)
     next_records = [record for record in records if record.id != connection_id]
     if len(next_records) == len(records):
         raise ProviderProfileError(f"provider connection not found: {connection_id}")
-    _write_json(
-        path,
-        {
-            "version": 3,
-            "connections": [connection.to_dict() for connection in next_records],
-            "custom_models": [],
-        },
-    )
+    _write_providers_file(path, next_records)
     _refresh_active_model_after_connection_delete(directory, connection_id, next_records)
     return path
 
 
-def load_provider_connection_record(
-    connection_id: str,
-    *,
-    config_path: Path | None = None,
-) -> ProviderConnectionRecord:
-    records = list_provider_connection_records(config_path=config_path)
-    for record in records:
-        if record.id == connection_id:
-            return record
-    raise ProviderProfileError(f"provider connection not found: {connection_id}")
-
-
-def list_provider_connection_records(
-    *,
-    config_path: Path | None = None,
-) -> list[ProviderConnectionRecord]:
-    path = config_path or user_provider_connections_path()
-    if not path.exists():
-        return []
-    return _load_connection_records(path)
-
-
 def provider_connection_credential_status(
-    connection_id: str,
+    connection: ProviderConnectionRecord,
     *,
     environ: Mapping[str, str] | None = None,
     credential_store: CredentialStore | None = None,
-    config_dir: Path | None = None,
+    config_dir: Path,
 ) -> CredentialStatus:
-    config_path = (config_dir / USER_PROVIDERS_FILE) if config_dir is not None else None
-    connection = load_provider_connection_record(connection_id, config_path=config_path)
     if connection.credential_source == "none":
         return CredentialStatus(
             api_key_available=True,
@@ -233,15 +366,17 @@ def provider_connection_credential_status(
 def load_model_selection_profile(
     selection: ModelSelection,
     *,
-    config_path: Path | None = None,
+    snapshot: ProvidersConfigSnapshot,
     environ: Mapping[str, str] | None = None,
     credential_store: CredentialStore | None = None,
-    config_dir: Path | None = None,
 ) -> ProviderProfile:
-    connection_config_path = config_path or (
-        (config_dir / USER_PROVIDERS_FILE) if config_dir is not None else None
-    )
-    connection = load_provider_connection_record(selection.connection_id, config_path=connection_config_path)
+    connection = snapshot.connection(selection.connection_id)
+    if (selection.connection_id, selection.model) in snapshot.invalid_model_configs:
+        raise ProviderProfileError(
+            f"configured model is not available in catalog/discovery: "
+            f"connection={selection.connection_id} model={selection.model}",
+        )
+    request_config = resolve_selection_request_config(selection, connection)
     if connection.credential_source == "none":
         return ProviderProfile(
             name=f"{connection.id}:{selection.model}",
@@ -253,13 +388,15 @@ def load_model_selection_profile(
             credential_source_used="none",
             api_key="",
             runtime_kind=connection.runtime_kind,
+            variant=selection.variant,
+            request_config=request_config,
         )
     try:
         resolved = resolve_api_key(
             _credential_record(connection),
             environ=environ,
             credential_store=credential_store or DEFAULT_CREDENTIAL_STORE,
-            config_dir=config_dir or _config_dir_for(config_path),
+            config_dir=snapshot.path.parent,
         )
     except CredentialError as error:
         raise ProviderProfileError(str(error)) from error
@@ -279,7 +416,25 @@ def load_model_selection_profile(
         credential_source_used=resolved.credential_source_used or "",
         api_key=resolved.api_key,
         runtime_kind=connection.runtime_kind,
+        variant=selection.variant,
+        request_config=request_config,
     )
+
+
+def resolve_selection_request_config(
+    selection: ModelSelection,
+    connection: ProviderConnectionRecord,
+) -> ResolvedModelRequestConfig:
+    model_config = connection.models.get(selection.model)
+    try:
+        return resolve_model_request_config(
+            connection_id=selection.connection_id,
+            model_id=selection.model,
+            variant=selection.variant,
+            model_config=model_config,
+        )
+    except ModelOptionsError as error:
+        raise ProviderProfileError(str(error)) from error
 
 
 def load_active_model_selection(*, settings_path: Path | None = None, config_dir: Path | None = None) -> ModelSelection:
@@ -290,10 +445,9 @@ def load_active_model_selection(*, settings_path: Path | None = None, config_dir
     settings = _load_settings_record(path)
     active_model = settings.get("active_model")
     if isinstance(active_model, dict):
-        connection_id = active_model.get("connection_id")
-        model = active_model.get("model")
-        if isinstance(connection_id, str) and connection_id.strip() and isinstance(model, str) and model.strip():
-            return ModelSelection(connection_id=connection_id, model=model)
+        selection = _model_selection_from_setting(active_model, field_name="active_model")
+        if selection is not None:
+            return selection
     raise ProviderProfileError("settings config must contain active_model")
 
 
@@ -316,7 +470,7 @@ def load_model_route(*, settings_path: Path | None = None, config_dir: Path | No
     path = settings_path or directory / USER_SETTINGS_FILE
     primary = load_active_model_selection(settings_path=path, config_dir=directory)
     settings = _load_settings_record(path)
-    fallback = _model_selection_from_setting(settings.get("fallback_model"))
+    fallback = _model_selection_from_setting(settings.get("fallback_model"), field_name="fallback_model")
     return ModelRoute(
         primary=primary,
         fallback=fallback,
@@ -377,10 +531,13 @@ def _refresh_active_model_after_connection_delete(
     active_connection_id = active_model.get("connection_id") if isinstance(active_model, dict) else None
     if active_connection_id == connection_id:
         if next_records:
-            settings["active_model"] = {
+            next_active: dict[str, Any] = {
                 "connection_id": next_records[0].id,
                 "model": str(active_model.get("model", "")) if isinstance(active_model, dict) else "",
             }
+            if isinstance(active_model, dict) and isinstance(active_model.get("variant"), str):
+                next_active["variant"] = active_model["variant"]
+            settings["active_model"] = next_active
         else:
             settings.pop("active_model", None)
     if settings:
@@ -389,44 +546,112 @@ def _refresh_active_model_after_connection_delete(
         settings_path.unlink()
 
 
-def _load_connection_records(config_path: Path) -> list[ProviderConnectionRecord]:
-    if not config_path.exists():
-        raise ProviderProfileError(f"provider connection config not found: {config_path}")
+def _write_providers_file(path: Path, records: list[ProviderConnectionRecord]) -> None:
+    # 连接编辑必须完整保留未修改连接的 models。
+    _write_json(
+        path,
+        {
+            "version": PROVIDERS_CONFIG_VERSION,
+            "connections": [connection.to_dict() for connection in records],
+        },
+    )
+
+
+def _parse_connection_records(raw_text: str, config_path: Path) -> list[ProviderConnectionRecord]:
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = json.loads(raw_text)
     except json.JSONDecodeError as error:
-        raise ProviderProfileError(f"provider connection config is invalid JSON: {config_path}") from error
+        raise ProviderProfileError(
+            f"provider connection config is invalid JSON: {config_path}: {error.msg} "
+            f"(line {error.lineno} column {error.colno}). Fix the file and restart HaAgent.",
+        ) from error
     if not isinstance(raw, dict):
-        raise ProviderProfileError("provider connection config must be a JSON object")
+        raise ProviderProfileError(
+            f"provider connection config must be a JSON object: {config_path}",
+        )
+    version = raw.get("version")
+    if version != PROVIDERS_CONFIG_VERSION:
+        raise ProviderProfileError(
+            f"providers.json version must be {PROVIDERS_CONFIG_VERSION}: {config_path}",
+        )
+    _reject_unknown_fields(raw, {"$schema", "version", "connections"}, path="providers")
+    if "$schema" in raw and not isinstance(raw["$schema"], str):
+        raise ProviderProfileError("providers.$schema must be a string")
     connections = raw.get("connections")
     if not isinstance(connections, list):
-        if "connections" not in raw and isinstance(raw.get("profiles"), list):
-            return []
-        raise ProviderProfileError("provider connection config must contain connections")
+        raise ProviderProfileError(
+            f"provider connection config must contain connections: {config_path}",
+        )
     records = []
     for index, item in enumerate(connections):
         if not isinstance(item, dict):
-            raise ProviderProfileError(f"provider connection at index {index} must be an object")
-        _validate_connection_record(item)
-        records.append(_connection_from_record(item))
+            raise ProviderProfileError(
+                f"connections[{index}] must be an object ({config_path})",
+            )
+        try:
+            _validate_connection_record(item, path=f"connections[{index}]")
+            records.append(_connection_from_record(item, index=index))
+        except (ProviderProfileError, ModelOptionsError) as error:
+            raise ProviderProfileError(
+                f"{error} (file={config_path})",
+            ) from error
     return records
 
 
-def _connection_from_record(record: dict[str, object]) -> ProviderConnectionRecord:
+def _connection_from_record(
+    record: dict[str, object],
+    *,
+    index: int,
+) -> ProviderConnectionRecord:
+    gateway_provider = _required_gateway_provider(record)
+    models = parse_connection_models(
+        record["models"] if "models" in record else {},
+        path=f"connections[{index}].models",
+    )
     return ProviderConnectionRecord(
         id=_required_string(record, "id"),
         name=_required_string(record, "name"),
         provider_id=_required_string(record, "provider_id"),
         provider_name=_required_string(record, "provider_name"),
-        gateway_provider=_required_gateway_provider(record),
+        gateway_provider=gateway_provider,
         base_url=_required_string(record, "base_url"),
         api_key_env=_api_key_env(record),
         credential_source=_credential_source(record),
         runtime_kind=_runtime_kind(record),
+        models=models,
     )
 
 
-def _validate_connection_record(record: dict[str, object]) -> None:
+def _model_parameter_config_to_dict(config: ModelParameterConfig) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if config.options:
+        payload["options"] = config.options
+    if config.variants:
+        payload["variants"] = config.variants
+    return payload
+
+
+def _validate_connection_record(
+    record: dict[str, object],
+    *,
+    path: str = "connection",
+) -> None:
+    _reject_unknown_fields(
+        record,
+        {
+            "id",
+            "name",
+            "provider_id",
+            "provider_name",
+            "gateway_provider",
+            "base_url",
+            "api_key_env",
+            "credential_source",
+            "runtime_kind",
+            "models",
+        },
+        path=path,
+    )
     _required_string(record, "id")
     _required_string(record, "name")
     _required_string(record, "provider_id")
@@ -443,6 +668,17 @@ def _validate_connection_record(record: dict[str, object]) -> None:
     _runtime_kind(record)
     if "api_key" in record:
         raise ProviderProfileError("provider connection must not contain api_key")
+
+
+def _reject_unknown_fields(
+    value: Mapping[str, object],
+    allowed: set[str],
+    *,
+    path: str,
+) -> None:
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise ProviderProfileError(f"{path} contains unknown field: {unknown[0]}")
 
 
 def _required_gateway_provider(record: dict[str, object]) -> str:
@@ -500,19 +736,21 @@ def _runtime_kind(record: dict[str, object]) -> str:
     return value
 
 
-def _model_selection_from_setting(value: object) -> ModelSelection | None:
+def _model_selection_from_setting(value: object, *, field_name: str = "model") -> ModelSelection | None:
     if not isinstance(value, dict):
         return None
     connection_id = value.get("connection_id")
     model = value.get("model")
     if not isinstance(connection_id, str) or not connection_id.strip():
-        raise ProviderProfileError("fallback_model connection_id is required")
+        raise ProviderProfileError(f"{field_name} connection_id is required")
     if not isinstance(model, str) or not model.strip():
-        raise ProviderProfileError("fallback_model model is required")
-    return ModelSelection(connection_id=connection_id, model=model)
-
-
-def _config_dir_for(config_path: Path | None) -> Path:
-    if config_path is None:
-        return user_config_dir()
-    return config_path.parent
+        raise ProviderProfileError(f"{field_name} model is required")
+    variant_raw = value.get("variant")
+    variant: str | None
+    if variant_raw is None:
+        variant = None
+    elif isinstance(variant_raw, str) and variant_raw.strip():
+        variant = variant_raw
+    else:
+        raise ProviderProfileError(f"{field_name} variant must be a non-empty string when present")
+    return ModelSelection(connection_id=connection_id, model=model, variant=variant)

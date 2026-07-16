@@ -9,6 +9,7 @@ from pathlib import Path
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelResponse
 from haagent.models.model_connections import ModelSelection, ProviderProfile, ProviderProfileError
+from haagent.models.model_options import empty_resolved_config
 import haagent.multi_agent.runtime as runtime_module
 from haagent.multi_agent.profiles import WorkerProfileRuntime
 from haagent.multi_agent.runtime import MultiAgentRuntime
@@ -143,6 +144,10 @@ def test_spawn_worker_profile_overrides_session_settings_and_model_input(tmp_pat
             credential_source="env",
             credential_source_used="env",
             api_key="test-key",
+            request_config=empty_resolved_config(
+                connection_id="writer-model",
+                model_id="gpt-test",
+            ),
         ),
     )
 

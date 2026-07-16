@@ -11,7 +11,12 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from haagent.models.model_connections import ModelSelection, ProviderProfile
+from haagent.models.model_connections import (
+    ModelSelection,
+    ProviderProfile,
+    load_providers_config_snapshot,
+)
+from haagent.models.model_options import empty_resolved_config
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.session.package import (
     list_sessions,
@@ -120,6 +125,9 @@ def test_assistant_create_reuses_existing_session_package(tmp_path: Path) -> Non
         enable_web=False,
         initial_resume=None,
         initial_continue=False,
+        providers_snapshot=load_providers_config_snapshot(
+            tmp_path / ".haagent" / "providers.json"
+        ),
         session=first,
     )
     sessions = AssistantSessions(context)
@@ -176,6 +184,9 @@ def test_assistant_resume_reuses_existing_mcp_runtime(tmp_path: Path) -> None:
         enable_web=False,
         initial_resume=None,
         initial_continue=False,
+        providers_snapshot=load_providers_config_snapshot(
+            tmp_path / ".haagent" / "providers.json"
+        ),
         session=first,
     )
     sessions = AssistantSessions(context)
@@ -189,6 +200,10 @@ def test_assistant_resume_reuses_existing_mcp_runtime(tmp_path: Path) -> None:
         credential_source="env",
         credential_source_used="env",
         api_key="test-key",
+        request_config=empty_resolved_config(
+            connection_id="test",
+            model_id="test-model",
+        ),
     )
 
     with patch(

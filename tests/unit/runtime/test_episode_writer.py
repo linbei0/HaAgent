@@ -105,6 +105,7 @@ def test_episode_writer_writes_extended_environment_schema(tmp_path: Path) -> No
         "endpoint": "https://example.test/v1/chat/completions",
         "base_url": "https://example.test/v1",
         "profile_name": "main",
+        "request_config": None,
     }
     assert environment["tools"] == {
         "allowed_tool_count": 1,

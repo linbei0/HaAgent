@@ -311,7 +311,7 @@ def _safe_artifact_name(value: str) -> str:
     return safe or "tool"
 
 
-def _environment_model_metadata(metadata: ModelGatewayMetadata | None) -> dict[str, str | None]:
+def _environment_model_metadata(metadata: ModelGatewayMetadata | None) -> dict[str, object | None]:
     if metadata is None:
         return {
             "provider": "unknown",
@@ -319,6 +319,7 @@ def _environment_model_metadata(metadata: ModelGatewayMetadata | None) -> dict[s
             "endpoint": None,
             "base_url": None,
             "profile_name": None,
+            "request_config": None,
         }
     return {
         "provider": metadata.provider or "unknown",
@@ -326,6 +327,7 @@ def _environment_model_metadata(metadata: ModelGatewayMetadata | None) -> dict[s
         "endpoint": _safe_url(metadata.endpoint),
         "base_url": _safe_url(metadata.base_url),
         "profile_name": metadata.profile_name,
+        "request_config": metadata.request_config,
     }
 
 

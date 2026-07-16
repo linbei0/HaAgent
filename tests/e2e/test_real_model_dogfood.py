@@ -18,6 +18,7 @@ from haagent.models.model_connections import (
     ProviderProfileError,
     load_active_model_selection,
     load_model_selection_profile,
+    load_providers_config_snapshot,
 )
 from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks
 
@@ -46,13 +47,17 @@ def _real_gateway_or_skip():
     if connection_id:
         try:
             model = os.environ.get("HAAGENT_DOGFOOD_MODEL") or load_active_model_selection().model
-            profile = load_model_selection_profile(ModelSelection(connection_id, model))
+            profile = load_model_selection_profile(
+                ModelSelection(connection_id, model),
+                snapshot=load_providers_config_snapshot(),
+            )
         except ProviderProfileError as error:
             pytest.skip(f"real model dogfood skipped: {error}")
         gateway_kwargs = {
             "api_key": profile.api_key,
             "model": profile.model,
             "base_url": profile.base_url,
+            "request_config": profile.request_config,
         }
         if profile.provider == "openai":
             return OpenAIResponsesGateway(**gateway_kwargs)

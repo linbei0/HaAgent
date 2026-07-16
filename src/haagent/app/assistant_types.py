@@ -69,6 +69,7 @@ class AssistantWorkspaceStatus:
         reason="docker sandbox disabled",
     )
     image_input_supported: bool | None = None
+    model_variant: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class AssistantSessionStatus:
     model_profile_name: str | None = None
     model_connection_id: str | None = None
     model: str | None = None
+    model_variant: str | None = None
     base_url: str | None = None
     web_enabled: bool = False
     external_roots: list[dict[str, str]] | None = None
@@ -150,6 +152,7 @@ class AssistantModelConnection:
     credential_source: str
     credential_available: bool
     credential_source_used: str | None
+    model_config_diagnostics: tuple[str, ...]
     runtime_kind: str = "remote"
 
 
@@ -222,6 +225,7 @@ class ModelConnectionConfigureRequest:
 class ModelSelectionRequest:
     connection_id: str
     model: str
+    variant: str | None = None
 
 
 @dataclass(frozen=True, repr=False)

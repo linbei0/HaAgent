@@ -12,6 +12,7 @@ from typing import Any, Callable
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.capabilities import ModelCapabilities
 from haagent.models.http_transport import ModelHttpTransport
+from haagent.models.model_options import ResolvedModelRequestConfig, empty_resolved_config, merge_provider_payload
 from haagent.models.transport import (
     _chat_completions_stream_transport,
     _chat_completions_transport,
@@ -155,10 +156,15 @@ class OpenAIChatCompletionsGateway:
         retry_controller: RetryController | None = None,
         require_api_key: bool = True,
         http_transport: ModelHttpTransport | None = None,
+        request_config: ResolvedModelRequestConfig | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._require_api_key = require_api_key
         self._model = model
+        self._request_config = request_config or empty_resolved_config(
+            connection_id="",
+            model_id=model,
+        )
         self._chat_completions_endpoint = _normalize_chat_completions_endpoint(base_url)
         # 仅在需要默认 HTTP path 时创建/绑定 transport；外部注入不越权关闭。
         self._owns_http_transport = False
@@ -212,6 +218,7 @@ class OpenAIChatCompletionsGateway:
             model=self._model,
             endpoint=_redact_url(self._chat_completions_endpoint),
             base_url=_endpoint_base_url(self._chat_completions_endpoint),
+            request_config=self._request_config.audit_summary(),
         )
 
     def capabilities(self) -> ModelCapabilities:
@@ -249,6 +256,7 @@ class OpenAIChatCompletionsGateway:
             payload["parallel_tool_calls"] = True
         if event_sink is not None:
             payload["stream"] = True
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

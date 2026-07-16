@@ -23,6 +23,7 @@ from haagent.runtime.session.attachments import (
     save_clipboard_image,
 )
 from haagent.runtime.session.lifecycle import (
+    MODEL_VARIANT_UNSET,
     SessionRuntimeState,
     apply_state,
     build_create_state,
@@ -129,6 +130,7 @@ class AgentSession:
         model_connection_id: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
+        model_variant: str | None = None,
         max_turns: int | None = CHAT_MAX_TURNS,
         session_id: str | None = None,
         memory_extraction_enabled: bool = True,
@@ -151,6 +153,7 @@ class AgentSession:
             model_connection_id=model_connection_id,
             model_name=model_name,
             model_base_url=model_base_url,
+            model_variant=model_variant,
             max_turns=max_turns,
             session_id=session_id,
             memory_extraction_enabled=memory_extraction_enabled,
@@ -182,6 +185,7 @@ class AgentSession:
         model_connection_id: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
+        model_variant: str | None | object = MODEL_VARIANT_UNSET,
         max_turns: int | None = CHAT_MAX_TURNS,
         enable_web: bool = False,
         mcp_runtime: Any | None = None,
@@ -201,6 +205,7 @@ class AgentSession:
             model_connection_id=model_connection_id,
             model_name=model_name,
             model_base_url=model_base_url,
+            model_variant=model_variant,
             max_turns=max_turns,
             enable_web=enable_web,
             mcp_runtime=mcp_runtime,
@@ -226,6 +231,7 @@ class AgentSession:
         model_connection_id: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
+        model_variant: str | None | object = MODEL_VARIANT_UNSET,
         max_turns: int | None = None,
         enable_web: bool | None = None,
     ) -> None:
@@ -243,6 +249,7 @@ class AgentSession:
             model_connection_id=self.model_connection_id if model_connection_id is None else model_connection_id,
             model_name=self.model_name if model_name is None else model_name,
             model_base_url=self.model_base_url if model_base_url is None else model_base_url,
+            model_variant=self.model_variant if model_variant is MODEL_VARIANT_UNSET else model_variant,
             max_turns=self.max_turns if max_turns is None else max_turns,
             enable_web=self.enable_web if enable_web is None else enable_web,
             mcp_runtime=self._mcp_runtime,
@@ -508,6 +515,7 @@ class AgentSession:
         model: str,
         base_url: str,
         gateway: ModelGateway,
+        model_variant: str | None = None,
     ) -> None:
         if self._current_cancellation_token is not None:
             raise ChatSessionError("current task is running")
@@ -518,12 +526,14 @@ class AgentSession:
             self.model_connection_id,
             self.model_name,
             self.model_base_url,
+            self.model_variant,
         )
         self.model_gateway = gateway
         self.model_profile_name = profile_name
         self.model_connection_id = model_connection_id
         self.model_name = model
         self.model_base_url = base_url
+        self.model_variant = model_variant
         try:
             self._write_session_metadata()
         except Exception as error:
@@ -533,6 +543,7 @@ class AgentSession:
                 self.model_connection_id,
                 self.model_name,
                 self.model_base_url,
+                self.model_variant,
             ) = previous_selection
             from haagent.models.http_transport import close_model_gateway
 
@@ -659,6 +670,7 @@ class AgentSession:
             model_connection_id=self.model_connection_id,
             model_name=self.model_name,
             model_base_url=self.model_base_url,
+            model_variant=self.model_variant,
             max_turns=self.max_turns,
             memory_extraction_enabled=self.memory_extraction_enabled,
             enable_web=self.enable_web,
@@ -849,6 +861,7 @@ class AgentSession:
             model_connection_id=self.model_connection_id,
             model_name=self.model_name,
             model_base_url=self.model_base_url,
+            model_variant=self.model_variant,
             enable_web=self.enable_web,
             last_user_image_attachments=self._last_user_image_attachments,
             image_attachment_history=self._image_attachment_history,

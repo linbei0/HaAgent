@@ -184,6 +184,11 @@ class FakeModels:
     def switch_current_session_selection(self, request):
         return self._owner._switch_current_session_model_selection(request)
 
+    def list_model_variants(self, connection_id, model_id):
+        if self._owner.model_variant_error is not None:
+            raise self._owner.model_variant_error
+        return list(self._owner.model_variants.get((connection_id, model_id), []))
+
 
 class FakeSkills:
     def __init__(self, owner) -> None:
@@ -638,8 +643,11 @@ class FakeAssistantService:
         self.sandbox_enabled_count = 0
         self.sandbox_disabled_count = 0
         self.model_connections: list[SimpleNamespace] = []
+        self.model_variants: dict[tuple[str, str], list[str]] = {}
+        self.model_variant_error: Exception | None = None
         self.switched_model_connection: str | None = None
         self.switched_model: str | None = None
+        self.switched_model_variant: str | None = None
         self.current_session_model_connection: str | None = None
         self.default_model_selection: str | None = None
         self.deleted_model_connection: str | None = None
@@ -872,6 +880,7 @@ class FakeAssistantService:
         connection_id = request.connection_id
         self.switched_model_connection = connection_id
         self.switched_model = request.model
+        self.switched_model_variant = request.variant
         self.current_session_model_connection = connection_id
         for index, profile in enumerate(self.model_connections):
             normalized = _connection_record(profile)
@@ -890,6 +899,7 @@ class FakeAssistantService:
             model_profile_name=f"{connection_id}:{request.model}",
             model_connection_id=connection_id,
             model=request.model,
+            model_variant=request.variant,
             base_url=getattr(selected, "base_url", "https://api.deepseek.com"),
             external_roots=list(self.external_roots),
             permission_mode=self.permission_mode,
@@ -1063,6 +1073,7 @@ def _connection_record(connection: SimpleNamespace) -> SimpleNamespace:
         credential_source=str(getattr(connection, "credential_source", "keyring")),
         credential_available=bool(getattr(connection, "credential_available", True)),
         credential_source_used=getattr(connection, "credential_source_used", None),
+        model_config_diagnostics=(),
         model=str(getattr(connection, "model", "deepseek-chat")),
     )
 

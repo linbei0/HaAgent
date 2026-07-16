@@ -29,7 +29,7 @@
 
 - Profile 是模型连接配置，支持云端、本地 Ollama、LM Studio 及显式混合 fallback；OpenAI-compatible endpoint 使用 `openai` / `openai-chat` gateway，模型目录明确识别的 Anthropic 与 Google provider 使用对应原生 gateway。
 - 本地发现只探测 `127.0.0.1:11434` 和 `127.0.0.1:1234`，不扫描局域网；发现失败必须区分不可达、未授权和无效响应。
-- `providers.json` 当前保存 version 3；旧 version 2 连接读取为 `runtime_kind=remote`。本地连接可以使用 `credential_source=none`，能力快照不持久化。
+- `providers.json` 只接受 version 4，不维护旧版本迁移路径。本地连接可以使用 `credential_source=none`，能力快照不持久化。
 - `settings.json` 可保存一个 `fallback_model` 和 `cloud_fallback_consent`。本地到云端 fallback 必须有明确 consent，本地到本地不需要；fallback 不得在已有输出后重放。
 - 默认 profile 存放在用户级 `~/.haagent/providers.json`；active profile 存放在 `~/.haagent/settings.json`。
 - Workspace 和 session 是目录相关运行状态，默认写入当前目录的 `.runs/sessions`。

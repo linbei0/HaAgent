@@ -44,7 +44,13 @@ class ModelFlow:
     def open_connections(self) -> None:
         if self._app._prompt_has_pending_text():
             return
-        connections = self._app.service.models.list_connections()
+        try:
+            connections = self._app.service.models.list_connections()
+        except Exception as error:
+            self._app._conversation.append_block("Model warning", f"模型配置失败：{error}")
+            self._app._refresh()
+            self._app._defer_prompt_focus()
+            return
         if connections:
             self._app.push_screen(
                 ConnectionCenterOverlay(connections),
@@ -184,8 +190,17 @@ class ModelFlow:
 
     def open_switch_overlay(self, providers: list[object]) -> None:
         self.dismiss_loading_overlay()
+        try:
+            connections = self._app.service.models.list_connections()
+        except Exception as error:
+            self.handle_catalog_error(error)
+            return
         self._app.push_screen(
-            ModelSwitchOverlay(self._app.service.models.list_connections(), providers),
+            ModelSwitchOverlay(
+                connections,
+                providers,
+                variant_lookup=self._app.service.models.list_model_variants,
+            ),
             self.handle_switch_result,
         )
 
@@ -202,17 +217,23 @@ class ModelFlow:
                 return
             if result.action == "set_default":
                 self._app.service.models.set_default_selection(result.selection)
-                self._app._conversation.append_line(f"默认模型：{result.selection.model}")
+                self._app._conversation.append_line(
+                    f"默认模型：{_selection_label(result.selection)}",
+                )
             elif result.action in {"set_fallback", "set_fallback_cloud"}:
                 self._app.service.models.set_fallback_selection(
                     result.selection,
                     cloud_fallback_consent=result.action == "set_fallback_cloud",
                 )
-                self._app._conversation.append_line(f"备用模型：{result.selection.model}")
+                self._app._conversation.append_line(
+                    f"备用模型：{_selection_label(result.selection)}",
+                )
             else:
                 status = self._app.service.models.switch_current_session_selection(result.selection)
                 model_name = status.model or result.selection.model
-                self._app._conversation.append_line(f"当前会话：{model_name}")
+                variant = status.model_variant or result.selection.variant
+                label = f"{model_name} · {variant}" if variant else model_name
+                self._app._conversation.append_line(f"当前会话：{label}")
         except Exception as error:
             self._app._conversation.append_block("Model warning", f"模型切换失败：{error}")
         self._app._refresh()
@@ -279,3 +300,9 @@ def configurable_catalog_providers(providers: list[object]) -> list[object]:
         if getattr(catalog_provider_capability(provider), "status", None) == "runnable"
         and list(getattr(provider, "models", []) or [])
     ]
+
+
+def _selection_label(selection: ModelSelectionRequest) -> str:
+    if selection.variant:
+        return f"{selection.model} · {selection.variant}"
+    return selection.model

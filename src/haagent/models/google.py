@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.http_transport import ModelHttpTransport
+from haagent.models.model_options import ResolvedModelRequestConfig, empty_resolved_config, merge_provider_payload
 from haagent.models.transport import (
     _endpoint_base_url,
     _google_gemini_stream_transport,
@@ -55,7 +56,13 @@ def _gemini_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[d
         if raw_role == "assistant":
             if not isinstance(content, str):
                 raise ModelCallError("Gemini assistant message content must be a string")
-            contents.append(_gemini_assistant_content(content, message.get("tool_calls")))
+            contents.append(
+                _gemini_assistant_content(
+                    content,
+                    message.get("tool_calls"),
+                    message.get("provider_continuation"),
+                )
+            )
             continue
         if raw_role == "model":
             if not isinstance(content, str):
@@ -93,7 +100,16 @@ def _gemini_user_parts(content: object) -> list[dict[str, Any]]:
     return parts
 
 
-def _gemini_assistant_content(content: str, raw_tool_calls: object) -> dict[str, Any]:
+def _gemini_assistant_content(
+    content: str,
+    raw_tool_calls: object,
+    provider_continuation: object = None,
+) -> dict[str, Any]:
+    # Gemini 工具续轮要求 thoughtSignature 与原始 parts 保持绑定和顺序。
+    if isinstance(provider_continuation, dict):
+        original_content = provider_continuation.get("content")
+        if isinstance(original_content, dict):
+            return dict(original_content)
     if raw_tool_calls is None:
         return {"role": "model", "parts": [{"text": content}]}
     if not isinstance(raw_tool_calls, list):
@@ -177,6 +193,7 @@ def _parse_gemini_response(response: dict[str, object]) -> ModelResponse:
 
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
+    has_thought_state = False
     for part in parts:
         if not isinstance(part, dict):
             raise ModelCallError("Gemini part must be an object")
@@ -184,9 +201,14 @@ def _parse_gemini_response(response: dict[str, object]) -> ModelResponse:
             text = part["text"]
             if not isinstance(text, str):
                 raise ModelCallError("Gemini text part must be a string")
-            text_parts.append(text)
+            if part.get("thought") is not True:
+                text_parts.append(text)
+            else:
+                has_thought_state = True
             continue
         if "functionCall" in part:
+            if "thoughtSignature" in part:
+                has_thought_state = True
             function_call = part["functionCall"]
             if not isinstance(function_call, dict):
                 raise ModelCallError("Gemini functionCall must be an object")
@@ -203,6 +225,11 @@ def _parse_gemini_response(response: dict[str, object]) -> ModelResponse:
         content="".join(text_parts),
         tool_calls=tool_calls,
         usage=_parse_gemini_usage(response),
+        provider_continuation=(
+            {"kind": "google_gemini", "content": dict(content)}
+            if has_thought_state
+            else None
+        ),
     )
 
 
@@ -239,9 +266,14 @@ class GoogleGeminiGateway:
         stream_transport: GoogleGeminiStreamTransport | None = None,
         retry_controller: RetryController | None = None,
         http_transport: ModelHttpTransport | None = None,
+        request_config: ResolvedModelRequestConfig | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         self._model = model
+        self._request_config = request_config or empty_resolved_config(
+            connection_id="",
+            model_id=model,
+        )
         self._endpoint = _normalize_gemini_generate_content_endpoint(base_url, model)
         # 仅在需要默认 HTTP path 时创建/绑定 transport；外部注入不越权关闭。
         self._owns_http_transport = False
@@ -295,6 +327,7 @@ class GoogleGeminiGateway:
             model=self._model,
             endpoint=_redact_url(self._endpoint),
             base_url=_endpoint_base_url(self._endpoint),
+            request_config=self._request_config.audit_summary(),
         )
 
     def generate(
@@ -321,6 +354,7 @@ class GoogleGeminiGateway:
             payload["tools"] = _gemini_tool_schemas(tool_schemas)
         if event_sink is not None:
             payload["stream"] = True
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

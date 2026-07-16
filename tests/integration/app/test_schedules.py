@@ -34,7 +34,7 @@ def _write_connection(home: Path, *, name: str = "local", model: str = "m1") -> 
     (config_dir / "providers.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": name,
@@ -47,7 +47,6 @@ def _write_connection(home: Path, *, name: str = "local", model: str = "m1") -> 
                         "credential_source": "env",
                     }
                 ],
-                "custom_models": [],
             }
         ),
         encoding="utf-8",

@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.http_transport import ModelHttpTransport
+from haagent.models.model_options import ResolvedModelRequestConfig, empty_resolved_config, merge_provider_payload
 from haagent.models.transport import (
     _anthropic_stream_transport,
     _anthropic_transport,
@@ -55,7 +56,13 @@ def _anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, lis
         if role == "assistant":
             if not isinstance(content, str):
                 raise ModelCallError("Anthropic assistant message content must be a string")
-            normalized.append(_anthropic_assistant_message(content, message.get("tool_calls")))
+            normalized.append(
+                _anthropic_assistant_message(
+                    content,
+                    message.get("tool_calls"),
+                    message.get("provider_continuation"),
+                ),
+            )
             continue
         if role == "tool":
             tool_result_block = _anthropic_tool_result_block(message)
@@ -97,12 +104,28 @@ def _anthropic_user_content(content: object) -> str | list[dict[str, Any]]:
     return [*images, *texts]
 
 
-def _anthropic_assistant_message(content: str, raw_tool_calls: object) -> dict[str, Any]:
+def _anthropic_assistant_message(
+    content: str,
+    raw_tool_calls: object,
+    provider_continuation: object = None,
+) -> dict[str, Any]:
+    blocks: list[dict[str, Any]] = []
+    # continuation 保存完整原始 block 序列；存在时不能再从规范化字段重组。
+    if isinstance(provider_continuation, dict):
+        continuation_blocks = provider_continuation.get("blocks")
+        if isinstance(continuation_blocks, list):
+            return {
+                "role": "assistant",
+                "content": [dict(block) for block in continuation_blocks if isinstance(block, dict)],
+            }
     if raw_tool_calls is None:
+        if content:
+            blocks.append({"type": "text", "text": content})
+        if blocks:
+            return {"role": "assistant", "content": blocks}
         return {"role": "assistant", "content": content}
     if not isinstance(raw_tool_calls, list):
         raise ModelCallError("Anthropic assistant tool_calls must be a list when present")
-    blocks: list[dict[str, Any]] = []
     if content:
         blocks.append({"type": "text", "text": content})
     for item in raw_tool_calls:
@@ -171,15 +194,25 @@ def _parse_anthropic_response(response: dict[str, object]) -> ModelResponse:
 
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
+    continuation_blocks: list[dict[str, Any]] = []
+    has_thinking = False
     for block in content_blocks:
         if not isinstance(block, dict):
             raise ModelCallError("Anthropic content block must be an object")
         block_type = block.get("type")
+        continuation_blocks.append(dict(block))
         if block_type == "text":
             text = block.get("text")
             if not isinstance(text, str):
                 raise ModelCallError("Anthropic text block must include text")
             text_parts.append(text)
+            continue
+        if block_type == "thinking":
+            # 不展示 CoT；仅作为 opaque continuation 保留。
+            has_thinking = True
+            continue
+        if block_type == "redacted_thinking":
+            has_thinking = True
             continue
         if block_type == "tool_use":
             name = block.get("name")
@@ -192,10 +225,16 @@ def _parse_anthropic_response(response: dict[str, object]) -> ModelResponse:
             tool_calls.append(ToolCall(name=name, args=raw_input, id=tool_id))
             continue
         raise ModelCallError(f"unsupported Anthropic content block type: {block_type}")
+    continuation = (
+        {"kind": "anthropic_messages", "blocks": continuation_blocks}
+        if has_thinking
+        else None
+    )
     return ModelResponse(
         content="".join(text_parts),
         tool_calls=tool_calls,
         usage=_parse_anthropic_usage(response),
+        provider_continuation=continuation,
     )
 
 
@@ -232,9 +271,14 @@ class AnthropicMessagesGateway:
         stream_transport: AnthropicStreamTransport | None = None,
         retry_controller: RetryController | None = None,
         http_transport: ModelHttpTransport | None = None,
+        request_config: ResolvedModelRequestConfig | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self._model = model
+        self._request_config = request_config or empty_resolved_config(
+            connection_id="",
+            model_id=model,
+        )
         self._messages_endpoint = _normalize_anthropic_messages_endpoint(base_url)
         # 仅在需要默认 HTTP path 时创建/绑定 transport；外部注入不越权关闭。
         self._owns_http_transport = False
@@ -288,6 +332,7 @@ class AnthropicMessagesGateway:
             model=self._model,
             endpoint=_redact_url(self._messages_endpoint),
             base_url=_endpoint_base_url(self._messages_endpoint),
+            request_config=self._request_config.audit_summary(),
         )
 
     def generate(
@@ -305,6 +350,7 @@ class AnthropicMessagesGateway:
             raise ModelCallError("ANTHROPIC_API_KEY is required for AnthropicMessagesGateway")
 
         system, anthropic_messages = _anthropic_messages(messages)
+        # 未配置时保持历史默认 max_tokens=4096；用户 options 可覆盖。
         payload: dict[str, object] = {
             "model": self._model,
             "max_tokens": 4096,
@@ -316,6 +362,7 @@ class AnthropicMessagesGateway:
             payload["tools"] = _anthropic_tool_schemas(tool_schemas)
         if event_sink is not None:
             payload["stream"] = True
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,

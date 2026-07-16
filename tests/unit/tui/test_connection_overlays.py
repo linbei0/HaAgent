@@ -168,6 +168,7 @@ def test_model_switch_overlay_ignores_escape_after_it_is_already_closed() -> Non
                     models=[SimpleNamespace(id="model-001", name="Model 001")],
                 )
             ],
+            variant_lookup=lambda _connection_id, _model_id: [],
         )
         app = App()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -203,4 +204,5 @@ def _connection(connection_id: str, name: str, provider_id: str) -> AssistantMod
         credential_source="keyring",
         credential_available=True,
         credential_source_used="keyring",
+        model_config_diagnostics=(),
     )

@@ -46,6 +46,9 @@ from haagent.runtime.session.working_state import (
 from haagent.tools.registry import default_tool_runtime_registry
 
 
+MODEL_VARIANT_UNSET = object()
+
+
 @dataclass
 class SessionRuntimeState:
     """AgentSession 的可序列化/可装配运行时字段快照。"""
@@ -58,6 +61,7 @@ class SessionRuntimeState:
     model_connection_id: str | None
     model_name: str | None
     model_base_url: str | None
+    model_variant: str | None
     max_turns: int | None
     memory_extraction_enabled: bool
     enable_web: bool
@@ -120,6 +124,7 @@ def build_create_state(
     model_connection_id: str | None = None,
     model_name: str | None = None,
     model_base_url: str | None = None,
+    model_variant: str | None = None,
     max_turns: int | None,
     session_id: str | None = None,
     memory_extraction_enabled: bool = True,
@@ -143,6 +148,7 @@ def build_create_state(
         model_connection_id=model_connection_id,
         model_name=model_name,
         model_base_url=model_base_url,
+        model_variant=model_variant,
         max_turns=max_turns,
         memory_extraction_enabled=memory_extraction_enabled,
         enable_web=enable_web,
@@ -188,6 +194,7 @@ def build_resume_state(
     model_connection_id: str | None = None,
     model_name: str | None = None,
     model_base_url: str | None = None,
+    model_variant: str | None | object = MODEL_VARIANT_UNSET,
     max_turns: int | None,
     enable_web: bool = False,
     mcp_runtime: Any | None = None,
@@ -244,6 +251,11 @@ def build_resume_state(
         model_connection_id=model_connection_id or optional_string(metadata.get("model_connection_id")),
         model_name=model_name or optional_string(metadata.get("model")),
         model_base_url=model_base_url or optional_string(metadata.get("base_url")),
+        model_variant=(
+            optional_string(metadata["model_variant"])
+            if model_variant is MODEL_VARIANT_UNSET
+            else model_variant
+        ),
         max_turns=max_turns,
         memory_extraction_enabled=True,
         enable_web=enable_web,
@@ -291,6 +303,7 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         model_connection_id=state.model_connection_id,
         model_name=state.model_name,
         model_base_url=state.model_base_url,
+        model_variant=state.model_variant,
         max_turns=state.max_turns,
         memory_extraction_enabled=state.memory_extraction_enabled,
         enable_web=state.enable_web,
@@ -334,6 +347,7 @@ def apply_state(instance: Any, state: SessionRuntimeState) -> None:
     instance.model_connection_id = state.model_connection_id
     instance.model_name = state.model_name
     instance.model_base_url = state.model_base_url
+    instance.model_variant = state.model_variant
     instance.max_turns = state.max_turns
     instance.memory_extraction_enabled = state.memory_extraction_enabled
     instance.enable_web = state.enable_web

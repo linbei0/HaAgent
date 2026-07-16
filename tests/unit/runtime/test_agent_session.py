@@ -432,6 +432,7 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
     session.model_connection_id = "old-connection"
     session.model_name = "old-model"
     session.model_base_url = "https://old.invalid"
+    session.model_variant = "old-variant"
 
     def fail_metadata_write() -> None:
         raise OSError("disk full")
@@ -445,6 +446,7 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
             model="new-model",
             base_url="https://new.invalid",
             gateway=rejected,
+            model_variant="new-variant",
         )
 
     assert session.model_gateway is previous
@@ -452,5 +454,25 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
     assert session.model_connection_id == "old-connection"
     assert session.model_name == "old-model"
     assert session.model_base_url == "https://old.invalid"
+    assert session.model_variant == "old-variant"
     assert rejected.closed is True
     assert previous.closed is False
+
+
+def test_reload_can_explicitly_clear_model_variant(tmp_path) -> None:
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_variant="deep",
+        memory_extraction_enabled=False,
+    )
+    target = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_variant="old",
+        memory_extraction_enabled=False,
+    )
+
+    session.reload(target.session_path, model_variant=None)
+
+    assert session.model_variant is None

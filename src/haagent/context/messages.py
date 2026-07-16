@@ -165,10 +165,15 @@ def build_task_message(
 def build_assistant_message(
     content: str,
     tool_calls: list[dict[str, Any]],
+    *,
+    provider_continuation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
     if tool_calls:
         msg["tool_calls"] = tool_calls
+    # 仅供 gateway 续轮回传；UI/summary 不得渲染该字段内容。
+    if provider_continuation is not None:
+        msg["provider_continuation"] = provider_continuation
     return msg
 
 

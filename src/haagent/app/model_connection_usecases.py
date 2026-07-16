@@ -15,27 +15,26 @@ from haagent.app.assistant_types import (
     ModelConnectionConfigureRequest,
     ModelSelectionRequest,
 )
-from haagent.models import model_connections as model_connections_module
 from haagent.models.catalog import (
     DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE,
     CatalogFetchResult,
     CatalogTransport,
     fetch_model_catalog,
 )
+from haagent.models import model_connections as model_connections_module
 from haagent.models.credentials import CredentialError
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderConnectionRecord,
     ProviderProfileError,
     delete_provider_connection,
-    list_provider_connection_records,
     load_active_model_selection,
     load_model_selection_profile,
+    load_providers_config_snapshot,
     provider_connection_credential_status,
     save_active_model_selection,
     save_fallback_model_selection,
     save_provider_connection_with_key,
-    user_config_dir,
 )
 from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel, discover_local_runtimes
 from haagent.models.types import ModelCallError
@@ -48,11 +47,12 @@ class AssistantModels:
 
     def list_connections(self) -> list[AssistantModelConnection]:
         connections = []
-        for record in list_provider_connection_records(config_path=user_config_dir() / "providers.json"):
+        snapshot = self._context.providers_snapshot
+        for record in snapshot.list_connections():
             credential = provider_connection_credential_status(
-                record.id,
+                record,
                 environ=self._context.environ,
-                config_dir=user_config_dir(),
+                config_dir=snapshot.path.parent,
             )
             connections.append(
                 AssistantModelConnection(
@@ -67,6 +67,7 @@ class AssistantModels:
                     credential_available=credential.api_key_available,
                     credential_source_used=credential.credential_source_used,
                     runtime_kind=record.runtime_kind,
+                    model_config_diagnostics=snapshot.diagnostics_for(record.id),
                 ),
             )
         return connections
@@ -84,19 +85,36 @@ class AssistantModels:
             runtime_kind=request.runtime_kind,
         )
         try:
-            save_provider_connection_with_key(
+            snapshot = self._context.providers_snapshot
+            path = save_provider_connection_with_key(
                 record,
                 request.api_key,
+                snapshot=snapshot,
                 credential_store=model_connections_module.DEFAULT_CREDENTIAL_STORE,
-                config_dir=user_config_dir(),
             )
         except (ProviderProfileError, CredentialError) as error:
             raise AssistantServiceError(str(error)) from error
+        _replace_snapshot_from_path(self._context, path)
         self._context.status_generation += 1
         return record
 
     def discover_local_runtimes(self) -> tuple[LocalRuntimeDiscovery, LocalRuntimeDiscovery]:
-        return discover_local_runtimes(environ=self._context.environ)
+        discoveries = discover_local_runtimes(environ=self._context.environ)
+        snapshot = self._context.providers_snapshot
+        available: dict[str, set[str]] = {}
+        for connection in snapshot.records:
+            discovery = next(
+                (
+                    item
+                    for item in discoveries
+                    if item.runtime_kind == connection.runtime_kind and item.status == "available"
+                ),
+                None,
+            )
+            if discovery is not None:
+                available[connection.id] = {model.id for model in discovery.models}
+        self._context.providers_snapshot = snapshot.bind_available_models(available)
+        return discoveries
 
     def save_local_model(
         self,
@@ -120,7 +138,16 @@ class AssistantModels:
             credential_source=credential_source,
             runtime_kind=discovery.runtime_kind,
         )
-        save_provider_connection_with_key(record, None, config_dir=user_config_dir())
+        snapshot = self._context.providers_snapshot
+        path = save_provider_connection_with_key(
+            record,
+            None,
+            snapshot=snapshot,
+        )
+        _replace_snapshot_from_path(self._context, path)
+        self._context.providers_snapshot = self._context.providers_snapshot.bind_available_models(
+            {connection_id: {item.id for item in discovery.models}},
+        )
         self._context.status_generation += 1
         return ModelSelection(connection_id=connection_id, model=model.id)
 
@@ -130,55 +157,87 @@ class AssistantModels:
         *,
         cloud_fallback_consent: bool = False,
     ) -> None:
-        selection = ModelSelection(connection_id=request.connection_id, model=request.model)
-        load_model_selection_profile(selection, environ=self._context.environ, config_dir=user_config_dir())
+        selection = ModelSelection(
+            connection_id=request.connection_id,
+            model=request.model,
+            variant=request.variant,
+        )
+        _load_profile(self._context, selection)
         save_fallback_model_selection(
             selection,
             cloud_fallback_consent=cloud_fallback_consent,
-            config_dir=user_config_dir(),
+            config_dir=self._context.providers_snapshot.path.parent,
         )
 
     def set_default_selection(self, request: ModelSelectionRequest) -> None:
-        selection = ModelSelection(connection_id=request.connection_id, model=request.model)
+        selection = ModelSelection(
+            connection_id=request.connection_id,
+            model=request.model,
+            variant=request.variant,
+        )
         try:
-            load_model_selection_profile(selection, environ=self._context.environ, config_dir=user_config_dir())
-            save_active_model_selection(selection, config_dir=user_config_dir())
+            _load_profile(self._context, selection)
+            save_active_model_selection(
+                selection,
+                config_dir=self._context.providers_snapshot.path.parent,
+            )
         except (ProviderProfileError, CredentialError) as error:
             raise AssistantServiceError(str(error)) from error
         self._context.status_generation += 1
 
-    def delete_connection(self, connection_id: str) -> None:
+    def list_model_variants(self, connection_id: str, model_id: str) -> list[str]:
         try:
-            delete_provider_connection(connection_id, config_dir=user_config_dir())
+            snapshot = self._context.providers_snapshot
+            snapshot.require_valid()
+            if (connection_id, model_id) in snapshot.invalid_model_configs:
+                raise ProviderProfileError(
+                    f"configured model is not available in catalog/discovery: "
+                    f"connection={connection_id} model={model_id}",
+                )
+            config = snapshot.connection(connection_id).models.get(model_id)
+            return [] if config is None else list(config.variants)
         except ProviderProfileError as error:
             raise AssistantServiceError(str(error)) from error
+
+    def delete_connection(self, connection_id: str) -> None:
+        try:
+            snapshot = self._context.providers_snapshot
+            path = delete_provider_connection(
+                connection_id,
+                snapshot=snapshot,
+            )
+        except ProviderProfileError as error:
+            raise AssistantServiceError(str(error)) from error
+        _replace_snapshot_from_path(self._context, path)
         self._context.status_generation += 1
 
     def refresh_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
         try:
-            return fetch_model_catalog(transport=transport, force_refresh=True)
+            result = fetch_model_catalog(transport=transport, force_refresh=True)
+            bind_catalog_snapshot(self._context, result)
+            return result
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
 
     def get_catalog(self, *, transport: CatalogTransport | None = None) -> CatalogFetchResult:
         try:
-            return fetch_model_catalog(
+            result = fetch_model_catalog(
                 transport=transport,
                 max_cache_age=DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE,
             )
+            bind_catalog_snapshot(self._context, result)
+            return result
         except Exception as error:
             raise AssistantServiceError(str(error)) from error
 
     def test_connection(self, connection_id: str, *, model: str | None = None) -> AssistantModelTestResult:
         try:
             if model is None:
-                model = load_active_model_selection(config_dir=user_config_dir()).model
+                model = load_active_model_selection(
+                    config_dir=self._context.providers_snapshot.path.parent,
+                ).model
             selection = ModelSelection(connection_id=connection_id, model=model)
-            profile = load_model_selection_profile(
-                selection,
-                environ=self._context.environ,
-                config_dir=user_config_dir(),
-            )
+            profile = _load_profile(self._context, selection)
             response = self._context.gateway_factory(profile).generate(
                 [{"role": "user", "content": "Reply with OK."}],
                 [],
@@ -200,14 +259,17 @@ class AssistantModels:
             )
 
     def switch_current_session_selection(self, request: ModelSelectionRequest) -> AssistantSessionStatus:
-        selection = ModelSelection(connection_id=request.connection_id, model=request.model)
+        selection = ModelSelection(
+            connection_id=request.connection_id,
+            model=request.model,
+            variant=request.variant,
+        )
         try:
-            profile = load_model_selection_profile(
+            profile = _load_profile(self._context, selection)
+            _save_default_selection_if_missing(
                 selection,
-                environ=self._context.environ,
-                config_dir=user_config_dir(),
+                config_dir=self._context.providers_snapshot.path.parent,
             )
-            _save_default_selection_if_missing(selection)
             if self._context.session is None:
                 self._context.pending_model_selection = selection
                 # 无 session 时 status 读 active selection；抬 generation 避免凭据/默认模型旧缓存。
@@ -223,6 +285,7 @@ class AssistantModels:
                     model_profile_name=profile.name,
                     model_connection_id=selection.connection_id,
                     model=profile.model,
+                    model_variant=selection.variant,
                     base_url=profile.base_url,
                     web_enabled=self._context.enable_web,
                     permission_mode="request_approval",
@@ -232,8 +295,9 @@ class AssistantModels:
                 profile_name=profile.name,
                 model_connection_id=selection.connection_id,
                 model=profile.model,
-                base_url=profile.base_url,
+                base_url=profile.base_url or "",
                 gateway=gateway,
+                model_variant=selection.variant,
             )
             self._context.status_generation += 1
         except (ProviderProfileError, ChatSessionError) as error:
@@ -243,11 +307,38 @@ class AssistantModels:
         return session_status(self._context.session)
 
 
-def _save_default_selection_if_missing(selection: ModelSelection) -> None:
+def _save_default_selection_if_missing(selection: ModelSelection, *, config_dir) -> None:
     try:
-        load_active_model_selection(config_dir=user_config_dir())
+        load_active_model_selection(config_dir=config_dir)
     except ProviderProfileError:
-        save_active_model_selection(selection, config_dir=user_config_dir())
+        save_active_model_selection(selection, config_dir=config_dir)
+
+
+def _replace_snapshot_from_path(context: AssistantContext, path) -> None:
+    snapshot = load_providers_config_snapshot(path)
+    snapshot.require_valid()
+    context.providers_snapshot = snapshot
+
+
+def _load_profile(context: AssistantContext, selection: ModelSelection):
+    return load_model_selection_profile(
+        selection,
+        snapshot=context.providers_snapshot,
+        environ=context.environ,
+    )
+
+
+def bind_catalog_snapshot(context: AssistantContext, catalog: CatalogFetchResult) -> None:
+    snapshot = context.providers_snapshot
+    available: dict[str, set[str]] = {}
+    providers = {provider.id: provider for provider in catalog.providers}
+    for connection in snapshot.records:
+        if connection.runtime_kind != "remote":
+            continue
+        provider = providers.get(connection.provider_id)
+        if provider is not None:
+            available[connection.id] = {model.id for model in provider.models}
+    context.providers_snapshot = snapshot.bind_available_models(available)
 
 
 def _secret_candidates(environ) -> list[str]:

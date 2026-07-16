@@ -391,7 +391,13 @@ def run_turn_loop(
             }
             for tc in tool_calls_with_ids
         ]
-        state.messages.append(build_assistant_message(model_response.content, assistant_tool_calls))
+        state.messages.append(
+            build_assistant_message(
+                model_response.content,
+                assistant_tool_calls,
+                provider_continuation=model_response.provider_continuation,
+            ),
+        )
 
         result = _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls_with_ids, state=state, deps=deps)
         if result is not None:

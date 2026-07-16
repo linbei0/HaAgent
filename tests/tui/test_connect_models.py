@@ -537,6 +537,88 @@ def test_tui_model_overlay_without_connections_guides_to_connect(tmp_path: Path)
     asyncio.run(run())
 
 
+def test_tui_model_variant_lookup_error_is_visible_and_does_not_switch(tmp_path: Path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path)
+    service.model_connections = [
+        SimpleNamespace(
+            id="openai-main",
+            name="main",
+            provider_id="openai",
+            provider_name="OpenAI",
+            gateway_provider="openai",
+            base_url="https://api.openai.com/v1",
+            api_key_env="OPENAI_API_KEY",
+            credential_source="keyring",
+            credential_available=True,
+        )
+    ]
+    service.catalog_providers = [
+        SimpleNamespace(
+            id="openai",
+            name="OpenAI",
+            models=[SimpleNamespace(id="gpt-test", name="GPT Test")],
+        )
+    ]
+    service.model_variant_error = RuntimeError("providers.json 配置无效")
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("/")
+            await pilot.press("m", "o", "d", "e", "l", "enter")
+            await pilot.pause(0.2)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            assert "providers.json 配置无效" in _all_text(app)
+            assert service.switched_model is None
+
+    asyncio.run(run())
+
+
+def test_tui_model_variant_step_switches_named_variant(tmp_path: Path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path)
+    service.model_connections = [
+        SimpleNamespace(
+            id="openai-main",
+            name="main",
+            provider_id="openai",
+            provider_name="OpenAI",
+            gateway_provider="openai",
+            base_url="https://api.openai.com/v1",
+            api_key_env="OPENAI_API_KEY",
+            credential_source="keyring",
+            credential_available=True,
+        )
+    ]
+    service.catalog_providers = [
+        SimpleNamespace(
+            id="openai",
+            name="OpenAI",
+            models=[SimpleNamespace(id="gpt-test", name="GPT Test")],
+        )
+    ]
+    service.model_variants[("openai-main", "gpt-test")] = ["fast", "deep"]
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("/")
+            await pilot.press("m", "o", "d", "e", "l", "enter")
+            await pilot.pause(0.2)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            assert "默认" in _all_text(app)
+            assert "fast" in _all_text(app)
+            await pilot.press("down", "enter")
+            await pilot.pause(0.1)
+
+            assert service.switched_model == "gpt-test"
+            assert service.switched_model_variant == "fast"
+
+    asyncio.run(run())
+
+
 def test_local_runtime_overlay_renders_through_textual_widget_pipeline(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path)
     discovery = LocalRuntimeDiscovery(

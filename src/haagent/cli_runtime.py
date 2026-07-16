@@ -21,7 +21,9 @@ from haagent.models.model_connections import (
     load_active_model_selection,
     load_model_selection_profile,
     load_model_route,
+    load_providers_config_snapshot,
 )
+from haagent.models.model_options import empty_resolved_config
 from haagent.models.types import ModelGateway
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
@@ -63,6 +65,7 @@ class CliRuntime:
         ]
 
     def build_run_model_gateway(self, args: argparse.Namespace) -> Any:
+        providers_snapshot = load_providers_config_snapshot()
         if args.profile is not None:
             if args.provider not in {None, "fake"} or args.base_url is not None:
                 raise ProviderProfileError(
@@ -73,14 +76,20 @@ class CliRuntime:
                 connection_id=args.profile,
                 model=args.model or active_selection.model,
             )
-            return self.gateway_factory(load_model_selection_profile(selection))
+            return self.gateway_factory(
+                load_model_selection_profile(selection, snapshot=providers_snapshot)
+            )
 
         if args.provider is None:
             if args.model is not None or args.base_url is not None:
                 raise ProviderProfileError("--model and --base-url require --provider or --profile")
             route = load_model_route()
-            primary = load_model_selection_profile(route.primary)
-            fallback = load_model_selection_profile(route.fallback) if route.fallback is not None else None
+            primary = load_model_selection_profile(route.primary, snapshot=providers_snapshot)
+            fallback = (
+                load_model_selection_profile(route.fallback, snapshot=providers_snapshot)
+                if route.fallback is not None
+                else None
+            )
             if self.gateway_factory is gateway_from_profile:
                 return gateway_from_route(
                     primary,
@@ -104,7 +113,12 @@ class CliRuntime:
                 connection_id=args.profile,
                 model=args.model or active_selection.model,
             )
-            return self.gateway_factory(load_model_selection_profile(selection))
+            return self.gateway_factory(
+                load_model_selection_profile(
+                    selection,
+                    snapshot=load_providers_config_snapshot(),
+                )
+            )
         if args.provider is None:
             return None
         if not os.environ.get("OPENAI_API_KEY"):
@@ -134,4 +148,8 @@ class CliRuntime:
             credential_source="env",
             credential_source_used="env",
             api_key=api_key,
+            request_config=empty_resolved_config(
+                connection_id=f"cli-{provider}",
+                model_id=model,
+            ),
         )

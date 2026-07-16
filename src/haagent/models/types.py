@@ -61,8 +61,6 @@ class ModelCallError(RuntimeError):
 
 
 @dataclass(frozen=True)
-
-
 class ToolCall:
     name: str
     args: dict[str, Any]
@@ -70,8 +68,6 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
-
-
 class ModelUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -80,23 +76,23 @@ class ModelUsage:
 
 
 @dataclass(frozen=True)
-
-
 class ModelGatewayMetadata:
     provider: str
     model: str | None
     endpoint: str | None
     base_url: str | None = None
     profile_name: str | None = None
+    # episode 审计用；不含 secret，只放选择状态与脱敏参数摘要。
+    request_config: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
-
-
 class ModelResponse:
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: ModelUsage | None = None
+    # 前端不可见的 provider 续轮状态（如 reasoning/thinking）；不得进入主对话展示。
+    provider_continuation: dict[str, Any] | None = None
 
 
 class ModelGateway(Protocol):

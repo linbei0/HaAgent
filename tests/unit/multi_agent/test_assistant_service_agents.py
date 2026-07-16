@@ -24,6 +24,7 @@ class _Session:
         self.runs_root = runs_root
         self.session_path = runs_root / "sessions" / self.session_id
         self.max_turns = None
+        self.model_variant = None
 
 
 def test_assistant_service_lists_agents_for_current_session(tmp_path: Path, monkeypatch) -> None:

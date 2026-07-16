@@ -18,9 +18,7 @@ from haagent.mcp.settings import load_mcp_settings
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderProfileError,
-    USER_PROVIDERS_FILE,
     load_active_model_selection,
-    load_provider_connection_record,
     provider_connection_credential_status,
     user_config_dir,
 )
@@ -179,6 +177,7 @@ class AssistantWorkspace:
             session.turn_count,
             getattr(session, "model_connection_id", None),
             getattr(session, "model_name", None),
+            session.model_variant,
             permission,
             external,
             self._context.enable_web,
@@ -192,30 +191,36 @@ class AssistantWorkspace:
 
         session = session_status(self._context.session) if self._context.session is not None else None
         override = (
-            ModelSelection(connection_id=session.model_connection_id, model=session.model or "")
+            ModelSelection(
+                connection_id=session.model_connection_id,
+                model=session.model or "",
+                variant=session.model_variant,
+            )
             if session is not None and session.model_connection_id is not None
             else None
         )
         profile_name = provider = base_url = model = api_key_env = None
+        model_variant = None
         credential_source_configured = credential_source_used = None
         credential_store_available = None
         credential_store_error = profile_error = None
         api_key_available = False
         try:
-            selection = override or load_active_model_selection(config_dir=user_config_dir())
-            connection = load_provider_connection_record(
-                selection.connection_id,
-                config_path=user_config_dir() / USER_PROVIDERS_FILE,
+            snapshot = self._context.providers_snapshot
+            selection = override or load_active_model_selection(
+                config_dir=snapshot.path.parent,
             )
+            connection = snapshot.connection(selection.connection_id)
             profile_name = connection.id
             provider = connection.gateway_provider
             base_url = connection.base_url
             model = selection.model
+            model_variant = selection.variant
             api_key_env = connection.api_key_env
             credential = provider_connection_credential_status(
-                connection.id,
+                connection,
                 environ=self._context.environ,
-                config_dir=user_config_dir(),
+                config_dir=snapshot.path.parent,
             )
             api_key_available = credential.api_key_available
             credential_source_configured = credential.credential_source_configured
@@ -245,6 +250,7 @@ class AssistantWorkspace:
             permission_mode=session.permission_mode if session is not None else "request_approval",
             sandbox_status=session.sandbox_status if session is not None else sandbox_status(),
             image_input_supported=_image_input_supported(provider, base_url, model),
+            model_variant=model_variant,
         )
 
 

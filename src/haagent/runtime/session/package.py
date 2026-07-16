@@ -288,6 +288,7 @@ def write_session_metadata(
     turn_count: int,
     edit_diff_session_always: bool = False,
     first_request: str | None = None,
+    model_variant: str | None = None,
 ) -> str:
     """写入 session.json；返回实际保留的 created_at。"""
     session_path.mkdir(parents=True, exist_ok=True)
@@ -310,6 +311,7 @@ def write_session_metadata(
         "model_profile_name": model_profile_name,
         "model_connection_id": model_connection_id,
         "model": model_name,
+        "model_variant": model_variant,
         "base_url": model_base_url,
         "enable_web": enable_web,
         "last_user_image_attachments": [

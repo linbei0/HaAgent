@@ -106,9 +106,12 @@ class ConnectionCenterState:
 
 def _connection_option(connection: AssistantModelConnection) -> Option:
     credential = "key:ok" if connection.credential_available else "key:missing"
+    diagnostics = connection.model_config_diagnostics
+    config_status = " config:error" if diagnostics else ""
     provider = safe_summary(connection.provider_name, 24)
     return Option(
-        f"{connection.name:<16} {provider:<24} {connection.gateway_provider:<12} {credential}",
+        f"{connection.name:<16} {provider:<24} {connection.gateway_provider:<12} "
+        f"{credential}{config_status}",
         id=connection.id,
     )
 
@@ -178,17 +181,21 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
         except NoMatches:
             return
         # 头部引导：本列表是已配置连接，不是全量供应商目录；n 进入新建向导。
-        body.update(
-            "\n".join(
-                [
-                    "供应商连接（已配置）",
-                    "下方仅显示已保存的连接；按 n 新建可浏览全部供应商。",
-                    f"搜索: {state.query or '-'}",
-                    "n 新建(全部供应商)  t 测试  d 删除  r 刷新目录  Esc 关闭",
-                    "",
-                ]
+        lines = [
+            "供应商连接（已配置）",
+            "下方仅显示已保存的连接；按 n 新建可浏览全部供应商。",
+            f"搜索: {state.query or '-'}",
+            "n 新建(全部供应商)  t 测试  d 删除  r 刷新目录  Esc 关闭",
+            "",
+        ]
+        selected = state.selected_connection
+        diagnostics = selected.model_config_diagnostics if selected else ()
+        if diagnostics:
+            lines.append(
+                "模型参数配置错误："
+                + safe_summary(diagnostics[0], 160)
             )
-        )
+        body.update("\n".join(lines))
         options = [_connection_option(connection) for connection in state.visible_connections]
         if not options:
             options = [Option("无匹配连接", id="empty", disabled=True)]

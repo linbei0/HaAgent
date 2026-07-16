@@ -26,7 +26,7 @@ from haagent.models import model_connections
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderConnectionRecord,
-    list_provider_connection_records,
+    load_providers_config_snapshot,
     load_active_model_selection,
     save_active_model_selection,
     save_provider_connection,
@@ -76,6 +76,7 @@ class RecordingSession:
         model_connection_id: str | None = None,
         model_name: str | None = None,
         model_base_url: str | None = None,
+        model_variant: str | None = None,
         max_turns: int | None,
         enable_web: bool = False,
         **_kwargs,
@@ -89,6 +90,7 @@ class RecordingSession:
         self.model_connection_id = model_connection_id
         self.model_name = model_name
         self.model_base_url = model_base_url
+        self.model_variant = model_variant
         self.max_turns = max_turns
         self.enable_web = enable_web
         self.session_path = runs_root / self.session_id
@@ -101,12 +103,14 @@ class RecordingSession:
         model: str,
         base_url: str,
         gateway,
+        model_variant: str | None = None,
     ) -> None:
         self.model_gateway = gateway
         self.model_profile_name = profile_name
         self.model_connection_id = model_connection_id
         self.model_name = model
         self.model_base_url = base_url
+        self.model_variant = model_variant
 
     def compact_current_session(self):
         return type(
@@ -145,7 +149,7 @@ def _write_user_connection(
     (config_dir / "providers.json").write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": name,
@@ -158,7 +162,6 @@ def _write_user_connection(
                         "credential_source": credential_source,
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -170,7 +173,8 @@ def _write_user_connection(
 
 
 def _write_two_connections(config_dir: Path) -> None:
-    save_provider_connection(
+    _save_connection(
+        config_dir,
         ProviderConnectionRecord(
             id="local",
             name="local",
@@ -180,9 +184,9 @@ def _write_two_connections(config_dir: Path) -> None:
             base_url="https://api.deepseek.com",
             api_key_env="DEEPSEEK_API_KEY",
         ),
-        config_dir=config_dir,
     )
-    save_provider_connection(
+    _save_connection(
+        config_dir,
         ProviderConnectionRecord(
             id="router",
             name="router",
@@ -192,9 +196,13 @@ def _write_two_connections(config_dir: Path) -> None:
             base_url="https://openrouter.ai/api/v1",
             api_key_env="OPENROUTER_API_KEY",
         ),
-        config_dir=config_dir,
     )
     save_active_model_selection(ModelSelection("local", "deepseek-chat"), config_dir=config_dir)
+
+
+def _save_connection(config_dir: Path, connection: ProviderConnectionRecord) -> Path:
+    snapshot = load_providers_config_snapshot(config_dir / "providers.json")
+    return save_provider_connection(connection, snapshot=snapshot)
 
 
 def _session_image_attachment(session_path: Path, attachment_id: str) -> ImageAttachment:
@@ -259,6 +267,60 @@ def _service(
     )
 
 
+def test_assistant_service_keeps_startup_providers_snapshot(tmp_path: Path, monkeypatch) -> None:
+    _set_home(monkeypatch, tmp_path)
+    config_dir = tmp_path / ".haagent"
+    config_dir.mkdir()
+    path = config_dir / "providers.json"
+    payload = {
+        "version": 4,
+        "connections": [
+            {
+                "id": "local",
+                "name": "Local",
+                "provider_id": "local",
+                "provider_name": "Local",
+                "gateway_provider": "openai-chat",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key_env": "",
+                "credential_source": "none",
+                "runtime_kind": "lm_studio",
+                "models": {
+                    "model": {
+                        "variants": {"startup": {"temperature": 0.2}}
+                    }
+                },
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    service = AssistantService(workspace_root=tmp_path)
+
+    payload["connections"][0]["models"]["model"]["variants"] = {
+        "changed": {"temperature": 0.9}
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert service.models.list_model_variants("local", "model") == ["startup"]
+    with pytest.raises(AssistantServiceError, match="changed after HaAgent started"):
+        service.models.configure_connection(
+            ModelConnectionConfigureRequest(
+                id="another",
+                name="Another",
+                provider_id="local",
+                provider_name="Local",
+                gateway_provider="openai-chat",
+                base_url="http://127.0.0.1:1234/v1",
+                api_key_env="",
+                credential_source="none",
+                runtime_kind="lm_studio",
+            )
+        )
+    assert "changed" in path.read_text(encoding="utf-8")
+    restarted = AssistantService(workspace_root=tmp_path)
+    assert restarted.models.list_model_variants("local", "model") == ["changed"]
+
+
 def test_service_lists_model_connections_with_credential_status(
     tmp_path: Path,
     monkeypatch,
@@ -266,7 +328,8 @@ def test_service_lists_model_connections_with_credential_status(
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
     config_dir = home / ".haagent"
-    save_provider_connection(
+    _save_connection(
+        config_dir,
         ProviderConnectionRecord(
             id="router",
             name="router",
@@ -276,7 +339,6 @@ def test_service_lists_model_connections_with_credential_status(
             base_url="https://openrouter.ai/api/v1",
             api_key_env="OPENROUTER_API_KEY",
         ),
-        config_dir=config_dir,
     )
     service = _service(tmp_path, config_dir=config_dir, environ={"OPENROUTER_API_KEY": "sk-router"})
 
@@ -287,60 +349,6 @@ def test_service_lists_model_connections_with_credential_status(
     assert connections[0].name == "router"
     assert connections[0].provider_name == "OpenRouter"
     assert connections[0].gateway_provider == "openai-chat"
-
-
-def test_service_lists_no_connections_from_obsolete_provider_file(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home = tmp_path / "home"
-    _set_home(monkeypatch, home)
-    config_dir = home / ".haagent"
-    config_dir.mkdir(parents=True)
-    (config_dir / "providers.json").write_text(
-        json.dumps({"profiles": [{"name": "old", "model": "old-model"}]}),
-        encoding="utf-8",
-    )
-    service = _service(tmp_path, config_dir=config_dir)
-
-    assert service.models.list_connections() == []
-
-
-def test_service_configures_connection_over_obsolete_provider_file(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home = tmp_path / "home"
-    _set_home(monkeypatch, home)
-    config_dir = home / ".haagent"
-    config_dir.mkdir(parents=True)
-    (config_dir / "providers.json").write_text(
-        json.dumps({"profiles": [{"name": "old", "model": "old-model"}]}),
-        encoding="utf-8",
-    )
-    store = FakeCredentialStore()
-    monkeypatch.setattr(model_connections, "DEFAULT_CREDENTIAL_STORE", store)
-    service = _service(tmp_path, config_dir=config_dir)
-
-    service.models.configure_connection(
-        ModelConnectionConfigureRequest(
-            id="requesty-work",
-            name="work",
-            provider_id="requesty",
-            provider_name="Requesty",
-            gateway_provider="openai-chat",
-            base_url="https://router.requesty.ai/v1",
-            api_key_env="REQUESTY_WORK_API_KEY",
-            credential_source="keyring",
-            api_key="sk-work",
-        )
-    )
-
-    provider_config = json.loads((config_dir / "providers.json").read_text(encoding="utf-8"))
-    assert "profiles" not in provider_config
-    assert provider_config["version"] == 3
-    assert provider_config["connections"][0]["id"] == "requesty-work"
-    assert store.values["connection:requesty-work"] == "sk-work"
 
 
 def test_service_searches_skill_marketplace_and_caches_results(tmp_path: Path, monkeypatch) -> None:
@@ -465,7 +473,8 @@ def test_service_sets_default_model_selection_without_switching_current_session(
     home = tmp_path / "home"
     _set_home(monkeypatch, home)
     config_dir = home / ".haagent"
-    save_provider_connection(
+    _save_connection(
+        config_dir,
         ProviderConnectionRecord(
             id="router",
             name="router",
@@ -476,7 +485,6 @@ def test_service_sets_default_model_selection_without_switching_current_session(
             api_key_env="OPENROUTER_API_KEY",
             credential_source="env",
         ),
-        config_dir=config_dir,
     )
     service = _service(tmp_path, config_dir=config_dir, environ={"OPENROUTER_API_KEY": "sk-router"})
 
@@ -605,7 +613,9 @@ def test_service_deletes_model_connection_and_refreshes_default(
 
     assert [
         connection.id
-        for connection in list_provider_connection_records(config_path=config_dir / "providers.json")
+        for connection in load_providers_config_snapshot(
+            config_dir / "providers.json"
+        ).list_connections()
     ] == ["router"]
     assert load_active_model_selection(config_dir=config_dir).connection_id == "router"
 

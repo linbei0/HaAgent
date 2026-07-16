@@ -16,6 +16,7 @@ import pytest
 from haagent.models.gateway_registry import gateway_from_route
 from haagent.models.http_transport import ModelHttpTransport, close_model_gateway
 from haagent.models.model_connections import ProviderProfile
+from haagent.models.model_options import empty_resolved_config
 from haagent.models.types import ModelCallError
 
 
@@ -85,6 +86,10 @@ def _local_chat_profile(base_url: str) -> ProviderProfile:
         credential_source="keyring",
         credential_source_used="direct",
         api_key="test-key",
+        request_config=empty_resolved_config(
+            connection_id="local",
+            model_id="local-model",
+        ),
         runtime_kind="remote",
     )
 

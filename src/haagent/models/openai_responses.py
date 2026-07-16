@@ -12,6 +12,7 @@ from typing import Any, Callable
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
 from haagent.models.capabilities import ModelCapabilities
 from haagent.models.http_transport import ModelHttpTransport
+from haagent.models.model_options import ResolvedModelRequestConfig, empty_resolved_config, merge_provider_payload
 from haagent.models.transport import (
     _endpoint_base_url,
     _image_data_url,
@@ -36,20 +37,26 @@ from haagent.runtime.execution.cancellation import CancellationToken, RunCancell
 from haagent.runtime.execution.retry import RetryController, RetryEvent, RetryFailure
 
 
-def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
+def _parse_tool_calls(response: dict[str, object]) -> tuple[list[ToolCall], list[dict[str, Any]]]:
     output = response.get("output")
     if output is None:
-        return []
+        return [], []
     if not isinstance(output, list):
         raise ModelCallError("OpenAI output must be a list when present")
 
     tool_calls: list[ToolCall] = []
+    # 完整 output 序列不展示给用户，但工具续轮必须按原顺序原样回传。
+    continuation_items: list[dict[str, Any]] = []
+    has_reasoning = False
     for item in output:
-        # 当前只支持 Responses API 的最小 function_call 结构，避免误吞 provider 新格式。
         if not isinstance(item, dict):
             raise ModelCallError("unsupported OpenAI output item")
         output_type = item.get("type")
+        continuation_items.append(dict(item))
         if output_type in {"message", "output_text", "text"}:
+            continue
+        if output_type == "reasoning":
+            has_reasoning = True
             continue
         if output_type != "function_call":
             raise ModelCallError(f"unsupported OpenAI output type: {output_type}")
@@ -61,7 +68,7 @@ def _parse_tool_calls(response: dict[str, object]) -> list[ToolCall]:
             raise ModelCallError("missing tool arguments")
         call_id = str(item.get("call_id") or item.get("id") or "")
         tool_calls.append(ToolCall(name=name, args=_parse_tool_arguments(arguments), id=call_id))
-    return tool_calls
+    return tool_calls, continuation_items if has_reasoning else []
 
 
 def _parse_openai_responses_usage(response: dict[str, object]) -> ModelUsage | None:
@@ -87,6 +94,17 @@ def _messages_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[st
         elif role == "user":
             result.append({"role": "user", "content": _responses_user_content(msg.get("content", ""))})
         elif role == "assistant":
+            continuation = msg.get("provider_continuation")
+            replayed = False
+            if isinstance(continuation, dict):
+                items = continuation.get("items")
+                if isinstance(items, list):
+                    for cont_item in items:
+                        if isinstance(cont_item, dict):
+                            result.append(dict(cont_item))
+                    replayed = True
+            if replayed:
+                continue
             item: dict[str, Any] = {"role": "assistant", "content": msg.get("content", "")}
             for tc in msg.get("tool_calls", []):
                 result.append({
@@ -136,10 +154,15 @@ class OpenAIResponsesGateway:
         retry_controller: RetryController | None = None,
         require_api_key: bool = True,
         http_transport: ModelHttpTransport | None = None,
+        request_config: ResolvedModelRequestConfig | None = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._require_api_key = require_api_key
         self._model = model
+        self._request_config = request_config or empty_resolved_config(
+            connection_id="",
+            model_id=model,
+        )
         configured_base_url = (
             base_url
             if base_url is not None
@@ -198,6 +221,7 @@ class OpenAIResponsesGateway:
             model=self._model,
             endpoint=_redact_url(self._responses_endpoint),
             base_url=_endpoint_base_url(self._responses_endpoint),
+            request_config=self._request_config.audit_summary(),
         )
 
     def capabilities(self) -> ModelCapabilities:
@@ -234,6 +258,8 @@ class OpenAIResponsesGateway:
             payload["parallel_tool_calls"] = True
         if event_sink is not None:
             payload["stream"] = True
+        # 未配置时 merge 为空操作，payload 与改动前逐字段一致。
+        payload = merge_provider_payload(payload, self._request_config.options)
         try:
             response = execute_model_request(
                 self._retry_controller,
@@ -263,8 +289,15 @@ class OpenAIResponsesGateway:
         output_text = response.get("output_text")
         if not isinstance(output_text, str):
             raise ModelCallError("OpenAI response did not include output_text")
+        tool_calls, continuation_items = _parse_tool_calls(response)
+        continuation = (
+            {"kind": "openai_responses", "items": continuation_items}
+            if continuation_items
+            else None
+        )
         return ModelResponse(
             content=output_text,
-            tool_calls=_parse_tool_calls(response),
+            tool_calls=tool_calls,
             usage=_parse_openai_responses_usage(response),
+            provider_continuation=continuation,
         )

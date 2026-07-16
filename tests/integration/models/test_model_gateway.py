@@ -23,17 +23,23 @@ from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.gateway_registry import (
     catalog_provider_capability,
     gateway_from_profile,
+    gateway_from_route,
 )
 from haagent.models.model_connections import (
     ModelSelection,
     ProviderConnectionRecord,
     ProviderProfile,
     ProviderProfileError,
-    list_provider_connection_records,
     load_model_selection_profile,
+    load_providers_config_snapshot,
     provider_connection_credential_status,
     save_provider_connection,
     save_provider_connection_with_key,
+)
+from haagent.models.model_options import (
+    ResolvedModelRequestConfig,
+    empty_resolved_config,
+    options_digest,
 )
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec
@@ -83,6 +89,28 @@ def _retry_controller() -> RetryController:
     )
 
 
+def _request_config(options: dict[str, object]) -> ResolvedModelRequestConfig:
+    return ResolvedModelRequestConfig(
+        connection_id="test",
+        model_id="model",
+        variant=None,
+        configured=True,
+        options=options,
+        options_digest=options_digest(options),
+    )
+
+
+def _snapshot(config_path: Path):
+    return load_providers_config_snapshot(config_path)
+
+
+def _save_connection(config_dir: Path, connection: ProviderConnectionRecord) -> Path:
+    return save_provider_connection(
+        connection,
+        snapshot=_snapshot(config_dir / "providers.json"),
+    )
+
+
 def test_openai_responses_gateway_retries_once_then_returns_response() -> None:
     attempts = 0
     retry_events = []
@@ -107,6 +135,181 @@ def test_openai_responses_gateway_retries_once_then_returns_response() -> None:
     assert gateway.generate([], [], retry_event_sink=retry_events.append).content == "ok"
     assert attempts == 2
     assert [(event.attempt, event.next_attempt) for event in retry_events] == [(1, 2)]
+
+
+def test_openai_responses_replays_interleaved_reasoning_and_calls_in_original_order() -> None:
+    original_output = [
+        {"type": "reasoning", "id": "r1", "encrypted_content": "opaque-1"},
+        {"type": "function_call", "call_id": "c1", "name": "read", "arguments": '{"path":"a"}'},
+        {"type": "reasoning", "id": "r2", "encrypted_content": "opaque-2"},
+        {"type": "function_call", "call_id": "c2", "name": "read", "arguments": '{"path":"b"}'},
+    ]
+    payloads: list[dict[str, object]] = []
+
+    def transport(payload, api_key):
+        del api_key
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"output_text": "", "output": original_output}
+        return {"output_text": "done", "output": []}
+
+    gateway = OpenAIResponsesGateway(api_key="test", transport=transport)
+    first = gateway.generate([{"role": "user", "content": "start"}], [])
+    tool_calls = [
+        {
+            "type": "function",
+            "id": call.id,
+            "function": {"name": call.name, "arguments": json.dumps(call.args, separators=(",", ":"))},
+        }
+        for call in first.tool_calls
+    ]
+    gateway.generate(
+        [
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": first.content,
+                "tool_calls": tool_calls,
+                "provider_continuation": first.provider_continuation,
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "a"},
+            {"role": "tool", "tool_call_id": "c2", "content": "b"},
+        ],
+        [],
+    )
+
+    assert payloads[1]["input"][1:5] == original_output
+
+
+def test_provider_request_options_reach_each_gateway_final_payload() -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    def responses_transport(payload, api_key):
+        del api_key
+        captured["responses"] = payload
+        return {"output_text": "ok", "output": []}
+
+    def chat_transport(payload, api_key):
+        del api_key
+        captured["chat"] = payload
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    def anthropic_transport(payload, api_key, endpoint):
+        del api_key, endpoint
+        captured["anthropic"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    def google_transport(payload, api_key, endpoint):
+        del api_key, endpoint
+        captured["google"] = payload
+        return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+    OpenAIResponsesGateway(
+        api_key="test",
+        transport=responses_transport,
+        request_config=_request_config({"reasoning": {"effort": "high"}, "max_output_tokens": 12000}),
+    ).generate([{"role": "user", "content": "hi"}], [])
+    OpenAIChatCompletionsGateway(
+        api_key="test",
+        transport=chat_transport,
+        request_config=_request_config({"temperature": 0.3, "max_tokens": 2048}),
+    ).generate([{"role": "user", "content": "hi"}], [])
+    AnthropicMessagesGateway(
+        api_key="test",
+        transport=anthropic_transport,
+        request_config=_request_config({"max_tokens": 8192, "thinking": {"type": "enabled", "budget_tokens": 4096}}),
+    ).generate([{"role": "user", "content": "hi"}], [])
+    GoogleGeminiGateway(
+        api_key="test",
+        transport=google_transport,
+        request_config=_request_config({"generationConfig": {"temperature": 0.4, "thinkingConfig": {"thinkingBudget": 1024}}}),
+    ).generate([{"role": "user", "content": "hi"}], [])
+
+    assert captured["responses"]["reasoning"] == {"effort": "high"}
+    assert captured["responses"]["max_output_tokens"] == 12000
+    assert captured["chat"]["temperature"] == 0.3
+    assert captured["chat"]["max_tokens"] == 2048
+    assert captured["anthropic"]["max_tokens"] == 8192
+    assert captured["anthropic"]["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert captured["google"]["generationConfig"] == {
+        "temperature": 0.4,
+        "thinkingConfig": {"thinkingBudget": 1024},
+    }
+
+
+def test_google_gateway_hides_thought_text_and_replays_signed_parts_in_order() -> None:
+    original_content = {
+        "role": "model",
+        "parts": [
+            {"text": "private reasoning", "thought": True},
+            {
+                "functionCall": {"name": "read", "args": {"path": "a"}},
+                "thoughtSignature": "signed-1",
+            },
+            {"text": "visible"},
+        ],
+    }
+    payloads: list[dict[str, object]] = []
+
+    def transport(payload, api_key, endpoint):
+        del api_key, endpoint
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"candidates": [{"content": original_content}]}
+        return {"candidates": [{"content": {"role": "model", "parts": [{"text": "done"}]}}]}
+
+    gateway = GoogleGeminiGateway(api_key="test", transport=transport)
+    first = gateway.generate([{"role": "user", "content": "start"}], [])
+    assert first.content == "visible"
+    gateway.generate(
+        [
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": first.content,
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {"name": "read", "arguments": '{"path":"a"}'},
+                    }
+                ],
+                "provider_continuation": first.provider_continuation,
+            },
+            {"role": "tool", "name": "read", "content": "a"},
+        ],
+        [],
+    )
+
+    assert payloads[1]["contents"][1] == original_content
+
+
+def test_parameter_4xx_is_exposed_without_retrying_or_removing_options() -> None:
+    attempts: list[dict[str, object]] = []
+
+    def transport(payload, api_key):
+        del api_key
+        attempts.append(payload)
+        raise ModelCallError(
+            "unsupported reasoning value",
+            details=ModelFailureDetails(
+                category="invalid_request",
+                status_code=400,
+                retryable=False,
+            ),
+        )
+
+    gateway = OpenAIResponsesGateway(
+        api_key="test",
+        transport=transport,
+        request_config=_request_config({"reasoning": {"effort": "extreme"}}),
+        retry_controller=_retry_controller(),
+    )
+
+    with pytest.raises(ModelCallError, match="unsupported reasoning value"):
+        gateway.generate([{"role": "user", "content": "hi"}], [])
+
+    assert len(attempts) == 1
+    assert attempts[0]["reasoning"] == {"effort": "extreme"}
 
 
 @pytest.mark.parametrize(
@@ -323,10 +526,38 @@ def test_gateway_registry_builds_supported_provider_gateways() -> None:
                 credential_source="keyring",
                 credential_source_used="direct",
                 api_key="test-key",
+                request_config=empty_resolved_config(
+                    connection_id=f"{provider}-main",
+                    model_id="test-model",
+                ),
             )
         )
 
         assert isinstance(gateway, expected_type)
+
+
+def test_responses_options_do_not_leak_into_chat_protocol_fallback() -> None:
+    profile = ProviderProfile(
+        name="openai-main:gpt-test",
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="gpt-test",
+        api_key_env="OPENAI_API_KEY",
+        credential_source="env",
+        credential_source_used="env",
+        api_key="test",
+        request_config=_request_config(
+            {"reasoning": {"effort": "high"}, "max_output_tokens": 12000}
+        ),
+    )
+
+    gateway = gateway_from_route(profile)
+    try:
+        assert gateway._primary.metadata().request_config["configured"] is True
+        assert gateway._primary_chat.metadata().request_config["configured"] is False
+        assert gateway._primary_chat.metadata().request_config["options_summary"] == {}
+    finally:
+        gateway.close()
 
 
 def test_gateway_metadata_redacts_secret_like_endpoint_parts() -> None:
@@ -382,6 +613,50 @@ def test_anthropic_gateway_text_response_uses_messages_payload() -> None:
     }
     assert captured["api_key"] == "sk-ant-test"
     assert captured["endpoint"] == "https://api.anthropic.com/v1/messages"
+
+
+def test_anthropic_gateway_replays_interleaved_thinking_and_tool_blocks_in_original_order() -> None:
+    original_blocks = [
+        {"type": "thinking", "thinking": "opaque-1", "signature": "sig-1"},
+        {"type": "tool_use", "id": "tool-1", "name": "read", "input": {"path": "a"}},
+        {"type": "redacted_thinking", "data": "opaque-2"},
+        {"type": "tool_use", "id": "tool-2", "name": "read", "input": {"path": "b"}},
+    ]
+    payloads: list[dict[str, object]] = []
+
+    def transport(payload, api_key, endpoint):
+        del api_key, endpoint
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"content": original_blocks}
+        return {"content": [{"type": "text", "text": "done"}]}
+
+    gateway = AnthropicMessagesGateway(api_key="test", transport=transport)
+    first = gateway.generate([{"role": "user", "content": "start"}], [])
+    assistant = {
+        "role": "assistant",
+        "content": first.content,
+        "tool_calls": [
+            {
+                "type": "function",
+                "id": call.id,
+                "function": {"name": call.name, "arguments": json.dumps(call.args)},
+            }
+            for call in first.tool_calls
+        ],
+        "provider_continuation": first.provider_continuation,
+    }
+    gateway.generate(
+        [
+            {"role": "user", "content": "start"},
+            assistant,
+            {"role": "tool", "tool_call_id": "tool-1", "content": "a"},
+            {"role": "tool", "tool_call_id": "tool-2", "content": "b"},
+        ],
+        [],
+    )
+
+    assert payloads[1]["messages"][1]["content"] == original_blocks
 
 
 def test_anthropic_gateway_converts_image_attachment_to_image_block(tmp_path: Path) -> None:
@@ -1010,7 +1285,7 @@ def test_model_selection_loads_connection_and_api_key_env(tmp_path: Path) -> Non
     config_path.write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "deepseek",
@@ -1022,7 +1297,6 @@ def test_model_selection_loads_connection_and_api_key_env(tmp_path: Path) -> Non
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -1030,7 +1304,7 @@ def test_model_selection_loads_connection_and_api_key_env(tmp_path: Path) -> Non
 
     profile = load_model_selection_profile(
         ModelSelection("deepseek", "deepseek-v4-pro"),
-        config_path=config_path,
+        snapshot=_snapshot(config_path),
         environ={"DEEPSEEK_API_KEY": "secret-key"},
     )
 
@@ -1048,7 +1322,7 @@ def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: P
     config_path.write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "deepseek",
@@ -1061,7 +1335,6 @@ def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: P
                         "credential_source": "keyring",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -1069,7 +1342,7 @@ def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: P
 
     profile = load_model_selection_profile(
         ModelSelection("deepseek", "deepseek-v4-pro"),
-        config_path=config_path,
+        snapshot=_snapshot(config_path),
         environ={},
         credential_store=FakeCredentialStore({"connection:deepseek": "keyring-secret"}),
     )
@@ -1080,8 +1353,7 @@ def test_model_selection_loads_api_key_from_keyring_when_env_missing(tmp_path: P
 
 
 def test_provider_connections_can_be_listed_without_secrets(tmp_path: Path) -> None:
-    save_provider_connection(
-        ProviderConnectionRecord(
+    connection = ProviderConnectionRecord(
             id="router",
             name="router",
             provider_id="openrouter",
@@ -1090,11 +1362,10 @@ def test_provider_connections_can_be_listed_without_secrets(tmp_path: Path) -> N
             base_url="https://openrouter.ai/api/v1",
             api_key_env="OPENROUTER_API_KEY",
             credential_source="keyring",
-        ),
-        config_dir=tmp_path,
-    )
+        )
+    _save_connection(tmp_path, connection)
 
-    records = list_provider_connection_records(config_path=tmp_path / "providers.json")
+    records = _snapshot(tmp_path / "providers.json").list_connections()
 
     assert [record.name for record in records] == ["router"]
     assert records[0].provider_id == "openrouter"
@@ -1102,8 +1373,7 @@ def test_provider_connections_can_be_listed_without_secrets(tmp_path: Path) -> N
 
 
 def test_provider_connection_credential_status_for_named_connection(tmp_path: Path) -> None:
-    save_provider_connection(
-        ProviderConnectionRecord(
+    connection = ProviderConnectionRecord(
             id="router",
             name="router",
             provider_id="openrouter",
@@ -1112,12 +1382,11 @@ def test_provider_connection_credential_status_for_named_connection(tmp_path: Pa
             base_url="https://openrouter.ai/api/v1",
             api_key_env="OPENROUTER_API_KEY",
             credential_source="keyring",
-        ),
-        config_dir=tmp_path,
-    )
+        )
+    _save_connection(tmp_path, connection)
 
     status = provider_connection_credential_status(
-        "router",
+        connection,
         config_dir=tmp_path,
         credential_store=FakeCredentialStore({"connection:router": "sk-test-secret"}),
     )
@@ -1142,15 +1411,14 @@ def test_model_selection_loads_api_key_from_explicit_insecure_file(tmp_path: Pat
             credential_source="insecure_file",
         ),
         "plain-secret",
-        config_dir=config_dir,
+        snapshot=_snapshot(config_path),
     )
 
     profile = load_model_selection_profile(
         ModelSelection("deepseek", "deepseek-v4-pro"),
-        config_path=config_path,
+        snapshot=_snapshot(config_path),
         environ={},
         credential_store=FakeCredentialStore({}),
-        config_dir=config_dir,
     )
 
     assert profile.api_key == "plain-secret"
@@ -1164,7 +1432,7 @@ def test_model_selection_missing_connection_fails_explicitly(tmp_path: Path) -> 
     config_path.write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "openai-main",
@@ -1176,7 +1444,6 @@ def test_model_selection_missing_connection_fails_explicitly(tmp_path: Path) -> 
                         "api_key_env": "OPENAI_API_KEY",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -1185,7 +1452,7 @@ def test_model_selection_missing_connection_fails_explicitly(tmp_path: Path) -> 
     with pytest.raises(ProviderProfileError, match="provider connection not found: deepseek"):
         load_model_selection_profile(
             ModelSelection("deepseek", "deepseek-v4-pro"),
-            config_path=config_path,
+            snapshot=_snapshot(config_path),
             environ={"OPENAI_API_KEY": "key"},
         )
 
@@ -1196,7 +1463,7 @@ def test_model_selection_missing_api_key_fails_explicitly(tmp_path: Path) -> Non
     config_path.write_text(
         json.dumps(
             {
-                "version": 2,
+                "version": 4,
                 "connections": [
                     {
                         "id": "deepseek",
@@ -1208,7 +1475,6 @@ def test_model_selection_missing_api_key_fails_explicitly(tmp_path: Path) -> Non
                         "api_key_env": "DEEPSEEK_API_KEY",
                     },
                 ],
-                "custom_models": [],
             },
         ),
         encoding="utf-8",
@@ -1217,7 +1483,7 @@ def test_model_selection_missing_api_key_fails_explicitly(tmp_path: Path) -> Non
     with pytest.raises(ProviderProfileError, match="API key is not available"):
         load_model_selection_profile(
             ModelSelection("deepseek", "deepseek-v4-pro"),
-            config_path=config_path,
+            snapshot=_snapshot(config_path),
             environ={},
             credential_store=FakeCredentialStore({}),
         )
