@@ -640,7 +640,7 @@ class AssistantSchedules:
     def _validate_connection(self, connection_id: str) -> None:
         try:
             assert self._context.model_runtime is not None
-            self._context.model_runtime.snapshot.connection(connection_id)
+            self._context.model_runtime.connection(connection_id)
         except ProviderProfileError as error:
             raise AssistantServiceError(f"模型连接不存在或不可用：{connection_id}") from error
 

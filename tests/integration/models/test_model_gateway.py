@@ -529,9 +529,19 @@ def test_gateway_registry_builds_supported_provider_gateways() -> None:
     ]
 
     for provider, base_url, expected_type in cases:
-        gateway = gateway_from_resolved(_resolved(provider, base_url))
-
-        assert isinstance(gateway, expected_type)
+        resolved = _resolved(provider, base_url)
+        gateway = gateway_from_resolved(resolved)
+        # gateway_from_resolved 外包审计层；底层仍是对应 provider adapter。
+        inner = getattr(gateway, "_gateway", gateway)
+        assert isinstance(inner, expected_type)
+        metadata = gateway.metadata()
+        assert metadata.profile_name == resolved.ref.connection_id
+        assert metadata.request_config is not None
+        assert metadata.request_config["connection_id"] == resolved.ref.connection_id
+        assert "settings_digest" in metadata.request_config
+        # 审计包装层必须转发重试控制器，避免 transcript max_attempts 变成 None。
+        assert getattr(gateway, "_retry_controller", None) is getattr(inner, "_retry_controller", None)
+        assert getattr(gateway._retry_controller.policy, "max_attempts", None) is not None
 
 
 def test_responses_options_do_not_leak_into_chat_protocol_fallback() -> None:

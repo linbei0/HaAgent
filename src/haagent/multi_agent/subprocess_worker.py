@@ -109,8 +109,7 @@ def _build_gateway(payload: dict[str, Any]):
     if model_profile is None:
         raise ValueError("subprocess worker requires a serializable gateway or model_profile")
     runtime = ModelRuntime.load(config_dir=user_config_dir(), environ=os.environ)
-    active = runtime.selection_store.load_active()
-    return runtime.create_gateway(ModelRef(model_profile, active.model))
+    return runtime.create_gateway(runtime.ref_for_connection(model_profile))
 
 
 def _build_model_ref(payload: dict[str, Any]) -> ModelRef | None:
@@ -118,7 +117,7 @@ def _build_model_ref(payload: dict[str, Any]) -> ModelRef | None:
     if model_profile is None:
         return None
     runtime = ModelRuntime.load(config_dir=user_config_dir(), environ=os.environ)
-    return ModelRef(model_profile, runtime.selection_store.load_active().model)
+    return runtime.ref_for_connection(model_profile)
 
 
 def _write_result(path: Path, payload: dict[str, Any]) -> None:

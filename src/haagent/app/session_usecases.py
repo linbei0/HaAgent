@@ -263,7 +263,7 @@ class AssistantSessions:
 
     def _load_session_ref(self) -> ModelRef:
         assert self._context.model_runtime is not None
-        ref = self._context.pending_model_selection or self._context.model_runtime.selection_store.load_active()
+        ref = self._context.pending_model_selection or self._context.model_runtime.load_active()
         self._context.model_runtime.resolve(ref)
         return ref
 

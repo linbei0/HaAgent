@@ -191,9 +191,8 @@ class AssistantWorkspace:
         api_key_available = False
         try:
             assert self._context.model_runtime is not None
-            selection = override or self._context.model_runtime.selection_store.load_active()
-            snapshot = self._context.model_runtime.snapshot
-            connection = snapshot.connection(selection.connection_id)
+            selection = override or self._context.model_runtime.load_active()
+            connection = self._context.model_runtime.connection(selection.connection_id)
             profile_name = connection.id
             provider = connection.gateway_provider
             base_url = connection.base_url

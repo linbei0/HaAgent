@@ -47,9 +47,9 @@ def _workspace(tmp_path: Path, monkeypatch, credential_counter: _CountingCredent
         digest="test",
     )
     model_runtime = SimpleNamespace(
-        snapshot=snapshot,
-        selection_store=SimpleNamespace(
-            load_active=lambda: ModelRef("conn-1", "gpt-test")
+        load_active=lambda: ModelRef("conn-1", "gpt-test"),
+        connection=lambda connection_id: next(
+            item for item in snapshot.records if item.id == connection_id
         ),
         credential_status=credential_counter,
     )

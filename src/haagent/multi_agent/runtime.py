@@ -742,8 +742,7 @@ class MultiAgentRuntime:
         if model_profile is None:
             return self.model_gateway
         try:
-            active_selection = self.model_runtime.selection_store.load_active()
-            ref = ModelRef(model_profile, active_selection.model)
+            ref = self.model_runtime.ref_for_connection(model_profile)
             self.model_runtime.resolve(ref)
         except ProviderProfileError as error:
             raise ValueError(str(error)) from error
@@ -752,8 +751,7 @@ class MultiAgentRuntime:
     def _worker_model_ref(self, model_profile: str | None) -> ModelRef | None:
         if model_profile is None:
             return None
-        active = self.model_runtime.selection_store.load_active()
-        return ModelRef(model_profile, active.model)
+        return self.model_runtime.ref_for_connection(model_profile)
 
     def _emit_worker_event(
         self,

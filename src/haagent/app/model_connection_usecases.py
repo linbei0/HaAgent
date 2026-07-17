@@ -18,7 +18,7 @@ from haagent.app.assistant_types import (
 from haagent.models.catalog import DEFAULT_MODEL_CATALOG_CACHE_MAX_AGE, CatalogFetchResult, CatalogTransport, fetch_model_catalog
 from haagent.models.config.credentials import CredentialError
 from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel, discover_local_runtimes
-from haagent.models.config.connections import ProviderConnectionRecord, ProviderProfileError, save_connection_api_key
+from haagent.models.config.connections import ProviderConnectionRecord, ProviderProfileError
 from haagent.models.model_ref import ModelInvocation, ModelRef
 from haagent.models.types import ModelCallError
 from haagent.runtime.session.package import ChatSessionError
@@ -34,7 +34,6 @@ class AssistantModels:
         return self._context.model_runtime
 
     def list_connections(self) -> list[AssistantModelConnection]:
-        snapshot = self._runtime.snapshot
         return [
             AssistantModelConnection(
                 id=record.id,
@@ -48,7 +47,7 @@ class AssistantModels:
                 credential_available=self._runtime.credential_status(record.id).api_key_available,
                 credential_source_used=self._runtime.credential_status(record.id).credential_source_used,
                 runtime_kind=record.runtime_kind,
-                model_config_diagnostics=snapshot.diagnostics_for(record.id),
+                model_config_diagnostics=self._runtime.diagnostics_for(record.id),
             )
             for record in self._runtime.list_connections()
         ]
@@ -69,9 +68,7 @@ class AssistantModels:
             runtime_kind=request.runtime_kind,
         )
         try:
-            snapshot = self._runtime.config_store.save_connection(record, expected_digest=self._runtime.snapshot.digest)
-            save_connection_api_key(record, request.api_key, config_dir=snapshot.path.parent)
-            self._runtime.snapshot = snapshot
+            self._runtime.save_connection(record, api_key=request.api_key)
         except (ProviderProfileError, CredentialError) as error:
             raise AssistantServiceError(str(error)) from error
         self._context.status_generation += 1
@@ -79,33 +76,14 @@ class AssistantModels:
 
     def delete_connection(self, connection_id: str) -> None:
         try:
-            snapshot = self._runtime.config_store.delete_connection(
-                connection_id,
-                expected_digest=self._runtime.snapshot.digest,
-            )
-            self._runtime.selection_store.remove_connection(
-                connection_id,
-                [record.id for record in snapshot.records],
-            )
-            self._runtime.snapshot = snapshot
+            self._runtime.delete_connection(connection_id)
         except ProviderProfileError as error:
             raise AssistantServiceError(str(error)) from error
         self._context.status_generation += 1
 
     def discover_local_runtimes(self) -> tuple[LocalRuntimeDiscovery, LocalRuntimeDiscovery]:
         discoveries = discover_local_runtimes(environ=self._context.environ)
-        available: dict[str, set[str]] = {}
-        for connection in self._runtime.snapshot.records:
-            discovery = next(
-                (item for item in discoveries if item.runtime_kind == connection.runtime_kind and item.status == "available"),
-                None,
-            )
-            if discovery is not None:
-                available[connection.id] = {model.id for model in discovery.models}
-        self._runtime.snapshot = self._runtime.snapshot.bind_available_models(
-            available,
-            source="local",
-        )
+        self._runtime.bind_local_discoveries(discoveries)
         return discoveries
 
     def save_local_model(self, discovery: LocalRuntimeDiscovery, model: LocalRuntimeModel) -> ModelRef:
@@ -125,10 +103,13 @@ class AssistantModels:
             credential_source=source,
             runtime_kind=discovery.runtime_kind,
         )
-        self._runtime.snapshot = self._runtime.config_store.save_connection(
-            record,
-            expected_digest=self._runtime.snapshot.digest,
-        ).bind_available_models({connection_id: {item.id for item in discovery.models}})
+        try:
+            self._runtime.save_connection(
+                record,
+                available_models={connection_id: {item.id for item in discovery.models}},
+            )
+        except ProviderProfileError as error:
+            raise AssistantServiceError(str(error)) from error
         self._context.status_generation += 1
         return ModelRef(connection_id, model.id)
 
@@ -166,8 +147,7 @@ class AssistantModels:
 
     def test_connection(self, connection_id: str, *, model: str | None = None) -> AssistantModelTestResult:
         try:
-            selected = self._runtime.selection_store.load_active()
-            ref = ModelRef(connection_id, model or selected.model)
+            ref = self._runtime.ref_for_connection(connection_id, model)
             resolved = self._runtime.resolve(ref)
             response = self._runtime.create_gateway(ref).generate(
                 ModelInvocation([{"role": "user", "content": "Reply with OK."}], [], resolved.settings),
@@ -187,7 +167,7 @@ class AssistantModels:
         try:
             resolved = self._runtime.resolve(ref)
             try:
-                self._runtime.selection_store.load_active()
+                self._runtime.load_active()
             except ProviderProfileError:
                 self._runtime.set_active(ref)
             if self._context.session is None:
@@ -217,16 +197,7 @@ class AssistantModels:
 
 def bind_catalog_snapshot(context: AssistantContext, catalog: CatalogFetchResult) -> None:
     assert context.model_runtime is not None
-    providers = {provider.id: provider for provider in catalog.providers}
-    available = {
-        connection.id: {model.id for model in providers[connection.provider_id].models}
-        for connection in context.model_runtime.snapshot.records
-        if connection.runtime_kind == "remote" and connection.provider_id in providers
-    }
-    context.model_runtime.snapshot = context.model_runtime.snapshot.bind_available_models(
-        available,
-        source="remote",
-    )
+    context.model_runtime.bind_remote_catalog(catalog)
 
 
 def _ref(request: ModelSelectionRequest) -> ModelRef:

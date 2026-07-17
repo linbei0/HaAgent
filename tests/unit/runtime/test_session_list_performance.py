@@ -29,7 +29,7 @@ _MODEL_REF = ModelRef("test", "test-model")
 
 def _model_runtime():
     return SimpleNamespace(
-        selection_store=SimpleNamespace(load_active=lambda: _MODEL_REF),
+        load_active=lambda: _MODEL_REF,
         resolve=lambda ref: ref,
         create_route_gateway=lambda ref, **kwargs: FakeModelGateway(),
     )

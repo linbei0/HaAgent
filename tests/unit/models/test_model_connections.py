@@ -10,6 +10,7 @@ import pytest
 
 from haagent.models.config.config_store import ModelConfigStore
 from haagent.models.config.connections import ProviderConnectionRecord, ProviderProfileError
+from haagent.models.config.credentials import CredentialError
 from haagent.models.model_options import ModelParameterConfig
 from haagent.models.model_ref import ModelRef
 from haagent.models.model_runtime import ModelRuntime
@@ -57,10 +58,10 @@ def test_store_rejects_unknown_v4_field_and_digest_conflict(tmp_path) -> None:
 
 def test_snapshot_binds_catalog_and_lists_choices_in_order(tmp_path) -> None:
     runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
-    runtime.snapshot = runtime.config_store.save_connection(
+    runtime.save_connection(
         _record(models={"gpt-5": ModelParameterConfig({}, {"fast": {}, "deep": {}})}),
-        expected_digest=runtime.snapshot.digest,
-    ).bind_available_models({"main": {"gpt-5", "gpt-4.1"}})
+        available_models={"main": {"gpt-5", "gpt-4.1"}},
+    )
     choices = runtime.list_choices()
     assert [choice.ref.model for choice in choices] == ["gpt-4.1", "gpt-5"]
     assert choices[1].variants == ("fast", "deep")
@@ -145,15 +146,53 @@ def test_bind_available_models_source_refresh_clears_stale_results(tmp_path) -> 
 
 def test_runtime_resolves_variant_and_unconfigured_model_keeps_defaults(tmp_path) -> None:
     runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
-    runtime.snapshot = runtime.config_store.save_connection(
-        _record(models={"gpt-5": ModelParameterConfig({"reasoning": {"effort": "low"}}, {"deep": {"reasoning": {"effort": "high"}}})}),
-        expected_digest=runtime.snapshot.digest,
+    runtime.save_connection(
+        _record(
+            models={
+                "gpt-5": ModelParameterConfig(
+                    {"reasoning": {"effort": "low"}},
+                    {"deep": {"reasoning": {"effort": "high"}}},
+                )
+            }
+        ),
     )
     resolved = runtime.resolve(ModelRef("main", "gpt-5", "deep"))
     assert resolved.settings.options == {"reasoning": {"effort": "high"}}
     assert runtime.resolve(ModelRef("main", "unconfigured")).settings.configured is False
     with pytest.raises(ProviderProfileError, match="not available"):
         runtime.resolve(ModelRef("main", "gpt-5", "gone"))
+
+
+def test_runtime_public_api_hides_snapshot_and_selection_store(tmp_path) -> None:
+    runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
+    runtime.save_connection(_record(connection_id="main", models={"gpt-5": ModelParameterConfig({}, {})}))
+    runtime.save_connection(_record(connection_id="backup", models={"gpt-4.1": ModelParameterConfig({}, {})}))
+    runtime.set_active(ModelRef("main", "gpt-5", "deep"))
+    runtime.set_fallback(ModelRef("backup", "gpt-4.1"), cloud_consent=True)
+
+    # 信息隐藏：调用方只能用公开方法，不能直接读写 snapshot/store。
+    assert "snapshot" not in runtime.__dict__
+    assert "config_store" not in runtime.__dict__
+    assert "selection_store" not in runtime.__dict__
+    assert not hasattr(runtime, "snapshot")
+    assert not hasattr(runtime, "config_store")
+    assert not hasattr(runtime, "selection_store")
+
+    assert runtime.load_active() == ModelRef("main", "gpt-5", "deep")
+    assert runtime.load_route().fallback == ModelRef("backup", "gpt-4.1")
+    assert runtime.connection("main").id == "main"
+    assert runtime.ref_for_connection("backup").model == "gpt-5"
+
+    runtime.bind_available_models({"main": {"gpt-5", "gpt-4.1"}}, source="remote")
+    assert [choice.ref.model for choice in runtime.list_choices() if choice.ref.connection_id == "main"] == [
+        "gpt-4.1",
+        "gpt-5",
+    ]
+
+    runtime.delete_connection("backup")
+    with pytest.raises(ProviderProfileError, match="not found"):
+        runtime.connection("backup")
+    assert runtime.load_route().fallback is None
 
 
 def test_selection_store_round_trip_and_delete_connection(tmp_path) -> None:
@@ -167,3 +206,44 @@ def test_selection_store_round_trip_and_delete_connection(tmp_path) -> None:
     assert store.load_route().cloud_fallback_consent is True
     store.remove_connection("backup", ["main"])
     assert store.load_route().fallback is None
+
+
+def test_runtime_save_connection_rolls_back_when_credential_write_fails(tmp_path, monkeypatch) -> None:
+    runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
+    runtime.save_connection(_record(connection_id="existing", models={"gpt-5": ModelParameterConfig({}, {})}))
+    runtime.bind_available_models({"existing": {"gpt-5", "gpt-4.1"}}, source="remote")
+    before_choices = [choice.ref.model for choice in runtime.list_choices()]
+    record = _record(source="keyring")
+
+    def _fail_save(*args, **kwargs):
+        del args, kwargs
+        raise CredentialError("keyring unavailable")
+
+    monkeypatch.setattr(
+        "haagent.models.model_runtime.save_connection_api_key",
+        _fail_save,
+    )
+    with pytest.raises(CredentialError, match="keyring unavailable"):
+        runtime.save_connection(record, api_key="secret-key")
+    # 凭据失败后不得留下半提交连接，且保留 catalog 内存态。
+    assert [item.id for item in runtime.list_connections()] == ["existing"]
+    assert [choice.ref.model for choice in runtime.list_choices()] == before_choices
+    assert "main" not in {item.id for item in runtime.list_connections()}
+
+
+def test_runtime_save_connection_reports_when_rollback_also_fails(tmp_path, monkeypatch) -> None:
+    runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
+    record = _record(source="keyring")
+
+    monkeypatch.setattr(
+        "haagent.models.model_runtime.save_connection_api_key",
+        lambda *args, **kwargs: (_ for _ in ()).throw(CredentialError("keyring unavailable")),
+    )
+
+    def _fail_rollback(*args, **kwargs):
+        del args, kwargs
+        raise ProviderProfileError("digest conflict during rollback")
+
+    monkeypatch.setattr(runtime._config_store, "delete_connection", _fail_rollback)
+    with pytest.raises(ProviderProfileError, match="config rollback also failed"):
+        runtime.save_connection(record, api_key="secret-key")

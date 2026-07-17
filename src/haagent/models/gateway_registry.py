@@ -18,7 +18,7 @@ from haagent.models.http_transport import ModelHttpTransport, close_model_gatewa
 from haagent.models.config.connections import ProviderProfileError
 from haagent.models.model_ref import ModelInvocation, ResolvedModel
 from haagent.models.model_settings import ModelSettings
-from haagent.models.types import ModelGateway
+from haagent.models.types import ModelGateway, ModelGatewayMetadata
 from haagent.models.negotiating_gateway import NegotiatingModelGateway
 from haagent.models.local_runtime import discover_lm_studio, discover_ollama
 from haagent.models.capabilities import ModelCapabilities
@@ -83,14 +83,17 @@ def gateway_from_resolved(
         kwargs["http_transport"] = http_transport
     require_key = model.runtime_kind == "remote"
     if model.provider == "openai":
-        return OpenAIResponsesGateway(**kwargs, require_api_key=require_key)  # type: ignore[arg-type]
-    if model.provider == "openai-chat":
-        return OpenAIChatCompletionsGateway(**kwargs, require_api_key=require_key)  # type: ignore[arg-type]
-    if model.provider == "anthropic":
-        return AnthropicMessagesGateway(**kwargs)  # type: ignore[arg-type]
-    if model.provider == "google":
-        return GoogleGeminiGateway(**kwargs)  # type: ignore[arg-type]
-    raise GatewayRegistryError(f"unsupported provider in resolved model: {model.provider}")
+        gateway: ModelGateway = OpenAIResponsesGateway(**kwargs, require_api_key=require_key)  # type: ignore[arg-type]
+    elif model.provider == "openai-chat":
+        gateway = OpenAIChatCompletionsGateway(**kwargs, require_api_key=require_key)  # type: ignore[arg-type]
+    elif model.provider == "anthropic":
+        gateway = AnthropicMessagesGateway(**kwargs)  # type: ignore[arg-type]
+    elif model.provider == "google":
+        gateway = GoogleGeminiGateway(**kwargs)  # type: ignore[arg-type]
+    else:
+        raise GatewayRegistryError(f"unsupported provider in resolved model: {model.provider}")
+    # 审计字段挂在 ResolvedModel 上，不泄漏到 adapter 构造参数。
+    return _AuditMetadataGateway(gateway, model)
 
 
 def gateway_from_route(
@@ -131,17 +134,21 @@ def gateway_from_route(
     primary_chat = None
     if primary_model.provider == "openai":
         # Responses 原生参数不能透传到 Chat Completions；协议 fallback 使用原有默认 payload。
+        chat_binding = replace(primary_model, settings=ModelSettings.empty())
         primary_chat = _with_discovered_capabilities(
-            OpenAIChatCompletionsGateway(
-                api_key=primary_model.credential.api_key or None,
-                model=primary_model.ref.model,
-                base_url=primary_model.base_url,
-                retry_controller=retry_controller,
-                require_api_key=primary_model.runtime_kind == "remote",
-                http_transport=shared_transport,
-                request_config=ModelSettings.empty(),
+            _AuditMetadataGateway(
+                OpenAIChatCompletionsGateway(
+                    api_key=primary_model.credential.api_key or None,
+                    model=primary_model.ref.model,
+                    base_url=primary_model.base_url,
+                    retry_controller=retry_controller,
+                    require_api_key=primary_model.runtime_kind == "remote",
+                    http_transport=shared_transport,
+                    request_config=ModelSettings.empty(),
+                ),
+                chat_binding,
             ),
-            primary_model,
+            chat_binding,
             protocol="chat_completions",
         )
     return NegotiatingModelGateway(
@@ -158,11 +165,52 @@ def gateway_from_route(
     )
 
 
+class _AuditMetadataGateway:
+    """为 episode 附加脱敏 connection/model/variant/settings digest，不含 secret。"""
+
+    def __init__(self, gateway: ModelGateway, model: ResolvedModel) -> None:
+        self._gateway = gateway
+        self._model = model
+        self.provider_name = gateway.provider_name
+        # turns 审计仍读私有 _retry_controller；包装层必须转发，避免 max_attempts 变 None。
+        self._retry_controller = getattr(gateway, "_retry_controller", None)
+
+    def capabilities(self):
+        return self._gateway.capabilities()
+
+    def metadata(self) -> ModelGatewayMetadata:
+        base = self._gateway.metadata()
+        request_config = dict(base.request_config or {})
+        request_config["connection_id"] = self._model.ref.connection_id
+        request_config["settings_digest"] = self._model.settings.digest
+        if self._model.ref.variant is not None:
+            request_config["variant"] = self._model.ref.variant
+        return ModelGatewayMetadata(
+            provider=base.provider,
+            model=base.model or self._model.ref.model,
+            endpoint=base.endpoint,
+            base_url=base.base_url,
+            profile_name=base.profile_name or self._model.ref.connection_id,
+            request_config=request_config,
+        )
+
+    @property
+    def model_settings(self):
+        return self._gateway.model_settings
+
+    def generate(self, invocation: ModelInvocation, **kwargs: object):
+        return self._gateway.generate(invocation, **kwargs)
+
+    def close(self) -> None:
+        close_model_gateway(self._gateway)
+
+
 class _CapabilityOverrideGateway:
     def __init__(self, gateway: ModelGateway, capabilities: ModelCapabilities) -> None:
         self._gateway = gateway
         self._capabilities = capabilities
         self.provider_name = gateway.provider_name
+        self._retry_controller = getattr(gateway, "_retry_controller", None)
 
     def capabilities(self) -> ModelCapabilities:
         return self._capabilities

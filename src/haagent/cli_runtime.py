@@ -50,8 +50,7 @@ class CliRuntime:
         if args.profile is not None:
             if args.provider not in {None, "fake"} or args.base_url is not None:
                 raise ProviderProfileError("--profile cannot be combined with --provider or --base-url")
-            active = runtime.selection_store.load_active()
-            return runtime.create_gateway(ModelRef(args.profile, args.model or active.model))
+            return runtime.create_gateway(runtime.ref_for_connection(args.profile, args.model))
         if args.provider is None:
             if args.model is not None or args.base_url is not None:
                 raise ProviderProfileError("--model and --base-url require --provider or --profile")

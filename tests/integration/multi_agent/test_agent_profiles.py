@@ -68,7 +68,7 @@ def test_spawn_worker_rejects_unknown_model_profile(tmp_path: Path, monkeypatch)
         mcp_runtime=None,
         team_root=tmp_path / ".haagent" / "teams",
     )
-    monkeypatch.setattr(runtime.model_runtime.selection_store, "load_active", lambda: ModelSelection("local", "gpt-test"))
+    monkeypatch.setattr(runtime.model_runtime, "load_active", lambda: ModelSelection("local", "gpt-test"))
     monkeypatch.setattr(
         runtime.model_runtime,
         "resolve",
@@ -123,7 +123,7 @@ def test_spawn_worker_profile_overrides_session_settings_and_model_input(tmp_pat
         backend="in_process",
         worktree=False,
     )
-    monkeypatch.setattr(runtime.model_runtime.selection_store, "load_active", lambda: ModelSelection("writer-model", "gpt-test"))
+    monkeypatch.setattr(runtime.model_runtime, "load_active", lambda: ModelSelection("writer-model", "gpt-test"))
     monkeypatch.setattr(
         runtime.model_runtime,
         "resolve",
