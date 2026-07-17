@@ -11,6 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from haagent.cli_render import excerpt, last_model_response, summary_bool, summary_provider
+from haagent.runtime.episodes.package_types import (
+    CostRecord,
+    EnvironmentRecord,
+    FailureRecord,
+    ToolCallRecord,
+    VerificationCommandRecord,
+)
 from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
@@ -25,21 +32,14 @@ class EpisodeInspectError(RuntimeError):
 def render_episode_summary(episode_path: Path) -> str:
     """读取 episode package，并生成面向人的审计摘要。"""
     try:
-        package_view = load_inspect_episode_package(episode_path)
+        package = load_inspect_episode_package(episode_path)
     except EpisodeValidationError as error:
         raise EpisodeInspectError(str(error)) from error
-    episode_metadata = package_view.episode_metadata
-    context_manifest = package_view.context_manifest
-    plan = package_view.plan
-    transcript = package_view.transcript
-    tool_calls = package_view.tool_calls
-    verification = package_view.verification_commands
-    verification_reached = package_view.verification_reached
-    failure_record = package_view.failure_record
-    environment = package_view.environment
-    cost = package_view.cost
-    sandbox = package_view.sandbox
-    workspace_preflight = package_view.workspace_preflight
+    transcript = package.transcript
+    plan = package.plan
+    verification_reached = package.verification_reached
+    sandbox = package.sandbox
+    workspace_preflight = package.workspace_preflight
 
     failure_attribution = (episode_path / "failure-attribution.md").read_text(encoding="utf-8").strip()
 
@@ -49,29 +49,29 @@ def render_episode_summary(episode_path: Path) -> str:
         if record.get("event") == "state_transition"
     ]
     final_status = state_flow[-1] if state_flow else "unknown"
-    final_status = episode_metadata.get("status", final_status)
-    model_calls = cost.get("model_calls", [])
+    final_status = package.metadata.status or final_status
+    model_calls = package.cost.model_calls
 
     lines = [
         "Run Summary",
         f"- episode_path: {episode_path}",
-        f"- episode_version: {episode_metadata.get('episode_version', 'unknown')}",
+        f"- episode_version: {package.metadata.episode_version}",
         f"- status: {final_status}",
-        f"- provider: {summary_provider(episode_metadata)}",
-        f"- context_count: {context_manifest.get('context_count', 0)}",
+        f"- provider: {summary_provider(package.metadata)}",
+        f"- context_count: {package.context_manifest.context_count}",
         "",
         "State Flow",
         f"- {' -> '.join(state_flow) if state_flow else 'none'}",
         "",
         "Contexts",
     ]
-    lines.extend(_format_contexts(episode_path, context_manifest.get("contexts", [])))
+    lines.extend(_format_contexts(episode_path, package.context_manifest.contexts))
     lines.extend(["", "Plan"])
     lines.extend(_format_plan(plan))
     lines.extend(["", "Environment"])
-    lines.extend(_format_environment(environment))
+    lines.extend(_format_environment(package.environment))
     lines.extend(["", "Cost"])
-    lines.extend(_format_cost(cost))
+    lines.extend(_format_cost(package.cost))
     lines.extend(["", "Sandbox"])
     lines.extend(_format_sandbox(sandbox))
     lines.extend(["", "Workspace Preflight"])
@@ -79,25 +79,25 @@ def render_episode_summary(episode_path: Path) -> str:
     lines.extend(["", "Task Ledger"])
     lines.extend(_format_task_ledger_for_episode(episode_path))
     lines.extend(["", "Next Actions"])
-    lines.extend(_format_next_actions(episode_path, context_manifest.get("contexts", [])))
+    lines.extend(_format_next_actions(episode_path, package.context_manifest.contexts))
     lines.extend(["", "Model Calls"])
     lines.extend(_format_model_calls(model_calls))
     lines.extend(["", "Final Response"])
     lines.extend(_format_final_response(transcript))
     lines.extend(["", "Tool Calls"])
-    lines.extend(_format_tool_calls(tool_calls))
+    lines.extend(_format_tool_calls(package.tool_calls))
     lines.extend(["", "Human Interactions"])
     lines.extend(_format_human_interactions(transcript))
     lines.extend(["", "Compression Diagnostics"])
     lines.extend(_format_compression_diagnostics(transcript))
     lines.extend(["", "Approval Summary"])
-    lines.extend(_format_approval_summary(tool_calls))
+    lines.extend(_format_approval_summary(package.tool_calls))
     lines.extend(["", "Tool Argument Errors"])
-    lines.extend(_format_tool_argument_errors(tool_calls))
+    lines.extend(_format_tool_argument_errors(package.tool_calls))
     lines.extend(["", "Verification"])
-    lines.extend(_format_verification(verification, verification_reached))
+    lines.extend(_format_verification(package.verification_commands, verification_reached))
     lines.extend(["", "Structured Failure"])
-    lines.extend(_format_failure_record(failure_record))
+    lines.extend(_format_failure_record(package.failure))
     lines.extend(["", "Failure Attribution", failure_attribution])
     return "\n".join(lines)
 
@@ -333,38 +333,26 @@ def _format_plan(plan: dict[str, Any]) -> list[str]:
     return [f"- {step}" for step in planned_steps]
 
 
-def _format_environment(environment: dict[str, Any]) -> list[str]:
-    if not environment:
+def _format_environment(environment: EnvironmentRecord) -> list[str]:
+    if not environment.python and not environment.platform and not environment.model.provider:
         return ["- none"]
-    model = environment.get("model", {})
-    tools = environment.get("tools", {})
-    haagent = environment.get("haagent", {})
-    if not isinstance(model, dict):
-        model = {}
-    if not isinstance(tools, dict):
-        tools = {}
-    if not isinstance(haagent, dict):
-        haagent = {}
-    provider = model.get("provider", "unknown")
-    model_name = model.get("model") or "unknown"
+    provider = environment.model.provider or "unknown"
+    model_name = environment.model.model or "unknown"
     return [
-        f"- python: {environment.get('python', 'unknown')}",
-        f"- platform: {environment.get('platform', 'unknown')}",
-        f"- haagent_version: {haagent.get('package_version', 'unknown')}",
+        f"- python: {environment.python or 'unknown'}",
+        f"- platform: {environment.platform or 'unknown'}",
+        f"- haagent_version: {environment.haagent_version or 'unknown'}",
         f"- model: {provider}/{model_name}",
-        f"- endpoint: {model.get('endpoint') or 'unknown'}",
-        f"- allowed_tool_count: {tools.get('allowed_tool_count', 'unknown')}",
+        f"- endpoint: {environment.model.endpoint or 'unknown'}",
+        f"- allowed_tool_count: {environment.tools.allowed_tool_count if environment.tools.allowed_tool_count is not None else 'unknown'}",
     ]
 
 
-def _format_cost(cost: dict[str, Any]) -> list[str]:
-    if not cost:
+def _format_cost(cost: CostRecord) -> list[str]:
+    if cost.usage_available is None and not cost.model_calls and cost.estimated_cost is None:
         return ["- none"]
-    totals = cost.get("totals", {})
-    if not isinstance(totals, dict):
-        totals = {}
-    estimated_cost = cost.get("estimated_cost")
-    currency = cost.get("currency")
+    estimated_cost = cost.estimated_cost
+    currency = cost.currency
     if estimated_cost is None:
         estimated = "unavailable"
     elif currency:
@@ -372,14 +360,14 @@ def _format_cost(cost: dict[str, Any]) -> list[str]:
     else:
         estimated = str(estimated_cost)
     return [
-        f"- usage_available: {summary_bool(cost.get('usage_available'))}",
-        f"- pricing_available: {summary_bool(cost.get('pricing_available'))}",
-        f"- model_call_count: {totals.get('model_call_count', 'unknown')}",
-        f"- input_tokens: {_format_optional_count(totals.get('input_tokens'))}",
-        f"- output_tokens: {_format_optional_count(totals.get('output_tokens'))}",
-        f"- total_tokens: {_format_optional_count(totals.get('total_tokens'))}",
+        f"- usage_available: {summary_bool(cost.usage_available)}",
+        f"- pricing_available: {summary_bool(cost.pricing_available)}",
+        f"- model_call_count: {cost.totals.model_call_count if cost.totals.model_call_count is not None else 'unknown'}",
+        f"- input_tokens: {_format_optional_count(cost.totals.input_tokens)}",
+        f"- output_tokens: {_format_optional_count(cost.totals.output_tokens)}",
+        f"- total_tokens: {_format_optional_count(cost.totals.total_tokens)}",
         f"- estimated_cost: {estimated}",
-        f"- reason: {cost.get('reason') or 'none'}",
+        f"- reason: {cost.reason or 'none'}",
     ]
 
 
@@ -498,13 +486,10 @@ def _format_final_response(transcript: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def _format_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
+def _format_tool_calls(tool_calls: list[ToolCallRecord]) -> list[str]:
     if not tool_calls:
         return ["- none"]
-    return [
-        f"- {call.get('tool_name', 'unknown')}: {call.get('status', 'unknown')}"
-        for call in tool_calls
-    ]
+    return [f"- {call.tool_name}: {call.status}" for call in tool_calls]
 
 
 def _format_human_interactions(transcript: list[dict[str, Any]]) -> list[str]:
@@ -559,54 +544,41 @@ def _format_compression_diagnostics(transcript: list[dict[str, Any]]) -> list[st
     return lines
 
 
-def _format_approval_summary(tool_calls: list[dict[str, Any]]) -> list[str]:
+def _format_approval_summary(tool_calls: list[ToolCallRecord]) -> list[str]:
     if not tool_calls:
         return ["- none"]
     lines = []
     for call in tool_calls:
-        tool_name = call.get("tool_name", "unknown")
-        policy = call.get("policy")
-        if policy is None and _policy_not_evaluated(call):
-            error = call.get("error") if isinstance(call.get("error"), dict) else {}
-            lines.append(f"- {tool_name}: policy=not_evaluated reason={error.get('message', '')}")
+        if call.policy is None and call.policy_not_evaluated():
+            lines.append(f"- {call.tool_name}: policy=not_evaluated reason={call.error_message}")
             continue
-        approval = policy["approval"]
-        required = "true" if approval.get("required") is True else "false"
+        if call.policy is None:
+            continue
+        required = "true" if call.policy.approval.required is True else "false"
         lines.append(
             (
-                f"- {tool_name}: action={policy['action']} "
+                f"- {call.tool_name}: action={call.policy.action} "
                 f"approval.required={required} "
-                f"approval.status={approval['status']} "
-                f"approval.reason={approval['reason']}"
+                f"approval.status={call.policy.approval.status} "
+                f"approval.reason={call.policy.approval.reason}"
             ),
         )
     return lines
 
 
-def _policy_not_evaluated(call: dict[str, Any]) -> bool:
-    error = call.get("error")
-    return (
-        call.get("status") == "error"
-        and isinstance(error, dict)
-        and error.get("type") in {"tool_not_allowed", "unknown_tool", "tool_call_skipped"}
-    )
-
-
-def _format_tool_argument_errors(tool_calls: list[dict[str, Any]]) -> list[str]:
-    errors = []
-    for call in tool_calls:
-        error = call.get("error")
-        if isinstance(error, dict) and error.get("type") == "tool_argument_invalid":
-            errors.append(
-                f"- {call.get('tool_name', 'unknown')}: {error.get('message', '')}",
-            )
+def _format_tool_argument_errors(tool_calls: list[ToolCallRecord]) -> list[str]:
+    errors = [
+        f"- {call.tool_name}: {call.error_message}"
+        for call in tool_calls
+        if call.error_type == "tool_argument_invalid"
+    ]
     if not errors:
         return ["- none"]
     return errors
 
 
 def _format_verification(
-    commands: list[dict[str, Any]],
+    commands: list[VerificationCommandRecord],
     verification_reached: bool = True,
 ) -> list[str]:
     if not verification_reached:
@@ -616,27 +588,24 @@ def _format_verification(
     lines = []
     for command in commands:
         lines.append(
-            (
-                f"- {command.get('command', '')}: {command.get('status', 'unknown')} "
-                f"(exit_code={command.get('exit_code')})"
-            ),
+            f"- {command.command}: {command.status} (exit_code={command.exit_code})",
         )
-        if command.get("timeout"):
+        if command.timeout:
             lines.append("  timeout: true")
-        if command.get("stdout_excerpt"):
-            lines.append(f"  stdout: {command['stdout_excerpt']}")
-        if command.get("stderr_excerpt"):
-            lines.append(f"  stderr: {command['stderr_excerpt']}")
+        if command.stdout_excerpt:
+            lines.append(f"  stdout: {command.stdout_excerpt}")
+        if command.stderr_excerpt:
+            lines.append(f"  stderr: {command.stderr_excerpt}")
     return lines
 
 
-def _format_failure_record(record: dict[str, Any]) -> list[str]:
-    if record.get("status") == "success":
+def _format_failure_record(record: FailureRecord) -> list[str]:
+    if record.is_success:
         return ["- status: success"]
-    failure = record.get("failure") or {}
+    failure = record.failure
     return [
-        f"- status: {record.get('status', 'unknown')}",
-        f"- category: {failure.get('category', 'unknown')}",
-        f"- stage: {failure.get('stage', 'unknown')}",
-        f"- evidence: {failure.get('evidence', '')}",
+        f"- status: {record.status}",
+        f"- category: {failure.category if failure else 'unknown'}",
+        f"- stage: {failure.stage if failure else 'unknown'}",
+        f"- evidence: {failure.evidence if failure else ''}",
     ]

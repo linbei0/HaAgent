@@ -7,11 +7,14 @@ src/haagent/runtime/episodes/validator.py - Episode schema 校验模块
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from haagent.runtime.episodes.package_types import (
+    EpisodePackage,
+    build_episode_package,
+)
 from haagent.runtime.episodes.writer import EPISODE_VERSION
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.orchestration.state import RunStatus
@@ -48,41 +51,25 @@ class EpisodeValidationError(RuntimeError):
     """Episode package 存在但 schema 损坏或版本不兼容时抛出。"""
 
 
-@dataclass(frozen=True)
-class EpisodePackageView:
-    episode_metadata: dict[str, Any]
-    failure_record: dict[str, Any]
-    context_manifest: dict[str, Any]
-    transcript: list[dict[str, Any]]
-    tool_calls: list[dict[str, Any]]
-    verification_commands: list[dict[str, Any]]
-    plan: dict[str, Any] = field(default_factory=dict)
-    environment: dict[str, Any] = field(default_factory=dict)
-    cost: dict[str, Any] = field(default_factory=dict)
-    sandbox: dict[str, Any] = field(default_factory=dict)
-    workspace_preflight: dict[str, Any] = field(default_factory=dict)
-    verification_reached: bool = True
-
-
 def validate_episode_package(episode_path: Path) -> None:
     """校验 v1 episode package 的完整性和关键 trace 文件结构。"""
     _read_validated_episode_package(episode_path)
 
 
-def load_validated_episode_package(episode_path: Path) -> EpisodePackageView:
-    """校验并返回已解析的 episode package view，供后续审计/导出复用。"""
+def load_validated_episode_package(episode_path: Path) -> EpisodePackage:
+    """校验并返回 typed EpisodePackage，供后续审计/导出复用。"""
     return _read_validated_episode_package(episode_path)
 
 
-def load_inspect_episode_package(episode_path: Path) -> EpisodePackageView:
-    """读取 inspect 用 package view；允许 verifying 前失败的 episode 缺少 verification trace。"""
+def load_inspect_episode_package(episode_path: Path) -> EpisodePackage:
+    """读取 inspect 用 typed package；允许 verifying 前失败的 episode 缺少 verification trace。"""
     return _read_inspect_episode_package(episode_path)
 
 
 def _read_validated_episode_package(
     episode_path: Path,
     allow_missing_pre_verification: bool = False,
-) -> EpisodePackageView:
+) -> EpisodePackage:
     """读取、校验并组装 package view；保持 validate 入口只负责触发该流程。"""
     required_files = (
         [
@@ -153,7 +140,8 @@ def _read_validated_episode_package(
         sandbox,
         transcript,
     )
-    return EpisodePackageView(
+    return build_episode_package(
+        path=episode_path,
         episode_metadata=episode_metadata,
         failure_record=failure_record,
         plan=plan,
@@ -169,7 +157,7 @@ def _read_validated_episode_package(
     )
 
 
-def _read_inspect_episode_package(episode_path: Path) -> EpisodePackageView:
+def _read_inspect_episode_package(episode_path: Path) -> EpisodePackage:
     """读取 inspect 视图；仅对当前 run 的 verifying 前失败放宽后续阶段文件要求。"""
     for relative_path in INSPECT_PRE_VERIFICATION_CORE_FILES:
         path = episode_path / relative_path
@@ -239,7 +227,8 @@ def _read_inspect_episode_package(episode_path: Path) -> EpisodePackageView:
     if inspect_metadata.get("workspace_root") is None:
         inspect_metadata["workspace_root"] = "unknown"
 
-    return EpisodePackageView(
+    return build_episode_package(
+        path=episode_path,
         episode_metadata=inspect_metadata,
         failure_record=failure_record,
         plan=plan or {},

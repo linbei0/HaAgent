@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 
 from haagent.models.types import ModelResponse, ToolCall
+from haagent.runtime.episodes.package_types import EpisodePackage
 from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
-    EpisodePackageView,
     load_validated_episode_package,
     read_episode_metadata,
     read_failure_record,
@@ -244,10 +244,10 @@ def test_load_validated_episode_package_returns_environment_and_cost(tmp_path: P
     result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
 
     package = load_validated_episode_package(result.episode_path)
-    assert package.environment["environment_schema_version"] == "1.0"
-    assert package.environment["model"]["provider"] == "fake"
-    assert package.cost["cost_schema_version"] == "1.0"
-    assert package.cost["usage_available"] is False
+    assert package.environment.environment_schema_version == "1.0"
+    assert package.environment.model.provider == "fake"
+    assert package.cost.raw.get("cost_schema_version") == "1.0"
+    assert package.cost.usage_available is False
 
 
 def test_package_validator_rejects_missing_required_file(tmp_path: Path) -> None:
@@ -1013,12 +1013,12 @@ def test_load_validated_episode_package_returns_view_for_valid_run(tmp_path: Pat
     write_task(task_path)
     result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
 
-    package_view = load_validated_episode_package(result.episode_path)
+    package = load_validated_episode_package(result.episode_path)
 
-    assert isinstance(package_view, EpisodePackageView)
-    assert package_view.episode_metadata["status"] == "completed"
-    assert package_view.failure_record == {"status": "success", "failure": None}
-    assert package_view.context_manifest["context_count"] == 1
+    assert isinstance(package, EpisodePackage)
+    assert package.metadata.status == "completed"
+    assert package.failure.to_dict() == {"status": "success", "failure": None}
+    assert package.context_manifest.context_count == 1
 
 
 def test_load_validated_episode_package_raises_for_invalid_episode(tmp_path: Path) -> None:
@@ -1037,14 +1037,19 @@ def test_load_validated_episode_package_returns_parsed_jsonl_lists(tmp_path: Pat
     write_task(task_path)
     result = RunOrchestrator(runs_root=tmp_path / ".runs").run(task_path)
 
-    package_view = load_validated_episode_package(result.episode_path)
+    package = load_validated_episode_package(result.episode_path)
 
-    assert isinstance(package_view.transcript, list)
-    assert all(isinstance(record, dict) for record in package_view.transcript)
-    assert isinstance(package_view.tool_calls, list)
-    assert all(isinstance(record, dict) for record in package_view.tool_calls)
-    assert isinstance(package_view.verification_commands, list)
-    assert all(isinstance(record, dict) for record in package_view.verification_commands)
+    from haagent.runtime.episodes.package_types import ToolCallRecord, VerificationCommandRecord
+
+    assert isinstance(package.transcript, list)
+    assert all(isinstance(record, dict) for record in package.transcript)
+    assert isinstance(package.tool_calls, list)
+    assert all(isinstance(record, ToolCallRecord) for record in package.tool_calls)
+    assert isinstance(package.verification_commands, list)
+    assert all(
+        isinstance(record, VerificationCommandRecord)
+        for record in package.verification_commands
+    )
 
 
 def _valid_performance_payload() -> dict[str, object]:

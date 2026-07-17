@@ -69,6 +69,9 @@
 
 - `AgentSession` 应维护 bounded session summary 和 bounded working state；多轮任务不得线性撑大 `model_input`。
 - 会话恢复只读取 `turns.jsonl` 摘要、turn\_count、workspace\_root 和 working\_state，不读取完整 episode transcript、tool-calls 或 verification 输出。
+- `AgentSession` 持有 `SessionSnapshot`（可序列化 package 状态）与 `SessionResources`（gateway/MCP/callback 等 live 资源）；`apply_state` 只绑定二者，不再逐字段镜像。gateway/MCP/callback 不进磁盘 schema。
+- `session.json` 必须写入 `session_snapshot_schema_version`；resume 读取并校验该版本。缺失视为 v0 并显式迁移到当前版本；未知/未来版本拒绝。
+- Episode 消费经 typed `EpisodePackage` / record codecs（metadata、failure、tool-call、environment、cost 等）；inspect/export/eval 只走 typed 字段，不保留裸 dict 双契约。跨文件 validator 保留；`build_episode_package` 仅在 validator 之后内部 decode，codec 自身拒绝宽松 bool 转换。
 - `working_state.json` 保存当前目标、关键发现、已完成动作、下一步和最近更新 turn，字段必须有固定条目数或字符限制。
 - `RuntimeUiEvent` 是前端无关的强类型事件契约，字段只放展示和状态判断需要的摘要。
 - `RuntimeUiEvent` 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。

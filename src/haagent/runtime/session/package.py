@@ -286,8 +286,17 @@ def write_session_metadata(
     turn_count: int,
     edit_diff_session_always: bool = False,
     first_request: str | None = None,
+    session_snapshot_schema_version: int | None = None,
 ) -> str:
     """写入 session.json；返回实际保留的 created_at。"""
+    # 延迟导入避免 package ↔ lifecycle 循环依赖。
+    from haagent.runtime.session.lifecycle import SESSION_SNAPSHOT_SCHEMA_VERSION
+
+    schema_version = (
+        SESSION_SNAPSHOT_SCHEMA_VERSION
+        if session_snapshot_schema_version is None
+        else session_snapshot_schema_version
+    )
     session_path.mkdir(parents=True, exist_ok=True)
     metadata_path = session_path / "session.json"
     effective_created_at = created_at
@@ -304,6 +313,8 @@ def write_session_metadata(
         "path_policy": serialize_path_policy(path_policy),
         # 仅布尔标志，不保存完整 diff；新 session 默认 False
         "edit_diff_session_always": bool(edit_diff_session_always),
+        # 持久化 SessionSnapshot 逻辑版本；resume 据此迁移/拒绝未知版本。
+        "session_snapshot_schema_version": schema_version,
         "provider": provider,
         "model_ref": model_ref.to_dict() if model_ref is not None else None,
         "enable_web": enable_web,

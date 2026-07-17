@@ -15,7 +15,7 @@ from haagent.runtime.evaluation.export import EVAL_CASE_VERSION, export_eval_cas
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
-from haagent.tools import handler_factory as handler_factory_module
+from haagent.tools.contributions import shell as shell_contribution_module
 
 
 class BadArgsGateway:
@@ -324,7 +324,7 @@ policy:
     def approved_shell(args, workspace_root, path_policy, **kwargs):
         return {"status": "success", "stdout": "ok\n", "stderr": ""}
 
-    monkeypatch.setattr(handler_factory_module, "shell", approved_shell)
+    monkeypatch.setattr(shell_contribution_module, "shell", approved_shell)
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
         model_gateway=ShellOnceGateway(),

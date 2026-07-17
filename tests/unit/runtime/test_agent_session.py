@@ -416,8 +416,10 @@ def test_edit_diff_session_always_persists_on_resume_not_new_session(
     assert session._session_interaction_state.edit_diff_session_always is False
     new_meta = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
     assert new_meta.get("edit_diff_session_always") is False
-def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_gateway() -> None:
+def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_gateway(tmp_path) -> None:
     class Gateway:
+        provider_name = "fake"
+
         def __init__(self) -> None:
             self.closed = False
 
@@ -426,15 +428,19 @@ def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_ga
 
     previous = Gateway()
     rejected = Gateway()
-    session = object.__new__(AgentSession)
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        model_gateway=previous,  # type: ignore[arg-type]
+        model_ref=ModelRef("old-connection", "old-model", "old-variant"),
+        memory_extraction_enabled=False,
+    )
     session._current_cancellation_token = None
-    session.model_gateway = previous
-    session.model_ref = ModelRef("old-connection", "old-model", "old-variant")
 
     def fail_metadata_write() -> None:
         raise OSError("disk full")
 
-    session._write_session_metadata = fail_metadata_write
+    session._write_session_metadata = fail_metadata_write  # type: ignore[method-assign]
 
     with pytest.raises(OSError, match="disk full"):
         session.switch_model_gateway(ModelRef("new-connection", "new-model", "new-variant"), rejected)

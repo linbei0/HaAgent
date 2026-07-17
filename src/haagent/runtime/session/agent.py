@@ -24,7 +24,9 @@ from haagent.runtime.session.attachments import (
     save_clipboard_image,
 )
 from haagent.runtime.session.lifecycle import (
+    SessionResources,
     SessionRuntimeState,
+    SessionSnapshot,
     apply_state,
     build_create_state,
     build_new_package_state,
@@ -119,7 +121,97 @@ class SessionCompactResult:
     saved_chars: int
 
 
+# AgentSession 实例自有字段；其余会话字段委托到 Snapshot / Resources。
+_SESSION_OWN_ATTRS = frozenset(
+    {
+        "_snapshot",
+        "_resources",
+        "_skill_catalog",
+        "_instruction_cache",
+        "_tool_schema_cache",
+    }
+)
+
+# 对外/对内属性名 → SessionSnapshot 字段名
+_SNAPSHOT_ATTRS: dict[str, str] = {
+    "workspace_root": "workspace_root",
+    "path_policy": "path_policy",
+    "runs_root": "runs_root",
+    "model_ref": "model_ref",
+    "enable_web": "enable_web",
+    "session_id": "session_id",
+    "turn_count": "turn_count",
+    "session_path": "session_path",
+    "_summaries": "summaries",
+    "_turn_records": "turn_records",
+    "_manual_compaction_summary": "manual_compaction_summary",
+    "_manual_compaction_turn_count": "manual_compaction_turn_count",
+    "_last_user_image_attachments": "last_user_image_attachments",
+    "_image_attachment_history": "image_attachment_history",
+    "_working_state": "working_state",
+    "_task_ledger": "task_ledger",
+    "_created_at": "created_at",
+    "_session_interaction_state": "session_interaction_state",
+}
+
+# 对外/对内属性名 → SessionResources 字段名
+_RESOURCES_ATTRS: dict[str, str] = {
+    "model_gateway": "model_gateway",
+    "max_turns": "max_turns",
+    "memory_extraction_enabled": "memory_extraction_enabled",
+    "_allowed_tools_override": "allowed_tools_override",
+    "_approval_allowed_tools_override": "approval_allowed_tools_override",
+    "_approved_tools_override": "approved_tools_override",
+    "_worker_context": "worker_context",
+    "_worker_permission_requester": "worker_permission_requester",
+    "_next_turn_target_paths": "next_turn_target_paths",
+    "_historical_tool_compression_count": "historical_tool_compression_count",
+    "_current_cancellation_token": "current_cancellation_token",
+    "_mcp_settings": "mcp_settings",
+    "_mcp_runtime": "mcp_runtime",
+    "_owns_mcp_runtime": "owns_mcp_runtime",
+    "_mcp_tool_names": "mcp_tool_names",
+    "_tool_registry": "tool_registry",
+}
+
+
 class AgentSession:
+    def __getattr__(self, name: str) -> Any:
+        # 失败边界：snapshot/resources 未装配时不假装字段存在。
+        snap_field = _SNAPSHOT_ATTRS.get(name)
+        if snap_field is not None:
+            snapshot = self.__dict__.get("_snapshot")
+            if snapshot is None:
+                raise AttributeError(name)
+            return getattr(snapshot, snap_field)
+        res_field = _RESOURCES_ATTRS.get(name)
+        if res_field is not None:
+            resources = self.__dict__.get("_resources")
+            if resources is None:
+                raise AttributeError(name)
+            return getattr(resources, res_field)
+        raise AttributeError(f"{type(self).__name__!s} has no attribute {name!r}")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _SESSION_OWN_ATTRS:
+            object.__setattr__(self, name, value)
+            return
+        snap_field = _SNAPSHOT_ATTRS.get(name)
+        if snap_field is not None:
+            snapshot = self.__dict__.get("_snapshot")
+            if snapshot is None:
+                raise AttributeError(name)
+            setattr(snapshot, snap_field, value)
+            return
+        res_field = _RESOURCES_ATTRS.get(name)
+        if res_field is not None:
+            resources = self.__dict__.get("_resources")
+            if resources is None:
+                raise AttributeError(name)
+            setattr(resources, res_field, value)
+            return
+        object.__setattr__(self, name, value)
+
     def __init__(
         self,
         *,
@@ -246,9 +338,13 @@ class AgentSession:
 
     @property
     def provider_name(self) -> str:
-        if self.model_gateway is None:
+        # 不用 gateway.provider_name 直接访问：CPython 会把 descriptor 内 AttributeError
+        # 清掉后继续走 __getattr__，误报 AgentSession 缺字段。
+        gateway = self.model_gateway
+        if gateway is None:
             return "fake"
-        return self.model_gateway.provider_name
+        name = getattr(gateway, "provider_name", None)
+        return "fake" if name is None else str(name)
 
     def run_prompt(
         self,
@@ -616,42 +712,19 @@ class AgentSession:
         self._write_task_ledger()
 
     def _snapshot_state(self) -> SessionRuntimeState:
+        # new() 会再构造独立 package；clone 避免共享可变 list。
         return SessionRuntimeState(
-            workspace_root=self.workspace_root,
-            path_policy=self.path_policy,
-            runs_root=self.runs_root,
-            model_gateway=self.model_gateway,
-            model_ref=self.model_ref,
-            max_turns=self.max_turns,
-            memory_extraction_enabled=self.memory_extraction_enabled,
-            enable_web=self.enable_web,
-            allowed_tools_override=self._allowed_tools_override,
-            approval_allowed_tools_override=self._approval_allowed_tools_override,
-            approved_tools_override=self._approved_tools_override,
-            worker_context=self._worker_context,
-            worker_permission_requester=self._worker_permission_requester,
-            session_id=self.session_id,
-            turn_count=self.turn_count,
-            summaries=list(self._summaries),
-            turn_records=list(self._turn_records),
-            manual_compaction_summary=self._manual_compaction_summary,
-            manual_compaction_turn_count=self._manual_compaction_turn_count,
-            next_turn_target_paths=list(self._next_turn_target_paths),
-            last_user_image_attachments=list(self._last_user_image_attachments),
-            image_attachment_history=list(self._image_attachment_history),
-            historical_tool_compression_count=self._historical_tool_compression_count,
-            working_state=self._working_state,
-            task_ledger=self._task_ledger,
-            current_cancellation_token=self._current_cancellation_token,
-            mcp_settings=self._mcp_settings,
-            mcp_runtime=self._mcp_runtime,
-            owns_mcp_runtime=self._owns_mcp_runtime,
-            mcp_tool_names=list(self._mcp_tool_names),
-            tool_registry=self._tool_registry,
-            session_path=self.session_path,
-            created_at=self._created_at,
-            session_interaction_state=self._session_interaction_state,
+            snapshot=self._snapshot.clone(),
+            resources=self._resources.clone(),
         )
+
+    @property
+    def snapshot(self) -> SessionSnapshot:
+        return self._snapshot
+
+    @property
+    def resources(self) -> SessionResources:
+        return self._resources
 
     def _write_task_ledger(self) -> None:
         write_task_ledger(self.session_path / "task-ledger.json", self._task_ledger)
@@ -816,6 +889,7 @@ class AgentSession:
             turn_count=self.turn_count,
             edit_diff_session_always=self._session_interaction_state.edit_diff_session_always,
             first_request=first_request,
+            session_snapshot_schema_version=self.snapshot.schema_version,
         )
 
     def _write_manual_compaction_state(self) -> None:

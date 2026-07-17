@@ -657,16 +657,16 @@ def run_smoke_definition(
 
 def run_failure_summary(episode_path: Path) -> tuple[str, str, str]:
     try:
-        package_view = load_inspect_episode_package(episode_path)
+        package = load_inspect_episode_package(episode_path)
     except EpisodeValidationError as error:
         return "summary", "Episode Summary Error", str(error)
-    failure = package_view.failure_record.get("failure")
-    if not isinstance(failure, dict):
+    failure = package.failure.failure
+    if failure is None:
         return "unknown", "unknown", ""
     return (
-        str(failure.get("stage", "unknown")),
-        str(failure.get("category", "unknown")),
-        str(failure.get("evidence", "")),
+        failure.stage,
+        failure.category,
+        failure.evidence,
     )
 
 

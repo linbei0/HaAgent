@@ -1,13 +1,14 @@
 """
-src/haagent/runtime/session/lifecycle.py - AgentSession 创建/恢复/重置字段装配
+src/haagent/runtime/session/lifecycle.py - AgentSession 创建/恢复/重置装配
 
-统一 init 与 resume 的字段与 MCP/tool registry 装配，避免双路径漂移。
-行为与历史 AgentSession 保持一致（含 resume 不恢复 worker override 等既有约定）。
+SessionSnapshot：可序列化、版本化的 package 状态。
+SessionResources：gateway/MCP/callback 等不可序列化运行资源。
+AgentSession 只持有二者，不再逐字段镜像。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -45,24 +46,56 @@ from haagent.runtime.session.working_state import (
 )
 from haagent.tools.registry import default_tool_runtime_registry
 
+# 磁盘 session package 的逻辑 schema；迁移只经 SessionSnapshot 入口。
+SESSION_SNAPSHOT_SCHEMA_VERSION = 1
+# 无 session_snapshot_schema_version 字段的旧 package 视为 v0。
+SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION = 0
+
+
+def resolve_session_snapshot_schema_version(metadata: dict[str, object]) -> int:
+    """从 session.json 读取 schema 版本；缺失=0，未来版本拒绝。"""
+    raw = metadata.get("session_snapshot_schema_version")
+    if raw is None:
+        return SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION
+    if not isinstance(raw, int) or isinstance(raw, bool):
+        raise ChatSessionError(
+            "invalid session.json: session_snapshot_schema_version must be an integer"
+        )
+    if raw < SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION:
+        raise ChatSessionError(
+            f"invalid session.json: session_snapshot_schema_version is invalid: {raw}"
+        )
+    if raw > SESSION_SNAPSHOT_SCHEMA_VERSION:
+        raise ChatSessionError(
+            f"unsupported session_snapshot_schema_version: {raw} "
+            f"(supported up to {SESSION_SNAPSHOT_SCHEMA_VERSION})"
+        )
+    return raw
+
+
+def migrate_session_snapshot_schema_version(disk_version: int) -> int:
+    """把磁盘版本迁到当前逻辑版本；当前仅支持 0→1 与 1 保持。"""
+    if disk_version == SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION:
+        # 旧 package 字段布局已兼容 v1，显式升级而非假装磁盘本就是最新版。
+        return SESSION_SNAPSHOT_SCHEMA_VERSION
+    if disk_version == SESSION_SNAPSHOT_SCHEMA_VERSION:
+        return disk_version
+    raise ChatSessionError(
+        f"unsupported session_snapshot_schema_version: {disk_version} "
+        f"(supported up to {SESSION_SNAPSHOT_SCHEMA_VERSION})"
+    )
+
 
 @dataclass
-class SessionRuntimeState:
-    """AgentSession 的可序列化/可装配运行时字段快照。"""
+class SessionSnapshot:
+    """可持久化会话状态；不包含 gateway/MCP/callback。"""
 
+    schema_version: int
     workspace_root: Path
     path_policy: PathPolicy
     runs_root: Path
-    model_gateway: ModelGateway | None
     model_ref: ModelRef | None
-    max_turns: int | None
-    memory_extraction_enabled: bool
     enable_web: bool
-    allowed_tools_override: list[str] | None
-    approval_allowed_tools_override: list[str] | None
-    approved_tools_override: list[str] | None
-    worker_context: dict[str, object] | None
-    worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None
     session_id: str
     turn_count: int
     summaries: list[str]
@@ -70,21 +103,76 @@ class SessionRuntimeState:
     turn_records: list[dict[str, object]]
     manual_compaction_summary: str | None
     manual_compaction_turn_count: int
-    next_turn_target_paths: list[str]
     last_user_image_attachments: list[ImageAttachment]
     image_attachment_history: list[ImageAttachment]
-    historical_tool_compression_count: int
     working_state: WorkingState
     task_ledger: TaskLedger
+    session_path: Path
+    created_at: str
+    session_interaction_state: SessionInteractionState
+
+    def clone(self) -> SessionSnapshot:
+        """浅拷贝容器字段，避免 new/reload 共享可变 list。"""
+        return replace(
+            self,
+            summaries=list(self.summaries),
+            turn_records=list(self.turn_records),
+            last_user_image_attachments=list(self.last_user_image_attachments),
+            image_attachment_history=list(self.image_attachment_history),
+        )
+
+
+@dataclass
+class SessionResources:
+    """不可序列化运行资源与进程内注入项。"""
+
+    model_gateway: ModelGateway | None
+    max_turns: int | None
+    memory_extraction_enabled: bool
+    allowed_tools_override: list[str] | None
+    approval_allowed_tools_override: list[str] | None
+    approved_tools_override: list[str] | None
+    worker_context: dict[str, object] | None
+    worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None
+    next_turn_target_paths: list[str]
+    historical_tool_compression_count: int
     current_cancellation_token: CancellationToken | None
     mcp_settings: Any
     mcp_runtime: Any
     owns_mcp_runtime: bool
     mcp_tool_names: list[str]
     tool_registry: Any
-    session_path: Path
-    created_at: str
-    session_interaction_state: SessionInteractionState
+
+    def clone(self) -> SessionResources:
+        return replace(
+            self,
+            allowed_tools_override=(
+                list(self.allowed_tools_override)
+                if self.allowed_tools_override is not None
+                else None
+            ),
+            approval_allowed_tools_override=(
+                list(self.approval_allowed_tools_override)
+                if self.approval_allowed_tools_override is not None
+                else None
+            ),
+            approved_tools_override=(
+                list(self.approved_tools_override)
+                if self.approved_tools_override is not None
+                else None
+            ),
+            worker_context=dict(self.worker_context) if self.worker_context is not None else None,
+            next_turn_target_paths=list(self.next_turn_target_paths),
+            mcp_tool_names=list(self.mcp_tool_names),
+        )
+
+
+@dataclass
+class SessionRuntimeState:
+    """create/resume/new 装配结果：snapshot + resources。"""
+
+    snapshot: SessionSnapshot
+    resources: SessionResources
 
 
 def bootstrap_mcp(mcp_runtime: Any | None = None) -> tuple[Any, Any, bool, list[str], Any]:
@@ -128,15 +216,31 @@ def build_create_state(
     resolved_workspace = workspace_root.resolve()
     sid = session_id or new_session_id()
     mcp_settings, runtime, owns, mcp_tool_names, tool_registry = bootstrap_mcp(mcp_runtime)
-    return SessionRuntimeState(
+    snapshot = SessionSnapshot(
+        schema_version=SESSION_SNAPSHOT_SCHEMA_VERSION,
         workspace_root=resolved_workspace,
         path_policy=default_path_policy(resolved_workspace),
         runs_root=runs_root,
-        model_gateway=model_gateway,
         model_ref=model_ref,
+        enable_web=enable_web,
+        session_id=sid,
+        turn_count=0,
+        summaries=[],
+        turn_records=[],
+        manual_compaction_summary=None,
+        manual_compaction_turn_count=0,
+        last_user_image_attachments=[],
+        image_attachment_history=[],
+        working_state=empty_working_state(),
+        task_ledger=empty_task_ledger(),
+        session_path=runs_root / "sessions" / sid,
+        created_at=datetime.now(UTC).isoformat(),
+        session_interaction_state=SessionInteractionState(),
+    )
+    resources = SessionResources(
+        model_gateway=model_gateway,
         max_turns=max_turns,
         memory_extraction_enabled=memory_extraction_enabled,
-        enable_web=enable_web,
         allowed_tools_override=list(allowed_tools_override) if allowed_tools_override is not None else None,
         approval_allowed_tools_override=(
             list(approval_allowed_tools_override)
@@ -146,28 +250,16 @@ def build_create_state(
         approved_tools_override=list(approved_tools_override) if approved_tools_override is not None else None,
         worker_context=dict(worker_context) if worker_context is not None else None,
         worker_permission_requester=worker_permission_requester,
-        session_id=sid,
-        turn_count=0,
-        summaries=[],
-        turn_records=[],
-        manual_compaction_summary=None,
-        manual_compaction_turn_count=0,
         next_turn_target_paths=[],
-        last_user_image_attachments=[],
-        image_attachment_history=[],
         historical_tool_compression_count=0,
-        working_state=empty_working_state(),
-        task_ledger=empty_task_ledger(),
         current_cancellation_token=None,
         mcp_settings=mcp_settings,
         mcp_runtime=runtime,
         owns_mcp_runtime=owns,
         mcp_tool_names=mcp_tool_names,
         tool_registry=tool_registry,
-        session_path=runs_root / "sessions" / sid,
-        created_at=datetime.now(UTC).isoformat(),
-        session_interaction_state=SessionInteractionState(),
     )
+    return SessionRuntimeState(snapshot=snapshot, resources=resources)
 
 
 def build_resume_state(
@@ -203,6 +295,8 @@ def build_resume_state(
         task_ledger = load_task_ledger(session_path / "task-ledger.json")
     except TaskLedgerError as error:
         raise ChatSessionError(str(error)) from error
+    disk_schema_version = resolve_session_snapshot_schema_version(metadata)
+    schema_version = migrate_session_snapshot_schema_version(disk_schema_version)
     # 有现成 MCP 时复用（会话切换热路径）；否则自建。不恢复 worker/tool override。
     if mcp_runtime is not None:
         settings = mcp_settings if mcp_settings is not None else mcp_runtime.settings
@@ -223,11 +317,11 @@ def build_resume_state(
         owns = True if owns_mcp_runtime is None else bool(owns_mcp_runtime)
     else:
         settings, runtime, owns, names, registry = bootstrap_mcp(None)
-    return SessionRuntimeState(
+    snapshot = SessionSnapshot(
+        schema_version=schema_version,
         workspace_root=workspace_root,
         path_policy=path_policy,
         runs_root=session_path.parent.parent,
-        model_gateway=model_gateway,
         model_ref=(
             model_ref
             if model_ref is not None
@@ -235,32 +329,17 @@ def build_resume_state(
             if isinstance(metadata.get("model_ref"), dict)
             else None
         ),
-        max_turns=max_turns,
-        memory_extraction_enabled=True,
         enable_web=enable_web,
-        allowed_tools_override=None,
-        approval_allowed_tools_override=None,
-        approved_tools_override=None,
-        worker_context=None,
-        worker_permission_requester=None,
         session_id=str(metadata["session_id"]),
         turn_count=int(metadata["turn_count"]),
         summaries=[str(turn["summary"]) for turn in turns],
         turn_records=list(turns),
         manual_compaction_summary=compaction_summary,
         manual_compaction_turn_count=compacted_turn_count,
-        next_turn_target_paths=[],
         last_user_image_attachments=read_session_image_attachments(metadata, session_path),
         image_attachment_history=read_image_attachment_history(metadata, session_path),
-        historical_tool_compression_count=0,
         working_state=working_state,
         task_ledger=task_ledger,
-        current_cancellation_token=None,
-        mcp_settings=settings,
-        mcp_runtime=runtime,
-        owns_mcp_runtime=owns,
-        mcp_tool_names=names,
-        tool_registry=registry,
         session_path=session_path,
         created_at=str(metadata["created_at"]),
         # resume 同一 session：恢复 edit_diff 始终允许；缺失字段视为 False
@@ -268,83 +347,84 @@ def build_resume_state(
             edit_diff_session_always=bool(metadata.get("edit_diff_session_always", False)),
         ),
     )
+    resources = SessionResources(
+        model_gateway=model_gateway,
+        max_turns=max_turns,
+        memory_extraction_enabled=True,
+        allowed_tools_override=None,
+        approval_allowed_tools_override=None,
+        approved_tools_override=None,
+        worker_context=None,
+        worker_permission_requester=None,
+        next_turn_target_paths=[],
+        historical_tool_compression_count=0,
+        current_cancellation_token=None,
+        mcp_settings=settings,
+        mcp_runtime=runtime,
+        owns_mcp_runtime=owns,
+        mcp_tool_names=names,
+        tool_registry=registry,
+    )
+    return SessionRuntimeState(snapshot=snapshot, resources=resources)
 
 
 def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
     """在保留 workspace/model/MCP 的前提下重置为新 session package。"""
     sid = new_session_id()
-    return SessionRuntimeState(
-        workspace_root=state.workspace_root,
-        path_policy=default_path_policy(state.workspace_root),
-        runs_root=state.runs_root,
-        model_gateway=state.model_gateway,
-        model_ref=state.model_ref,
-        max_turns=state.max_turns,
-        memory_extraction_enabled=state.memory_extraction_enabled,
-        enable_web=state.enable_web,
-        allowed_tools_override=state.allowed_tools_override,
-        approval_allowed_tools_override=state.approval_allowed_tools_override,
-        approved_tools_override=state.approved_tools_override,
-        worker_context=state.worker_context,
-        worker_permission_requester=state.worker_permission_requester,
+    snap = state.snapshot
+    res = state.resources
+    snapshot = SessionSnapshot(
+        schema_version=SESSION_SNAPSHOT_SCHEMA_VERSION,
+        workspace_root=snap.workspace_root,
+        path_policy=default_path_policy(snap.workspace_root),
+        runs_root=snap.runs_root,
+        model_ref=snap.model_ref,
+        enable_web=snap.enable_web,
         session_id=sid,
         turn_count=0,
         summaries=[],
         turn_records=[],
         manual_compaction_summary=None,
         manual_compaction_turn_count=0,
-        next_turn_target_paths=state.next_turn_target_paths,
         last_user_image_attachments=[],
         image_attachment_history=[],
-        historical_tool_compression_count=state.historical_tool_compression_count,
         working_state=empty_working_state(),
         task_ledger=empty_task_ledger(),
-        current_cancellation_token=state.current_cancellation_token,
-        mcp_settings=state.mcp_settings,
-        mcp_runtime=state.mcp_runtime,
-        owns_mcp_runtime=state.owns_mcp_runtime,
-        mcp_tool_names=state.mcp_tool_names,
-        tool_registry=state.tool_registry,
-        session_path=state.runs_root / "sessions" / sid,
+        session_path=snap.runs_root / "sessions" / sid,
         created_at=datetime.now(UTC).isoformat(),
         # 新 session 不继承上一会话的 edit_diff always
         session_interaction_state=SessionInteractionState(),
     )
+    resources = SessionResources(
+        model_gateway=res.model_gateway,
+        max_turns=res.max_turns,
+        memory_extraction_enabled=res.memory_extraction_enabled,
+        allowed_tools_override=(
+            list(res.allowed_tools_override) if res.allowed_tools_override is not None else None
+        ),
+        approval_allowed_tools_override=(
+            list(res.approval_allowed_tools_override)
+            if res.approval_allowed_tools_override is not None
+            else None
+        ),
+        approved_tools_override=(
+            list(res.approved_tools_override) if res.approved_tools_override is not None else None
+        ),
+        worker_context=dict(res.worker_context) if res.worker_context is not None else None,
+        worker_permission_requester=res.worker_permission_requester,
+        next_turn_target_paths=list(res.next_turn_target_paths),
+        historical_tool_compression_count=res.historical_tool_compression_count,
+        current_cancellation_token=res.current_cancellation_token,
+        mcp_settings=res.mcp_settings,
+        mcp_runtime=res.mcp_runtime,
+        owns_mcp_runtime=res.owns_mcp_runtime,
+        mcp_tool_names=list(res.mcp_tool_names),
+        tool_registry=res.tool_registry,
+    )
+    return SessionRuntimeState(snapshot=snapshot, resources=resources)
 
 
 def apply_state(instance: Any, state: SessionRuntimeState) -> None:
-    """把 SessionRuntimeState 写入 AgentSession 实例字段（含私有字段名）。"""
-    instance.workspace_root = state.workspace_root
-    instance.path_policy = state.path_policy
-    instance.runs_root = state.runs_root
-    instance.model_gateway = state.model_gateway
-    instance.model_ref = state.model_ref
-    instance.max_turns = state.max_turns
-    instance.memory_extraction_enabled = state.memory_extraction_enabled
-    instance.enable_web = state.enable_web
-    instance._allowed_tools_override = state.allowed_tools_override
-    instance._approval_allowed_tools_override = state.approval_allowed_tools_override
-    instance._approved_tools_override = state.approved_tools_override
-    instance._worker_context = state.worker_context
-    instance._worker_permission_requester = state.worker_permission_requester
-    instance.session_id = state.session_id
-    instance.turn_count = state.turn_count
-    instance._summaries = state.summaries
-    instance._turn_records = list(state.turn_records)
-    instance._manual_compaction_summary = state.manual_compaction_summary
-    instance._manual_compaction_turn_count = state.manual_compaction_turn_count
-    instance._next_turn_target_paths = state.next_turn_target_paths
-    instance._last_user_image_attachments = state.last_user_image_attachments
-    instance._image_attachment_history = state.image_attachment_history
-    instance._historical_tool_compression_count = state.historical_tool_compression_count
-    instance._working_state = state.working_state
-    instance._task_ledger = state.task_ledger
-    instance._current_cancellation_token = state.current_cancellation_token
-    instance._mcp_settings = state.mcp_settings
-    instance._mcp_runtime = state.mcp_runtime
-    instance._owns_mcp_runtime = state.owns_mcp_runtime
-    instance._mcp_tool_names = state.mcp_tool_names
-    instance._tool_registry = state.tool_registry
-    instance.session_path = state.session_path
-    instance._created_at = state.created_at
-    instance._session_interaction_state = state.session_interaction_state
+    """把 snapshot/resources 装入 AgentSession；不再逐字段镜像。"""
+    instance._snapshot = state.snapshot
+    instance._resources = state.resources

@@ -19,9 +19,10 @@ from haagent.models.model_ref import ModelInvocation
 from haagent.models.types import ModelGateway, ModelResponse, ToolCall
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.types import McpSettings
-from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.episodes.package_types import FailureRecord
 from haagent.runtime.episodes.validator import load_inspect_episode_package
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS
 
 
@@ -140,14 +141,14 @@ def _compare_case(
     episode_path: Path,
     actual_status: str,
 ) -> dict[str, Any]:
-    package_view = load_inspect_episode_package(episode_path)
+    package = load_inspect_episode_package(episode_path)
     expected_tool_uses = _expected_tool_uses(case)
-    actual_tool_uses = sorted({str(record["tool_name"]) for record in package_view.tool_calls})
+    actual_tool_uses = package.tool_names_used()
     missing_tool_uses = sorted(set(expected_tool_uses) - set(actual_tool_uses))
     unexpected_tool_uses = sorted(set(actual_tool_uses) - set(expected_tool_uses))
     expected_status = _expected_status(case)
-    final_response_match = _final_response_match(case, package_view.transcript)
-    failure_category_match = _failure_category_match(case, package_view.failure_record)
+    final_response_match = _final_response_match(case, package.transcript)
+    failure_category_match = _failure_category_match(case, package.failure)
 
     reasons: list[str] = []
     if actual_status != expected_status:
@@ -326,16 +327,14 @@ def _final_response_expectation(case: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-def _failure_category_match(case: dict[str, Any], failure_record: dict[str, Any]) -> bool | None:
+def _failure_category_match(case: dict[str, Any], failure: FailureRecord) -> bool | None:
     expectations = case.get("expectations")
     expected = None
     if isinstance(expectations, dict):
         expected = expectations.get("failure_category")
     if expected is None:
         return None
-    failure = failure_record.get("failure")
-    actual = failure.get("category") if isinstance(failure, dict) else None
-    return actual == expected
+    return failure.category == expected
 
 
 def _context_expectation_reason(case: dict[str, Any], episode_path: Path) -> str | None:

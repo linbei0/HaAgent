@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from haagent.runtime.episodes.package_types import VerificationCommandRecord
 from haagent.runtime.episodes.validator import (
     EpisodeValidationError,
     load_inspect_episode_package,
@@ -43,7 +44,7 @@ def build_turn_result(
     result: Any,
 ) -> ChatTurnResult:
     try:
-        package_view = load_inspect_episode_package(result.episode_path)
+        package = load_inspect_episode_package(result.episode_path)
     except EpisodeValidationError as error:
         return ChatTurnResult(
             session_id=session_id,
@@ -56,23 +57,21 @@ def build_turn_result(
             summary_error=str(error),
         )
 
-    failure = package_view.failure_record.get("failure")
-    if not isinstance(failure, dict):
-        failure = {}
+    failure = package.failure.failure
     return ChatTurnResult(
         session_id=session_id,
         turn_index=turn_index,
         status=result.status.value,
         episode_path=result.episode_path,
-        provider=str(package_view.episode_metadata.get("provider", provider_name)),
-        final_response=run_final_response(package_view.transcript),
+        provider=str(package.metadata.provider or provider_name),
+        final_response=package.final_response_text(),
         verification_status=verification_status(
-            package_view.verification_commands,
-            package_view.verification_reached,
+            package.verification_commands,
+            package.verification_reached,
         ),
-        failed_stage=str(failure.get("stage", "none")),
-        failure_category=str(failure.get("category", "none")),
-        reason=str(failure.get("evidence", "none")),
+        failed_stage="none" if failure is None else failure.stage,
+        failure_category="none" if failure is None else failure.category,
+        reason="none" if failure is None else failure.evidence,
     )
 
 
@@ -95,11 +94,15 @@ def run_final_response(transcript: list[dict[str, Any]]) -> str:
     return "none"
 
 
-def verification_status(commands: list[dict[str, Any]], verification_reached: bool) -> str:
+def verification_status(
+    commands: list[VerificationCommandRecord],
+    verification_reached: bool,
+) -> str:
     if not verification_reached or not commands:
         return "not_run"
-    if any(command.get("status") != "success" for command in commands):
-        return "failed"
+    for command in commands:
+        if command.status != "success":
+            return "failed"
     return "success"
 
 

@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from haagent.runtime.episodes.package_types import (
+    CostRecord,
+    EpisodeMetadata,
+    EnvironmentRecord,
+)
 from haagent.runtime.episodes.validator import EpisodeValidationError, load_inspect_episode_package
 
 
@@ -16,26 +21,25 @@ def print_run_summary(result) -> None:
     print(f"status={result.status.value}")
     print(f"episode_path={result.episode_path}")
     try:
-        package_view = load_inspect_episode_package(result.episode_path)
+        package = load_inspect_episode_package(result.episode_path)
     except EpisodeValidationError as error:
         print(f"summary_error={summary_value(str(error))}")
         return
 
-    print(f"provider={summary_provider(package_view.episode_metadata)}")
-    print(f"model={summary_value(summary_model(package_view.environment))}")
-    print(f"usage_available={summary_bool(package_view.cost.get('usage_available'))}")
-    print(f"total_tokens={summary_token_total(package_view.cost)}")
-    print(f"estimated_cost={summary_estimated_cost(package_view.cost)}")
+    print(f"provider={summary_provider(package.metadata)}")
+    print(f"model={summary_value(summary_model(package.environment))}")
+    print(f"usage_available={summary_bool(package.cost.usage_available)}")
+    print(f"total_tokens={summary_token_total(package.cost)}")
+    print(f"estimated_cost={summary_estimated_cost(package.cost)}")
     if result.status.value == "completed":
-        print(f"final_response={summary_value(run_final_response(package_view.transcript))}")
+        print(f"final_response={summary_value(package.final_response_text())}")
         return
 
-    failure = package_view.failure_record.get("failure")
-    if not isinstance(failure, dict):
-        failure = {}
-    print(f"failed_stage={summary_value(str(failure.get('stage', 'unknown')))}")
-    print(f"failure_category={summary_value(str(failure.get('category', 'unknown')))}")
-    print(f"reason={summary_value(str(failure.get('evidence', '')))}")
+    failure = package.failure.failure
+    print(f"failed_stage={summary_value('unknown' if failure is None else failure.stage)}")
+    print(f"failure_category={summary_value('unknown' if failure is None else failure.category)}")
+    print(f"reason={summary_value('' if failure is None else failure.evidence)}")
+
 
 
 def print_smoke_result(result) -> None:
@@ -102,16 +106,13 @@ def run_final_response(transcript: list[dict[str, Any]]) -> str:
     return str(response.get("content", ""))
 
 
-def summary_provider(episode_metadata: dict[str, Any]) -> str:
-    return str(episode_metadata.get("provider", "unknown"))
+def summary_provider(episode_metadata: EpisodeMetadata) -> str:
+    return str(episode_metadata.provider or "unknown")
 
 
-def summary_model(environment: dict[str, Any]) -> str:
-    model = environment.get("model") if isinstance(environment, dict) else None
-    if not isinstance(model, dict):
-        return "unknown"
-    provider = str(model.get("provider") or "unknown")
-    model_name = str(model.get("model") or "unknown")
+def summary_model(environment: EnvironmentRecord) -> str:
+    provider = str(environment.model.provider or "unknown")
+    model_name = str(environment.model.model or "unknown")
     return f"{provider}/{model_name}"
 
 
@@ -123,21 +124,18 @@ def summary_bool(value: object) -> str:
     return "unknown"
 
 
-def summary_token_total(cost: dict[str, Any]) -> str:
-    totals = cost.get("totals") if isinstance(cost, dict) else None
-    if not isinstance(totals, dict):
-        return "unavailable"
-    value = totals.get("total_tokens")
+def summary_token_total(cost: CostRecord) -> str:
+    value = cost.totals.total_tokens
     return str(value) if isinstance(value, int) and not isinstance(value, bool) else "unavailable"
 
 
-def summary_estimated_cost(cost: dict[str, Any]) -> str:
-    value = cost.get("estimated_cost") if isinstance(cost, dict) else None
+def summary_estimated_cost(cost: CostRecord) -> str:
+    value = cost.estimated_cost
     if isinstance(value, int | float) and not isinstance(value, bool):
-        currency = cost.get("currency")
+        currency = cost.currency
         return f"{value} {currency}" if currency else str(value)
-    reason = cost.get("reason") if isinstance(cost, dict) else None
-    return summary_value(str(reason or "unavailable"))
+    return summary_value(str(cost.reason or "unavailable"))
+
 
 
 def last_model_response(transcript: list[dict[str, Any]]) -> dict[str, Any] | None:
