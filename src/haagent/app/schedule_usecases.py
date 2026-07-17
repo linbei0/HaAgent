@@ -30,14 +30,18 @@ from haagent.models.config.connections import (
     ProviderProfileError,
     user_config_dir,
 )
+from haagent.scheduling.draft import (
+    ScheduleDraft,
+    SchedulePatch,
+    apply_patch,
+    definition_from_draft,
+)
 from haagent.scheduling.models import (
     RetryPolicy,
     ScheduleDefinition,
     ScheduleRun,
     ScheduleStatus,
     ScheduleValidationError,
-    merge_web_tools,
-    validate_schedule,
 )
 from haagent.scheduling.background.base import (
     BackgroundServiceAdapter,
@@ -177,47 +181,16 @@ class AssistantSchedules:
         self._store = ScheduleStore(db)
         return self._store
 
-    def create(self, request: ScheduleCreateRequest) -> AssistantSchedule:
+    def create(self, request: ScheduleCreateRequest | ScheduleDraft) -> AssistantSchedule:
         now = self._clock()
         self._validate_workspace(request.workspace_root)
         self._validate_connection(request.connection_id)
-        try:
-            rrule = normalize_rrule(request.rrule)
-        except RecurrenceError as error:
-            raise AssistantServiceError(str(error)) from error
-
         schedule_id = f"sch_{uuid.uuid4().hex[:16]}"
-        definition = ScheduleDefinition(
-            id=schedule_id,
-            name=request.name,
-            prompt=request.prompt,
-            workspace_root=Path(request.workspace_root).resolve(),
-            destination_kind=request.destination_kind,
-            destination_session_path=(
-                Path(request.destination_session_path).resolve()
-                if request.destination_session_path is not None
-                else None
-            ),
-            connection_id=request.connection_id,
-            model=request.model,
-            web_enabled=request.web_enabled,
-            allowed_tools=merge_web_tools(
-                request.allowed_tools, web_enabled=request.web_enabled
-            ),
-            approval_allowed_tools=tuple(request.approval_allowed_tools),
-            approved_tools=tuple(request.approved_tools),
-            permission_mode=request.permission_mode,
-            dtstart_local=request.dtstart_local,
-            timezone=request.timezone,
-            rrule=rrule,
-            status="active",
-            misfire_policy=request.misfire_policy,
-            overlap_policy=request.overlap_policy,
-            retry_policy=request.retry_policy or RetryPolicy(),
-            revision=1,
-        )
         try:
-            validate_schedule(definition)
+            definition = definition_from_draft(
+                request if isinstance(request, ScheduleDraft) else ScheduleDraft(**request.__dict__),
+                schedule_id=schedule_id,
+            )
         except ScheduleValidationError as error:
             raise AssistantServiceError(str(error)) from error
 
@@ -237,7 +210,7 @@ class AssistantSchedules:
         base_name = str(source.name or "").strip() or "计划"
         copy_name = f"{base_name} 副本"
         return self.create(
-            ScheduleCreateRequest(
+            ScheduleDraft(
                 name=copy_name,
                 prompt=source.prompt,
                 workspace_root=source.workspace_root,
@@ -259,83 +232,25 @@ class AssistantSchedules:
             )
         )
 
-    def update(self, schedule_id: str, request: ScheduleUpdateRequest) -> AssistantSchedule:
+    def update(self, schedule_id: str, request: ScheduleUpdateRequest | SchedulePatch) -> AssistantSchedule:
         now = self._clock()
         store = self._get_store()
-        fields: dict = {}
-        if request.name is not None:
-            fields["name"] = request.name
-        if request.prompt is not None:
-            fields["prompt"] = request.prompt
-        if request.workspace_root is not None:
-            self._validate_workspace(request.workspace_root)
-            fields["workspace_root"] = Path(request.workspace_root).resolve()
-        if request.destination_kind is not None:
-            fields["destination_kind"] = request.destination_kind
-        if request.destination_session_path is not ...:
-            path = request.destination_session_path
-            fields["destination_session_path"] = (
-                Path(path).resolve() if path is not None else None  # type: ignore[arg-type]
-            )
-        if request.connection_id is not None:
-            self._validate_connection(request.connection_id)
-            fields["connection_id"] = request.connection_id
-        if request.model is not None:
-            fields["model"] = request.model
-        if request.web_enabled is not None:
-            fields["web_enabled"] = request.web_enabled
-        if request.allowed_tools is not None:
-            fields["allowed_tools"] = tuple(request.allowed_tools)
-        if request.approval_allowed_tools is not None:
-            fields["approval_allowed_tools"] = tuple(request.approval_allowed_tools)
-        if request.approved_tools is not None:
-            fields["approved_tools"] = tuple(request.approved_tools)
-        if request.permission_mode is not None:
-            fields["permission_mode"] = request.permission_mode
-        if request.dtstart_local is not None:
-            fields["dtstart_local"] = request.dtstart_local
-        if request.timezone is not None:
-            fields["timezone"] = request.timezone
-        if request.rrule is not ...:
-            try:
-                fields["rrule"] = normalize_rrule(request.rrule)  # type: ignore[arg-type]
-            except RecurrenceError as error:
-                raise AssistantServiceError(str(error)) from error
-        if request.misfire_policy is not None:
-            fields["misfire_policy"] = request.misfire_policy
-        if request.overlap_policy is not None:
-            fields["overlap_policy"] = request.overlap_policy
-        if request.retry_policy is not None:
-            fields["retry_policy"] = request.retry_policy
-
+        patch = request if isinstance(request, SchedulePatch) else SchedulePatch(**request.__dict__)
+        if patch.workspace_root.kind == "set" and patch.workspace_root.value is not None:
+            self._validate_workspace(patch.workspace_root.value)
+        if patch.connection_id.kind == "set" and patch.connection_id.value is not None:
+            self._validate_connection(patch.connection_id.value)
         try:
             current = store.get(schedule_id)
             if current is None:
                 raise ScheduleStoreError("not_found", f"计划不存在: {schedule_id}")
-            # web_enabled 与 allowed_tools 合并后再写入，避免只开联网却无 web 工具
-            merged_web = fields.get("web_enabled", current.web_enabled)
-            merged_tools = fields.get("allowed_tools", current.allowed_tools)
-            fields["allowed_tools"] = merge_web_tools(
-                merged_tools, web_enabled=bool(merged_web)
-            )
-            # 合并后算 next
-            merged_data = {**current.__dict__, **fields}
-            probe = ScheduleDefinition(**merged_data)
-            probe = validate_schedule(
-                ScheduleDefinition(
-                    **{
-                        **probe.__dict__,
-                        "revision": current.revision + 1,
-                    }
-                )
-            )
-            next_run = self._compute_next(probe, after=now) if probe.status == "active" else None
-            updated = store.update(
-                schedule_id,
-                expected_revision=request.expected_revision,
+            definition = apply_patch(current, patch)
+            next_run = self._compute_next(definition, after=now) if definition.status == "active" else None
+            updated = store.replace(
+                definition,
+                expected_revision=patch.expected_revision,
                 now=now,
                 next_run_at_utc=next_run,
-                **fields,
             )
         except ScheduleStoreError as error:
             raise _map_store_error(error) from error

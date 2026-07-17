@@ -80,6 +80,7 @@
 
 ## 7. 记忆系统
 
+- 未信任候选只经 `MemoryCandidateIntake.submit` 进入 queue；模型/用户/runtime draft 共享 `MemoryIdentity` 与治理结果。提取器只产 draft，不直写 store/queue。`MemoryStore` 仅保留内部 `_persist_candidate`，禁止公开旁路入队。
 - 长期记忆写入必须满足证据边界：允许用户直接声明、成功工具结果、明确文件内容；不允许助手回答、模型推理、猜测、未验证计划、memory recall 或 unknown 来源作为用户事实证据。
 - 正式长期记忆必须先进入候选队列，再由确定性服务确认和落库；不得由模型工具直接写正式记忆。
 - 候选到正式记忆必须经过 canonical fingerprint、去重、冲突检查、rejected tombstone 抑制、scope/category 校验，以及用户确认或明确策略授权。

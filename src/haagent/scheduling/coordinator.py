@@ -210,11 +210,12 @@ class ScheduleCoordinator:
             # once 或 COUNT/UNTIL 等有限 RRULE 耗尽 → completed，避免僵尸 active
             current = self._store.get(schedule.id)
             if current is not None and current.status == "active":
-                self._store.update(
-                    schedule.id,
+                from dataclasses import replace as dc_replace
+
+                self._store.replace(
+                    dc_replace(current, status="completed", revision=current.revision + 1),
                     expected_revision=current.revision,
                     now=now,
-                    status="completed",
                     next_run_at_utc=None,
                 )
             return

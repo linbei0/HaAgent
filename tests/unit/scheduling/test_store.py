@@ -85,9 +85,10 @@ def test_create_get_list_update_revision(tmp_path: Path) -> None:
         assert got.allowed_tools == ("file_read",)
         assert store.list_schedules()[0].id == created.id
 
-        updated = store.update(
-            created.id,
-            name="plan-v2",
+        from dataclasses import replace as dc_replace
+
+        updated = store.replace(
+            dc_replace(created, name="plan-v2", revision=2),
             expected_revision=1,
             now=now,
             next_run_at_utc=now,
@@ -107,10 +108,11 @@ def test_optimistic_revision_conflict(tmp_path: Path) -> None:
     now = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
     with ScheduleStore(db) as store:
         created = store.create(_def(tmp_path, workspace_root=ws), now=now)
+        from dataclasses import replace as dc_replace
+
         with pytest.raises(ScheduleStoreError) as exc:
-            store.update(
-                created.id,
-                name="x",
+            store.replace(
+                dc_replace(created, name="x", revision=100),
                 expected_revision=99,
                 now=now,
             )
@@ -536,9 +538,12 @@ def test_reader_does_not_block_writer(tmp_path: Path) -> None:
         try:
             reader_ready.wait(timeout=5)
             with ScheduleStore(db) as w:
-                w.update(
-                    "sch_1",
-                    name="from-writer",
+                from dataclasses import replace as dc_replace
+
+                current = w.get("sch_1")
+                assert current is not None
+                w.replace(
+                    dc_replace(current, name="from-writer", revision=current.revision + 1),
                     expected_revision=1,
                     now=now,
                 )

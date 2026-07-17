@@ -7,28 +7,17 @@ haagent/memory/extraction.py - 长期记忆候选提取
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from pathlib import Path
+
 from haagent.memory.candidates import CandidateQueue
-from haagent.memory.governance import (
-    MemoryGovernanceError,
-    memory_content_hash,
-    normalize_title,
-    prepare_candidate_text,
-    redact_sensitive,
-    scan_secrets,
-    text_risk_flags,
-    validate_scope_category,
-)
-from haagent.memory.schema import (
-    CandidateEvidence,
-    MemoryCandidate,
-)
+from haagent.memory.governance import redact_sensitive
+from haagent.memory.identity import fingerprint_from_parts
+from haagent.memory.intake import MemoryCandidateIntake, MemoryDraft
 from haagent.memory.prompts import build_memory_extraction_prompt
+from haagent.memory.schema import CandidateEvidence, MemoryCandidate
 from haagent.memory.store import MemoryStore
 from haagent.models.types import ModelCallError, ModelGateway
 
@@ -113,6 +102,8 @@ class MemoryExtractor:
 
         queue = CandidateQueue(request.session_path)
         store = MemoryStore(workspace_root=request.workspace_root, user_memory_root=request.user_memory_root)
+        # 提取只产 draft；queue/store 写入只经 MemoryCandidateIntake。
+        intake = MemoryCandidateIntake(store, queue)
         extracted = _model_candidates(request)
         if not extracted:
             return MemoryExtractionResult("skipped", "no durable memories proposed", diagnostics=diagnostics)
@@ -125,26 +116,14 @@ class MemoryExtractor:
                 rejected += 1
                 _count_rejection(rejection_reasons, "missing_required_fields")
                 continue
-            evidence_fingerprint = _candidate_fingerprint(candidate)
             evidence_error = _candidate_evidence_error(candidate, request)
             if evidence_error is not None:
                 rejected += 1
                 _count_rejection(rejection_reasons, evidence_error)
                 continue
-            if _candidate_has_blocked_risk(candidate):
-                rejected += 1
-                _count_rejection(rejection_reasons, "blocked_risk")
-                continue
-            try:
-                validate_scope_category(candidate.scope, candidate.category)
-            except MemoryGovernanceError:
-                rejected += 1
-                _count_rejection(rejection_reasons, "invalid_scope_category")
-                continue
-            if _is_duplicate(candidate, queue, store, evidence_fingerprint):
-                rejected += 1
-                _count_rejection(rejection_reasons, "duplicate_fingerprint_or_content")
-                continue
+            evidence_quote = _bounded(candidate.evidence_quote, request.policy.max_evidence_chars)
+            title = _bounded(candidate.title, request.policy.max_title_chars)
+            body = _bounded(candidate.body, request.policy.max_body_chars)
             evidence = CandidateEvidence(
                 source_type=candidate.evidence_source,
                 evidence_summary=_bounded(
@@ -157,26 +136,34 @@ class MemoryExtractor:
                 source_summary=_bounded(candidate.source_summary, request.policy.max_evidence_chars),
                 basis=_bounded(candidate.basis, request.policy.max_evidence_chars),
                 category_rationale=_bounded(candidate.category_rationale, request.policy.max_evidence_chars),
-                evidence_quote=_bounded(candidate.evidence_quote, request.policy.max_evidence_chars),
-                fingerprint=evidence_fingerprint,
+                evidence_quote=evidence_quote,
+                fingerprint=fingerprint_from_parts(
+                    category=candidate.category,
+                    body=body,
+                    evidence_source=candidate.evidence_source,
+                    evidence_quote=evidence_quote,
+                ),
             )
-            try:
-                created.append(
-                    store.create_candidate(
-                        queue,
-                        scope=candidate.scope,
-                        category=candidate.category,
-                        title=_bounded(candidate.title, request.policy.max_title_chars),
-                        body=_bounded(candidate.body, request.policy.max_body_chars),
-                        evidence=evidence,
-                        source="extraction",
-                        tags=candidate.tags,
-                        actor="agent",
-                    ),
-                )
-            except MemoryGovernanceError:
+            draft = MemoryDraft(
+                scope=candidate.scope,
+                category=candidate.category,
+                title=title,
+                body=body,
+                evidence=evidence,
+                source="extraction",
+                tags=list(candidate.tags),
+                actor="agent",
+            )
+            result = intake.submit(draft, reject_secrets=True)
+            if not result.accepted or result.candidate is None:
                 rejected += 1
-                _count_rejection(rejection_reasons, "governance_error")
+                reason = result.reason or "governance_error"
+                # 提取路径对 secret 使用历史 reason 名 blocked_risk，保持 diagnostics 兼容。
+                if reason == "possible_secret":
+                    reason = "blocked_risk"
+                _count_rejection(rejection_reasons, reason)
+                continue
+            created.append(result.candidate)
 
         status = "created" if created else "skipped"
         reason = "" if created else "all candidates rejected"
@@ -291,61 +278,6 @@ def _candidate_has_required_evidence(candidate: ExtractedMemoryCandidate) -> boo
     )
 
 
-def _candidate_has_blocked_risk(candidate: ExtractedMemoryCandidate) -> bool:
-    text = "\n".join(
-        [
-            candidate.title,
-            candidate.body,
-            candidate.source_summary,
-            candidate.basis,
-            candidate.category_rationale,
-            candidate.evidence_source,
-            candidate.evidence_quote,
-            *candidate.tags,
-        ],
-    )
-    if scan_secrets(text):
-        return True
-    _, _, flags = prepare_candidate_text(candidate.title, candidate.body)
-    return bool(flags or text_risk_flags(candidate.source_summary, candidate.basis))
-
-
-def _is_duplicate(
-    candidate: ExtractedMemoryCandidate,
-    queue: CandidateQueue,
-    store: MemoryStore,
-    fingerprint: str,
-) -> bool:
-    content_hash = memory_content_hash(candidate.title, candidate.body)
-    candidate_title = normalize_title(candidate.title)
-    candidate_body = " ".join(candidate.body.split()).strip().lower()
-    for record in store.list_records(scope=candidate.scope, category=candidate.category):
-        if record.evidence.fingerprint == fingerprint:
-            return True
-        if record.content_hash == content_hash:
-            return True
-        if " ".join(record.body.split()).strip().lower() == candidate_body:
-            return True
-        if _similar_title(candidate_title, normalize_title(record.title)):
-            return True
-    for pending in queue.list():
-        if pending.scope != candidate.scope or pending.category != candidate.category:
-            continue
-        if pending.evidence.fingerprint == fingerprint:
-            return True
-        if memory_content_hash(pending.title, pending.body) == content_hash:
-            return True
-        if " ".join(pending.body.split()).strip().lower() == candidate_body:
-            return True
-        if _similar_title(candidate_title, normalize_title(pending.title)):
-            return True
-    return False
-
-
-def _similar_title(left: str, right: str) -> bool:
-    return bool(left and right and (left == right or SequenceMatcher(None, left, right).ratio() >= 0.86))
-
-
 def _runtime_event_summary(event: dict[str, object]) -> str:
     event_type = str(event.get("event_type", "unknown"))
     tool_name = str(event.get("tool_name", ""))
@@ -442,17 +374,6 @@ def _quote_is_locatable(source_text: str, quote: str) -> bool:
 def _normalize_evidence_text(value: str) -> str:
     lowered = value.lower()
     return "".join(re.findall(r"[a-z0-9\u3400-\u4dbf\u4e00-\u9fff]+", lowered))
-
-
-def _candidate_fingerprint(candidate: ExtractedMemoryCandidate) -> str:
-    parts = [
-        candidate.category,
-        candidate.body,
-        candidate.evidence_source,
-        candidate.evidence_quote,
-    ]
-    normalized = "\n".join(_normalize_evidence_text(part) for part in parts)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _count_rejection(rejection_reasons: dict[str, int], reason: str) -> None:

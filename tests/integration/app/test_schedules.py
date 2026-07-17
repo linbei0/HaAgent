@@ -165,9 +165,14 @@ def test_update_pause_resume_archive_delete(tmp_path: Path, monkeypatch) -> None
     ws = service.workspace.status().workspace_root
     created = service.schedules.create(_create_req(ws))
 
+    from haagent.scheduling.draft import FieldPatch
+
     updated = service.schedules.update(
         created.id,
-        ScheduleUpdateRequest(name="renamed", expected_revision=1),
+        ScheduleUpdateRequest(
+            expected_revision=1,
+            name=FieldPatch.set("renamed"),
+        ),
     )
     assert updated.name == "renamed"
     assert updated.revision == 2
@@ -232,10 +237,15 @@ def test_invalid_id_and_revision_conflict_chinese_errors(
         service.schedules.get("missing-id")
     assert "不存在" in str(exc.value) or "找不到" in str(exc.value)
 
+    from haagent.scheduling.draft import FieldPatch
+
     with pytest.raises(AssistantServiceError) as exc2:
         service.schedules.update(
             created.id,
-            ScheduleUpdateRequest(name="x", expected_revision=99),
+            ScheduleUpdateRequest(
+                expected_revision=99,
+                name=FieldPatch.set("x"),
+            ),
         )
     assert "revision" in str(exc2.value).lower() or "冲突" in str(exc2.value)
 

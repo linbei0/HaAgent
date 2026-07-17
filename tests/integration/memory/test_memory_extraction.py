@@ -16,6 +16,7 @@ from haagent.memory.extraction import (
     MemoryExtractionRequest,
     MemoryExtractor,
 )
+from haagent.memory.intake import MemoryCandidateIntake, MemoryDraft
 from haagent.memory.retrieval import MemoryRetrievalRequest, MemoryRetriever
 from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.session.agent import AgentSession
@@ -523,57 +524,96 @@ def test_uncertain_words_do_not_trigger_phrase_based_rejection(tmp_path: Path) -
 
 
 def test_duplicate_confirmed_or_pending_memory_is_not_queued_again(tmp_path: Path) -> None:
-    gateway = RecordingGateway(
-        json.dumps(
-            {
-                "candidates": [
-                    {
-                        "scope": "workspace",
-                        "category": "facts",
-                        "title": "Package manager",
-                        "body": "HaAgent 使用 uv 管理依赖。",
-                        "source_summary": "用户明确要求记住依赖管理事实。",
-                        "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
-                        "category_rationale": "这是当前 workspace 的稳定项目事实。",
-                        "evidence_source": "user_prompt",
-                        "evidence_quote": "HaAgent 使用 uv 管理依赖",
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        ),
+    payload = json.dumps(
+        {
+            "candidates": [
+                {
+                    "scope": "workspace",
+                    "category": "facts",
+                    "title": "Package manager",
+                    "body": "HaAgent 使用 uv 管理依赖。",
+                    "source_summary": "用户明确要求记住依赖管理事实。",
+                    "basis": "用户说：记住这个：HaAgent 使用 uv 管理依赖。",
+                    "category_rationale": "这是当前 workspace 的稳定项目事实。",
+                    "evidence_source": "user_prompt",
+                    "evidence_quote": "HaAgent 使用 uv 管理依赖",
+                }
+            ]
+        },
+        ensure_ascii=False,
     )
-    request = _request(tmp_path, prompt="记住这个：HaAgent 使用 uv 管理依赖。", gateway=gateway)
+    request = _request(
+        tmp_path,
+        prompt="记住这个：HaAgent 使用 uv 管理依赖。",
+        gateway=RecordingGateway(payload),
+    )
     store = MemoryStore(workspace_root=request.workspace_root, user_memory_root=tmp_path / "user-memory")
     queue = CandidateQueue(request.session_path)
-    existing = store.create_candidate(
-        queue,
+    draft = MemoryDraft(
         scope="workspace",
         category="facts",
         title="Package manager",
         body="HaAgent 使用 uv 管理依赖。",
         evidence=CandidateEvidence(source_type="episode", evidence_summary="用户确认。"),
         source="user_explicit",
+        actor="user",
     )
-    store.confirm_candidate(queue, existing.candidate_id)
+    existing_result = MemoryCandidateIntake(store, queue).submit(draft, reject_secrets=False)
+    assert existing_result.accepted is True
+    assert existing_result.candidate is not None
+    store.confirm_candidate(queue, existing_result.candidate.candidate_id)
 
+    # 已确认正式记忆：提取不得再入队。
     result = MemoryExtractor().extract(request)
-
     assert result.created_count == 0
     assert len(queue.list(status="pending")) == 0
 
-    pending = store.create_candidate(
-        queue,
-        scope="workspace",
-        category="facts",
-        title="Package manager pending",
-        body="HaAgent 使用 uv 管理依赖。",
-        evidence=CandidateEvidence(source_type="episode", evidence_summary="用户确认。"),
-        source="user_explicit",
+    # pending 抑制：独立 workspace 先入队，再提取不得重复写。
+    pending_root = tmp_path / "pending-workspace"
+    pending_root.mkdir()
+    pending_session = pending_root / ".runs" / "sessions" / "session-pending"
+    pending_store = MemoryStore(workspace_root=pending_root, user_memory_root=tmp_path / "user-memory-2")
+    pending_queue = CandidateQueue(pending_session)
+    pending_seed = MemoryCandidateIntake(pending_store, pending_queue).submit(
+        MemoryDraft(
+            scope="workspace",
+            category="facts",
+            title="Package manager pending",
+            body="HaAgent 使用 uv 管理依赖。",
+            evidence=CandidateEvidence(source_type="episode", evidence_summary="用户确认。"),
+            source="user_explicit",
+            actor="user",
+        ),
+        reject_secrets=False,
     )
-    second = MemoryExtractor().extract(request)
+    assert pending_seed.accepted is True
+    assert pending_seed.candidate is not None
+    pending_request = MemoryExtractionRequest(
+        session_id="session-pending",
+        session_path=pending_session,
+        workspace_root=pending_root,
+        turn_index=1,
+        user_prompt="记住这个：HaAgent 使用 uv 管理依赖。",
+        final_response="done",
+        status="completed",
+        verification_status="not_run",
+        episode_path=pending_root / ".runs" / "episode-test",
+        working_state={
+            "current_goal": "记住这个：HaAgent 使用 uv 管理依赖。",
+            "key_findings": [],
+            "completed_actions": [],
+            "next_steps": [],
+            "last_updated_turn": 1,
+        },
+        runtime_events=[],
+        model_gateway=RecordingGateway(payload),
+        user_memory_root=tmp_path / "user-memory-2",
+    )
+    second = MemoryExtractor().extract(pending_request)
     assert second.created_count == 0
-    assert [item.candidate_id for item in queue.list(status="pending")] == [pending.candidate_id]
+    assert [item.candidate_id for item in pending_queue.list(status="pending")] == [
+        pending_seed.candidate.candidate_id
+    ]
 
 
 def test_missing_evidence_fields_are_rejected(tmp_path: Path) -> None:

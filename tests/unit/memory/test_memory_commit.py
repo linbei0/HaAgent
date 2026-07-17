@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from haagent.memory import CandidateEvidence, CandidateQueue, MemoryStore
+from haagent.memory.intake import MemoryCandidateIntake, MemoryDraft
 
 
 def _evidence() -> CandidateEvidence:
@@ -26,16 +27,45 @@ def _jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
+def _submit(
+    store: MemoryStore,
+    queue: CandidateQueue,
+    *,
+    scope: str,
+    category: str,
+    title: str,
+    body: str,
+    source: str,
+    tags: list[str] | None = None,
+) -> object:
+    result = MemoryCandidateIntake(store, queue).submit(
+        MemoryDraft(
+            scope=scope,
+            category=category,
+            title=title,
+            body=body,
+            evidence=_evidence(),
+            source=source,
+            tags=list(tags or []),
+            actor="user",
+        ),
+        reject_secrets=False,
+    )
+    assert result.accepted is True
+    assert result.candidate is not None
+    return result.candidate
+
+
 def test_confirm_candidate_writes_workspace_fact_index_and_audit(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    candidate = store.create_candidate(
+    candidate = _submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Package manager",
         body="HaAgent uses uv for dependency management.",
-        evidence=_evidence(),
         source="user_explicit",
         tags=["setup"],
     )
@@ -59,13 +89,13 @@ def test_confirm_workspace_categories_write_separate_files(tmp_path: Path) -> No
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
 
     for category in ["sop", "glossary", "decisions"]:
-        candidate = store.create_candidate(
+        candidate = _submit(
+            store,
             queue,
             scope="workspace",
             category=category,
             title=f"{category} title",
             body=f"{category} body",
-            evidence=_evidence(),
             source="user_explicit",
         )
         store.confirm_candidate(queue, candidate.candidate_id)
@@ -80,13 +110,13 @@ def test_confirm_user_memory_writes_to_user_root_only(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     user_root = tmp_path / "home" / ".haagent" / "memory"
     store = MemoryStore(workspace_root=tmp_path / "workspace", user_memory_root=user_root)
-    candidate = store.create_candidate(
+    candidate = _submit(
+        store,
         queue,
         scope="user",
         category="user_preferences",
         title="Response language",
         body="The user prefers Simplified Chinese responses.",
-        evidence=_evidence(),
         source="user_explicit",
         tags=["preference"],
     )
@@ -101,13 +131,13 @@ def test_confirm_user_memory_writes_to_user_root_only(tmp_path: Path) -> None:
 def test_confirm_uses_user_edited_candidate_content(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    candidate = store.create_candidate(
+    candidate = _submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Old title",
         body="Old body.",
-        evidence=_evidence(),
         source="agent_proposed",
         tags=["old"],
     )

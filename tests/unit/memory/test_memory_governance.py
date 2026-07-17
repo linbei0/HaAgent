@@ -15,10 +15,10 @@ from haagent.memory import (
     CandidateEvidence,
     CandidateQueue,
     MemoryConflictError,
-    MemoryDuplicateError,
     MemoryGovernanceError,
     MemoryStore,
 )
+from haagent.memory.intake import MemoryCandidateIntake, MemoryDraft
 
 
 def _evidence() -> CandidateEvidence:
@@ -42,19 +42,57 @@ def _all_text_under(path: Path) -> str:
     return "\n".join(chunks)
 
 
+def _submit(
+    store: MemoryStore,
+    queue: CandidateQueue,
+    *,
+    scope: str,
+    category: str,
+    title: str,
+    body: str,
+    source: str,
+    tags: list[str] | None = None,
+    evidence: CandidateEvidence | None = None,
+    reject_secrets: bool = False,
+):
+    result = MemoryCandidateIntake(store, queue).submit(
+        MemoryDraft(
+            scope=scope,
+            category=category,
+            title=title,
+            body=body,
+            evidence=evidence or _evidence(),
+            source=source,
+            tags=list(tags or []),
+            actor="user",
+        ),
+        reject_secrets=reject_secrets,
+    )
+    return result
+
+
+def _must_submit(*args, **kwargs):
+    result = _submit(*args, **kwargs)
+    assert result.accepted is True
+    assert result.candidate is not None
+    return result.candidate
+
+
 def test_secret_candidate_is_redacted_and_cannot_commit(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
     secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
 
-    candidate = store.create_candidate(
+    # 用户显式路径可选择入队后 redact（reject_secrets=False）；confirm 仍被 risk_flags 拦住。
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="API key",
         body=f"OpenAI key is {secret}",
-        evidence=_evidence(),
         source="user_explicit",
+        reject_secrets=False,
     )
 
     raw_queue = (queue.path).read_text(encoding="utf-8")
@@ -71,7 +109,8 @@ def test_evidence_secret_is_redacted_and_blocks_confirm(tmp_path: Path) -> None:
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
     secret = "token=abcdefghijklmnopqrstuvwxyz123456"
 
-    candidate = store.create_candidate(
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
@@ -85,6 +124,7 @@ def test_evidence_secret_is_redacted_and_blocks_confirm(tmp_path: Path) -> None:
             episode_path=".runs/episode-test",
         ),
         source="runtime",
+        reject_secrets=False,
     )
 
     assert "possible_secret" in candidate.risk_flags
@@ -104,15 +144,16 @@ def test_tag_secret_is_redacted_blocks_confirm_and_can_be_edited(tmp_path: Path)
     memory_root = tmp_path / ".haagent" / "memory"
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
     secret = "cookie=abcdefghijklmnopqrstuvwxyz123456"
-    candidate = store.create_candidate(
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Safe title",
         body="Safe body.",
-        evidence=_evidence(),
         source="user_explicit",
         tags=["safe", secret],
+        reject_secrets=False,
     )
 
     assert "possible_secret" in candidate.risk_flags
@@ -130,28 +171,31 @@ def test_candidate_requires_evidence(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
 
-    with pytest.raises(MemoryGovernanceError, match="evidence"):
-        store.create_candidate(
-            queue,
-            scope="workspace",
-            category="facts",
-            title="No evidence",
-            body="This cannot be committed.",
-            evidence=CandidateEvidence(source_type="episode", evidence_summary=""),
-            source="runtime",
-        )
+    result = _submit(
+        store,
+        queue,
+        scope="workspace",
+        category="facts",
+        title="No evidence",
+        body="This cannot be committed.",
+        evidence=CandidateEvidence(source_type="episode", evidence_summary=""),
+        source="runtime",
+    )
+    assert result.accepted is False
+    assert result.reason == "invalid_evidence"
+    assert queue.list() == []
 
 
 def test_uncertain_words_are_not_phrase_flagged_or_blocked(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    candidate = store.create_candidate(
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Maybe package manager",
         body="HaAgent 可能 uses uv.",
-        evidence=_evidence(),
         source="agent_proposed",
     )
 
@@ -164,15 +208,16 @@ def test_title_body_secret_can_commit_after_safe_user_edit(tmp_path: Path) -> No
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
     secret = "password=abcdefghijklmnopqrstuvwxyz123456"
-    candidate = store.create_candidate(
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Credential note",
         body=f"The password was {secret}.",
-        evidence=_evidence(),
         source="user_explicit",
         tags=["credential-note"],
+        reject_secrets=False,
     )
 
     record = store.confirm_candidate(
@@ -190,69 +235,103 @@ def test_title_body_secret_can_commit_after_safe_user_edit(tmp_path: Path) -> No
 def test_duplicate_content_hash_is_not_written_twice(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    first = store.create_candidate(
+    first = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Quality gate",
         body="Run uv run pytest tests/test_memory_*.py -q.",
-        evidence=_evidence(),
         source="user_explicit",
     )
-    second = store.create_candidate(
+    # Intake 在入队前去重：相同内容第二次不得再写 pending。
+    second = _submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Quality gate",
         body="Run uv run pytest tests/test_memory_*.py -q.",
-        evidence=_evidence(),
         source="runtime",
     )
+    assert second.accepted is False
+    assert second.reason == "duplicate_fingerprint_or_content"
     store.confirm_candidate(queue, first.candidate_id)
-
-    with pytest.raises(MemoryDuplicateError):
-        store.confirm_candidate(queue, second.candidate_id)
     assert len(_jsonl(tmp_path / ".haagent" / "memory" / "facts.jsonl")) == 1
 
 
 def test_similar_title_conflict_is_explicit(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    first = store.create_candidate(
+    first = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="decisions",
         title="Long term memory write path",
         body="Candidates must be confirmed before durable commit.",
-        evidence=_evidence(),
         source="user_explicit",
     )
-    second = store.create_candidate(
+    store.confirm_candidate(queue, first.candidate_id)
+
+    # 相似标题：Intake 抑制再入队；confirm 路径仍保留 MemoryConflictError 语义（见下）。
+    second = _submit(
+        store,
         queue,
         scope="workspace",
         category="decisions",
         title="Long-term memory write path",
         body="Candidates require user review before durable commit.",
-        evidence=_evidence(),
+        source="runtime",
+    )
+    assert second.accepted is False
+    assert second.reason == "duplicate_fingerprint_or_content"
+    assert len(_jsonl(tmp_path / ".haagent" / "memory" / "decisions.jsonl")) == 1
+
+
+def test_confirm_still_raises_conflict_for_queued_similar_titles(tmp_path: Path) -> None:
+    """两条已 pending 候选若身份不同但 confirm 时标题冲突，仍应 MemoryConflictError。"""
+    queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
+    store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
+    first = _must_submit(
+        store,
+        queue,
+        scope="workspace",
+        category="decisions",
+        title="Alpha decision path",
+        body="First durable decision body.",
+        source="user_explicit",
+    )
+    # 不同 body/title 足以绕过 intake 指纹/hash；confirm 时用编辑制造相似标题冲突。
+    second = _must_submit(
+        store,
+        queue,
+        scope="workspace",
+        category="decisions",
+        title="Beta decision path",
+        body="Second durable decision body.",
         source="runtime",
     )
     store.confirm_candidate(queue, first.candidate_id)
-
     with pytest.raises(MemoryConflictError):
-        store.confirm_candidate(queue, second.candidate_id)
-    assert len(_jsonl(tmp_path / ".haagent" / "memory" / "decisions.jsonl")) == 1
+        store.confirm_candidate(
+            queue,
+            second.candidate_id,
+            edited_title="Alpha decision path",
+            edited_body="Second durable decision body.",
+        )
 
 
 def test_soft_delete_writes_tombstone_and_keeps_source_record(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    candidate = store.create_candidate(
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Soft delete target",
         body="Soft delete keeps source JSONL records.",
-        evidence=_evidence(),
         source="user_explicit",
     )
     record = store.confirm_candidate(queue, candidate.candidate_id)
@@ -279,13 +358,13 @@ def test_soft_delete_writes_tombstone_and_keeps_source_record(tmp_path: Path) ->
 def test_soft_delete_redacts_secret_reason_in_tombstone_and_audit(tmp_path: Path) -> None:
     queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
     store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
-    candidate = store.create_candidate(
+    candidate = _must_submit(
+        store,
         queue,
         scope="workspace",
         category="facts",
         title="Delete reason target",
         body="Soft delete reason must be redacted.",
-        evidence=_evidence(),
         source="user_explicit",
     )
     record = store.confirm_candidate(queue, candidate.candidate_id)

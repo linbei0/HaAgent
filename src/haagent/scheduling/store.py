@@ -314,46 +314,36 @@ class ScheduleStore:
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_definition(r) for r in rows]
 
-    def update(
+    def replace(
         self,
-        schedule_id: str,
+        definition: ScheduleDefinition,
         *,
         expected_revision: int,
         now: datetime,
         next_run_at_utc: datetime | None | object = ...,
-        **fields: Any,
     ) -> ScheduleDefinition:
-        current = self.get(schedule_id)
+        """只接受完整已校验 definition；不接受开放 **fields。"""
+        current = self.get(definition.id)
         if current is None:
-            raise ScheduleStoreError("not_found", f"计划不存在: {schedule_id}")
+            raise ScheduleStoreError("not_found", f"计划不存在: {definition.id}")
         if current.revision != expected_revision:
             raise ScheduleStoreError(
                 "revision_conflict",
                 f"revision 冲突: 期望 {expected_revision}, 实际 {current.revision}",
             )
-        data = asdict(current)
-        # asdict 会把 Path 变成 str；重建时再包装
-        data["workspace_root"] = current.workspace_root
-        data["destination_session_path"] = current.destination_session_path
-        data["allowed_tools"] = current.allowed_tools
-        data["approval_allowed_tools"] = current.approval_allowed_tools
-        data["approved_tools"] = current.approved_tools
-        data["retry_policy"] = current.retry_policy
-        for key, value in fields.items():
-            if key in {"id", "revision"}:
-                continue
-            if key not in data:
-                raise ScheduleStoreError("unknown_field", f"未知字段: {key}")
-            data[key] = value
-        data["revision"] = current.revision + 1
-        updated = validate_schedule(ScheduleDefinition(**data))
+        if definition.revision != expected_revision + 1:
+            raise ScheduleStoreError(
+                "invalid_revision",
+                f"definition.revision 必须为 expected+1: {definition.revision}",
+            )
+        updated = validate_schedule(definition)
         now_s = _dt_to_iso(now)
         # ... 哨兵：未传入时保留原 next_run；显式 None 表示清除
         update_next = next_run_at_utc is not ...
         next_s = _dt_to_iso(next_run_at_utc) if update_next else None  # type: ignore[arg-type]
+        schedule_id = definition.id
         try:
             self._conn.execute("BEGIN IMMEDIATE")
-            # 重新读 revision 做乐观锁
             row = self._conn.execute(
                 "SELECT revision FROM schedules WHERE id = ?", (schedule_id,)
             ).fetchone()
@@ -435,14 +425,15 @@ class ScheduleStore:
         return updated
 
     def pause(self, schedule_id: str, *, now: datetime) -> ScheduleDefinition:
+        from dataclasses import replace as dc_replace
+
         current = self.get(schedule_id)
         if current is None:
             raise ScheduleStoreError("not_found", f"计划不存在: {schedule_id}")
-        return self.update(
-            schedule_id,
+        return self.replace(
+            dc_replace(current, status="paused", revision=current.revision + 1),
             expected_revision=current.revision,
             now=now,
-            status="paused",
             next_run_at_utc=None,
         )
 
@@ -453,26 +444,28 @@ class ScheduleStore:
         now: datetime,
         next_run_at_utc: datetime | None,
     ) -> ScheduleDefinition:
+        from dataclasses import replace as dc_replace
+
         current = self.get(schedule_id)
         if current is None:
             raise ScheduleStoreError("not_found", f"计划不存在: {schedule_id}")
-        return self.update(
-            schedule_id,
+        return self.replace(
+            dc_replace(current, status="active", revision=current.revision + 1),
             expected_revision=current.revision,
             now=now,
-            status="active",
             next_run_at_utc=next_run_at_utc,
         )
 
     def archive(self, schedule_id: str, *, now: datetime) -> ScheduleDefinition:
+        from dataclasses import replace as dc_replace
+
         current = self.get(schedule_id)
         if current is None:
             raise ScheduleStoreError("not_found", f"计划不存在: {schedule_id}")
-        return self.update(
-            schedule_id,
+        return self.replace(
+            dc_replace(current, status="archived", revision=current.revision + 1),
             expected_revision=current.revision,
             now=now,
-            status="archived",
             next_run_at_utc=None,
         )
 

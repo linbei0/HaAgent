@@ -294,49 +294,15 @@ class AssistantChannelTestResult:
         )
 
 
-@dataclass(frozen=True)
-class ScheduleCreateRequest:
-    name: str
-    prompt: str
-    workspace_root: Path
-    destination_kind: DestinationKind
-    destination_session_path: Path | None
-    connection_id: str
-    model: str
-    web_enabled: bool
-    allowed_tools: tuple[str, ...]
-    approval_allowed_tools: tuple[str, ...]
-    approved_tools: tuple[str, ...]
-    permission_mode: PermissionMode
-    dtstart_local: datetime
-    timezone: str
-    rrule: str | None
-    misfire_policy: MisfirePolicy = "latest"
-    overlap_policy: OverlapPolicy = "skip"
-    retry_policy: RetryPolicy = field(default_factory=RetryPolicy)
+# 领域输入以 ScheduleDraft / SchedulePatch 为准；应用层类型与之同形。
+from haagent.scheduling.draft import (  # noqa: E402
+    FieldPatch as ScheduleFieldPatch,
+    ScheduleDraft,
+    SchedulePatch,
+)
 
-
-@dataclass(frozen=True)
-class ScheduleUpdateRequest:
-    expected_revision: int
-    name: str | None = None
-    prompt: str | None = None
-    workspace_root: Path | None = None
-    destination_kind: DestinationKind | None = None
-    destination_session_path: Path | None | object = ...
-    connection_id: str | None = None
-    model: str | None = None
-    web_enabled: bool | None = None
-    allowed_tools: tuple[str, ...] | None = None
-    approval_allowed_tools: tuple[str, ...] | None = None
-    approved_tools: tuple[str, ...] | None = None
-    permission_mode: PermissionMode | None = None
-    dtstart_local: datetime | None = None
-    timezone: str | None = None
-    rrule: str | None | object = ...
-    misfire_policy: MisfirePolicy | None = None
-    overlap_policy: OverlapPolicy | None = None
-    retry_policy: RetryPolicy | None = None
+ScheduleCreateRequest = ScheduleDraft
+ScheduleUpdateRequest = SchedulePatch
 
 
 @dataclass(frozen=True)

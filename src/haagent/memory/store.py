@@ -16,14 +16,13 @@ from haagent.memory.governance import (
     MemoryGovernanceError,
     check_duplicate_and_conflict,
     ensure_confirmable,
-    memory_content_hash,
-    memory_id_for,
     prepare_candidate_fields,
     redact_tombstone_reason,
     validate_candidate_source,
     validate_evidence,
     validate_scope_category,
 )
+from haagent.memory.identity import compute_identity
 from haagent.memory.schema import (
     MEMORY_SCHEMA_VERSION,
     MEMORY_CATEGORIES_BY_SCOPE,
@@ -66,7 +65,7 @@ class MemoryStore:
         self.workspace_memory_root = self.workspace_root / ".haagent" / "memory"
         self.user_memory_root = (user_memory_root or user_config_dir() / "memory").resolve()
 
-    def create_candidate(
+    def _persist_candidate(
         self,
         queue: CandidateQueue,
         *,
@@ -79,6 +78,7 @@ class MemoryStore:
         tags: list[str] | None = None,
         actor: str = "agent",
     ) -> MemoryCandidate:
+        """仅供 MemoryCandidateIntake 在治理通过后落盘；禁止外部直调。"""
         validate_scope_category(scope, category)
         validate_candidate_source(source)
         validate_evidence(evidence)
@@ -150,17 +150,24 @@ class MemoryStore:
         ensure_confirmable(candidate.evidence, risk_flags)
         validate_scope_category(candidate.scope, candidate.category)
 
-        content_hash = memory_content_hash(title, body)
+        # confirm 复用同一 MemoryIdentity 模块，与 intake 身份规则一致。
+        identity = compute_identity(
+            scope=candidate.scope,
+            category=candidate.category,
+            title=title,
+            body=body,
+            evidence=candidate.evidence,
+        )
         now = _now_iso()
         record = MemoryRecord(
-            memory_id=memory_id_for(candidate.scope, candidate.category, content_hash),
+            memory_id=identity.memory_id,
             scope=candidate.scope,
             category=candidate.category,
             title=title,
             body=body,
             evidence=candidate.evidence,
             source_candidate_id=candidate.candidate_id,
-            content_hash=content_hash,
+            content_hash=identity.content_hash,
             created_at=now,
             updated_at=now,
             tags=tags,

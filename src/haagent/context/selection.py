@@ -10,6 +10,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from haagent.context.compression.sections import ContextBudget, collapse_text_head_tail
+from haagent.context.source_definitions import (
+    CONTEXT_SOURCE_DEFINITIONS,
+    ContextSourceDefinition,
+    get_source_definition,
+)
 from haagent.context.sources import ContextCandidate, ContextDecision, ContextSection
 
 
@@ -88,13 +93,24 @@ class ContextSelector:
             decision = _decision(candidate, chars=chars, selected=True, skip_reason=None)
             selected.append(decision)
             # 直接产出压缩层可消费的统一 ContextSection，避免二次字段映射。
+            definition = get_source_definition(candidate.source_type)
             section = ContextSection(
                 key=candidate.source_id,
                 title=candidate.title,
                 content=content,
-                source=_compaction_source(candidate.source_type),
-                priority=_compaction_priority(candidate.source_type),
-                kind=_compaction_kind(candidate.source_type),
+                source=(
+                    definition.resolved_compaction_source()
+                    if definition is not None
+                    else candidate.source_type
+                ),
+                priority=(
+                    definition.compaction_priority if definition is not None else 10
+                ),
+                kind=(
+                    definition.resolved_compaction_kind()
+                    if definition is not None
+                    else candidate.source_type
+                ),
                 hard_required=candidate.hard_required,
                 source_type=candidate.source_type,
                 source_id=candidate.source_id,
@@ -137,115 +153,29 @@ class ContextCandidateInputs:
 
 
 def collect_context_candidates(inputs: ContextCandidateInputs) -> list[ContextCandidate]:
+    """按固定 ContextSourceDefinition 列表收集候选；新增 source 只加 definition。"""
     candidates: list[ContextCandidate] = []
-    _append_candidate(
-        candidates,
-        source_type="soul",
-        source_id="soul",
-        placement="system",
-        title="Agent Soul",
-        content=inputs.soul,
-        reason="deterministic_soul_context",
-        priority=25,
-        include_empty=inputs.soul_skip_reason is not None,
-        skip_reason=inputs.soul_skip_reason,
-        metadata=inputs.soul_metadata,
-    )
-    _append_candidate(
-        candidates,
-        source_type="project_instructions",
-        source_id="project_instructions",
-        placement="system",
-        title="Project Instructions",
-        content=inputs.project_instructions,
-        reason="workspace_agents_md_found",
-        priority=10,
-    )
-    _append_candidate(
-        candidates,
-        source_type="prompt_pack",
-        source_id="prompt_pack",
-        placement="system",
-        title="Prompt Packs",
-        content=inputs.prompt_packs,
-        reason="explicit_prompt_command",
-        priority=15,
-        metadata=inputs.prompt_pack_metadata,
-        hard_required=True,
-    )
-    _append_candidate(
-        candidates,
-        source_type="session_summary",
-        source_id="session_summary",
-        placement="system",
-        title="Session Summary",
-        content=inputs.session_summary,
-        reason="resumed_session",
-        priority=30,
-    )
-    _append_candidate(
-        candidates,
-        source_type="working_state",
-        source_id="working_state",
-        placement="task",
-        title="Working State",
-        content=inputs.working_state,
-        reason="working_state_present",
-        priority=20,
-    )
-    _append_candidate(
-        candidates,
-        source_type="task_ledger",
-        source_id="task_ledger",
-        placement="task",
-        title="Task Ledger",
-        content=inputs.task_ledger,
-        reason="task_ledger_present",
-        priority=18,
-    )
-    _append_candidate(
-        candidates,
-        source_type="memory_index",
-        source_id="memory_index",
-        placement="task",
-        title="Memory/SOP Navigation Index",
-        content=inputs.memory_index,
-        reason="confirmed_memory_index_available",
-        priority=45,
-        include_empty=inputs.memory_index_skip_reason is not None,
-        skip_reason=inputs.memory_index_skip_reason,
-        metadata=inputs.memory_index_metadata,
-    )
-    _append_candidate(
-        candidates,
-        source_type="memory",
-        source_id="memory",
-        placement="task",
-        title="Relevant Memory",
-        content=inputs.memory_block,
-        reason="memory_retrieval_match",
-        priority=50,
-    )
-    _append_candidate(
-        candidates,
-        source_type="interaction_history",
-        source_id="interaction_history",
-        placement="task",
-        title="Interaction History",
-        content=inputs.interaction_state,
-        reason="recent_interaction_state",
-        priority=40,
-    )
-    _append_candidate(
-        candidates,
-        source_type="skills",
-        source_id="skills",
-        placement="system",
-        title="Available Skills",
-        content=inputs.skills_block,
-        reason="allowed_skill_tools_present",
-        priority=60,
-    )
+    for definition in CONTEXT_SOURCE_DEFINITIONS:
+        content = getattr(inputs, definition.content_field, None)
+        skip_reason = (
+            getattr(inputs, definition.skip_reason_field, None)
+            if definition.skip_reason_field
+            else None
+        )
+        metadata = (
+            getattr(inputs, definition.metadata_field, None)
+            if definition.metadata_field
+            else None
+        )
+        include_empty = definition.include_empty_on_skip and skip_reason is not None
+        _append_candidate(
+            candidates,
+            definition=definition,
+            content=content if isinstance(content, str) else None,
+            include_empty=include_empty,
+            skip_reason=skip_reason if isinstance(skip_reason, str) else None,
+            metadata=metadata if isinstance(metadata, dict) else None,
+        )
     return candidates
 
 
@@ -286,29 +216,23 @@ def _prepare_candidate(candidate: ContextCandidate, budget: ContextSelectionBudg
 def _append_candidate(
     candidates: list[ContextCandidate],
     *,
-    source_type: str,
-    source_id: str,
-    placement: str,
-    title: str,
+    definition: ContextSourceDefinition,
     content: str | None,
-    reason: str,
-    priority: int,
     include_empty: bool = False,
     skip_reason: str | None = None,
     metadata: dict[str, Any] | None = None,
-    hard_required: bool = False,
 ) -> None:
     if include_empty or (content and content.strip()):
         candidates.append(
             ContextCandidate(
-                source_type=source_type,
-                source_id=source_id,
-                placement=placement,  # type: ignore[arg-type]
-                title=title,
+                source_type=definition.source_type,
+                source_id=definition.id,
+                placement=definition.placement,
+                title=definition.title,
                 content=(content or "").strip(),
-                reason=reason,
-                priority=priority,
-                hard_required=hard_required,
+                reason=definition.reason,
+                priority=definition.selection_priority,
+                hard_required=definition.hard_required,
                 skip_reason=skip_reason,
                 metadata=dict(metadata or {}),
             ),
@@ -334,38 +258,3 @@ def _decision(
         skip_reason=skip_reason,
         metadata=dict(candidate.metadata),
     )
-
-
-def _compaction_source(source_type: str) -> str:
-    if source_type == "project_instructions":
-        return "project"
-    if source_type == "session_summary":
-        return "session"
-    if source_type == "interaction_history":
-        return "interaction_state"
-    if source_type == "memory_index":
-        return "memory"
-    return source_type
-
-
-def _compaction_kind(source_type: str) -> str:
-    if source_type == "interaction_history":
-        return "interaction"
-    if source_type == "memory_index":
-        return "memory_index"
-    return source_type
-
-
-def _compaction_priority(source_type: str) -> int:
-    return {
-        "prompt_pack": 85,
-        "project_instructions": 80,
-        "task_ledger": 78,
-        "working_state": 75,
-        "session_summary": 70,
-        "soul": 68,
-        "memory_index": 65,
-        "memory": 60,
-        "interaction_history": 55,
-        "skills": 50,
-    }.get(source_type, 10)

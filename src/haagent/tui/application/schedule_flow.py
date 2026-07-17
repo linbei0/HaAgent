@@ -483,28 +483,35 @@ class ScheduleFlow:
             retry_policy=request.retry_policy or RetryPolicy(),
         )
         if state.editing_id and state.expected_revision is not None:
+            from haagent.scheduling.draft import FieldPatch
+
+            set_ = FieldPatch.set
             updated = self._app.service.schedules.update(
                 state.editing_id,
                 ScheduleUpdateRequest(
                     expected_revision=state.expected_revision,
-                    name=request.name,
-                    prompt=request.prompt,
-                    workspace_root=request.workspace_root,
-                    destination_kind=request.destination_kind,
-                    destination_session_path=request.destination_session_path,
-                    connection_id=request.connection_id,
-                    model=request.model,
-                    web_enabled=request.web_enabled,
-                    allowed_tools=request.allowed_tools,
-                    approval_allowed_tools=request.approval_allowed_tools,
-                    approved_tools=request.approved_tools,
-                    permission_mode=request.permission_mode,
-                    dtstart_local=request.dtstart_local,
-                    timezone=request.timezone,
-                    rrule=request.rrule,
-                    misfire_policy=request.misfire_policy,
-                    overlap_policy=request.overlap_policy,
-                    retry_policy=request.retry_policy,
+                    name=set_(request.name),
+                    prompt=set_(request.prompt),
+                    workspace_root=set_(request.workspace_root),
+                    destination_kind=set_(request.destination_kind),
+                    destination_session_path=(
+                        set_(request.destination_session_path)
+                        if request.destination_session_path is not None
+                        else FieldPatch.clear()
+                    ),
+                    connection_id=set_(request.connection_id),
+                    model=set_(request.model),
+                    web_enabled=set_(request.web_enabled),
+                    allowed_tools=set_(request.allowed_tools),
+                    approval_allowed_tools=set_(request.approval_allowed_tools),
+                    approved_tools=set_(request.approved_tools),
+                    permission_mode=set_(request.permission_mode),
+                    dtstart_local=set_(request.dtstart_local),
+                    timezone=set_(request.timezone),
+                    rrule=set_(request.rrule) if request.rrule is not None else FieldPatch.clear(),
+                    misfire_policy=set_(request.misfire_policy),
+                    overlap_policy=set_(request.overlap_policy),
+                    retry_policy=set_(request.retry_policy),
                 ),
             )
             return updated.id

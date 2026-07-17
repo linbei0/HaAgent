@@ -11,6 +11,7 @@ from pathlib import Path
 
 from haagent.context.builder import ContextBuilder
 from haagent.memory import CandidateEvidence, CandidateQueue, MemoryStore
+from haagent.memory.intake import MemoryCandidateIntake, MemoryDraft
 from haagent.memory.retrieval import (
     MemoryRetrievalBudget,
     MemoryRetrievalRequest,
@@ -38,6 +39,35 @@ def _queue(tmp_path: Path) -> CandidateQueue:
     return CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
 
 
+def _submit_candidate(
+    tmp_path: Path,
+    *,
+    scope: str,
+    category: str,
+    title: str,
+    body: str,
+    tags: list[str] | None = None,
+):
+    store = _store(tmp_path)
+    queue = _queue(tmp_path)
+    result = MemoryCandidateIntake(store, queue).submit(
+        MemoryDraft(
+            scope=scope,
+            category=category,
+            title=title,
+            body=body,
+            evidence=_evidence(),
+            source="user_explicit",
+            tags=list(tags or []),
+            actor="user",
+        ),
+        reject_secrets=False,
+    )
+    assert result.accepted is True
+    assert result.candidate is not None
+    return store, queue, result.candidate
+
+
 def _commit(
     tmp_path: Path,
     *,
@@ -47,18 +77,15 @@ def _commit(
     body: str,
     tags: list[str] | None = None,
 ) -> str:
-    store = _store(tmp_path)
-    candidate = store.create_candidate(
-        _queue(tmp_path),
+    store, queue, candidate = _submit_candidate(
+        tmp_path,
         scope=scope,
         category=category,
         title=title,
         body=body,
-        evidence=_evidence(),
-        source="user_explicit",
         tags=tags,
     )
-    return store.confirm_candidate(_queue(tmp_path), candidate.candidate_id).memory_id
+    return store.confirm_candidate(queue, candidate.candidate_id).memory_id
 
 
 def _retrieve(
@@ -78,14 +105,12 @@ def _retrieve(
 
 
 def test_retrieval_reads_only_confirmed_active_memory_not_pending_candidates(tmp_path: Path) -> None:
-    pending = _store(tmp_path).create_candidate(
-        _queue(tmp_path),
+    _store_ref, _queue_ref, pending = _submit_candidate(
+        tmp_path,
         scope="workspace",
         category="facts",
         title="Pending pytest note",
         body="Pending candidates must never enter retrieval.",
-        evidence=_evidence(),
-        source="user_explicit",
     )
     committed_id = _commit(
         tmp_path,
