@@ -7,12 +7,13 @@ src/haagent/tui/widgets/timeline_models.py - 对话时间线数据模型
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypeAlias
 
 
 TimelineRole = Literal["user", "assistant", "system", "failure", "activity", "notice", "effect", "process"]
 TimelineStatus = Literal["streaming", "done", "failed"]
 ToolStatus = Literal["running", "approval", "done", "failed"]
+InteractionKey: TypeAlias = tuple[int, int | None, str, str]
 TOOL_DETAIL_VISIBLE_LIMIT = 8
 TOOL_DIAGNOSTIC_VISIBLE_LIMIT = 2
 TOOL_ACTIVITY_FLUSH_INTERVAL_MS = 50
@@ -45,6 +46,10 @@ class TimelineItem:
     tools: list[ToolActivity] = field(default_factory=list)
     detail_id: str | None = None
     detail_lines: list[str] = field(default_factory=list)
+    # 人机交互与最终回答必须使用显式状态；done 也可能只是失败/取消时结束流式占位。
+    interaction_key: InteractionKey | None = None
+    requires_attention: bool = False
+    is_final_answer: bool = False
     expanded: bool = False
     pinned: bool = False
     elapsed_seconds: float | None = None

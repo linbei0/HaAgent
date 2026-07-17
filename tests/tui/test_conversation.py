@@ -237,27 +237,21 @@ def test_tui_tool_events_and_failure_stay_visible_in_conversation(tmp_path: Path
             await pilot.pause(0.2)
             conversation = _text(app, "#conversation")
             assert list(app.query("#side-bar")) == []
-            # 审批状态保持可见；侧效与工具失败进过程组，折叠后显示步骤数与耗时。
+            # 没有最终回答时，已解决的拒绝、侧效与工具失败默认展开，便于用户直接诊断。
             assert "已完成" in conversation and "步" in conversation
-            assert "已写入文件" not in conversation
-            assert "运行命令失败" not in conversation
-            assert "需要确认：运行命令" in conversation
-            assert "已拒绝：运行命令" in conversation
-            assert "file_write" not in conversation
-            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
-            await pilot.pause(0.1)
-            conversation = _text(app, "#conversation")
-            assert app.query(".timeline-effect")
             assert "已写入文件" in conversation
             assert "文件已写入" in conversation
             assert "运行命令失败" in conversation or "写入文件" in conversation
+            assert "需要确认：运行命令" not in conversation
+            assert "已拒绝：运行命令" in conversation
+            assert "file_write" not in conversation
+            assert app.query(".timeline-effect")
             assert "步骤" not in conversation
             assert "过程" not in conversation
             assert "工具 1 项" not in conversation
             assert "1 失败" not in conversation
             assert "file_write" not in conversation
             assert "shell" not in conversation
-            assert "需要确认：运行命令" in conversation
             assert "已拒绝：运行命令" in conversation
             assert "查看工具详情" not in conversation
             assert "任务工作台" not in conversation

@@ -90,6 +90,7 @@ def _handle_approval_state(app, event: ApprovalStateEvent) -> None:
         return
     if event.state == "granted":
         app._state = "running"
+        _apply_progress_presentation(app, present_approval_state(event))
         return
     _apply_progress_presentation(app, present_approval_state(event))
 
@@ -166,12 +167,17 @@ def _warning_tool_name(event: WarningNoticeEvent) -> str:
 
 
 def _apply_progress_presentation(app, presentation: ProgressPresentation) -> None:
+    timeline = None
+    if presentation.dismiss_interaction_key is not None:
+        timeline = app.query_one("#conversation", ConversationTimeline)
+        timeline.dismiss_pending_interaction(presentation.dismiss_interaction_key)
     if presentation.status_line is not None:
         app.set_progress_status(presentation.status_line)
     if presentation.timeline_item is None:
         return
     app.clear_progress_status()
-    timeline = app.query_one("#conversation", ConversationTimeline)
+    if timeline is None:
+        timeline = app.query_one("#conversation", ConversationTimeline)
     if timeline.replace_presentation_item(presentation.timeline_item, presentation.details):
         return
     timeline.add_presentation_item(presentation.timeline_item, presentation.details)

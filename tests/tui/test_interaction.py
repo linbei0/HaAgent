@@ -320,8 +320,9 @@ def test_tui_user_input_answer_continues_same_run_prompt_events(tmp_path: Path) 
             ]
             conversation = _text(app, "#conversation")
             assert "回答已提交：request_user_input" not in conversation
-            assert "需要补充信息" in conversation
-            assert "Which file should I inspect?" in conversation
+            assert "已完成" not in conversation
+            assert "需要补充信息" not in conversation
+            assert "Which file should I inspect?" not in conversation
             assert "README.md" not in conversation
             assert "assistant: Inspect" in conversation
 

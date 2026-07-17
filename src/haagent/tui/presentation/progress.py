@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from haagent.runtime.events.types import ApprovalStateEvent, TaskProgressEvent, ToolActivityEvent, UserInputStateEvent
 from haagent.tui.design.copy import tool_display_name
 
 Severity = Literal["info", "warning", "error"]
 TimelineKind = Literal["activity", "notice", "effect"]
+InteractionKey: TypeAlias = tuple[int, int | None, str, str]
 
 TEXT_LIMIT = 160
 DETAIL_LIMIT = 240
@@ -55,6 +56,8 @@ class TimelinePresentationItem:
     severity: Severity
     turn_index: int
     detail_id: str | None = None
+    interaction_key: InteractionKey | None = None
+    requires_attention: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,7 @@ class ProgressPresentation:
     status_line: ProgressStatusState | None = None
     timeline_item: TimelinePresentationItem | None = None
     details: ExpandableDetail | None = None
+    dismiss_interaction_key: InteractionKey | None = None
 
 
 def present_task_progress(event: TaskProgressEvent) -> ProgressPresentation:
@@ -117,7 +121,7 @@ def present_approval_state(event: ApprovalStateEvent) -> ProgressPresentation:
         return _approval_requested_notice(event)
     if event.state == "denied":
         return _approval_denied_notice(event)
-    return ProgressPresentation()
+    return ProgressPresentation(dismiss_interaction_key=_approval_interaction_key(event))
 
 
 def present_user_input_state(event: UserInputStateEvent) -> ProgressPresentation:
@@ -125,7 +129,7 @@ def present_user_input_state(event: UserInputStateEvent) -> ProgressPresentation
         return _user_input_requested_notice(event)
     if event.approved is False:
         return _user_input_cancelled_notice(event)
-    return ProgressPresentation()
+    return ProgressPresentation(dismiss_interaction_key=_user_input_interaction_key(event))
 
 
 def _task_budget_notice(event: TaskProgressEvent) -> ProgressPresentation:
@@ -199,6 +203,8 @@ def _approval_requested_notice(event: ApprovalStateEvent) -> ProgressPresentatio
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
+            interaction_key=_approval_interaction_key(event),
+            requires_attention=True,
         ),
         details=detail,
     )
@@ -215,6 +221,7 @@ def _approval_denied_notice(event: ApprovalStateEvent) -> ProgressPresentation:
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
+            interaction_key=_approval_interaction_key(event),
         ),
         details=detail,
     )
@@ -231,6 +238,8 @@ def _user_input_requested_notice(event: UserInputStateEvent) -> ProgressPresenta
             severity="info",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
+            interaction_key=_user_input_interaction_key(event),
+            requires_attention=True,
         ),
         details=detail,
     )
@@ -246,6 +255,7 @@ def _user_input_cancelled_notice(event: UserInputStateEvent) -> ProgressPresenta
             severity="warning",
             turn_index=event.turn_index,
             detail_id=detail.detail_id,
+            interaction_key=_user_input_interaction_key(event),
         ),
         details=detail,
     )
@@ -284,7 +294,7 @@ def _tool_detail(event: ToolActivityEvent) -> ExpandableDetail:
 
 def _approval_detail(event: ApprovalStateEvent) -> ExpandableDetail:
     return ExpandableDetail(
-        detail_id=f"approval:{event.turn_index}:{event.tool_name}:{event.state}",
+        detail_id=f"approval:{event.turn_index}:{event.model_turn}:{event.approval_kind}:{event.tool_name}",
         lines=[
             f"工具：{_bounded(event.tool_name, 80)}",
             f"状态：{_bounded(event.state, 80)}",
@@ -295,12 +305,20 @@ def _approval_detail(event: ApprovalStateEvent) -> ExpandableDetail:
 
 def _user_input_detail(event: UserInputStateEvent) -> ExpandableDetail:
     return ExpandableDetail(
-        detail_id=f"input:{event.turn_index}:{event.tool_name}:{event.state}",
+        detail_id=f"input:{event.turn_index}:{event.model_turn}:{event.tool_name}",
         lines=[
             f"工具：{_bounded(event.tool_name, 80)}",
             f"状态：{_bounded(event.state, 80)}",
         ],
     )
+
+
+def _approval_interaction_key(event: ApprovalStateEvent) -> InteractionKey:
+    return (event.turn_index, event.model_turn, event.approval_kind, event.tool_name)
+
+
+def _user_input_interaction_key(event: UserInputStateEvent) -> InteractionKey:
+    return (event.turn_index, event.model_turn, "input", event.tool_name)
 
 
 def _is_side_effect_tool(event: ToolActivityEvent) -> bool:

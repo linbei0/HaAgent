@@ -87,6 +87,7 @@ class FakeRuntimeEventApp:
         self.task_progress_events: list[TaskProgressEvent] = []
         self.presentation_texts: list[str] = []
         self.presentation_detail_ids: list[str | None] = []
+        self.presentation_interaction_keys: list[object] = []
         self.progress_status_text = ""
         self.progress_status_severity = ""
         self.memory_loads = 0
@@ -125,6 +126,7 @@ class FakeRuntimeEventApp:
     def add_presentation_item(self, item, details) -> None:
         self.presentation_texts.append(f"{item.title}\n{item.summary}")
         self.presentation_detail_ids.append(item.detail_id)
+        self.presentation_interaction_keys.append(item.interaction_key)
 
     def replace_presentation_item(self, item, details) -> bool:
         if item.detail_id is None:
@@ -134,6 +136,17 @@ class FakeRuntimeEventApp:
         except ValueError:
             return False
         self.presentation_texts[index] = f"{item.title}\n{item.summary}"
+        self.presentation_interaction_keys[index] = item.interaction_key
+        return True
+
+    def dismiss_pending_interaction(self, interaction_key) -> bool:
+        try:
+            index = self.presentation_interaction_keys.index(interaction_key)
+        except ValueError:
+            return False
+        self.presentation_texts.pop(index)
+        self.presentation_detail_ids.pop(index)
+        self.presentation_interaction_keys.pop(index)
         return True
 
     def count_presentations_containing(self, text: str) -> int:
@@ -487,6 +500,9 @@ def test_runtime_ui_event_handler_tracks_approval_state() -> None:
     )
 
     assert "审批已允许" not in app.plain_text
+    assert "需要确认：运行命令" not in app.plain_text
+    assert "已允许：运行命令" not in app.plain_text
+    assert app.presentation_texts == []
     assert app.lines == []
     assert app._state == "running"
 

@@ -10,8 +10,13 @@ import asyncio
 
 from textual.app import App, ComposeResult
 
-from haagent.runtime.events.types import TaskProgressEvent
-from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem, present_task_progress
+from haagent.runtime.events.types import ApprovalStateEvent, TaskProgressEvent
+from haagent.tui.presentation.progress import (
+    ExpandableDetail,
+    TimelinePresentationItem,
+    present_approval_state,
+    present_task_progress,
+)
 from haagent.tui.widgets import conversation_timeline as timeline_module
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
@@ -73,6 +78,19 @@ class TimelineClickTestApp(App[None]):
             ExpandableDetail("detail-2", ["文件：src/example.py"]),
         )
         timeline.add_assistant_message("最终回答", turn_index=1)
+
+
+class ToolDetailClickTestApp(App[None]):
+    CSS = TimelineClickTestApp.CSS
+
+    def compose(self) -> ComposeResult:
+        yield ConversationTimeline(id="conversation")
+
+    def on_mount(self) -> None:
+        timeline = self.query_one("#conversation", ConversationTimeline)
+        timeline.start_assistant_response(turn_index=1)
+        timeline.add_tool_activity(ToolActivity("shell", "done", "命令执行完成", 1))
+        timeline.finalize_assistant(1, "最终回答")
 
 
 class NoticeClickTestApp(App[None]):
@@ -325,6 +343,27 @@ def test_process_items_fold_warnings_and_effects_after_final_answer() -> None:
     assert text.index("已完成 2 步") < text.index("最终回答")
 
 
+def test_late_process_item_stays_visible_without_final_answer() -> None:
+    timeline = ConversationTimeline()
+    timeline.start_assistant_response(turn_index=1)
+    timeline.finish_assistant_without_final(1, "")
+    timeline.add_presentation_item(
+        TimelinePresentationItem(
+            kind="activity",
+            title="已拒绝：运行命令",
+            summary="建议：调整请求或选择其他方案",
+            severity="warning",
+            turn_index=1,
+            detail_id="approval-1",
+        ),
+        ExpandableDetail("approval-1", ["状态：denied"]),
+    )
+
+    assert "已拒绝：运行命令" in timeline.plain_text
+    assert "已完成 1 步" in timeline.plain_text
+    assert "⌄" in timeline.plain_text
+
+
 def test_process_group_toggle_expands_and_collapses_all_process_items() -> None:
     timeline = ConversationTimeline()
     timeline.add_presentation_item(
@@ -383,6 +422,86 @@ def test_clicking_process_group_expands_the_folded_items() -> None:
             assert "2 个文件有变更" in timeline.plain_text
 
     asyncio.run(run())
+
+
+def test_clicking_process_tool_summary_expands_its_details() -> None:
+    async def run() -> None:
+        app = ToolDetailClickTestApp()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause(0.1)
+            timeline = app.query_one("#conversation", ConversationTimeline)
+
+            await pilot.click(timeline.query_one(".timeline-process"), offset=(1, 0))
+            await pilot.pause(0.1)
+            assert "运行命令 ›" in timeline.plain_text
+
+            process_blocks = list(timeline.query(".timeline-process"))
+            await pilot.click(process_blocks[-1], offset=(1, 0))
+            await pilot.pause(0.1)
+
+            assert "运行命令（shell）成功 · 命令执行完成" in timeline.plain_text
+
+    asyncio.run(run())
+
+
+def test_terminal_tool_event_updates_running_activity_across_process_items() -> None:
+    timeline = ConversationTimeline()
+    timeline.start_assistant_response(turn_index=1)
+    timeline.add_tool_activity(ToolActivity("shell", "running", "starting tool shell", 1))
+    timeline.finalize_intermediate(1, 1, "准备运行命令")
+    timeline.add_presentation_item(
+        TimelinePresentationItem(
+            kind="activity",
+            title="其他过程",
+            summary="",
+            severity="info",
+            turn_index=1,
+            detail_id="other-process",
+        ),
+        ExpandableDetail("other-process", ["详情"]),
+    )
+
+    timeline.add_tool_activity(ToolActivity("shell", "done", "命令执行完成", 1))
+
+    process_items = timeline._process_items_by_turn[1]
+    shell_activities = [
+        activity
+        for item in process_items
+        for activity in item.tools
+        if activity.tool_name == "shell"
+    ]
+    assert shell_activities == [ToolActivity("shell", "done", "命令执行完成", 1)]
+    assert process_items[-1].tools == []
+
+
+def test_approved_tool_flow_renders_as_one_completed_step_without_stale_running_state() -> None:
+    timeline = ConversationTimeline()
+    approval = {
+        "session_id": "session-1",
+        "turn_index": 1,
+        "model_turn": 1,
+        "tool_name": "shell",
+        "question": "允许运行命令？",
+    }
+    timeline.start_assistant_response(turn_index=1)
+    timeline.add_tool_activity(ToolActivity("shell", "running", "starting tool shell", 1))
+    timeline.finalize_intermediate(1, 1, "准备运行命令")
+    requested = present_approval_state(ApprovalStateEvent(**approval, state="requested", approved=None))
+    assert requested.timeline_item is not None
+    timeline.add_presentation_item(requested.timeline_item, requested.details)
+    granted = present_approval_state(ApprovalStateEvent(**approval, state="granted", approved=True))
+    assert granted.dismiss_interaction_key is not None
+    timeline.dismiss_pending_interaction(granted.dismiss_interaction_key)
+    timeline.add_tool_activity(ToolActivity("shell", "done", "命令执行完成", 1))
+    timeline.finalize_assistant(1, "最终回答")
+
+    assert "已完成 1 步" in timeline.plain_text
+    timeline.toggle_process_group(1)
+    expanded = timeline.plain_text
+    assert "运行命令 ›" in expanded
+    assert "正在运行命令" not in expanded
+    assert "starting tool shell" not in expanded
+    assert "已允许：运行命令" not in expanded
 
 
 def test_process_child_items_do_not_show_generic_process_label() -> None:

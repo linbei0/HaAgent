@@ -9,8 +9,13 @@ from __future__ import annotations
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest
 from haagent.tui.design.renderers import approval_body, edit_diff_body
 
-from haagent.runtime.events.types import TaskProgressEvent, ToolActivityEvent
-from haagent.tui.presentation.progress import present_task_progress, present_tool_activity
+from haagent.runtime.events.types import ApprovalStateEvent, TaskProgressEvent, ToolActivityEvent, UserInputStateEvent
+from haagent.tui.presentation.progress import (
+    present_approval_state,
+    present_task_progress,
+    present_tool_activity,
+    present_user_input_state,
+)
 
 
 def _task_event(event_name: str, **overrides: object) -> TaskProgressEvent:
@@ -187,6 +192,47 @@ def test_tool_failure_becomes_actionable_notice_without_full_error() -> None:
     assert presentation.timeline_item.kind == "activity"
     assert presentation.details is not None
     assert long_error not in "\n".join(presentation.details.lines)
+
+
+def test_resolved_approval_replaces_pending_notice_and_clears_attention() -> None:
+    common = {
+        "session_id": "session-1",
+        "turn_index": 1,
+        "model_turn": 2,
+        "tool_name": "shell",
+        "question": "允许运行命令？",
+        "args_summary": {"command": "echo ok"},
+    }
+    requested = present_approval_state(ApprovalStateEvent(**common, state="requested", approved=None))
+    granted = present_approval_state(ApprovalStateEvent(**common, state="granted", approved=True))
+    denied = present_approval_state(ApprovalStateEvent(**common, state="denied", approved=False))
+
+    assert requested.timeline_item is not None
+    assert denied.timeline_item is not None
+    assert granted.timeline_item is None
+    assert requested.timeline_item.detail_id == denied.timeline_item.detail_id
+    assert requested.timeline_item.requires_attention is True
+    assert denied.timeline_item.requires_attention is False
+    assert granted.dismiss_interaction_key == requested.timeline_item.interaction_key
+
+
+def test_received_user_input_replaces_pending_notice_and_clears_attention() -> None:
+    common = {
+        "session_id": "session-1",
+        "turn_index": 1,
+        "model_turn": 2,
+        "tool_name": "request_user_input",
+        "question": "请选择输出格式",
+    }
+    requested = present_user_input_state(UserInputStateEvent(**common, state="requested"))
+    received = present_user_input_state(UserInputStateEvent(**common, state="received", approved=True))
+
+    assert requested.timeline_item is not None
+    assert received.timeline_item is None
+    assert requested.timeline_item.requires_attention is True
+    assert received.dismiss_interaction_key == requested.timeline_item.interaction_key
+
+
 def test_common_approval_surfaces_use_chinese_field_labels() -> None:
     request = HumanInteractionRequest(
         interaction_type="approval",

@@ -422,13 +422,13 @@ def _timeline_item_classes(item: TimelineItem) -> str:
 def _is_process_item(item: TimelineItem) -> bool:
     # 失败与任务受阻通知同样属于本轮过程：运行时展开供用户处理，
     # 最终回答到达后由 ConversationTimeline 统一折叠进过程组。
-    if item.detail_id and item.detail_id.startswith(("approval:", "input:")):
+    if item.requires_attention:
         return False
     return item.role in {"activity", "effect", "process", "notice", "failure"}
 
 
 def _is_clickable_item(item: TimelineItem) -> bool:
-    return _is_process_group_id(item.item_id) or bool(item.detail_lines)
+    return _is_process_group_id(item.item_id) or bool(item.detail_lines) or bool(item.tools)
 
 
 def _process_group_id(turn_index: int) -> int:
