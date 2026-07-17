@@ -30,27 +30,20 @@ from haagent.tools.registry import ToolRuntimeRegistry
 from haagent.tools.presentation import summarize_tool_args, summarize_tool_result
 
 
-CHAT_ALLOWED_TOOLS = [
-    "file_list",
-    "grep",
-    "file_read",
-    "request_user_input",
-    "start_memory_update",
-    "file_write",
-    "code_run",
-    "apply_patch",
-    "apply_patch_set",
-    "shell",
-    "agent",
-    "send_message",
-    "task_stop",
-    "task_get",
-    "task_list",
-    "task_output",
-]
-CHAT_WEB_TOOLS = ["web_search", "web_fetch", "skill_market_search"]
-CHAT_SKILL_TOOLS = ["skill_list", "skill_read"]
-CHAT_APPROVED_TOOLS = ["file_write", "code_run", "apply_patch", "apply_patch_set", "shell"]
+def _chat_tool_lists() -> tuple[list[str], list[str], list[str], list[str]]:
+    # chat 可见工具集由静态 ToolCatalog tags 派生，避免与 registry 分头维护。
+    from haagent.tools.catalog import default_tool_catalog
+
+    catalog = default_tool_catalog()
+    return (
+        catalog.chat_default_tools(),
+        catalog.chat_web_tools(),
+        catalog.chat_skill_tools(),
+        catalog.chat_approval_tools(),
+    )
+
+
+CHAT_ALLOWED_TOOLS, CHAT_WEB_TOOLS, CHAT_SKILL_TOOLS, CHAT_APPROVED_TOOLS = _chat_tool_lists()
 
 
 class OrchestratorFactory(Protocol):

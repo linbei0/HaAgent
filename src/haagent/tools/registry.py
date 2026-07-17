@@ -1,13 +1,14 @@
 """
 haagent/tools/registry.py - 工具注册表组合入口
 
-合并领域工具定义，校验 schema，并导出模型网关使用的稳定接口。
+提供 ToolDefinition 与运行时 registry；静态定义由 ToolCatalog 唯一生成。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -37,6 +38,7 @@ class ToolDefinition:
     risk_level: str
     parameters: dict[str, Any]
     execution_effect: ExecutionEffect
+    # 动态 MCP 可沿用默认；静态 contribution 必须显式声明。
     replay_safety: ReplaySafety = ReplaySafety.NEVER_REPLAY
 
     def to_model_schema(self) -> dict[str, Any]:
@@ -48,23 +50,10 @@ class ToolDefinition:
         }
 
 
-def merge_tool_registry_fragments(
-    *fragments: dict[str, ToolDefinition],
-) -> dict[str, ToolDefinition]:
-    """合并领域注册表片段，重复工具名必须显式失败。"""
-    merged: dict[str, ToolDefinition] = {}
-    for fragment in fragments:
-        duplicate_names = sorted(set(merged).intersection(fragment))
-        if duplicate_names:
-            raise ValueError(f"duplicate tool definition: {duplicate_names[0]}")
-        merged.update(fragment)
-    return merged
-
-
 @dataclass(frozen=True)
 class ToolRuntimeRegistry:
-    static_tools: dict[str, ToolDefinition]
-    dynamic_tools: dict[str, ToolDefinition]
+    static_tools: Mapping[str, ToolDefinition]
+    dynamic_tools: Mapping[str, ToolDefinition]
     _schema_version: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -106,28 +95,8 @@ class ToolRuntimeRegistry:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-from haagent.tools.registry_fragments.agent import AGENT_TOOL_REGISTRY
-from haagent.tools.registry_fragments.core import CORE_TOOL_REGISTRY
-from haagent.tools.registry_fragments.files import FILE_TOOL_REGISTRY
-from haagent.tools.registry_fragments.mcp import MCP_TOOL_REGISTRY
-from haagent.tools.registry_fragments.shell import SHELL_TOOL_REGISTRY
-from haagent.tools.registry_fragments.skills import SKILL_TOOL_REGISTRY
-from haagent.tools.registry_fragments.web import WEB_TOOL_REGISTRY
-
-
-TOOL_REGISTRY = merge_tool_registry_fragments(
-    CORE_TOOL_REGISTRY,
-    AGENT_TOOL_REGISTRY,
-    FILE_TOOL_REGISTRY,
-    SKILL_TOOL_REGISTRY,
-    WEB_TOOL_REGISTRY,
-    MCP_TOOL_REGISTRY,
-    SHELL_TOOL_REGISTRY,
-)
-
-
 def default_tool_runtime_registry(
-    dynamic_tools: dict[str, ToolDefinition] | None = None,
+    dynamic_tools: Mapping[str, ToolDefinition] | None = None,
 ) -> ToolRuntimeRegistry:
     return ToolRuntimeRegistry(
         static_tools=TOOL_REGISTRY,
@@ -135,7 +104,7 @@ def default_tool_runtime_registry(
     )
 
 
-def validate_tool_registry(registry: dict[str, ToolDefinition] | None = None) -> None:
+def validate_tool_registry(registry: Mapping[str, ToolDefinition] | None = None) -> None:
     """自检 Tool Registry，启动时显式暴露 schema 配置错误。"""
     registry = TOOL_REGISTRY if registry is None else registry
     for name, definition in registry.items():
@@ -191,3 +160,44 @@ def export_tool_schemas(
 
         cache = default_tool_schema_cache()
     return cache.export(names, runtime_registry, diagnostics_sink=diagnostics_sink)
+
+
+def _static_tool_registry() -> Mapping[str, ToolDefinition]:
+    # 延迟加载避免 registry <-> catalog 循环导入。
+    from haagent.tools.catalog import default_tool_catalog
+
+    return default_tool_catalog().definitions
+
+
+class _ToolRegistryProxy(Mapping[str, ToolDefinition]):
+    """只读静态 registry 代理：完整 Mapping 接口，首次访问时从 catalog 加载。
+
+    不用 dict 子类：未覆盖的 copy/update/| 等继承路径会在未加载时看到空表，
+    或允许就地修改破坏全局 registry。
+    """
+
+    __slots__ = ("_loaded",)
+
+    def __init__(self) -> None:
+        self._loaded: Mapping[str, ToolDefinition] | None = None
+
+    def _ensure(self) -> Mapping[str, ToolDefinition]:
+        if self._loaded is None:
+            # 失败边界：catalog 加载失败时保持未缓存，便于下次重试。
+            self._loaded = _static_tool_registry()
+        return self._loaded
+
+    def __getitem__(self, key: str) -> ToolDefinition:
+        return self._ensure()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._ensure())
+
+    def __len__(self) -> int:
+        return len(self._ensure())
+
+    def __repr__(self) -> str:
+        return repr(dict(self._ensure()))
+
+
+TOOL_REGISTRY: Mapping[str, ToolDefinition] = _ToolRegistryProxy()

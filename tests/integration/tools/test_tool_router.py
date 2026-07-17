@@ -21,7 +21,6 @@ from haagent.skills import SkillSettings
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
-from haagent.tools import handler_factory as handler_factory_module
 from haagent.tools import file_tools
 from haagent.tools.shell import shell
 
@@ -292,7 +291,10 @@ def test_skill_market_search_runs_through_router_and_writes_trace(tmp_path: Path
             "warnings": [],
         }
 
-    monkeypatch.setattr(handler_factory_module, "skill_market_search", fake_skill_market_search)
+    monkeypatch.setattr(
+        "haagent.tools.contributions.skills.skill_market_search",
+        fake_skill_market_search,
+    )
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["skill_market_search"], episode_writer=writer, workspace_root=tmp_path)
 
@@ -315,7 +317,7 @@ def test_medium_risk_web_fetch_runs_without_high_risk_approval(tmp_path: Path) -
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {
             "status": "success",
@@ -403,7 +405,7 @@ def test_tool_router_does_not_call_handler_when_schema_validation_fails(tmp_path
     router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -427,7 +429,7 @@ def test_tool_guardrail_blocks_shell_secret_exfiltration_before_handler(tmp_path
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -452,7 +454,7 @@ def test_tool_router_denies_high_risk_shell_before_handler(tmp_path: Path) -> No
     router = ToolRouter(allowed_tools=["shell"], episode_writer=writer, workspace_root=tmp_path)
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -694,7 +696,7 @@ def test_tool_router_executes_handler_once_through_retry_controller(tmp_path: Pa
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success", "handled": True}
 
@@ -720,7 +722,7 @@ def test_approved_high_risk_tool_validates_arguments_before_execution(tmp_path: 
     calls = []
     requests = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -1224,7 +1226,7 @@ def test_apply_patch_is_denied_before_handler(tmp_path: Path) -> None:
     router = ToolRouter(allowed_tools=["apply_patch"], episode_writer=writer, workspace_root=tmp_path)
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -1409,7 +1411,7 @@ def test_apply_patch_set_policy_denial_happens_before_handler(tmp_path: Path) ->
     router = ToolRouter(allowed_tools=["apply_patch_set"], episode_writer=writer, workspace_root=tmp_path)
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         target.write_text("new", encoding="utf-8")
         return {"status": "success"}
@@ -1781,7 +1783,7 @@ def test_shell_does_not_scan_command_for_formal_memory_api_strings(tmp_path: Pat
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -1824,7 +1826,7 @@ def test_code_run_does_not_scan_code_for_formal_memory_api_strings(tmp_path: Pat
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -2054,7 +2056,7 @@ def test_policy_allowed_high_risk_tool_still_denies_but_records_allowed_missing(
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success"}
 
@@ -2107,6 +2109,79 @@ def test_request_user_input_tool_uses_interaction_handler_and_writes_trace(tmp_p
     assert record["tool_name"] == "request_user_input"
     assert record["status"] == "success"
     assert record["policy"]["action"] == "allow"
+
+
+def test_router_dispatches_file_write_through_bound_handler(tmp_path: Path) -> None:
+    """file_write 必须走 handler map，不能在 Router 内按工具名旁路实现。"""
+    from haagent.tools.catalog import ToolExecutionContext
+
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+    )
+    calls: list[tuple[dict, object]] = []
+    interaction = object()
+
+    def handler(args, context: ToolExecutionContext):
+        calls.append((args, context.interaction_handler))
+        return {
+            "status": "success",
+            "path": str(tmp_path / "notes.txt"),
+            "mode": "create",
+            "bytes_written": 5,
+            "created": True,
+            "changed_files": [],
+        }
+
+    router._handlers["file_write"] = handler
+    result = router.dispatch(
+        "file_write",
+        {"path": "notes.txt", "content": "hello", "mode": "create"},
+        interaction_handler=interaction,  # type: ignore[arg-type]
+    )
+
+    assert result["status"] == "success"
+    assert len(calls) == 1
+    assert calls[0][0]["path"] == "notes.txt"
+    assert calls[0][1] is interaction
+
+
+def test_router_dispatches_request_user_input_through_bound_handler(tmp_path: Path) -> None:
+    """request_user_input 必须走 handler map，不能在 dispatch 中单独分支。"""
+    from haagent.tools.catalog import ToolExecutionContext
+
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["request_user_input"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+    )
+    calls: list[tuple[dict, object]] = []
+    interaction = object()
+
+    def handler(args, context: ToolExecutionContext):
+        calls.append((args, context.interaction_handler))
+        return {
+            "status": "success",
+            "question": args["question"],
+            "answer": "bound",
+            "answer_chars": 5,
+        }
+
+    router._handlers["request_user_input"] = handler
+    result = router.dispatch(
+        "request_user_input",
+        {"question": "Which file?"},
+        interaction_handler=interaction,  # type: ignore[arg-type]
+    )
+
+    assert result["answer"] == "bound"
+    assert len(calls) == 1
+    assert calls[0][1] is interaction
 
 
 def test_high_risk_tool_with_missing_approval_prompts_and_runs_when_granted(tmp_path: Path) -> None:
@@ -2195,7 +2270,7 @@ def test_approved_high_risk_tool_runs_handler_and_records_granted(
     )
     calls = []
 
-    def handler(args):
+    def handler(args, _context=None):
         calls.append(args)
         return {"status": "success", "approved": True}
 

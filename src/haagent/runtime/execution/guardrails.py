@@ -62,41 +62,10 @@ def check_user_input(text: str) -> GuardrailResult | None:
 
 
 def check_tool_input(tool_name: str, args: dict[str, Any]) -> GuardrailResult | None:
-    if tool_name == "shell":
-        command = str(args.get("command", ""))
-        lowered = command.lower()
-        if any(pattern in lowered for pattern in ["~/.ssh", "id_rsa", "api_key", "api key", "secret_key"]):
-            return GuardrailResult(
-                status="blocked",
-                scope="tool_input",
-                rule_id="shell_secret_exfiltration",
-                message="shell command attempts to read or print secrets",
-                severity="high",
-            )
-        if any(pattern in lowered for pattern in ["rm -rf /", "del /f /s /q c:\\", "format c:"]):
-            return GuardrailResult(
-                status="blocked",
-                scope="tool_input",
-                rule_id="shell_destructive_outside_workspace",
-                message="shell command is destructive outside workspace scope",
-                severity="high",
-            )
-    if tool_name == "code_run":
-        code = str(args.get("code", ""))
-        lowered = code.lower()
-        if any(pattern in lowered for pattern in ["id_rsa", "api_key", "api key", "secret_key"]):
-            return GuardrailResult(
-                status="blocked",
-                scope="tool_input",
-                rule_id="code_run_secret_access",
-                message="python code attempts to read or print secrets",
-                severity="high",
-            )
-    if tool_name in {"file_write", "apply_patch"}:
-        return _check_write_like_text(tool_name, args)
-    if tool_name == "apply_patch_set":
-        return _check_patch_set(args)
-    return None
+    # 静态工具 guardrail 登记在 ToolContribution；此处只做 catalog 分发。
+    from haagent.tools.catalog import default_tool_catalog
+
+    return default_tool_catalog().check_guardrail(tool_name, args)
 
 
 def check_assistant_output(text: str) -> GuardrailResult | None:
@@ -113,41 +82,3 @@ def check_assistant_output(text: str) -> GuardrailResult | None:
 
 def guardrail_evidence(result: GuardrailResult) -> str:
     return f"guardrail {result.rule_id}: {result.message}"
-
-
-def _check_write_like_text(tool_name: str, args: dict[str, Any]) -> GuardrailResult | None:
-    text = "\n".join(
-        str(args.get(field, ""))
-        for field in ["content", "old_text", "new_text"]
-    )
-    if SECRET_TOKEN_PATTERN.search(text):
-        return GuardrailResult(
-            status="blocked",
-            scope="tool_input",
-            rule_id=f"{tool_name}_secret_write",
-            message=f"{tool_name} arguments contain a secret-like token",
-            severity="high",
-        )
-    return None
-
-
-def _check_patch_set(args: dict[str, Any]) -> GuardrailResult | None:
-    replacements = args.get("replacements")
-    if not isinstance(replacements, list):
-        return None
-    for replacement in replacements:
-        if not isinstance(replacement, dict):
-            continue
-        text = "\n".join(
-            str(replacement.get(field, ""))
-            for field in ["old_text", "new_text"]
-        )
-        if SECRET_TOKEN_PATTERN.search(text):
-            return GuardrailResult(
-                status="blocked",
-                scope="tool_input",
-                rule_id="apply_patch_set_secret_write",
-                message="apply_patch_set arguments contain a secret-like token",
-                severity="high",
-            )
-    return None

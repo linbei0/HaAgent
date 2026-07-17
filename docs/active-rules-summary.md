@@ -47,6 +47,7 @@
 - `policy.approved_tools` 表示高风险工具在本次任务中已被显式批准执行。
 - `policy` 缺失时两个列表都默认为空；两个字段都必须是 `list[str]`。
 - 列表中的工具名必须存在于 Tool Registry；`approved_tools` 中的工具必须同时出现在 `approval_allowed_tools` 中。
+- 静态工具经 `ToolContribution` / `ToolCatalog` 同源登记 definition、handler binder、展示/observation 投影、guardrail 与 chat tags；新增静态工具只改一个 contribution。静态执行统一走 catalog 绑定的 handler，并经 `ToolExecutionContext` 注入逐次 `interaction_handler`；Router 不对 `file_write`/`apply_patch*`/`request_user_input` 按名旁路。动态 `mcp__*` 不进静态 binder，仍由 ToolRouter 安全 Seam 处理。
 - 高风险工具缺少允许或批准时必须被 policy 拒绝，handler 不执行，并记录 `policy_denied` 与 `approval.status=missing`。
 - 低风险和中风险工具不需要审批，仍按原规则执行，并记录 `approval.status=not_required`。
 

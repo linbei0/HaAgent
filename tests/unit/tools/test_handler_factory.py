@@ -11,7 +11,7 @@ from haagent.runtime.execution.path_policy import default_path_policy
 from haagent.tools.registry import TOOL_REGISTRY
 
 
-def _handler(_: dict[str, Any]) -> dict[str, Any]:
+def _handler(_: dict[str, Any], __: Any = None) -> dict[str, Any]:
     return {"status": "success"}
 
 

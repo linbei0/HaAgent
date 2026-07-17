@@ -6,10 +6,21 @@ haagent/tools/base.py - 工具通用类型
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
-ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """逐次工具执行上下文。
+
+    interaction_handler 按调用注入；policy/approval 仍由 ToolRouter 决策，不进入此处。
+    """
+
+    interaction_handler: Any = None
+
+
+ToolHandler = Callable[[dict[str, Any], ToolExecutionContext], dict[str, Any]]
 
 
 class ToolRoutingError(RuntimeError):

@@ -1,14 +1,16 @@
 """
-haagent/tools/registry_fragments/agent.py - 后台智能体工具注册表
-
-定义后台任务创建、查询、消息与停止工具。
+haagent/tools/contributions/agent.py - 后台智能体静态工具 contribution
 """
 
-from haagent.tools.registry import ToolDefinition
+from __future__ import annotations
 
+from haagent.runtime.execution.retry import ReplaySafety
+from haagent.tools.catalog import ToolContribution
 
-AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
-    "agent": ToolDefinition(
+_AGENT_CONTROL = frozenset({"chat_default", "agent_control"})
+
+AGENT_CONTRIBUTIONS: list[ToolContribution] = [
+    ToolContribution(
         name="agent",
         description="spawn a background worker agent for delegated research, implementation, or verification",
         risk_level="low",
@@ -32,8 +34,11 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="external_effect",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_CONTROL,
+        router_owned=True,
     ),
-    "send_message": ToolDefinition(
+    ToolContribution(
         name="send_message",
         description="send a follow-up message to an existing worker agent",
         risk_level="low",
@@ -47,8 +52,11 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="external_effect",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_CONTROL,
+        router_owned=True,
     ),
-    "task_stop": ToolDefinition(
+    ToolContribution(
         name="task_stop",
         description="request a running worker task to stop",
         risk_level="low",
@@ -62,8 +70,11 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="external_effect",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_CONTROL,
+        router_owned=True,
     ),
-    "task_get": ToolDefinition(
+    ToolContribution(
         name="task_get",
         description="get status and metadata for one background worker task",
         risk_level="low",
@@ -76,8 +87,11 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_CONTROL,
+        router_owned=True,
     ),
-    "task_list": ToolDefinition(
+    ToolContribution(
         name="task_list",
         description="list background worker tasks for the current session",
         risk_level="low",
@@ -93,8 +107,11 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_CONTROL,
+        router_owned=True,
     ),
-    "task_output": ToolDefinition(
+    ToolContribution(
         name="task_output",
         description="read bounded output from a background worker task episode",
         risk_level="low",
@@ -111,5 +128,8 @@ AGENT_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_CONTROL,
+        router_owned=True,
     ),
-}
+]

@@ -52,19 +52,9 @@ BLOCK_TITLES = {
     "Answer required": "需要补充",
 }
 
-TOOL_DISPLAY_NAMES = {
-    "file_read": "读取文件",
-    "file_write": "写入文件",
-    "apply_patch": "修改文件",
-    "apply_patch_set": "修改文件",
-    "shell": "运行命令",
-    "code_run": "运行代码",
-    "web_search": "联网搜索",
-    "web_fetch": "读取网页",
-}
-
-
 def tool_display_name(tool_name: str) -> str:
     """普通界面使用中文动作名；原始标识只在展开详情中展示。"""
 
-    return TOOL_DISPLAY_NAMES.get(tool_name, "运行工具")
+    from haagent.tools.catalog import default_tool_catalog
+
+    return default_tool_catalog().display_name_zh(tool_name, default="运行工具")

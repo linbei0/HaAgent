@@ -1,14 +1,51 @@
 """
-haagent/tools/registry_fragments/skills.py - 技能工具注册表
-
-定义本地技能读取与远程技能市场检索工具。
+haagent/tools/contributions/skills.py - 技能静态工具 contribution
 """
 
-from haagent.tools.registry import ToolDefinition
+from __future__ import annotations
+
+from typing import Any
+
+from haagent.runtime.execution.retry import ReplaySafety
+from haagent.tools.base import ToolExecutionContext, ToolHandler
+from haagent.tools.catalog import ToolContribution, ToolRuntimeDeps
+from haagent.tools.skill_market import skill_market_search
+from haagent.tools.skills import skill_list, skill_read
 
 
-SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
-    "skill_list": ToolDefinition(
+def _bind_skill_list(deps: ToolRuntimeDeps) -> ToolHandler:
+    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+        return skill_list(
+            args,
+            deps.workspace_root,
+            deps.skill_settings,
+            skill_catalog=deps.skill_catalog,
+        )
+
+    return handler
+
+
+def _bind_skill_read(deps: ToolRuntimeDeps) -> ToolHandler:
+    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+        return skill_read(
+            args,
+            deps.workspace_root,
+            deps.skill_settings,
+            skill_catalog=deps.skill_catalog,
+        )
+
+    return handler
+
+
+def _bind_skill_market_search(_deps: ToolRuntimeDeps) -> ToolHandler:
+    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+        return skill_market_search(args)
+
+    return handler
+
+
+SKILL_CONTRIBUTIONS: list[ToolContribution] = [
+    ToolContribution(
         name="skill_list",
         description="list available local skills as compact metadata without loading skill bodies",
         risk_level="low",
@@ -32,8 +69,11 @@ SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"chat_skill"}),
+        bind_handler=_bind_skill_list,
     ),
-    "skill_read": ToolDefinition(
+    ToolContribution(
         name="skill_read",
         description="read one local skill body by name after choosing it from skill_list or available skills",
         risk_level="low",
@@ -49,8 +89,11 @@ SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"chat_skill"}),
+        bind_handler=_bind_skill_read,
     ),
-    "skill_market_search": ToolDefinition(
+    ToolContribution(
         name="skill_market_search",
         description="search the remote skill marketplace providers skills_sh and skillsmp as compact external metadata",
         risk_level="low",
@@ -75,5 +118,8 @@ SKILL_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"chat_web"}),
+        bind_handler=_bind_skill_market_search,
     ),
-}
+]

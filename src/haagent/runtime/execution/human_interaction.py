@@ -31,54 +31,7 @@ HumanInteractionHandler = Callable[[HumanInteractionRequest], HumanInteractionRe
 
 
 def interaction_args_summary(tool_name: str, args: dict[str, Any]) -> dict[str, object]:
-    if tool_name == "file_write":
-        content = str(args.get("content", ""))
-        return {
-            "content_chars": len(content),
-            "mode": str(args.get("mode", "")),
-            "path": _summary_value(str(args.get("path", "")), 160),
-        }
-    if tool_name == "code_run":
-        code = str(args.get("code", ""))
-        return {
-            "code_chars": len(code),
-            "cwd": str(args.get("cwd", ".")),
-            "timeout_seconds": args.get("timeout_seconds"),
-        }
-    if tool_name == "apply_patch":
-        old_text = str(args.get("old_text", ""))
-        new_text = str(args.get("new_text", ""))
-        return {
-            "new_text_chars": len(new_text),
-            "old_text_chars": len(old_text),
-            "path": _summary_value(str(args.get("path", "")), 160),
-        }
-    if tool_name == "apply_patch_set":
-        replacements = args.get("replacements")
-        if not isinstance(replacements, list):
-            return {"replacement_count": 0, "paths": []}
-        paths = [
-            _summary_value(str(replacement.get("path", "")), 160)
-            for replacement in replacements
-            if isinstance(replacement, dict)
-        ]
-        return {"replacement_count": len(replacements), "paths": paths}
-    if tool_name == "shell":
-        return {
-            "command": _summary_value(str(args.get("command", "")), 160),
-            "cwd": str(args.get("cwd", ".")),
-            "timeout_seconds": args.get("timeout_seconds"),
-        }
-    if tool_name == "request_user_input":
-        return {
-            "question": _summary_value(str(args.get("question", "")), 240),
-            "reason": _summary_value(str(args.get("reason", "")), 240),
-        }
-    return {"args_keys": sorted(str(key) for key in args)}
+    # 静态工具摘要由 ToolCatalog contribution 提供；未知/动态工具走通用回退。
+    from haagent.tools.catalog import default_tool_catalog
 
-
-def _summary_value(value: str, limit: int) -> str:
-    normalized = " ".join(value.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[:limit] + "... [truncated]"
+    return default_tool_catalog().interaction_args_summary(tool_name, args)

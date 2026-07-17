@@ -1,14 +1,33 @@
 """
-haagent/tools/registry_fragments/web.py - 联网工具注册表
-
-定义公开网页搜索和抓取工具。
+haagent/tools/contributions/web.py - 联网静态工具 contribution
 """
 
-from haagent.tools.registry import ToolDefinition
+from __future__ import annotations
+
+from typing import Any
+
+from haagent.runtime.execution.retry import ReplaySafety
+from haagent.tools.base import ToolExecutionContext, ToolHandler
+from haagent.tools.catalog import ToolContribution, ToolRuntimeDeps
+from haagent.tools.web import web_fetch, web_search
 
 
-WEB_TOOL_REGISTRY: dict[str, ToolDefinition] = {
-    "web_search": ToolDefinition(
+def _bind_web_search(_deps: ToolRuntimeDeps) -> ToolHandler:
+    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+        return web_search(args)
+
+    return handler
+
+
+def _bind_web_fetch(_deps: ToolRuntimeDeps) -> ToolHandler:
+    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+        return web_fetch(args)
+
+    return handler
+
+
+WEB_CONTRIBUTIONS: list[ToolContribution] = [
+    ToolContribution(
         name="web_search",
         description="search the public web using the configured search provider and return sourced compact results",
         risk_level="low",
@@ -43,8 +62,12 @@ WEB_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"chat_web"}),
+        bind_handler=_bind_web_search,
+        display_name_zh="联网搜索",
     ),
-    "web_fetch": ToolDefinition(
+    ToolContribution(
         name="web_fetch",
         description="fetch one public HTTP(S) URL and return compact readable external content",
         risk_level="medium",
@@ -64,5 +87,9 @@ WEB_TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
         execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"chat_web"}),
+        bind_handler=_bind_web_fetch,
+        display_name_zh="读取网页",
     ),
-}
+]

@@ -307,28 +307,16 @@ def observation_summary(observation: dict[str, object]) -> dict[str, object]:
     tool_name = observation_tool_name(observation)
     args = _dict_or_empty(observation.get("args"))
     result = _dict_or_empty(observation.get("result"))
-    if tool_name == "file_read":
-        return _file_read_observation_summary(args, result)
-    if tool_name == "file_write":
-        return _file_write_observation_summary(args, result)
-    if tool_name == "request_user_input":
-        return _request_user_input_observation_summary(args, result)
-    if tool_name == "file_list":
-        return _file_list_observation_summary(args, result)
-    if tool_name == "grep":
-        return _grep_observation_summary(args, result)
-    if tool_name == "shell":
-        return _shell_observation_summary(args, result)
-    if tool_name == "code_run":
-        return _code_run_observation_summary(args, result)
-    if tool_name == "apply_patch":
-        return _apply_patch_observation_summary(args, result)
-    if tool_name == "apply_patch_set":
-        return _apply_patch_set_observation_summary(args, result)
+    # 伪 observation 不是静态工具，仍在本地投影。
     if tool_name == "verification":
         return _verification_observation_summary(args, result)
     if tool_name == "loop_suggestion":
         return _loop_suggestion_observation_summary(args, result)
+    from haagent.tools.catalog import default_tool_catalog
+
+    projected = default_tool_catalog().project_observation(tool_name, args, result)
+    if projected is not None:
+        return projected
     return _generic_observation_summary(args, result)
 
 
@@ -393,110 +381,6 @@ def _ratio(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4)
 
 
-def _file_read_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    return {
-        "status": result.get("status", "unknown"),
-        "path": _first_present_string(result.get("path"), args.get("path")),
-        "start_line": result.get("start_line"),
-        "end_line": result.get("end_line"),
-        "line_count": result.get("line_count"),
-        "truncated": result.get("truncated", False),
-        "content": _compact_excerpt(_first_present_string(result.get("content"), result.get("excerpt")))[0],
-    }
-
-
-def _file_write_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    return {
-        "status": result.get("status", "unknown"),
-        "path": _first_present_string(result.get("path"), args.get("path")),
-        "mode": args.get("mode"),
-        "bytes_written": result.get("bytes_written"),
-        "created": result.get("created"),
-        "truncated": result.get("truncated", False),
-    }
-
-
-def _request_user_input_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    answer = _first_present_string(result.get("answer"), result.get("answer_excerpt"))
-    return {
-        "status": result.get("status", "unknown"),
-        "question": _first_present_string(result.get("question"), args.get("question")),
-        "answer_excerpt": _compact_excerpt(answer)[0],
-        "answer_chars": result.get("answer_chars", len(answer)),
-    }
-
-
-def _file_list_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    tree = _first_present_string(result.get("tree"), result.get("content"))
-    return {
-        "status": result.get("status", "unknown"),
-        "path": _first_present_string(result.get("path"), args.get("path"), "."),
-        "entry_count": result.get("entry_count"),
-        "truncated": result.get("truncated", False),
-        "tree": _compact_excerpt(tree)[0],
-    }
-
-
-def _grep_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    matches = result.get("matches")
-    formatted_matches = []
-    if isinstance(matches, list):
-        formatted_matches = [_format_search_match(match) for match in matches[:8]]
-    return {
-        "status": result.get("status", "unknown"),
-        "pattern": _first_present_string(result.get("pattern"), args.get("pattern")),
-        "match_count": result.get("match_count", len(formatted_matches)),
-        "truncated": result.get("truncated", False),
-        "matches": formatted_matches,
-    }
-
-
-def _shell_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    stdout = _first_present_string(result.get("stdout_excerpt"), result.get("stdout"))
-    stderr = _first_present_string(result.get("stderr_excerpt"), result.get("stderr"))
-    return {
-        "status": result.get("status", "unknown"),
-        "command": _first_present_string(result.get("command"), args.get("command")),
-        "exit_code": result.get("exit_code"),
-        "timeout": result.get("timeout", False),
-        "stdout": _compact_excerpt(stdout)[0],
-        "stderr": _compact_excerpt(stderr)[0],
-        "truncated": result.get("truncated", False),
-    }
-
-
-def _code_run_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    stdout = _first_present_string(result.get("stdout_excerpt"), result.get("stdout"))
-    stderr = _first_present_string(result.get("stderr_excerpt"), result.get("stderr"))
-    return {
-        "status": result.get("status", "unknown"),
-        "exit_code": result.get("exit_code"),
-        "timeout": result.get("timeout", False),
-        "stdout": _compact_excerpt(stdout)[0],
-        "stderr": _compact_excerpt(stderr)[0],
-        "truncated": result.get("truncated", False),
-    }
-
-
-def _apply_patch_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    patch = _first_present_string(result.get("patch"), args.get("patch"))
-    return {
-        "status": result.get("status", "unknown"),
-        "path": _first_present_string(result.get("path"), args.get("path")),
-        "changed": result.get("changed"),
-        "patch": _compact_excerpt(patch)[0],
-    }
-
-
-def _apply_patch_set_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    return {
-        "status": result.get("status", "unknown"),
-        "replacement_count": result.get("replacement_count", _patch_set_arg_count(args)),
-        "changed_paths": result.get("changed_paths", []),
-        "summary": _compact_excerpt(_first_present_string(result.get("summary")))[0],
-    }
-
-
 def _verification_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
     return {
         "status": result.get("status", "unknown"),
@@ -514,15 +398,6 @@ def _loop_suggestion_observation_summary(args: dict[str, Any], result: dict[str,
         "suggested_tool": result.get("suggested_tool"),
         "reason": _compact_excerpt(_first_present_string(result.get("reason")))[0],
     }
-
-
-def _format_search_match(match: object) -> str:
-    if isinstance(match, dict):
-        path = _first_present_string(match.get("path"), match.get("file"))
-        line = match.get("line") or match.get("line_number")
-        text = _compact_excerpt(_first_present_string(match.get("text"), match.get("line_text")))[0]
-        return f"{path}:{line}: {text}"
-    return _compact_excerpt(str(match))[0]
 
 
 def _generic_observation_summary(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
@@ -569,14 +444,17 @@ def _microcompact_summary_fields(
 
 
 def _long_text_summary_keys() -> dict[str, str]:
-    return {
-        "file_read": "content",
-        "file_list": "tree",
-        "shell": "stdout,stderr",
-        "code_run": "stdout,stderr",
-        "apply_patch": "patch",
+    from haagent.tools.catalog import default_tool_catalog
+
+    keys: dict[str, str] = {
         "verification": "stdout,stderr",
     }
+    catalog = default_tool_catalog()
+    for name in catalog.names():
+        long_keys = catalog.observation_long_text_keys(name)
+        if long_keys:
+            keys[name] = ",".join(long_keys)
+    return keys
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:
@@ -597,8 +475,3 @@ def _string_value(value: object, default: str = "") -> str:
 def _first_present_string(*values: object) -> str:
     value = _first_present(*values)
     return _string_value(value)
-
-
-def _patch_set_arg_count(args: dict[str, Any]) -> int:
-    replacements = args.get("replacements")
-    return len(replacements) if isinstance(replacements, list) else 0

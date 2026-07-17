@@ -32,8 +32,7 @@ from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.skills.catalog import SkillCatalogService
-from haagent.tools.base import ToolRoutingError, tool_error
-from haagent.tools.file_tools import apply_patch, apply_patch_set, file_write
+from haagent.tools.base import ToolExecutionContext, ToolRoutingError, tool_error
 from haagent.tools.handler_factory import build_static_tool_handlers
 from haagent.tools.mcp_tools import run_mcp_tool
 from haagent.tools.registry import (
@@ -105,7 +104,7 @@ class ToolRouter:
                 "task_get": self._task_get,
                 "task_list": self._task_list,
                 "task_output": self._task_output,
-                "request_user_input": self._request_user_input_without_handler,
+                "request_user_input": self._request_user_input_handler,
                 "start_memory_update": self._start_memory_update,
             },
         )
@@ -153,12 +152,8 @@ class ToolRouter:
                         "guardrail_denied",
                         guardrail_evidence(guardrail_result),
                     )
-                elif tool_name == "request_user_input":
-                    result = self._execute_tool_operation(
-                        tool_definition,
-                        lambda: self._request_user_input(args, interaction_handler),
-                    )
                 elif tool_name.startswith("mcp__"):
+                    # 动态 MCP 不进静态 binder；其余静态工具统一走 catalog handler map。
                     result = self._execute_tool_operation(
                         tool_definition,
                         lambda: run_mcp_tool(
@@ -251,10 +246,18 @@ class ToolRouter:
             return {}
         return self._agent_runtime.wait_for_task(task_id, timeout=timeout)
 
-    def _fake_tool(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _fake_tool(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         return {"status": "success", "args": args}
 
-    def _load_image_attachment(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _load_image_attachment(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         image_id = str(args["image_id"]).strip()
         attachment = self._image_attachment_history.get(image_id)
         if attachment is None:
@@ -289,17 +292,22 @@ class ToolRouter:
             },
         }
 
-    def _request_user_input_without_handler(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._request_user_input(args, None)
-
-    def _start_memory_update(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _start_memory_update(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         return {
             "status": "success",
             "memory_update_requested": True,
             "reason": str(args.get("reason", "")),
         }
 
-    def _agent(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _agent(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         if self._agent_runtime is None:
             return tool_error("agent_runtime_missing", "agent runtime is not configured")
         return _agent_runtime_result(
@@ -313,12 +321,20 @@ class ToolRouter:
             ),
         )
 
-    def _send_message(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _send_message(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         if self._agent_runtime is None:
             return tool_error("agent_runtime_missing", "agent runtime is not configured")
         return _agent_runtime_result(self._agent_runtime.send_message(str(args["to"]), str(args["message"])))
 
-    def _task_stop(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _task_stop(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         if self._agent_runtime is None:
             return tool_error("agent_runtime_missing", "agent runtime is not configured")
         return _agent_runtime_result(
@@ -328,12 +344,20 @@ class ToolRouter:
             ),
         )
 
-    def _task_get(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _task_get(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         if self._agent_runtime is None:
             return tool_error("agent_runtime_missing", "agent runtime is not configured")
         return _agent_runtime_result(self._agent_runtime.task_get(str(args["task_id"])))
 
-    def _task_list(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _task_list(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         if self._agent_runtime is None:
             return tool_error("agent_runtime_missing", "agent runtime is not configured")
         status = args.get("status")
@@ -341,7 +365,11 @@ class ToolRouter:
             self._agent_runtime.task_list(status=str(status) if status else None),
         )
 
-    def _task_output(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _task_output(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
         if self._agent_runtime is None:
             return tool_error("agent_runtime_missing", "agent runtime is not configured")
         return _agent_runtime_result(
@@ -350,6 +378,14 @@ class ToolRouter:
                 max_chars=int(args.get("max_chars", 12000)),
             ),
         )
+
+    def _request_user_input_handler(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        # 与写工具相同：interaction 经执行上下文注入，不在 dispatch 按名分支。
+        return self._request_user_input(args, context.interaction_handler)
 
     def _request_user_input(
         self,
@@ -491,13 +527,9 @@ class ToolRouter:
         args: dict[str, Any],
         interaction_handler: HumanInteractionHandler | None,
     ) -> dict[str, Any]:
-        if tool_name == "file_write":
-            return file_write(args, self._workspace_root, self._path_policy, interaction_handler)
-        if tool_name == "apply_patch":
-            return apply_patch(args, self._workspace_root, self._path_policy, interaction_handler)
-        if tool_name == "apply_patch_set":
-            return apply_patch_set(args, self._workspace_root, self._path_policy, interaction_handler)
-        return self._handlers[tool_name](args)
+        # 静态工具唯一执行入口：catalog 绑定的 handler + 逐次 ToolExecutionContext。
+        context = ToolExecutionContext(interaction_handler=interaction_handler)
+        return self._handlers[tool_name](args, context)
 
     def _assert_registry_alignment(self) -> None:
         """Router 和 Registry 必须同步，否则 allowed_tools 审计会和实际执行脱节。"""

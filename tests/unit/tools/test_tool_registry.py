@@ -4,6 +4,8 @@ tests/unit/tools/test_tool_registry.py - Tool Registry v1 测试
 验证工具注册表包含本阶段全部工具定义、风险级别和可导出的 JSON Schema。
 """
 
+from collections.abc import Mapping
+
 import pytest
 
 from haagent.tools.registry import (
@@ -13,7 +15,6 @@ from haagent.tools.registry import (
     allowed_tool_definitions,
     default_tool_runtime_registry,
     export_tool_schemas,
-    merge_tool_registry_fragments,
     validate_tool_registry,
 )
 
@@ -103,37 +104,21 @@ def test_tool_definition_requires_execution_effect() -> None:
         )
 
 
-def test_merge_tool_registry_fragments_rejects_duplicate_tool_names() -> None:
-    definition = ToolDefinition(
-        name="duplicate",
-        description="test",
-        risk_level="low",
-        parameters={"type": "object", "properties": {}, "required": []},
-        execution_effect="read_only",
-    )
-
-    with pytest.raises(ValueError, match="duplicate tool definition: duplicate"):
-        merge_tool_registry_fragments({"duplicate": definition}, {"duplicate": definition})
+def test_tool_registry_is_read_only_mapping_not_dict_subclass() -> None:
+    # 不全量实现 dict 子类会让 copy/update 等继承路径在未加载时返回空集；只读 Mapping 更安全。
+    assert isinstance(TOOL_REGISTRY, Mapping)
+    assert not isinstance(TOOL_REGISTRY, dict)
+    assert "file_read" in TOOL_REGISTRY
+    assert len(TOOL_REGISTRY) == len(dict(TOOL_REGISTRY))
+    with pytest.raises(TypeError):
+        TOOL_REGISTRY["file_read"] = TOOL_REGISTRY["file_read"]  # type: ignore[index]
 
 
-def test_tool_registry_is_the_deterministic_merge_of_domain_fragments() -> None:
-    from haagent.tools.registry_fragments.agent import AGENT_TOOL_REGISTRY
-    from haagent.tools.registry_fragments.core import CORE_TOOL_REGISTRY
-    from haagent.tools.registry_fragments.files import FILE_TOOL_REGISTRY
-    from haagent.tools.registry_fragments.mcp import MCP_TOOL_REGISTRY
-    from haagent.tools.registry_fragments.shell import SHELL_TOOL_REGISTRY
-    from haagent.tools.registry_fragments.skills import SKILL_TOOL_REGISTRY
-    from haagent.tools.registry_fragments.web import WEB_TOOL_REGISTRY
+def test_tool_registry_is_built_from_static_tool_catalog() -> None:
+    from haagent.tools.catalog import default_tool_catalog
 
-    assert TOOL_REGISTRY == merge_tool_registry_fragments(
-        CORE_TOOL_REGISTRY,
-        AGENT_TOOL_REGISTRY,
-        FILE_TOOL_REGISTRY,
-        SKILL_TOOL_REGISTRY,
-        WEB_TOOL_REGISTRY,
-        MCP_TOOL_REGISTRY,
-        SHELL_TOOL_REGISTRY,
-    )
+    assert dict(TOOL_REGISTRY) == default_tool_catalog().definitions
+
 
 
 def test_tool_registry_definitions_have_required_metadata() -> None:
