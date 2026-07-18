@@ -12,7 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from haagent.runtime.execution.command import CommandResult, run_process
+from haagent.runtime.execution.command import CommandResult, build_python_utf8_environment, run_process
 from haagent.runtime.sandbox.base import SandboxAvailability, SandboxCommand, SandboxMetadata
 from haagent.runtime.sandbox.docker_image import build_default_image, image_exists
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
@@ -201,12 +201,13 @@ class DockerSandboxBackend:
 
     def run_python(self, script_path: Path, command: SandboxCommand) -> CommandResult:
         container_script_path = self._container_path(script_path)
+        python_env = build_python_utf8_environment(command.env, inherit=False)
         result = run_process(
-            command=f"python {script_path}",
+            command=f"python -X utf8 {script_path}",
             popen_args=self.build_exec_argv(
-                ["python", container_script_path],
+                ["python", "-X", "utf8", container_script_path],
                 cwd=command.cwd,
-                env=command.env,
+                env=python_env,
             ),
             shell=False,
             cwd=self._workspace_root,

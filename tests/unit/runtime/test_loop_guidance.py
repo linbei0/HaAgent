@@ -39,6 +39,63 @@ def test_grep_no_results_suggests_refine() -> None:
     assert "file_list" in suggestion.message or "Refine" in suggestion.message
 
 
+def test_grep_partial_no_results_does_not_claim_search_was_complete() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "grep",
+            {"pattern": "missing"},
+            {
+                "status": "success",
+                "matches": [],
+                "partial": True,
+                "guidance": "Narrow root or file_glob and retry.",
+            },
+        )
+    )
+
+    assert suggestion is not None
+    assert "incomplete" in suggestion.message.lower()
+    assert "No matches found" not in suggestion.message
+
+
+def test_grep_truncated_results_suggest_narrower_search() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "grep",
+            {"pattern": "needle"},
+            {
+                "status": "success",
+                "matches": [{"path": "src/app.py", "line": 1, "text": "needle"}],
+                "truncated": True,
+                "guidance": "Search results were truncated; narrow root or file_glob and retry.",
+            },
+        )
+    )
+
+    assert suggestion is not None
+    assert "truncated" in suggestion.message.lower()
+    assert "root" in suggestion.message and "file_glob" in suggestion.message
+
+
+def test_grep_partial_results_with_matches_still_warns_search_is_incomplete() -> None:
+    suggestion = suggestion_for_observation(
+        _obs(
+            "grep",
+            {"pattern": "needle"},
+            {
+                "status": "success",
+                "matches": [{"path": "src/app.py", "line": 1, "text": "needle"}],
+                "partial": True,
+                "guidance": "Search was incomplete; narrow root or file_glob and retry.",
+            },
+        )
+    )
+
+    assert suggestion is not None
+    assert "partial" in suggestion.message.lower()
+    assert "root" in suggestion.message and "file_glob" in suggestion.message
+
+
 def test_file_write_success_suggests_read_back() -> None:
     suggestion = suggestion_for_observation(
         _obs(

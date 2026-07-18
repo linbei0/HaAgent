@@ -136,11 +136,18 @@ def _grep_observation(args: dict[str, Any], result: dict[str, Any]) -> dict[str,
     formatted_matches = []
     if isinstance(matches, list):
         formatted_matches = [format_search_match(match) for match in matches[:8]]
+    warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+    skipped_paths = result.get("skipped_paths") if isinstance(result.get("skipped_paths"), list) else []
     return {
         "status": result.get("status", "unknown"),
         "pattern": first_present_string(result.get("pattern"), args.get("pattern")),
         "match_count": result.get("match_count", len(formatted_matches)),
         "truncated": result.get("truncated", False),
+        "partial": result.get("partial", False),
+        "warnings": warnings[:4],
+        "skipped_paths": skipped_paths[:8],
+        "skipped_count": len(skipped_paths),
+        "guidance": result.get("guidance"),
         "matches": formatted_matches,
     }
 
@@ -283,7 +290,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
                 },
                 "file_glob": {
                     "type": "string",
-                    "description": "optional file glob for directory roots; defaults to **/*",
+                    "description": "optional include glob for directory roots; omitted searches ripgrep's default visible, non-ignored files",
                 },
                 "case_sensitive": {
                     "type": "boolean",
@@ -292,6 +299,10 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
                 "max_matches": {
                     "type": "integer",
                     "description": "optional total match limit; defaults to 200",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "optional search timeout from 1 to 60 seconds; defaults to 15",
                 },
             },
             "required": ["pattern"],

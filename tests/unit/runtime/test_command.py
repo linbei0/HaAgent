@@ -4,12 +4,23 @@ tests/unit/runtime/test_command.py - CommandRunner 测试
 验证统一命令执行器能表达成功、非零退出、超时和取消结果。
 """
 
+import os
+import shutil
 import threading
 import time
 from pathlib import Path
 
+import pytest
+
+import haagent.runtime.execution.command as command_module
 from haagent.runtime.execution.cancellation import CancellationToken
-from haagent.runtime.execution.command import _powershell_command, resolve_shell_command, run_command
+from haagent.runtime.execution.command import (
+    _powershell_command,
+    build_python_utf8_environment,
+    resolve_shell_command,
+    run_command,
+    run_process,
+)
 
 
 def test_resolve_shell_command_prefers_usable_bash_on_windows() -> None:
@@ -25,6 +36,19 @@ def test_resolve_shell_command_prefers_usable_bash_on_windows() -> None:
 
     assert argv == ["C:/Program Files/Git/bin/bash.exe", "-lc", "pwd && ls -la"]
     assert use_shell is False
+
+
+def test_python_utf8_environment_overrides_windows_locale_settings() -> None:
+    environment = build_python_utf8_environment(
+        {"PYTHONUTF8": "0", "PYTHONIOENCODING": "gbk", "CUSTOM_ENV": "1"},
+        inherit=False,
+    )
+
+    assert environment == {
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "CUSTOM_ENV": "1",
+    }
 
 
 def test_resolve_shell_command_falls_back_to_powershell_on_windows() -> None:
@@ -49,6 +73,22 @@ def test_resolve_shell_command_falls_back_to_powershell_on_windows() -> None:
     assert use_shell is False
 
 
+def test_resolve_shell_command_configures_legacy_powershell_utf8_reads() -> None:
+    def fake_which(name: str) -> str | None:
+        return {"powershell": "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"}.get(name)
+
+    argv, use_shell = resolve_shell_command(
+        "type README.md",
+        os_name="nt",
+        which=fake_which,
+        bash_is_usable=lambda path: False,
+    )
+
+    assert argv[0].endswith("powershell.exe")
+    assert "$PSDefaultParameterValues['Get-Content:Encoding'] = 'utf8'" in argv[4]
+    assert use_shell is False
+
+
 def test_resolve_shell_command_skips_wsl_bash_on_windows() -> None:
     def fake_which(name: str) -> str | None:
         return {
@@ -70,9 +110,39 @@ def test_resolve_shell_command_skips_wsl_bash_on_windows() -> None:
 def test_powershell_command_converts_cmdlet_errors_to_failed_exit() -> None:
     wrapped = _powershell_command("ls -la")
 
+    assert "[Console]::InputEncoding" in wrapped
+    assert "[Console]::OutputEncoding" in wrapped
+    assert "$OutputEncoding" in wrapped
     assert "$ErrorActionPreference = 'Stop'" in wrapped
     assert "catch" in wrapped
     assert "exit 1" in wrapped
+
+
+@pytest.mark.skipif(os.name != "nt" or shutil.which("powershell.exe") is None, reason="需要 Windows PowerShell 5.1")
+def test_legacy_powershell_reads_bomless_utf8_file(tmp_path: Path) -> None:
+    source = tmp_path / "utf8-source.txt"
+    source.write_text("压缩预算 € →\n", encoding="utf-8")
+    powershell = shutil.which("powershell.exe")
+    assert powershell is not None
+    escaped_path = str(source).replace("'", "''")
+    command = f"type '{escaped_path}'"
+
+    result = run_process(
+        command=command,
+        popen_args=[
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            _powershell_command(command, legacy=True),
+        ],
+        shell=False,
+        cwd=tmp_path,
+        timeout_seconds=5,
+    )
+
+    assert result.status == "success"
+    assert result.stdout.splitlines() == ["压缩预算 € →"]
 
 
 def test_run_command_records_success(tmp_path: Path) -> None:
@@ -97,7 +167,7 @@ def test_run_command_records_non_zero_exit(tmp_path: Path) -> None:
 
 def test_run_command_replaces_invalid_utf8_output(tmp_path: Path) -> None:
     result = run_command(
-        "python -c \"import sys; sys.stdout.buffer.write(bytes([0xd5])); sys.stderr.buffer.write(bytes([0xff]))\"",
+        "python -c \"import sys; sys.stdout.buffer.write(bytes([0x81])); sys.stderr.buffer.write(bytes([0x8d]))\"",
         cwd=tmp_path,
         timeout_seconds=5,
     )
@@ -106,6 +176,18 @@ def test_run_command_replaces_invalid_utf8_output(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "\ufffd" in result.stdout
     assert "\ufffd" in result.stderr
+
+
+def test_run_command_decodes_windows_locale_output_after_utf8_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(command_module.locale, "getpreferredencoding", lambda _setlocale=False: "gbk")
+    result = run_command(
+        "python -c \"import sys; sys.stdout.buffer.write(bytes([0xd6, 0xd0, 0xce, 0xc4]))\"",
+        cwd=tmp_path,
+        timeout_seconds=5,
+    )
+
+    assert result.status == "success"
+    assert result.stdout == "中文"
 
 
 def test_run_command_records_timeout(tmp_path: Path) -> None:

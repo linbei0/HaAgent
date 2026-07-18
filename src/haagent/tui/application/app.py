@@ -14,7 +14,10 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
+from textual.geometry import Offset
+from textual.screen import Screen
 from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import TextArea
 
 from haagent.app.assistant_service import AssistantService
@@ -63,6 +66,19 @@ from haagent.tui.widgets import (
     StatusBar,
 )
 
+
+class HaAgentScreen(Screen):
+    """过滤 Textual 命中缓存中已经卸载的文本选择节点。"""
+
+    def get_widget_and_offset_at(self, x: int, y: int) -> tuple[Widget | None, Offset | None]:
+        widget, offset = super().get_widget_and_offset_at(x, y)
+        # Markdown 流式刷新会卸载旧段落；Textual 8.2.x 的命中缓存可能短暂返回旧节点，
+        # _forward_event 随后会把空 parent 当作选择容器并访问 region，导致整个 TUI 退出。
+        if widget is not None and widget is not self and not widget.is_attached:
+            return None, None
+        return widget, offset
+
+
 class HaAgentTuiApp(App[None]):
     MIN_WIDTH = MIN_WIDTH
     MIN_HEIGHT = MIN_HEIGHT
@@ -108,6 +124,9 @@ class HaAgentTuiApp(App[None]):
         self._context_usage: ContextUsageEvent | None = None
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
+    def get_default_screen(self) -> Screen:
+        return HaAgentScreen(id="_default")
+
     def compose(self) -> ComposeResult:
         yield StatusBar("", id="status-bar")
         yield ResizeMessage(

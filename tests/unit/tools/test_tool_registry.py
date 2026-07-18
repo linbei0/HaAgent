@@ -190,8 +190,16 @@ def test_grep_schema_stays_deterministic() -> None:
 
     assert "regular expression" in schema["description"]
     assert schema["parameters"]["required"] == ["pattern"]
-    assert set(schema["parameters"]["properties"]) == {"pattern", "root", "file_glob", "case_sensitive", "max_matches"}
+    assert set(schema["parameters"]["properties"]) == {
+        "pattern",
+        "root",
+        "file_glob",
+        "case_sensitive",
+        "max_matches",
+        "timeout_seconds",
+    }
     assert "directory or file" in schema["parameters"]["properties"]["root"]["description"]
+    assert "defaults to **/*" not in schema["parameters"]["properties"]["file_glob"]["description"]
     assert TOOL_REGISTRY["grep"].risk_level == "low"
 
 

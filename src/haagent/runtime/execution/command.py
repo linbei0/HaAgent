@@ -1,11 +1,12 @@
 """
 src/haagent/runtime/execution/command.py - 统一命令执行器
 
-封装本地进程执行边界、输出摘要和 subprocess.run 结果。
+封装本地进程执行边界、输出摘要和 subprocess 结果。
 """
 
 from __future__ import annotations
 
+import locale
 import os
 import re
 import shutil
@@ -13,7 +14,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from haagent.runtime.execution.cancellation import CancellationToken
 
@@ -33,6 +34,10 @@ SECRET_ENV_NAME_PATTERN = re.compile(
     r"(api[_-]?key|secret|token|password|credential)",
     re.IGNORECASE,
 )
+PYTHON_UTF8_ENV = {
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+}
 
 
 @dataclass(frozen=True)
@@ -84,9 +89,18 @@ def resolve_shell_command(
         bash = which("bash")
         if bash and not _is_wsl_bash_path(bash) and usable_bash(bash):
             return [bash, "-lc", command], False
-        powershell = which("pwsh") or which("powershell")
+        pwsh = which("pwsh")
+        if pwsh:
+            return [pwsh, "-NoLogo", "-NoProfile", "-Command", _powershell_command(command)], False
+        powershell = which("powershell")
         if powershell:
-            return [powershell, "-NoLogo", "-NoProfile", "-Command", _powershell_command(command)], False
+            return [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                _powershell_command(command, legacy=True),
+            ], False
         return [which("cmd.exe") or "cmd.exe", "/d", "/s", "/c", command], False
 
     shell = which("bash") or which("sh") or os.environ.get("SHELL") or "/bin/sh"
@@ -106,9 +120,21 @@ def _bash_is_usable(bash_path: str) -> bool:
     return result.returncode == 0
 
 
-def _powershell_command(command: str) -> str:
+def _powershell_command(command: str, *, legacy: bool = False) -> str:
+    utf8_setup = (
+        "try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}; "
+        "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}; "
+        "try { $OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}; "
+    )
+    legacy_file_read = (
+        "$PSDefaultParameterValues['Get-Content:Encoding'] = 'utf8'; "
+        if legacy
+        else ""
+    )
     return (
         "& { "
+        f"{utf8_setup}"
+        f"{legacy_file_read}"
         "$ErrorActionPreference = 'Stop'; "
         "try { "
         f"{command}; "
@@ -131,6 +157,7 @@ def run_process(
     cwd: Path,
     timeout_seconds: float,
     cancellation_token: CancellationToken | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> CommandResult:
     """运行本地进程，支持超时和外部取消。"""
     started = time.perf_counter()
@@ -140,13 +167,12 @@ def run_process(
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        env=dict(env) if env is not None else None,
     )
     while True:
         if cancellation_token is not None and cancellation_token.is_cancelled:
-            stdout, stderr = _stop_process(process)
+            stdout_bytes, stderr_bytes = _stop_process(process)
+            stdout, stderr = _decode_process_streams(stdout_bytes, stderr_bytes)
             output = build_output_summary(stdout, stderr)
             return CommandResult(
                 command=command,
@@ -167,7 +193,8 @@ def run_process(
         elapsed = time.perf_counter() - started
         remaining = timeout_seconds - elapsed
         if remaining <= 0:
-            stdout, stderr = _stop_process(process)
+            stdout_bytes, stderr_bytes = _stop_process(process)
+            stdout, stderr = _decode_process_streams(stdout_bytes, stderr_bytes)
             output = build_output_summary(stdout, stderr)
             return CommandResult(
                 command=command,
@@ -186,11 +213,12 @@ def run_process(
                 timeout_seconds=timeout_seconds,
             )
         try:
-            stdout, stderr = process.communicate(timeout=min(0.05, remaining))
+            stdout_bytes, stderr_bytes = process.communicate(timeout=min(0.05, remaining))
             break
         except subprocess.TimeoutExpired:
             continue
 
+    stdout, stderr = _decode_process_streams(stdout_bytes, stderr_bytes)
     output = build_output_summary(stdout, stderr)
     return CommandResult(
         command=command,
@@ -210,7 +238,7 @@ def run_process(
     )
 
 
-def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+def _stop_process(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
     if process.poll() is None:
         if os.name == "nt":
             subprocess.run(
@@ -228,6 +256,51 @@ def _stop_process(process: subprocess.Popen[str]) -> tuple[str, str]:
             process.kill()
         stdout, stderr = process.communicate()
         return stdout, stderr
+
+
+def build_python_utf8_environment(
+    overrides: Mapping[str, str] | None = None,
+    *,
+    inherit: bool = True,
+) -> dict[str, str]:
+    """构造 Python 子进程环境，强制默认文件 IO 与标准流使用 UTF-8。"""
+    environment = dict(os.environ) if inherit else {}
+    if overrides:
+        environment.update(overrides)
+    # code_run 是确定性的 Python 执行边界，不能继承 Windows 本地代码页。
+    environment.update(PYTHON_UTF8_ENV)
+    return environment
+
+
+def _decode_process_streams(stdout: bytes, stderr: bytes) -> tuple[str, str]:
+    return _decode_process_output(stdout), _decode_process_output(stderr)
+
+
+def _decode_process_output(output: bytes) -> str:
+    if not output:
+        return ""
+    try:
+        decoded = output.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    else:
+        return _normalize_process_newlines(decoded)
+
+    fallback = locale.getpreferredencoding(False)
+    if fallback.lower().replace("_", "-") not in {"utf-8", "utf8"}:
+        try:
+            decoded = output.decode(fallback)
+        except (LookupError, UnicodeDecodeError):
+            pass
+        else:
+            return _normalize_process_newlines(decoded)
+    # 未知原生命令可能输出混合代码页；保留可见错误而不是让 reader thread 崩溃。
+    return _normalize_process_newlines(output.decode("utf-8", errors="replace"))
+
+
+def _normalize_process_newlines(output: str) -> str:
+    """保持原 text=True 合同：跨平台统一换行为 LF。"""
+    return output.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def resolve_execution_cwd(cwd_arg: str | None, workspace_root: Path) -> Path | str:

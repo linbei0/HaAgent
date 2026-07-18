@@ -14,6 +14,7 @@ from typing import Any
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.command import (
     CWD_GUIDANCE,
+    build_python_utf8_environment,
     normalize_timeout,
     resolve_execution_cwd,
     run_process,
@@ -57,21 +58,23 @@ def code_run(
 
     if sandbox_backend is None:
         command_result = run_process(
-            command=f"{sys.executable} {script_path}",
-            popen_args=[sys.executable, str(script_path)],
+            command=f"{sys.executable} -X utf8 {script_path}",
+            popen_args=[sys.executable, "-X", "utf8", str(script_path)],
             shell=False,
             cwd=cwd_result,
             timeout_seconds=timeout_result,
             cancellation_token=cancellation_token,
+            env=build_python_utf8_environment(),
         )
     else:
         command_result = sandbox_backend.run_python(
             script_path,
             SandboxCommand(
-                command=f"python {script_path}",
+                command=f"python -X utf8 {script_path}",
                 cwd=cwd_result,
                 timeout_seconds=timeout_result,
                 cancellation_token=cancellation_token,
+                env=build_python_utf8_environment(inherit=False),
             ),
         )
     result = {

@@ -157,7 +157,7 @@ def test_tui_file_reference_overlay_selects_workspace_file(tmp_path: Path) -> No
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert input_widget.value == "Read @"
-            assert type(app.screen) is Screen
+            assert isinstance(app.screen, Screen)
             assert app.query_one("#prompt-input", PromptInput) is input_widget
             assert "文件引用" in _all_text(app)
             assert "docs/Project Plan.md" in _all_text(app)

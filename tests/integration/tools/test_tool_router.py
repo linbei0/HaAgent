@@ -5,6 +5,8 @@ tests/integration/tools/test_tool_router.py - ToolRouter 本地工具行为测�
 """
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1190,6 +1192,163 @@ def test_grep_finds_matching_text_and_writes_trace(tmp_path: Path) -> None:
     trace_lines = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(trace_lines) == 1
     assert json.loads(trace_lines[0])["tool_name"] == "grep"
+
+
+def test_grep_default_respects_ignore_files_and_noise_directories(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".tmp").mkdir()
+    (tmp_path / ".tmp" / "blocked.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "kept.txt").write_text("needle\n", encoding="utf-8")
+
+    result = file_tools.grep({"pattern": "needle"}, tmp_path)
+
+    assert result["status"] == "success"
+    assert [match["path"] for match in result["matches"]] == ["kept.txt"]
+    assert result["partial"] is False
+
+
+def test_grep_default_command_does_not_override_ripgrep_ignore_rules(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "kept.txt").write_text("nothing\n", encoding="utf-8")
+    captured: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        captured.extend(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(file_tools.shutil, "which", lambda name: "rg" if name == "rg" else None)
+    monkeypatch.setattr(file_tools.subprocess, "run", fake_run)
+
+    result = file_tools.grep({"pattern": "needle"}, tmp_path)
+
+    assert result["status"] == "success"
+    assert "**/*" not in captured
+    assert "--glob" not in captured
+
+
+def test_grep_explicit_glob_keeps_fixed_noise_directories_excluded(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "src" / "note.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".tmp").mkdir()
+    (tmp_path / ".tmp" / "noise.py").write_text("needle\n", encoding="utf-8")
+
+    result = file_tools.grep({"pattern": "needle", "file_glob": "*.py"}, tmp_path)
+
+    assert result["status"] == "success"
+    assert [match["path"] for match in result["matches"]] == ["src/app.py"]
+
+
+def test_grep_permission_warning_returns_partial_matches(tmp_path: Path, monkeypatch) -> None:
+    match_path = tmp_path / "kept.txt"
+    match_path.write_text("needle\n", encoding="utf-8")
+    output = json.dumps(
+        {
+            "type": "match",
+            "data": {
+                "path": {"text": str(match_path)},
+                "lines": {"text": "needle\n"},
+                "line_number": 1,
+                "submatches": [{"start": 0}],
+            },
+        },
+    )
+
+    def fake_run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            2,
+            stdout=output,
+            stderr=f"rg: {tmp_path / '.tmp' / 'pytest'}: Access is denied. (os error 5)\n",
+        )
+
+    monkeypatch.setattr(file_tools.shutil, "which", lambda name: "rg" if name == "rg" else None)
+    monkeypatch.setattr(file_tools.subprocess, "run", fake_run)
+
+    result = file_tools.grep({"pattern": "needle"}, tmp_path)
+
+    assert result["status"] == "success"
+    assert result["partial"] is True
+    assert result["matches"][0]["path"] == "kept.txt"
+    assert result["warnings"][0]["type"] == "permission_denied"
+    assert result["skipped_paths"] == [".tmp/pytest"]
+
+
+def test_grep_non_permission_ripgrep_error_is_not_hidden(tmp_path: Path) -> None:
+    result = file_tools.grep({"pattern": "["}, tmp_path)
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] in {"search_failed", "tool_argument_invalid"}
+
+
+def test_grep_timeout_preserves_partial_stdout_and_adds_guidance(tmp_path: Path, monkeypatch) -> None:
+    match_path = tmp_path / "kept.txt"
+    match_path.write_text("needle\n", encoding="utf-8")
+    output = json.dumps(
+        {
+            "type": "match",
+            "data": {
+                "path": {"text": str(match_path)},
+                "lines": {"text": "needle\n"},
+                "line_number": 1,
+                "submatches": [{"start": 0}],
+            },
+        },
+    )
+
+    def fake_run(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 2, output=output, stderr="")
+
+    monkeypatch.setattr(file_tools.shutil, "which", lambda name: "rg" if name == "rg" else None)
+    monkeypatch.setattr(file_tools.subprocess, "run", fake_run)
+
+    result = file_tools.grep({"pattern": "needle", "timeout_seconds": 2}, tmp_path)
+
+    assert result["status"] == "success"
+    assert result["partial"] is True
+    assert result["matches"][0]["path"] == "kept.txt"
+    assert result["warnings"][0]["type"] == "timeout"
+    assert "root" in result["guidance"] and "file_glob" in result["guidance"]
+
+
+def test_grep_python_fallback_uses_git_ignore_and_fixed_exclusions(tmp_path: Path, monkeypatch) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is required for fallback ignore verification")
+    subprocess.run([git, "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    (tmp_path / "ignored").mkdir()
+    (tmp_path / "ignored" / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".tmp").mkdir()
+    (tmp_path / ".tmp" / "noise.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "kept.txt").write_text("needle\n", encoding="utf-8")
+    real_which = file_tools.shutil.which
+    monkeypatch.setattr(file_tools.shutil, "which", lambda name: None if name == "rg" else real_which(name))
+
+    result = file_tools.grep({"pattern": "needle"}, tmp_path)
+
+    assert result["status"] == "success"
+    assert result["search_backend"] == "python"
+    assert [match["path"] for match in result["matches"]] == ["kept.txt"]
+
+
+def test_grep_unreadable_root_is_a_hard_failure(tmp_path: Path, monkeypatch) -> None:
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    original_iterdir = Path.iterdir
+
+    def fake_iterdir(path: Path):
+        if path == blocked:
+            raise PermissionError("access denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+
+    result = file_tools.grep({"pattern": "needle", "root": "blocked"}, tmp_path)
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "search_failed"
 
 
 def test_grep_missing_root_returns_short_argument_error(tmp_path: Path) -> None:

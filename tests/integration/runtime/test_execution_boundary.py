@@ -12,12 +12,15 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from haagent.context.builder import ContextBuilder
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
 from haagent.runtime.contracts.plan import build_plan
 from haagent.runtime.contracts.task import TaskSpec
+from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 from haagent.tools.code_run import code_run
 from haagent.tools.router import ToolRouter
 from haagent.tools.shell import shell
@@ -76,6 +79,40 @@ def test_code_run_terminates_python_process_when_cancelled(tmp_path: Path) -> No
     assert result["exit_code"] is None
     assert result["timeout"] is False
     assert result["truncated"] is False
+
+
+@pytest.mark.parametrize("use_local_sandbox", [False, True])
+def test_code_run_defaults_file_io_and_stdio_to_utf8(tmp_path: Path, use_local_sandbox: bool) -> None:
+    source = tmp_path / "utf8-source.txt"
+    target = tmp_path / "utf8-output.txt"
+    source.write_text("压缩预算 € →", encoding="utf-8")
+    backend = (
+        LocalSubprocessSandboxBackend(
+            workspace_root=tmp_path,
+            command_timeout_seconds=5,
+        )
+        if use_local_sandbox
+        else None
+    )
+    result = code_run(
+        {
+            "code": (
+                "from pathlib import Path\n"
+                "import sys\n"
+                "text = Path('utf8-source.txt').read_text()\n"
+                "Path('utf8-output.txt').write_text(text)\n"
+                "print(sys.flags.utf8_mode)\n"
+                "print(text)\n"
+            ),
+            "timeout_seconds": 5,
+        },
+        tmp_path,
+        sandbox_backend=backend,
+    )
+
+    assert result["status"] == "success"
+    assert result["stdout_excerpt"].splitlines() == ["1", "压缩预算 € →"]
+    assert target.read_bytes() == "压缩预算 € →".encode("utf-8")
 
 
 def test_shell_rejects_workspace_escape_before_execution(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ from haagent.runtime.sandbox.docker_backend import (
     get_docker_availability,
 )
 from haagent.runtime.execution.command import CommandResult
+from haagent.runtime.sandbox.base import SandboxCommand
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 from haagent.runtime.sandbox.manager import create_sandbox_backend
 from haagent.runtime.sandbox.settings import DockerSandboxSettings, SandboxSettings
@@ -160,6 +161,57 @@ def test_docker_exec_argv_keeps_workdir_and_env_names(tmp_path: Path, monkeypatc
     assert "UV_CACHE_DIR=/tmp/uv" in argv
     assert "haagent-sandbox-abc123" in argv
     assert argv[-2:] == ["python", "script.py"]
+
+
+def test_docker_run_python_forces_utf8_mode_and_environment(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("haagent.runtime.sandbox.docker_backend.shutil.which", lambda name: "docker")
+    backend = DockerSandboxBackend(
+        settings=_settings(),
+        workspace_root=tmp_path,
+        session_id="abc123",
+        command_timeout_seconds=60,
+    )
+    script_path = tmp_path / "script.py"
+    script_path.write_text("print('中文')\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def fake_run_process(**kwargs):
+        captured.update(kwargs)
+        return CommandResult(
+            command="python script.py",
+            status="success",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            stdout_excerpt="",
+            stderr_excerpt="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            truncated=False,
+            timeout=False,
+            redacted=False,
+            duration_seconds=0.01,
+            timeout_seconds=60,
+        )
+
+    monkeypatch.setattr("haagent.runtime.sandbox.docker_backend.run_process", fake_run_process)
+
+    backend.run_python(
+        script_path,
+        SandboxCommand(
+            command="python script.py",
+            cwd=tmp_path,
+            timeout_seconds=60,
+            env={"CUSTOM_ENV": "1"},
+        ),
+    )
+
+    argv = captured["popen_args"]
+    assert isinstance(argv, list)
+    assert "CUSTOM_ENV=1" in argv
+    assert "PYTHONUTF8=1" in argv
+    assert "PYTHONIOENCODING=utf-8" in argv
+    assert argv[-4:] == ["python", "-X", "utf8", "/workspace/script.py"]
 
 
 def test_docker_exec_argv_maps_workspace_child_cwd_to_container_path(tmp_path: Path, monkeypatch) -> None:

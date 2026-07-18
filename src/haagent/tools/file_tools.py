@@ -7,9 +7,11 @@ haagent/tools/file_tools.py - 文件类本地工具
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import time
 from difflib import SequenceMatcher, unified_diff
 from pathlib import Path
 from typing import Any
@@ -36,7 +38,21 @@ NOISE_DIRECTORIES = {
     "dist",
     "build",
 }
+GREP_NOISE_DIRECTORIES = NOISE_DIRECTORIES | {".tmp", ".haagent-tmp", ".pytest_cache"}
 FILE_READ_MODEL_VISIBLE_CHAR_BUDGET = 12000
+GREP_DEFAULT_TIMEOUT_SECONDS = 15
+GREP_MAX_TIMEOUT_SECONDS = 60
+GREP_NARROW_GUIDANCE = "Search was incomplete; narrow root or file_glob and retry."
+GREP_TRUNCATED_GUIDANCE = "Search results were truncated; narrow root or file_glob and retry."
+PERMISSION_ERROR_MARKERS = (
+    "access is denied",
+    "access denied",
+    "permission denied",
+    "operation not permitted",
+    "拒绝访问",
+    "(os error 5)",
+    "(os error 13)",
+)
 
 
 def file_list(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
@@ -94,15 +110,25 @@ def grep(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | N
     root_arg = args.get("root", ".")
     if not isinstance(root_arg, str):
         return tool_error("tool_argument_invalid", "root must be a string")
-    file_glob = args.get("file_glob", "**/*")
-    if not isinstance(file_glob, str) or not file_glob:
+    file_glob = args.get("file_glob")
+    if file_glob is not None and (not isinstance(file_glob, str) or not file_glob):
         return tool_error("tool_argument_invalid", "file_glob must be a non-empty string")
     case_sensitive = args.get("case_sensitive", True)
     if not isinstance(case_sensitive, bool):
         return tool_error("tool_argument_invalid", "case_sensitive must be a boolean")
     max_matches = args.get("max_matches", 200)
-    if not isinstance(max_matches, int) or max_matches <= 0:
+    if isinstance(max_matches, bool) or not isinstance(max_matches, int) or max_matches <= 0:
         return tool_error("tool_argument_invalid", "max_matches must be a positive integer")
+    timeout_seconds = args.get("timeout_seconds", GREP_DEFAULT_TIMEOUT_SECONDS)
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int)
+        or not 1 <= timeout_seconds <= GREP_MAX_TIMEOUT_SECONDS
+    ):
+        return tool_error(
+            "tool_argument_invalid",
+            f"timeout_seconds must be an integer between 1 and {GREP_MAX_TIMEOUT_SECONDS}",
+        )
 
     policy = path_policy or default_path_policy(workspace_root)
     root = resolve_path_for_access(root_arg, policy, "read")
@@ -110,65 +136,31 @@ def grep(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | N
         return tool_error("path_policy_denied", root)
     if not root.exists():
         return tool_error("tool_argument_invalid", f"root does not exist: {root_arg}; {ROOT_GUIDANCE}")
+    if access_error := _search_root_access_error(root, root_arg):
+        return access_error
 
     rg = shutil.which("rg")
     if rg:
-        # 使用 JSON 输出避免 Windows 盘符冒号破坏 path:line:column 解析。
-        command = [rg, "--json"]
-        if not case_sensitive:
-            command.append("-i")
-        if not root.is_file():
-            command.extend(["--glob", file_glob])
-        command.extend(["--", pattern, str(root)])
-        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if completed.returncode not in (0, 1):
-            return tool_error("search_failed", completed.stderr.strip() or "ripgrep failed")
-        matches = _parse_rg_json(completed.stdout, workspace_root, max_matches=max_matches)
-        return {
-            "status": "success",
-            "pattern": pattern,
-            "matches": matches,
-            "match_count": len(matches),
-            "truncated": _rg_match_count_exceeds(completed.stdout, max_matches),
-        }
+        return _grep_with_ripgrep(
+            rg=rg,
+            pattern=pattern,
+            root=root,
+            workspace_root=workspace_root,
+            file_glob=file_glob,
+            case_sensitive=case_sensitive,
+            max_matches=max_matches,
+            timeout_seconds=timeout_seconds,
+        )
 
-    flags = 0 if case_sensitive else re.IGNORECASE
-    try:
-        compiled = re.compile(pattern, flags)
-    except re.error as error:
-        return tool_error("tool_argument_invalid", f"invalid regex pattern: {error}")
-    matches = []
-    paths = [root] if root.is_file() else root.rglob("*")
-    for path in paths:
-        if len(matches) >= max_matches:
-            break
-        if not path.is_file():
-            continue
-        if not root.is_file() and not path.relative_to(root).match(file_glob):
-            continue
-        try:
-            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                match = compiled.search(line)
-                if match:
-                    matches.append(
-                        {
-                            "path": _display_path(path, workspace_root),
-                            "line": line_number,
-                            "column": match.start() + 1,
-                            "text": line,
-                        },
-                    )
-                    if len(matches) >= max_matches:
-                        break
-        except UnicodeDecodeError:
-            continue
-    return {
-        "status": "success",
-        "pattern": pattern,
-        "matches": matches,
-        "match_count": len(matches),
-        "truncated": len(matches) >= max_matches,
-    }
+    return _grep_with_python(
+        pattern=pattern,
+        root=root,
+        workspace_root=workspace_root,
+        file_glob=file_glob,
+        case_sensitive=case_sensitive,
+        max_matches=max_matches,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def file_read(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
@@ -760,16 +752,334 @@ def _suggest_file_list_parent(path: Path, workspace_root: Path) -> dict[str, obj
     }
 
 
-def _parse_rg_json(output: str, workspace_root: Path, *, max_matches: int | None = None) -> list[dict[str, Any]]:
-    """解析 ripgrep JSON 事件流，只保留 match 事件。"""
+def _search_root_access_error(root: Path, root_arg: str) -> dict[str, Any] | None:
+    """搜索根不可读时立即失败，避免把根级权限错误伪装成“无匹配”。"""
+    try:
+        if root.is_file():
+            with root.open("rb") as stream:
+                stream.read(1)
+            return None
+        if root.is_dir():
+            next(root.iterdir(), None)
+            return None
+    except OSError as error:
+        return tool_error("search_failed", f"search root is not readable: {root_arg}: {error}")
+    return tool_error("tool_argument_invalid", f"root must be a directory or file: {root_arg}; {ROOT_GUIDANCE}")
+
+
+def _grep_with_ripgrep(
+    *,
+    rg: str,
+    pattern: str,
+    root: Path,
+    workspace_root: Path,
+    file_glob: str | None,
+    case_sensitive: bool,
+    max_matches: int,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    # JSON 事件流避免 Windows 盘符冒号破坏 path:line:column 解析。
+    command = [rg, "--json", "--no-require-git"]
+    if not case_sensitive:
+        command.append("-i")
+    if not root.is_file() and file_glob is not None:
+        command.extend(["--glob", file_glob])
+        # 用户显式 include 时追加固定排除；默认不传 glob，完整保留 rg 的 ignore 语义。
+        for directory in sorted(GREP_NOISE_DIRECTORIES):
+            command.extend(["--glob", f"!**/{directory}/**"])
+    command.extend(["--", pattern, str(root)])
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = _subprocess_text(error.stdout or error.output)
+        try:
+            matches, truncated = _parse_rg_matches(
+                output,
+                workspace_root,
+                max_matches=max_matches,
+                allow_incomplete_line=True,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as parse_error:
+            return tool_error("search_failed", f"invalid partial ripgrep output: {parse_error}")
+        warning = {
+            "type": "timeout",
+            "message": f"Search timed out after {timeout_seconds} seconds; returned available matches.",
+        }
+        return _grep_success(
+            pattern=pattern,
+            matches=matches,
+            truncated=truncated,
+            partial=True,
+            warnings=[warning],
+            skipped_paths=[],
+            search_backend="ripgrep",
+            guidance=GREP_NARROW_GUIDANCE,
+        )
+
+    try:
+        matches, truncated = _parse_rg_matches(completed.stdout, workspace_root, max_matches=max_matches)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        return tool_error("search_failed", f"invalid ripgrep output: {error}")
+
+    if completed.returncode in (0, 1):
+        return _grep_success(
+            pattern=pattern,
+            matches=matches,
+            truncated=truncated,
+            partial=False,
+            warnings=[],
+            skipped_paths=[],
+            search_backend="ripgrep",
+        )
+
+    skipped_paths = _ripgrep_permission_paths(completed.stderr, workspace_root)
+    if skipped_paths is None:
+        return tool_error("search_failed", completed.stderr.strip() or "ripgrep failed")
+    warning = {
+        "type": "permission_denied",
+        "message": f"Skipped {len(skipped_paths)} inaccessible path(s) while keeping available matches.",
+    }
+    return _grep_success(
+        pattern=pattern,
+        matches=matches,
+        truncated=truncated,
+        partial=True,
+        warnings=[warning],
+        skipped_paths=skipped_paths,
+        search_backend="ripgrep",
+        guidance=GREP_NARROW_GUIDANCE,
+    )
+
+
+def _grep_with_python(
+    *,
+    pattern: str,
+    root: Path,
+    workspace_root: Path,
+    file_glob: str | None,
+    case_sensitive: bool,
+    max_matches: int,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        compiled = re.compile(pattern, flags)
+    except re.error as error:
+        return tool_error("tool_argument_invalid", f"invalid regex pattern: {error}")
+
+    deadline = time.monotonic() + timeout_seconds
+    skipped_by_type: dict[str, set[str]] = {}
+    try:
+        paths = _python_search_paths(root, workspace_root, file_glob, deadline, skipped_by_type)
+    except subprocess.TimeoutExpired:
+        return _grep_success(
+            pattern=pattern,
+            matches=[],
+            truncated=False,
+            partial=True,
+            warnings=[
+                {
+                    "type": "timeout",
+                    "message": f"Search timed out after {timeout_seconds} seconds before file scanning completed.",
+                },
+            ],
+            skipped_paths=[],
+            search_backend="python",
+            guidance=GREP_NARROW_GUIDANCE,
+        )
+    except OSError as error:
+        return tool_error("search_failed", f"failed to enumerate search files: {error}")
+
+    matches: list[dict[str, Any]] = []
+    truncated = False
+    timed_out = False
+    for path in paths:
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
+        display_path = _display_path(path, workspace_root)
+        try:
+            with path.open("rb") as stream:
+                if b"\0" in stream.read(8192):
+                    continue
+            with path.open("r", encoding="utf-8") as stream:
+                for line_number, line in enumerate(stream, 1):
+                    match = compiled.search(line)
+                    if match is None:
+                        continue
+                    if len(matches) >= max_matches:
+                        truncated = True
+                        break
+                    matches.append(
+                        {
+                            "path": display_path,
+                            "line": line_number,
+                            "column": match.start() + 1,
+                            "text": line.rstrip("\r\n"),
+                        },
+                    )
+            if truncated:
+                break
+        except UnicodeDecodeError:
+            continue
+        except OSError as error:
+            # 文件级失败只跳过该文件，并通过 partial/warnings 明确暴露。
+            warning_type = "permission_denied" if isinstance(error, PermissionError) else "unreadable_file"
+            skipped_by_type.setdefault(warning_type, set()).add(display_path)
+
+    warnings = _python_skip_warnings(skipped_by_type)
+    if timed_out:
+        warnings.append(
+            {
+                "type": "timeout",
+                "message": f"Search timed out after {timeout_seconds} seconds; returned available matches.",
+            },
+        )
+    partial = timed_out or any(kind in skipped_by_type for kind in ("permission_denied", "unreadable_file"))
+    skipped_paths = sorted({path for paths in skipped_by_type.values() for path in paths})
+    return _grep_success(
+        pattern=pattern,
+        matches=matches,
+        truncated=truncated,
+        partial=partial,
+        warnings=warnings,
+        skipped_paths=skipped_paths,
+        search_backend="python",
+        guidance=GREP_NARROW_GUIDANCE if partial else None,
+    )
+
+
+def _python_search_paths(
+    root: Path,
+    workspace_root: Path,
+    file_glob: str | None,
+    deadline: float,
+    skipped_by_type: dict[str, set[str]],
+) -> list[Path]:
+    if root.is_file():
+        return [root]
+
+    git_paths = _git_search_paths(root, file_glob, deadline)
+    if git_paths is not None:
+        return git_paths
+
+    paths: list[Path] = []
+
+    def onerror(error: OSError) -> None:
+        skipped = Path(error.filename) if error.filename else root
+        warning_type = "permission_denied" if isinstance(error, PermissionError) else "unreadable_file"
+        skipped_by_type.setdefault(warning_type, set()).add(_display_path(skipped, workspace_root))
+
+    for current, directories, files in os.walk(root, topdown=True, onerror=onerror):
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("python grep traversal", max(0.0, deadline - time.monotonic()))
+        current_path = Path(current)
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory not in GREP_NOISE_DIRECTORIES and (file_glob is not None or not directory.startswith("."))
+        )
+        for filename in sorted(files):
+            if file_glob is None and filename.startswith("."):
+                continue
+            path = current_path / filename
+            relative = path.relative_to(root)
+            if file_glob is None or relative.match(file_glob):
+                paths.append(path)
+    return paths
+
+
+def _git_search_paths(root: Path, file_glob: str | None, deadline: float) -> list[Path] | None:
+    git = shutil.which("git")
+    if git is None or root.name in GREP_NOISE_DIRECTORIES:
+        return None
+    timeout = max(0.001, deadline - time.monotonic())
+    discovery = subprocess.run(
+        [git, "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+    if discovery.returncode != 0:
+        return None
+
+    repository_root = Path(discovery.stdout.strip()).resolve()
+    relative_root = root.resolve().relative_to(repository_root)
+    pathspec = relative_root.as_posix() if relative_root.parts else "."
+    timeout = max(0.001, deadline - time.monotonic())
+    listed = subprocess.run(
+        [
+            git,
+            "-C",
+            str(repository_root),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            pathspec,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+    if listed.returncode != 0:
+        raise OSError(listed.stderr.strip() or "git ls-files failed")
+
+    paths = []
+    for raw_path in listed.stdout.split("\0"):
+        if not raw_path:
+            continue
+        path = repository_root / raw_path
+        relative = path.relative_to(root)
+        if any(part in GREP_NOISE_DIRECTORIES for part in relative.parts[:-1]):
+            continue
+        if file_glob is None and any(part.startswith(".") for part in relative.parts):
+            continue
+        if file_glob is not None and not relative.match(file_glob):
+            continue
+        if path.is_file():
+            paths.append(path)
+    return sorted(paths, key=lambda path: path.as_posix().lower())
+
+
+def _parse_rg_matches(
+    output: str,
+    workspace_root: Path,
+    *,
+    max_matches: int,
+    allow_incomplete_line: bool = False,
+) -> tuple[list[dict[str, Any]], bool]:
+    """解析 ripgrep JSON 事件流；超时可能留下一个不完整的末行。"""
     root = workspace_root.resolve()
-    matches = []
-    for line in output.splitlines():
-        event = json.loads(line)
+    matches: list[dict[str, Any]] = []
+    truncated = False
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            if allow_incomplete_line and index == len(lines) - 1:
+                break
+            raise
         if event.get("type") != "match":
             continue
-        if max_matches is not None and len(matches) >= max_matches:
-            break
+        if len(matches) >= max_matches:
+            truncated = True
+            continue
         data = event["data"]
         submatches = data.get("submatches") or [{"start": 0}]
         matches.append(
@@ -780,16 +1090,71 @@ def _parse_rg_json(output: str, workspace_root: Path, *, max_matches: int | None
                 "text": data["lines"]["text"].rstrip("\r\n"),
             },
         )
-    return matches
+    return matches, truncated
 
 
-def _rg_match_count_exceeds(output: str, max_matches: int) -> bool:
-    count = 0
-    for line in output.splitlines():
-        event = json.loads(line)
-        if event.get("type") != "match":
-            continue
-        count += 1
-        if count > max_matches:
-            return True
-    return False
+def _ripgrep_permission_paths(stderr: str, workspace_root: Path) -> list[str] | None:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines or any(not any(marker in line.lower() for marker in PERMISSION_ERROR_MARKERS) for line in lines):
+        return None
+
+    paths = []
+    for line in lines:
+        match = re.match(
+            r"^rg:\s+(.*?):\s+.*(?:Access(?: is)? denied|Permission denied|Operation not permitted|拒绝访问|os error (?:5|13))",
+            line,
+            re.IGNORECASE,
+        )
+        raw_path = match.group(1) if match else line
+        paths.append(_display_path(Path(raw_path), workspace_root))
+    return sorted(set(paths))
+
+
+def _python_skip_warnings(skipped_by_type: dict[str, set[str]]) -> list[dict[str, Any]]:
+    labels = {
+        "permission_denied": "inaccessible",
+        "unreadable_file": "unreadable",
+    }
+    return [
+        {
+            "type": warning_type,
+            "message": f"Skipped {len(paths)} {labels[warning_type]} path(s).",
+        }
+        for warning_type, paths in sorted(skipped_by_type.items())
+        if paths
+    ]
+
+
+def _grep_success(
+    *,
+    pattern: str,
+    matches: list[dict[str, Any]],
+    truncated: bool,
+    partial: bool,
+    warnings: list[dict[str, Any]],
+    skipped_paths: list[str],
+    search_backend: str,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "success",
+        "pattern": pattern,
+        "matches": matches,
+        "match_count": len(matches),
+        "truncated": truncated,
+        "partial": partial,
+        "warnings": warnings,
+        "skipped_paths": skipped_paths,
+        "search_backend": search_backend,
+    }
+    if guidance is not None or truncated:
+        result["guidance"] = guidance or GREP_TRUNCATED_GUIDANCE
+    return result
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value

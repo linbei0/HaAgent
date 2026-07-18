@@ -9,7 +9,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from haagent.runtime.execution.command import CommandResult, run_command, run_process
+from haagent.runtime.execution.command import (
+    CommandResult,
+    build_python_utf8_environment,
+    run_command,
+    run_process,
+)
 from haagent.runtime.sandbox.base import SandboxAvailability, SandboxCommand, SandboxMetadata
 
 
@@ -58,12 +63,13 @@ class LocalSubprocessSandboxBackend:
 
     def run_python(self, script_path: Path, command: SandboxCommand) -> CommandResult:
         return run_process(
-            command=f"{sys.executable} {script_path}",
-            popen_args=[sys.executable, str(script_path)],
+            command=f"{sys.executable} -X utf8 {script_path}",
+            popen_args=[sys.executable, "-X", "utf8", str(script_path)],
             shell=False,
             cwd=command.cwd,
             timeout_seconds=command.timeout_seconds,
             cancellation_token=command.cancellation_token,
+            env=build_python_utf8_environment(command.env),
         )
 
     def close(self) -> None:

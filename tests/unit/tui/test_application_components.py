@@ -11,9 +11,11 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import OptionList
+from textual.geometry import Offset
+from textual.screen import Screen
+from textual.widgets import OptionList, Static
 
-from haagent.tui.application.app import HaAgentTuiApp
+from haagent.tui.application.app import HaAgentScreen, HaAgentTuiApp
 from haagent.tui.application.commands import CommandDispatcher
 from haagent.tui.application.conversation import ConversationController
 from haagent.tui.commands import SlashCommand, SlashCommandResult
@@ -22,6 +24,19 @@ from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch
 from haagent.tui.widgets import PromptInput, ProgressStatusLine
 from haagent.tui.widgets.input_dock import InputDock
+
+
+def test_default_screen_ignores_detached_cached_text_selection_target(monkeypatch) -> None:
+    stale_widget = Static("旧 Markdown 段落")
+    monkeypatch.setattr(
+        Screen,
+        "get_widget_and_offset_at",
+        lambda self, x, y: (stale_widget, Offset(0, 0)),
+    )
+
+    screen = HaAgentScreen()
+
+    assert screen.get_widget_and_offset_at(10, 5) == (None, None)
 
 
 def test_command_dispatcher_routes_registered_action_and_refreshes_errors() -> None:

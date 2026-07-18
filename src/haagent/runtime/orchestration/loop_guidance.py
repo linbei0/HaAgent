@@ -74,7 +74,16 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
     if tool_name == "grep":
         path = _first_match_path(result)
         if path:
+            if result.get("partial") is True:
+                guidance = str(result.get("guidance") or "Narrow root or file_glob and retry.")
+                return f"Search returned partial results. {guidance} Read the most relevant returned hit: {path}."
+            if result.get("truncated") is True:
+                guidance = str(result.get("guidance") or "Narrow root or file_glob and retry.")
+                return f"Search results were truncated. {guidance} Read the most relevant returned hit: {path}."
             return f"Choose the most relevant search hit and read it next with file_read: {path}."
+        if result.get("partial") is True:
+            guidance = str(result.get("guidance") or "Narrow root or file_glob and retry.")
+            return f"Search was incomplete, so zero returned matches is not conclusive. {guidance}"
         return "No matches found. Refine the grep pattern or use file_list to explore the directory structure."
 
     if tool_name in {"file_write", "apply_patch", "apply_patch_set"}:

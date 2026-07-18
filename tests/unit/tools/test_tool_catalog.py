@@ -139,6 +139,33 @@ def test_deleting_contribution_removes_schema_and_projector() -> None:
     assert "file_read" not in handlers
 
 
+def test_grep_observation_exposes_partial_state_without_raw_stderr() -> None:
+    from haagent.tools.catalog import default_tool_catalog
+
+    observation = default_tool_catalog().project_observation(
+        "grep",
+        {"pattern": "needle"},
+        {
+            "status": "success",
+            "pattern": "needle",
+            "matches": [],
+            "partial": True,
+            "warnings": [{"type": "permission_denied", "message": "Skipped 1 inaccessible path."}],
+            "skipped_paths": [".tmp/pytest"],
+            "guidance": "Narrow root or file_glob and retry.",
+            "stderr": "large raw diagnostic must not be projected",
+        },
+    )
+
+    assert observation is not None
+    assert observation["partial"] is True
+    assert observation["warnings"] == [
+        {"type": "permission_denied", "message": "Skipped 1 inaccessible path."},
+    ]
+    assert observation["skipped_paths"] == [".tmp/pytest"]
+    assert "stderr" not in observation
+
+
 def test_file_write_binder_uses_execution_context_interaction(tmp_path: Path) -> None:
     """写工具 binder 必须把逐次 interaction_handler 传给实现，不能只为集合对齐。"""
     from haagent.runtime.execution.human_interaction import HumanInteractionResponse
