@@ -56,6 +56,8 @@ from haagent.tui.widgets import (
     InputDock,
     ProgressStatusLine,
     PromptInput,
+    RequestHistoryPreview,
+    RequestHistoryRail,
     ResizeMessage,
     StatusBar,
 )
@@ -111,7 +113,9 @@ class HaAgentTuiApp(App[None]):
             classes="hidden",
         )
         with Horizontal(id="main"):
+            yield RequestHistoryRail(id="request-history-rail")
             yield ConversationTimeline(id="conversation", wrap=True, auto_scroll=True)
+            yield RequestHistoryPreview("", id="request-history-preview")
         with InputDock(id="input-panel"):
             yield ProgressStatusLine("", id="progress-status")
             yield PromptInput(placeholder=self._default_prompt_placeholder, id="prompt-input", show_line_numbers=False)
@@ -119,6 +123,7 @@ class HaAgentTuiApp(App[None]):
 
     def on_mount(self) -> None:
         self._timeline_widget = self.query_one("#conversation", ConversationTimeline)
+        self._timeline_widget.bind_history_rail(self.query_one("#request-history-rail", RequestHistoryRail))
         self._input_dock_widget = self.query_one("#input-panel", InputDock)
         self._apply_theme()
         self._show_initial_configuration_state()
@@ -584,6 +589,20 @@ class HaAgentTuiApp(App[None]):
 
     def action_conversation_end(self) -> None:
         self._conversation.stick_and_scroll_to_end()
+
+    def action_previous_request(self) -> None:
+        self._timeline().navigate_adjacent_request(-1)
+
+    def action_next_request(self) -> None:
+        self._timeline().navigate_adjacent_request(1)
+
+    def on_request_history_rail_navigate(self, message: RequestHistoryRail.Navigate) -> None:
+        self._timeline().scroll_to_request(message.turn_index)
+        if not message.keep_focus:
+            self.focus_prompt_input()
+
+    def focus_prompt_input(self) -> None:
+        self._prompt_input().focus()
 
     # ── permissions / skills / 外部目录授权 委托 ──────────────────────────
     def _show_permissions(self) -> None:

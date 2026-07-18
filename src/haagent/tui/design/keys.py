@@ -22,6 +22,8 @@ APP_BINDINGS = [
     ("ctrl+x", "cancel_current_task", "取消任务"),
     ("pageup", "conversation_page_up", "上翻"),
     ("pagedown", "conversation_page_down", "下翻"),
+    ("alt+up", "previous_request", "上一条请求"),
+    ("alt+down", "next_request", "下一条请求"),
     ("end", "conversation_end", "回到底部"),
 ]
 
@@ -47,6 +49,7 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("Enter", "发送当前输入"),
         ("Ctrl+Enter", "插入换行"),
         ("PgUp/PgDn", "滚动对话"),
+        ("Alt+↑/↓", "跳到上一条/下一条用户请求"),
         ("End", "回到底部"),
         ("/", "打开快捷命令"),
         ("/cancel", "取消当前任务"),
@@ -64,6 +67,7 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("Enter", "发送当前输入"),
         ("Ctrl+Enter", "插入换行"),
         ("PgUp/PgDn", "滚动对话"),
+        ("Alt+↑/↓", "跳到上一条/下一条用户请求"),
         ("End", "回到底部"),
         ("/", "打开快捷命令"),
         ("Ctrl+F", "搜索当前对话"),

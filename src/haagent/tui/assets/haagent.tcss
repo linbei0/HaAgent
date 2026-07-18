@@ -29,6 +29,37 @@ Screen > .screen--selection {
 
 #main {
     height: 1fr;
+    layers: base overlay;
+}
+
+#request-history-rail {
+    position: absolute;
+    layer: overlay;
+    offset: 0 0;
+    width: 5;
+    height: 1fr;
+    padding: 1 0 1 1;
+    background: $background;
+    color: $text-muted;
+    overflow: hidden;
+}
+
+#request-history-rail:focus {
+    color: $foreground;
+    background: $surface;
+}
+
+#request-history-preview {
+    position: absolute;
+    layer: overlay;
+    width: 56;
+    height: auto;
+    max-height: 16;
+    padding: 1 2;
+    background: $surface;
+    color: $foreground;
+    border-left: solid $primary;
+    overflow: hidden;
 }
 
 #conversation {

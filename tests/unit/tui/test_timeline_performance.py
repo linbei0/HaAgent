@@ -17,6 +17,7 @@ from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresenta
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.timeline_block import TimelineBlock
 from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
+from haagent.tui.widgets.request_history_rail import RequestHistoryRail, group_request_history_entries
 
 
 class InstrumentedTimeline(ConversationTimeline):
@@ -249,6 +250,76 @@ def test_load_session_history_renders_once_for_many_turns() -> None:
 
     assert timeline.render_timeline_count == 1
     assert len(timeline._items) == 80
+
+
+def test_request_history_entries_follow_timeline_state_and_redact_summaries() -> None:
+    timeline = InstrumentedTimeline()
+    timeline.add_user("读取 sk-secret-12345678901234567890 并总结", turn_index=1)
+    timeline.start_assistant_response(turn_index=1)
+    timeline.add_user("第二个请求", turn_index=2)
+    timeline.finalize_assistant(2, "已完成第二个请求")
+
+    entries = timeline.request_history_entries()
+
+    assert [entry.turn_index for entry in entries] == [1, 2]
+    assert entries[0].answer_summary == "正在生成回答"
+    assert "sk-secret" not in entries[0].request_summary
+    assert entries[1].answer_summary == "已完成第二个请求"
+
+
+def test_request_history_groups_dense_entries_without_losing_turns() -> None:
+    timeline = InstrumentedTimeline()
+    for turn_index in range(1, 9):
+        timeline.add_user(f"请求 {turn_index}", turn_index=turn_index)
+        timeline.finalize_assistant(turn_index, f"回答 {turn_index}")
+
+    groups = group_request_history_entries(timeline.request_history_entries(), height=3)
+
+    assert len(groups) == 3
+    assert [entry.turn_index for group in groups for entry in group.entries] == list(range(1, 9))
+    assert any(len(group.entries) > 1 for group in groups)
+
+
+def test_request_history_uses_compact_centered_rows_when_space_is_available() -> None:
+    timeline = InstrumentedTimeline()
+    for turn_index in range(1, 4):
+        timeline.add_user(f"请求 {turn_index}", turn_index=turn_index)
+
+    groups = group_request_history_entries(timeline.request_history_entries(), height=15)
+
+    assert [group.row for group in groups] == [6, 7, 8]
+
+
+def test_dense_request_history_group_cycles_selection() -> None:
+    timeline = InstrumentedTimeline()
+    for turn_index in range(1, 5):
+        timeline.add_user(f"请求 {turn_index}", turn_index=turn_index)
+        timeline.finalize_assistant(turn_index, f"回答 {turn_index}")
+    rail = RequestHistoryRail()
+    rail._entries = timeline.request_history_entries()
+    rail._groups = group_request_history_entries(rail._entries, height=1)
+    rail._hovered_group = 0
+
+    first = rail._selected_entry(0)
+    rail.action_next_group_entry()
+    second = rail._selected_entry(0)
+
+    assert second.turn_index == first.turn_index + 1
+
+
+def test_request_history_navigation_uses_current_turn_and_respects_boundaries() -> None:
+    timeline = InstrumentedTimeline()
+    for turn_index in (2, 5, 9):
+        timeline.add_user(f"请求 {turn_index}", turn_index=turn_index)
+
+    timeline._current_request_turn = 5
+
+    assert timeline.adjacent_request_turn(-1) == 2
+    assert timeline.adjacent_request_turn(1) == 9
+    timeline._current_request_turn = 2
+    assert timeline.adjacent_request_turn(-1) is None
+    timeline._current_request_turn = 9
+    assert timeline.adjacent_request_turn(1) is None
 
 
 def test_reapplying_same_tool_detail_state_does_not_rerender_timeline() -> None:

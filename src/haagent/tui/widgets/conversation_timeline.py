@@ -17,7 +17,9 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from haagent.app.assistant_types import AssistantSessionTurn
+from haagent.tui.design.utils import safe_summary
 from haagent.tui.presentation.progress import ExpandableDetail, TimelinePresentationItem
+from haagent.tui.widgets.request_history_rail import RequestHistoryEntry, RequestHistoryRail
 from haagent.tui.widgets.timeline_models import (
     DETAILS_REFRESH_RECENT_TURNS,
     InteractionKey,
@@ -50,6 +52,19 @@ TIMELINE_WINDOW_STEP = 100
 ELAPSED_REFRESH_INTERVAL_SECONDS = 1.0
 
 
+def _request_status(item: TimelineItem) -> str | None:
+    if item.role == "failure" or item.status == "failed":
+        return "failed"
+    if item.role != "system":
+        return None
+    normalized = item.content.casefold()
+    if "cancel" in normalized or "取消" in item.content:
+        return "cancelled"
+    if "fail" in normalized or "失败" in item.content:
+        return "failed"
+    return None
+
+
 class ConversationTimeline(VerticalScroll):
     _ids = count(1)
     can_focus = True
@@ -64,8 +79,10 @@ class ConversationTimeline(VerticalScroll):
         self._detail_items_by_id: dict[str, TimelineItem] = {}
         # 只索引尚未回答的人机交互；resolved 事件按结构化 key 原地替换，禁止 requested 条目残留。
         self._pending_interaction_items: dict[InteractionKey, TimelineItem] = {}
+        self._user_items_by_turn: dict[int, TimelineItem] = {}
         self._assistant_items_by_turn: dict[int, TimelineItem] = {}
         self._process_items_by_turn: dict[int, list[TimelineItem]] = {}
+        self._request_status_by_turn: dict[int, str] = {}
         self._turn_started_at: dict[int, float] = {}
         self._elapsed_timer: Timer | None = None
         self._visible_items_cache: list[TimelineItem] | None = None
@@ -88,6 +105,93 @@ class ConversationTimeline(VerticalScroll):
         # None 表示尾窗；非 None 时是用户正在回看的完整可见投影起点。
         self._window_start: int | None = None
         self._window_shift_in_progress = False
+        self._current_request_turn: int | None = None
+        self._history_rail: RequestHistoryRail | None = None
+
+    def bind_history_rail(self, rail: RequestHistoryRail) -> None:
+        self._history_rail = rail
+        self._sync_history_rail()
+
+    def request_history_entries(self) -> list[RequestHistoryEntry]:
+        entries: list[RequestHistoryEntry] = []
+        for turn_index, user_item in self._user_items_by_turn.items():
+            assistant = self._assistant_items_by_turn.get(turn_index)
+            turn_status = self._request_turn_status(turn_index)
+            if turn_status == "cancelled":
+                answer_summary = "请求已取消"
+            elif turn_status == "failed":
+                answer_summary = "请求处理失败"
+            elif assistant is None or assistant.status == "streaming":
+                answer_summary = "正在生成回答"
+            elif assistant.is_final_answer and assistant.content:
+                answer_summary = safe_summary(assistant.content, 180)
+            elif assistant.status == "failed":
+                answer_summary = "请求处理失败"
+            elif assistant.content:
+                answer_summary = safe_summary(assistant.content, 180)
+            else:
+                answer_summary = "未生成最终回答"
+            entries.append(
+                RequestHistoryEntry(
+                    turn_index=turn_index,
+                    request_summary=safe_summary(user_item.content, 400),
+                    answer_summary=answer_summary,
+                ),
+            )
+        return entries
+
+    def _request_turn_status(self, turn_index: int) -> str | None:
+        return self._request_status_by_turn.get(turn_index)
+
+    def adjacent_request_turn(self, direction: int) -> int | None:
+        turns = list(self._user_items_by_turn)
+        if not turns:
+            return None
+        current = self._current_request_turn if self._current_request_turn in turns else turns[-1]
+        target_index = turns.index(current) + direction
+        if target_index < 0 or target_index >= len(turns):
+            return None
+        return turns[target_index]
+
+    def navigate_adjacent_request(self, direction: int) -> bool:
+        turn_index = self.adjacent_request_turn(direction)
+        return False if turn_index is None else self.scroll_to_request(turn_index)
+
+    def scroll_to_request(self, turn_index: int) -> bool:
+        item = self._user_items_by_turn.get(turn_index)
+        if item is None:
+            return False
+        self._stick_to_bottom = False
+        self._ensure_item_window(item)
+        self._current_request_turn = turn_index
+        if self._history_rail is not None:
+            self._history_rail.set_active_turn(turn_index)
+        self.call_after_refresh(self._scroll_request_block_to_top, item.item_id)
+        return True
+
+    def _ensure_item_window(self, item: TimelineItem) -> None:
+        visible = self._visible_items()
+        target_index = next((index for index, candidate in enumerate(visible) if candidate.item_id == item.item_id), None)
+        if target_index is None or len(visible) <= TIMELINE_WINDOW_SIZE:
+            return
+        tail_start = len(visible) - TIMELINE_WINDOW_SIZE
+        next_start = min(target_index, tail_start)
+        resolved_start = None if next_start == tail_start else next_start
+        if resolved_start != self._window_start:
+            self._window_start = resolved_start
+            self._replace_window_blocks()
+
+    def _scroll_request_block_to_top(self, item_id: int) -> None:
+        block = self._blocks.get(item_id)
+        if block is not None:
+            self.scroll_to_widget(block, top=True, animate=False, immediate=True, force=True)
+
+    def _sync_history_rail(self) -> None:
+        if self._history_rail is not None:
+            self._history_rail.set_entries(
+                self.request_history_entries(),
+                active_turn=self._current_request_turn,
+            )
 
     def set_stick_to_bottom(self, enabled: bool) -> None:
         window_was_away_from_tail = self._window_start is not None
@@ -182,7 +286,9 @@ class ConversationTimeline(VerticalScroll):
 
     def add_user(self, content: str, *, turn_index: int) -> None:
         self._append_item(TimelineItem(item_id=next(self._ids), role="user", turn_index=turn_index, content=content, title="你"))
+        self._current_request_turn = turn_index
         self._render_timeline()
+        self._sync_history_rail()
 
     def load_session_history(self, turns: list[AssistantSessionTurn]) -> None:
         """批量装载会话历史，只触发一次 timeline 同步。"""
@@ -225,10 +331,15 @@ class ConversationTimeline(VerticalScroll):
                     ),
                 )
         self._render_timeline()
+        self._current_request_turn = turns[-1].turn_index if turns else None
+        self._sync_history_rail()
 
     def add_system(self, title: str, content: str, *, turn_index: int = 0) -> None:
-        self._append_item(TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title))
+        item = TimelineItem(item_id=next(self._ids), role="system", turn_index=turn_index, content=content, title=title)
+        self._append_item(item)
         self._render_timeline()
+        if _request_status(item) is not None:
+            self._sync_history_rail()
 
     def add_presentation_item(
         self,
@@ -298,6 +409,7 @@ class ConversationTimeline(VerticalScroll):
     def add_failure(self, content: str, *, turn_index: int) -> None:
         self._append_item(TimelineItem(item_id=next(self._ids), role="failure", turn_index=turn_index, content=content, status="failed", title="失败"))
         self._render_timeline()
+        self._sync_history_rail()
 
     def toggle_detail(self, item_id: int) -> bool:
         item = self._items_by_id.get(item_id)
@@ -346,6 +458,7 @@ class ConversationTimeline(VerticalScroll):
         )
         self._collapse_process_turn(turn_index)
         self._render_timeline()
+        self._sync_history_rail()
 
     def start_assistant_response(self, *, turn_index: int) -> None:
         item = self._assistant_item(turn_index)
@@ -355,6 +468,7 @@ class ConversationTimeline(VerticalScroll):
         item.is_final_answer = False
         self._sync_block(item)
         self._mark_plain_text_dirty()
+        self._sync_history_rail()
 
     def update_assistant_delta(self, turn_index: int, delta: str) -> None:
         if not delta:
@@ -383,6 +497,7 @@ class ConversationTimeline(VerticalScroll):
         else:
             self._sync_block(item)
         self._mark_plain_text_dirty()
+        self._sync_history_rail()
 
     def finish_assistant_without_final(self, turn_index: int, content: str) -> None:
         """结束流式占位但不触发“最终回答已到达”的过程折叠。"""
@@ -398,6 +513,7 @@ class ConversationTimeline(VerticalScroll):
         else:
             self._sync_block(item)
         self._mark_plain_text_dirty()
+        self._sync_history_rail()
 
     def _finish_turn_timing(self, item: TimelineItem) -> None:
         started_at = self._turn_started_at.pop(item.turn_index, None)
@@ -581,8 +697,13 @@ class ConversationTimeline(VerticalScroll):
             self._detail_items_by_id[item.detail_id] = item
         if item.requires_attention and item.interaction_key is not None:
             self._pending_interaction_items[item.interaction_key] = item
+        if item.role == "user":
+            self._user_items_by_turn[item.turn_index] = item
         if item.role == "assistant":
             self._assistant_items_by_turn[item.turn_index] = item
+        request_status = _request_status(item)
+        if request_status is not None:
+            self._request_status_by_turn[item.turn_index] = request_status
         if _is_process_item(item):
             process_items = self._process_items_by_turn.setdefault(item.turn_index, [])
             process_items.append(item)
@@ -602,8 +723,12 @@ class ConversationTimeline(VerticalScroll):
             self._detail_items_by_id.pop(item.detail_id)
         if item.interaction_key is not None and self._pending_interaction_items.get(item.interaction_key) is item:
             self._pending_interaction_items.pop(item.interaction_key)
+        if item.role == "user" and self._user_items_by_turn.get(item.turn_index) is item:
+            self._user_items_by_turn.pop(item.turn_index)
         if item.role == "assistant" and self._assistant_items_by_turn.get(item.turn_index) is item:
             self._assistant_items_by_turn.pop(item.turn_index)
+        if _request_status(item) is not None:
+            self._reindex_request_status(item.turn_index)
         if _is_process_item(item):
             process_items = self._process_items_by_turn.get(item.turn_index, [])
             process_items[:] = [candidate for candidate in process_items if candidate is not item]
@@ -615,12 +740,25 @@ class ConversationTimeline(VerticalScroll):
         self._items_by_id.clear()
         self._detail_items_by_id.clear()
         self._pending_interaction_items.clear()
+        self._user_items_by_turn.clear()
         self._assistant_items_by_turn.clear()
         self._process_items_by_turn.clear()
+        self._request_status_by_turn.clear()
         self._turn_started_at.clear()
         if self._elapsed_timer is not None:
             self._elapsed_timer.pause()
         self._invalidate_visible_items()
+        self._current_request_turn = None
+        self._sync_history_rail()
+
+    def _reindex_request_status(self, turn_index: int) -> None:
+        self._request_status_by_turn.pop(turn_index, None)
+        for item in self._items:
+            if item.turn_index != turn_index:
+                continue
+            status = _request_status(item)
+            if status is not None:
+                self._request_status_by_turn[turn_index] = status
 
     def _invalidate_visible_items(self) -> None:
         self._visible_items_cache = None
@@ -946,3 +1084,30 @@ class ConversationTimeline(VerticalScroll):
             self.resume_interactive_updates()
         else:
             self.pause_interactive_updates()
+        self.call_after_refresh(self._sync_current_request_from_viewport)
+
+    def _sync_current_request_from_viewport(self) -> None:
+        if not self._user_items_by_turn:
+            return
+        visible_users = [
+            item
+            for item in self._user_items_by_turn.values()
+            if (block := self._blocks.get(item.item_id)) is not None and block.parent is not None
+        ]
+        if not visible_users:
+            return
+        viewport_top = self.scroll_y
+        before_top = [
+            item
+            for item in visible_users
+            if self._blocks[item.item_id].virtual_region.y <= viewport_top + 1
+        ]
+        if before_top:
+            current = max(before_top, key=lambda item: self._blocks[item.item_id].virtual_region.y)
+        else:
+            current = min(visible_users, key=lambda item: self._blocks[item.item_id].virtual_region.y)
+        if current.turn_index == self._current_request_turn:
+            return
+        self._current_request_turn = current.turn_index
+        if self._history_rail is not None:
+            self._history_rail.set_active_turn(current.turn_index)

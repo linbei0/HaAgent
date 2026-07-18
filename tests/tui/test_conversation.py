@@ -15,7 +15,7 @@ from haagent.runtime.events import FailureNoticeEvent
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.commands import command_registry
 from haagent.tui.state.search import ConversationSearchState
-from haagent.tui.widgets import ConversationTimeline, PromptInput
+from haagent.tui.widgets import ConversationTimeline, PromptInput, RequestHistoryPreview, RequestHistoryRail
 from haagent.tui.typography.wrap import is_textual_line_breaking_installed
 from textual.widgets import Button, Markdown
 
@@ -338,6 +338,122 @@ def test_tui_end_key_keeps_prompt_cursor_behavior_when_prompt_has_text(tmp_path:
 
             assert conversation.scroll_y == 0
             assert input_widget.cursor_location == (0, 3)
+
+    asyncio.run(run())
+
+
+def test_tui_request_history_rail_shows_restored_and_running_requests(tmp_path: Path) -> None:
+    history = [
+        SimpleNamespace(
+            turn_index=1,
+            request="第一个请求",
+            summary="",
+            status="completed",
+            assistant_display_text="第一个回答",
+        ),
+        SimpleNamespace(
+            turn_index=2,
+            request="第二个请求",
+            summary="",
+            status="completed",
+            assistant_display_text="第二个回答",
+        ),
+    ]
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        session_histories={"session-test": history},
+    )
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.session_flow.show_session_history(service._session_status("session-test"), prefix="")
+            await pilot.pause()
+            rail = app.query_one(RequestHistoryRail)
+            assert rail.display is True
+            assert rail.region.width == 5
+            assert [entry.turn_index for entry in rail._entries] == [1, 2]
+
+            timeline = app.query_one(ConversationTimeline)
+            timeline.add_user("第三个请求", turn_index=3)
+            timeline.start_assistant_response(turn_index=3)
+            await pilot.pause()
+            assert [entry.turn_index for entry in rail._entries] == [1, 2, 3]
+            assert rail._entries[-1].answer_summary == "正在生成回答"
+            rendered = rail.render()
+            assert len([line for line in rendered.plain.splitlines() if line]) == 3
+            assert all("reverse" not in str(span.style) for span in rendered.spans)
+
+    asyncio.run(run())
+
+
+def test_tui_request_history_alt_navigation_keeps_prompt_recall_behavior(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            timeline = app.query_one(ConversationTimeline)
+            timeline.add_user("请求一", turn_index=1)
+            timeline.finalize_assistant(1, "回答一")
+            timeline.add_user("请求二", turn_index=2)
+            timeline.finalize_assistant(2, "回答二")
+            app._prompt_input().set_request_history(["请求一", "请求二"])
+            await pilot.pause()
+
+            await pilot.press("alt+up")
+            await pilot.pause()
+            assert timeline._current_request_turn == 1
+            assert app.query_one(PromptInput).value == ""
+
+            await pilot.press("up")
+            assert app.query_one(PromptInput).value == "请求二"
+
+    asyncio.run(run())
+
+
+def test_tui_request_history_hover_click_and_dense_keyboard_selection(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            timeline = app.query_one(ConversationTimeline)
+            for turn_index in range(1, 30):
+                timeline.add_user(f"请求 {turn_index}", turn_index=turn_index)
+                timeline.finalize_assistant(turn_index, f"回答 {turn_index}")
+            await pilot.pause()
+            rail = app.query_one(RequestHistoryRail)
+            grouped_index = next(index for index, group in enumerate(rail._groups) if len(group.entries) > 1)
+            grouped = rail._groups[grouped_index]
+            row = grouped.row
+            assert app.query_one(ConversationTimeline).region.x == 0
+            assert rail.region.height > 0
+
+            await pilot.hover(rail, offset=(1, row))
+            await pilot.pause()
+            preview = app.query_one("#request-history-preview", RequestHistoryPreview)
+            preview_text = preview.render()
+            assert preview.display is True
+            assert "请求" in preview_text.plain
+            assert "回答" in preview_text.plain
+            assert f"/{len(grouped.entries)}" in preview_text.plain
+            assert preview.region.width == 56
+            assert preview.region.x > rail.region.x
+            assert rail._content_row(rail.styles.padding.top + row) == row
+
+            await pilot.click(rail, offset=(1, row))
+            await pilot.pause()
+            assert rail.has_focus
+            first_turn = timeline._current_request_turn
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert timeline._current_request_turn != first_turn
+            await pilot.press("escape")
+            assert app.query_one(PromptInput).has_focus
+
+            before = timeline._current_request_turn
+            await pilot.click(rail, offset=(1, row), shift=True)
+            await pilot.pause()
+            assert timeline._current_request_turn == before
 
     asyncio.run(run())
 
