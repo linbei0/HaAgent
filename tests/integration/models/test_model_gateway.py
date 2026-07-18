@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from haagent.models.capabilities import ModelCapabilities
 from haagent.models.catalog import ModelCatalogProvider
 from haagent.models.fake import FakeModelGateway
 from haagent.models.adapters.anthropic import AnthropicMessagesGateway
@@ -618,13 +619,21 @@ def test_model_fallback_uses_target_settings_only() -> None:
         captured["payload"] = payload
         return {"choices": [{"message": {"content": "fallback-ok"}}]}
 
-    gateway = gateway_from_route(primary, fallback_model=fallback)
+    gateway = gateway_from_route(
+        primary,
+        fallback_model=fallback,
+        primary_capabilities=ModelCapabilities(context_window_tokens=200_000),
+        fallback_capabilities=ModelCapabilities(
+            context_window_tokens=64_000,
+            input_window_tokens=64_000,
+        ),
+    )
     try:
         primary_gateway = gateway._primary
         fallback_gateway = gateway._fallback
-        if hasattr(primary_gateway, "_gateway"):
+        while hasattr(primary_gateway, "_gateway"):
             primary_gateway = primary_gateway._gateway
-        if hasattr(fallback_gateway, "_gateway"):
+        while hasattr(fallback_gateway, "_gateway"):
             fallback_gateway = fallback_gateway._gateway
         primary_gateway._transport = lambda payload, api_key, **_: (_ for _ in ()).throw(
             ModelCallError(
@@ -641,10 +650,13 @@ def test_model_fallback_uses_target_settings_only() -> None:
             )
         )
         assert response.content == "fallback-ok"
+        assert gateway.capabilities().context_window_tokens == 64_000
+        assert gateway.metadata().context_window_tokens == 64_000
         payload = captured["payload"]
         assert payload["temperature"] == 0.1
         assert payload["max_tokens"] == 222
         assert payload["model"] == "fallback-model"
+        assert "max_context_tokens" not in payload
     finally:
         gateway.close()
 
@@ -782,7 +794,12 @@ def test_anthropic_gateway_parses_usage_metadata() -> None:
     ) -> dict[str, object]:
         return {
             "content": [{"type": "text", "text": "hello"}],
-            "usage": {"input_tokens": 12, "output_tokens": 4},
+            "usage": {
+                "input_tokens": 12,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 5,
+                "output_tokens": 4,
+            },
         }
 
     gateway = AnthropicMessagesGateway(
@@ -798,7 +815,43 @@ def test_anthropic_gateway_parses_usage_metadata() -> None:
         output_tokens=4,
         total_tokens=16,
         raw_source="anthropic.messages.usage",
+        context_input_tokens=20,
     )
+
+
+def test_route_overlays_catalog_input_windows_on_primary_and_fallback() -> None:
+    primary = _resolved("openai-chat", "https://primary.example/v1")
+    fallback = _resolved("openai-chat", "https://fallback.example/v1")
+
+    gateway = gateway_from_route(
+        primary,
+        fallback_model=fallback,
+        primary_capabilities=ModelCapabilities(
+            context_window_tokens=200_000,
+            input_window_tokens=180_000,
+        ),
+        fallback_capabilities=ModelCapabilities(context_window_tokens=128_000),
+    )
+    try:
+        assert gateway._primary.capabilities().input_window_tokens == 180_000
+        assert gateway._primary.capabilities().context_window_tokens == 200_000
+        assert gateway._fallback.capabilities().context_window_tokens == 128_000
+    finally:
+        gateway.close()
+
+
+def test_gateway_metadata_exposes_effective_context_window() -> None:
+    gateway = gateway_from_resolved(
+        _resolved("openai-chat", "https://example.test/v1"),
+        capabilities=ModelCapabilities(
+            context_window_tokens=400_000,
+            input_window_tokens=400_000,
+        ),
+    )
+    try:
+        assert gateway.metadata().context_window_tokens == 400_000
+    finally:
+        gateway.close()
 
 
 def test_anthropic_gateway_normalizes_tool_use_blocks() -> None:

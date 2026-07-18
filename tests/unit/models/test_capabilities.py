@@ -6,7 +6,9 @@ tests/unit/models/test_capabilities.py - 模型能力需求与匹配测试
 
 from haagent.models.capabilities import (
     ModelCapabilities,
+    apply_context_window_limit,
     build_model_requirements,
+    effective_input_window_tokens,
     missing_capabilities,
 )
 
@@ -68,3 +70,27 @@ def test_compatible_tool_mode_counts_as_supported() -> None:
     )
 
     assert missing_capabilities(requirements, capabilities) == ()
+
+
+def test_effective_input_window_prefers_input_limit() -> None:
+    assert effective_input_window_tokens(
+        ModelCapabilities(context_window_tokens=1_000_000, input_window_tokens=400_000),
+    ) == 400_000
+
+
+def test_user_context_limit_never_expands_provider_window() -> None:
+    cases = [
+        (ModelCapabilities(context_window_tokens=1_000_000), (400_000, 400_000)),
+        (ModelCapabilities(context_window_tokens=128_000), (128_000, 128_000)),
+        (ModelCapabilities(input_window_tokens=128_000), (128_000, 128_000)),
+        (
+            ModelCapabilities(context_window_tokens=1_000_000, input_window_tokens=180_000),
+            (400_000, 180_000),
+        ),
+        (None, (400_000, 400_000)),
+    ]
+
+    for capabilities, expected_windows in cases:
+        limited = apply_context_window_limit(capabilities, 400_000)
+        assert limited is not None
+        assert (limited.context_window_tokens, limited.input_window_tokens) == expected_windows

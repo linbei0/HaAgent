@@ -66,6 +66,11 @@ class ProviderConnectionRecord:
                 model_id: {
                     **({"options": config.options} if config.options else {}),
                     **({"variants": config.variants} if config.variants else {}),
+                    **(
+                        {"max_context_tokens": config.max_context_tokens}
+                        if config.max_context_tokens is not None
+                        else {}
+                    ),
                 }
                 for model_id, config in self.models.items()
             }

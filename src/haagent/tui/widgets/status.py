@@ -35,6 +35,22 @@ class ProgressStatusLine(Static):
         self.update("")
 
 
+class ContextUsageLine(Static):
+    """输入框与快捷键 footer 之间的右对齐上下文用量行。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.display = False
+
+    def update_usage(self, text: Text) -> None:
+        self.display = bool(text.plain)
+        self.update(text)
+
+    def clear(self) -> None:
+        self.display = False
+        self.update("")
+
+
 class FooterBar(Static):
     """底部快捷键 footer，按上下文切换显示内容。"""
 

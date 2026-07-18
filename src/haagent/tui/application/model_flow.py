@@ -228,6 +228,7 @@ class ModelFlow:
                 )
             else:
                 status = self._app.service.models.switch_current_session_selection(result.selection)
+                self._app.clear_context_usage()
                 model_name = status.model or result.selection.model
                 variant = status.model_variant or result.selection.variant
                 label = f"{model_name} · {variant}" if variant else model_name
@@ -261,6 +262,7 @@ class ModelFlow:
                     model=selection.model,
                 ),
             )
+            self._app.clear_context_usage()
             self._app._conversation.append_line(f"当前会话：{status.model or selection.model}")
         except Exception as error:
             self._app._conversation.append_block("Model warning", f"本地模型保存失败：{error}")

@@ -88,6 +88,16 @@ class ModelRetryExhaustedBusEvent:
 
 
 @dataclass(frozen=True)
+class ModelContextUsageBusEvent:
+    """一次真实模型 step 返回的当前输入上下文用量。"""
+
+    turn: int
+    input_tokens: int
+    input_window_tokens: int | None = None
+    event_type: str = field(default="model_context_usage", init=False)
+
+
+@dataclass(frozen=True)
 class ModelRouteFallbackBusEvent:
     turn: int
     kind: str
@@ -126,6 +136,7 @@ RuntimeBusEvent: TypeAlias = (
     | ToolFailedBusEvent
     | ModelRetryScheduledBusEvent
     | ModelRetryExhaustedBusEvent
+    | ModelContextUsageBusEvent
     | ModelRouteFallbackBusEvent
     | LegacyRawBusEvent
 )
@@ -187,6 +198,13 @@ def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, o
             "category": event.category,
             "status_code": event.status_code,
             "request_id": event.request_id,
+        }
+    if isinstance(event, ModelContextUsageBusEvent):
+        return {
+            "event_type": "model_context_usage",
+            "turn": event.turn,
+            "input_tokens": event.input_tokens,
+            "input_window_tokens": event.input_window_tokens,
         }
     if isinstance(event, ModelRouteFallbackBusEvent):
         return {
@@ -264,6 +282,12 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
             status_code=status_code if isinstance(status_code, int) and not isinstance(status_code, bool) else None,
             request_id=str(payload.get("request_id")) if payload.get("request_id") is not None else None,
         )
+    if event_type == "model_context_usage":
+        return ModelContextUsageBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            input_tokens=_non_negative_int(payload.get("input_tokens")),
+            input_window_tokens=_optional_positive_int(payload.get("input_window_tokens")),
+        )
     if event_type in {"model_protocol_fallback", "model_fallback"}:
         required = payload.get("required_capabilities")
         missing = payload.get("missing_capabilities")
@@ -292,3 +316,15 @@ def coerce_bus_event(event: RuntimeBusEvent | dict[str, object]) -> RuntimeBusEv
 
 def _optional_string(value: object) -> str | None:
     return str(value) if value is not None else None
+
+
+def _non_negative_int(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def _optional_positive_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None

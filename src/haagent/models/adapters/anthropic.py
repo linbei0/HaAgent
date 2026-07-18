@@ -7,6 +7,7 @@ src/haagent/models/adapters/anthropic.py - Anthropic Messages 网关
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any, Callable
 
 from haagent.models.gateway_retry import default_retry_controller, execute_model_request, unexpected_model_error
@@ -246,13 +247,28 @@ def _parse_anthropic_usage(response: dict[str, object]) -> ModelUsage | None:
     usage = response.get("usage")
     if not isinstance(usage, dict):
         return None
-    return _usage_from_fields(
+    parsed = _usage_from_fields(
         usage,
         input_field="input_tokens",
         output_field="output_tokens",
         total_field=None,
         raw_source="anthropic.messages.usage",
     )
+    if parsed is None:
+        return None
+    cache_creation = _optional_usage_int(usage.get("cache_creation_input_tokens")) or 0
+    cache_read = _optional_usage_int(usage.get("cache_read_input_tokens")) or 0
+    context_input_tokens = (
+        parsed.input_tokens + cache_creation + cache_read
+        if parsed.input_tokens is not None
+        else None
+    )
+    return replace(parsed, context_input_tokens=context_input_tokens)
+
+
+def _optional_usage_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
 
 class AnthropicMessagesGateway:
     provider_name = "anthropic"

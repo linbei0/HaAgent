@@ -82,6 +82,7 @@ class ModelParameterConfig:
 
     options: dict[str, Any]
     variants: dict[str, dict[str, Any]]
+    max_context_tokens: int | None = None
 
 
 def deep_merge_options(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
@@ -145,7 +146,7 @@ def parse_model_parameter_config(
 ) -> ModelParameterConfig:
     if not isinstance(raw, dict):
         raise ModelOptionsError(f"{path} must be a JSON object")
-    unknown = sorted(str(key) for key in raw if key not in {"options", "variants"})
+    unknown = sorted(str(key) for key in raw if key not in {"options", "variants", "max_context_tokens"})
     if unknown:
         raise ModelOptionsError(f"{path} contains unknown field: {unknown[0]}")
     options = validate_options_object(
@@ -164,7 +165,18 @@ def parse_model_parameter_config(
             body,
             path=f"{path}.variants.{variant_name}",
         )
-    return ModelParameterConfig(options=options, variants=variants)
+    max_context_tokens = raw.get("max_context_tokens")
+    if max_context_tokens is not None and (
+        not isinstance(max_context_tokens, int)
+        or isinstance(max_context_tokens, bool)
+        or max_context_tokens <= 0
+    ):
+        raise ModelOptionsError(f"{path}.max_context_tokens must be a positive integer")
+    return ModelParameterConfig(
+        options=options,
+        variants=variants,
+        max_context_tokens=max_context_tokens,
+    )
 
 
 def parse_connection_models(

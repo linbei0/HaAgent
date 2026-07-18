@@ -5,16 +5,20 @@ tests/unit/models/test_model_connections.py - providers v4 存储与解析测试
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
+from haagent.models.capabilities import ModelCapabilities, effective_input_window_tokens
+from haagent.models.catalog import CatalogFetchResult, ModelCatalogModel, ModelCatalogProvider
 from haagent.models.config.config_store import ModelConfigStore
 from haagent.models.config.connections import ProviderConnectionRecord, ProviderProfileError
 from haagent.models.config.credentials import CredentialError
 from haagent.models.model_options import ModelParameterConfig
 from haagent.models.model_ref import ModelRef
-from haagent.models.model_runtime import ModelRuntime
+from haagent.models.model_runtime import ModelRuntime, model_capabilities_from_catalog
 from haagent.models.config.selection_store import ModelSelectionStore
+from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel
 
 
 def _record(*, connection_id: str = "main", models=None, source: str = "none") -> ProviderConnectionRecord:
@@ -42,6 +46,18 @@ def test_store_saves_two_connections_and_preserves_models(tmp_path) -> None:
     assert json.loads(store.path.read_text(encoding="utf-8"))["version"] == 4
 
 
+def test_store_round_trips_per_model_context_limit(tmp_path) -> None:
+    store = ModelConfigStore(tmp_path / "providers.json")
+    record = _record(
+        models={"gpt-5": ModelParameterConfig({}, {}, max_context_tokens=400_000)},
+    )
+
+    store.save_connection(record, expected_digest=store.load().digest)
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    assert raw["connections"][0]["models"]["gpt-5"]["max_context_tokens"] == 400_000
+    assert store.load().connection("main").models["gpt-5"].max_context_tokens == 400_000
+
+
 def test_store_rejects_unknown_v4_field_and_digest_conflict(tmp_path) -> None:
     path = tmp_path / "providers.json"
     path.write_text(json.dumps({"version": 4, "connections": [], "legacy": True}), encoding="utf-8")
@@ -65,6 +81,149 @@ def test_snapshot_binds_catalog_and_lists_choices_in_order(tmp_path) -> None:
     choices = runtime.list_choices()
     assert [choice.ref.model for choice in choices] == ["gpt-4.1", "gpt-5"]
     assert choices[1].variants == ("fast", "deep")
+
+
+def test_catalog_capabilities_prefer_input_limit_and_ignore_invalid_values() -> None:
+    capabilities = model_capabilities_from_catalog(
+        ModelCatalogModel(
+            id="gpt-test",
+            limits={"input": 180_000, "context": 200_000},
+        ),
+    )
+    invalid = model_capabilities_from_catalog(
+        ModelCatalogModel(
+            id="invalid",
+            limits={"input": True, "context": "200000"},
+        ),
+    )
+
+    assert capabilities == ModelCapabilities(
+        context_window_tokens=200_000,
+        input_window_tokens=180_000,
+    )
+    assert effective_input_window_tokens(capabilities) == 180_000
+    assert effective_input_window_tokens(ModelCapabilities(context_window_tokens=128_000)) == 128_000
+    assert effective_input_window_tokens(invalid) is None
+
+
+def test_runtime_passes_bound_catalog_capabilities_to_route(tmp_path, monkeypatch) -> None:
+    runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
+    runtime.save_connection(_record(models={"gpt-test": ModelParameterConfig({}, {})}))
+    runtime.set_active(ModelRef("main", "gpt-test"))
+    runtime.bind_remote_catalog(
+        CatalogFetchResult(
+            providers=[
+                ModelCatalogProvider(
+                    id="openai",
+                    models=[
+                        ModelCatalogModel(
+                            id="gpt-test",
+                            limits={"input": 180_000, "context": 200_000},
+                        ),
+                    ],
+                ),
+            ],
+            source="test",
+            fetched_at="2026-07-18T00:00:00Z",
+        ),
+    )
+    direct_gateway = runtime.create_gateway(ModelRef("main", "gpt-test"))
+    try:
+        assert direct_gateway.capabilities().input_window_tokens == 180_000
+        assert direct_gateway.capabilities().context_window_tokens == 200_000
+    finally:
+        direct_gateway.close()
+    captured: dict[str, object] = {}
+
+    def fake_gateway_from_route(primary, **kwargs):
+        captured["primary"] = primary
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr("haagent.models.model_runtime.gateway_from_route", fake_gateway_from_route)
+
+    runtime.create_route_gateway()
+
+    assert captured["primary_capabilities"] == ModelCapabilities(
+        context_window_tokens=200_000,
+        input_window_tokens=180_000,
+    )
+
+
+def test_runtime_applies_user_context_limit_after_catalog_capabilities(tmp_path) -> None:
+    runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
+    runtime.save_connection(
+        _record(
+            models={"gpt-test": ModelParameterConfig({}, {}, max_context_tokens=400_000)},
+        ),
+    )
+    runtime.set_active(ModelRef("main", "gpt-test"))
+    runtime.bind_remote_catalog(
+        CatalogFetchResult(
+            providers=[
+                ModelCatalogProvider(
+                    id="openai",
+                    models=[
+                        ModelCatalogModel(id="gpt-test", limits={"input": 1_000_000, "context": 1_000_000}),
+                    ],
+                ),
+            ],
+            source="test",
+            fetched_at="2026-07-18T00:00:00Z",
+        ),
+    )
+
+    gateway = runtime.create_gateway(ModelRef("main", "gpt-test"))
+    try:
+        assert gateway.capabilities().context_window_tokens == 400_000
+        assert gateway.capabilities().input_window_tokens == 400_000
+    finally:
+        gateway.close()
+
+
+def test_runtime_applies_user_context_limit_to_discovered_local_capabilities(tmp_path) -> None:
+    runtime = ModelRuntime.load(config_dir=tmp_path, environ={})
+    runtime.save_connection(
+        ProviderConnectionRecord(
+            id="local-ollama",
+            name="Ollama",
+            provider_id="ollama",
+            provider_name="Ollama",
+            gateway_provider="openai",
+            base_url="http://127.0.0.1:11434/v1",
+            api_key_env="",
+            credential_source="none",
+            runtime_kind="ollama",
+            models={"llama3": ModelParameterConfig({}, {}, max_context_tokens=400_000)},
+        ),
+    )
+    runtime.bind_local_discoveries(
+        [
+            LocalRuntimeDiscovery(
+                runtime_kind="ollama",
+                base_url="http://127.0.0.1:11434/v1",
+                status="available",
+                models=(
+                    LocalRuntimeModel(
+                        id="llama3",
+                        name="llama3",
+                        loaded=True,
+                        capabilities=ModelCapabilities(
+                            context_window_tokens=1_000_000,
+                            input_window_tokens=1_000_000,
+                        ),
+                    ),
+                ),
+            ),
+        ],
+    )
+
+    gateway = runtime.create_gateway(ModelRef("local-ollama", "llama3"))
+    try:
+        assert gateway.capabilities().context_window_tokens == 400_000
+        assert gateway.metadata().context_window_tokens == 400_000
+    finally:
+        gateway.close()
 
 
 def test_bind_available_models_merges_remote_and_local_in_any_order(tmp_path) -> None:

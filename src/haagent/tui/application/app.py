@@ -18,7 +18,7 @@ from textual.timer import Timer
 from textual.widgets import TextArea
 
 from haagent.app.assistant_service import AssistantService
-from haagent.runtime.events import RuntimeUiEvent
+from haagent.runtime.events import ContextUsageEvent, RuntimeUiEvent
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.tui.application.attachments import AttachmentController, prompt_without_image_tokens
@@ -35,7 +35,7 @@ from haagent.tui.application.session_flow import SessionFlow
 from haagent.tui.commands import command_registry, is_prompt_mode_command, parse_slash_command
 from haagent.tui.design.failures import FailureView, failure_from_payload
 from haagent.tui.design.keys import APP_BINDINGS, footer_text
-from haagent.tui.design.renderers import status_line
+from haagent.tui.design.renderers import context_usage_line, status_line
 from haagent.tui.design.theme import (
     next_theme,
     select_theme,
@@ -52,6 +52,7 @@ from haagent.tui.state import MIN_HEIGHT, MIN_WIDTH, PendingInteraction, layout_
 from haagent.tui.typography import install_textual_line_breaking
 from haagent.tui.widgets import (
     ConversationTimeline,
+    ContextUsageLine,
     FooterBar,
     InputDock,
     ProgressStatusLine,
@@ -103,6 +104,8 @@ class HaAgentTuiApp(App[None]):
         self._timeline_widget: ConversationTimeline | None = None
         self._input_dock_widget: InputDock | None = None
         self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
+        # 只保存当前进程最近一次真实 provider usage；不恢复、不写 session package。
+        self._context_usage: ContextUsageEvent | None = None
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -119,6 +122,7 @@ class HaAgentTuiApp(App[None]):
         with InputDock(id="input-panel"):
             yield ProgressStatusLine("", id="progress-status")
             yield PromptInput(placeholder=self._default_prompt_placeholder, id="prompt-input", show_line_numbers=False)
+        yield ContextUsageLine("", id="context-usage")
         yield FooterBar(footer_text("chat"), id="footer-bar")
 
     def on_mount(self) -> None:
@@ -737,6 +741,32 @@ class HaAgentTuiApp(App[None]):
         self.query_one("#main", Horizontal).set_class(layout.too_small, "hidden")
         self.query_one("#input-panel", InputDock).set_class(layout.too_small, "hidden")
         self.query_one("#footer-bar", FooterBar).set_class(layout.too_small, "hidden")
+        self._render_context_usage(terminal_width, visible=not layout.too_small)
+
+    def update_context_usage(self, event: ContextUsageEvent) -> None:
+        """模型 step 完成后只刷新用量行，避免重读 workspace/keyring。"""
+
+        self._context_usage = event
+        layout = layout_for_size(self.size.width, self.size.height)
+        self._render_context_usage(self.size.width, visible=not layout.too_small)
+
+    def clear_context_usage(self) -> None:
+        self._context_usage = None
+        self.query_one("#context-usage", ContextUsageLine).clear()
+
+    def _render_context_usage(self, terminal_width: int, *, visible: bool) -> None:
+        widget = self.query_one("#context-usage", ContextUsageLine)
+        usage = self._context_usage
+        if not visible or usage is None:
+            widget.clear()
+            return
+        widget.update_usage(
+            context_usage_line(
+                usage.input_tokens,
+                usage.input_window_tokens,
+                terminal_width=terminal_width,
+            ),
+        )
 
     # ── 图片输入 ─────────────────────────────────────────────────────────
     def _current_model_accepts_images(self) -> bool:

@@ -74,6 +74,8 @@ class ModelUsage:
     output_tokens: int | None = None
     total_tokens: int | None = None
     raw_source: str = "unknown"
+    # provider 的“当前输入上下文”口径；Anthropic 需要包含 cache 创建与读取 token。
+    context_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,8 @@ class ModelGatewayMetadata:
     endpoint: str | None
     base_url: str | None = None
     profile_name: str | None = None
+    # HaAgent 本地有效输入窗口；不是 provider 请求参数。
+    context_window_tokens: int | None = None
     # episode 审计用；不含 secret，只放选择状态与脱敏参数摘要。
     request_config: dict[str, Any] | None = None
 

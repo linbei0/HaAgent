@@ -30,6 +30,7 @@
 - Profile 是模型连接配置，支持云端、本地 Ollama、LM Studio 及显式混合 fallback；OpenAI-compatible endpoint 使用 `openai` / `openai-chat` gateway，模型目录明确识别的 Anthropic 与 Google provider 使用对应原生 gateway。
 - 本地发现只探测 `127.0.0.1:11434` 和 `127.0.0.1:1234`，不扫描局域网；发现失败必须区分不可达、未授权和无效响应。
 - `providers.json` 只接受 version 4，不维护旧版本迁移路径。本地连接可以使用 `credential_source=none`，能力快照不持久化。
+- `providers.json` 的每个模型可选配置 `max_context_tokens` 作为 HaAgent 本地有效上限；它与 provider/本地发现窗口取较小值，不作为 provider 请求参数发送。
 - `settings.json` 可保存一个 `fallback_model` 和 `cloud_fallback_consent`。本地到云端 fallback 必须有明确 consent，本地到本地不需要；fallback 不得在已有输出后重放。
 - 默认 profile 存放在用户级 `~/.haagent/providers.json`；active profile 存放在 `~/.haagent/settings.json`。
 - Workspace 和 session 是目录相关运行状态，默认写入当前目录的 `.runs/sessions`。
@@ -116,6 +117,7 @@
 - 主对话区采用非对称安静结构：用户消息使用低对比表面和细左边线，不显示角色标签；assistant 回答直接落在主背景上，不使用卡片、边框或标题；系统、命令、操作和提示使用紧凑行内通知，失败保留明确符号与错误语义。
 - 工具过程运行时显示中文动作摘要，过程标题按秒只刷新当前块的步骤数与耗时，不触发 timeline 全量重绘；最终回答完成后连同本轮工具失败、任务受阻诊断一起折叠为“已完成 N 步 · 本轮耗时 ›”并冻结耗时。没有最终回答的失败、待审批和待补充输入保持可见。普通界面使用中文工具名，详情同时显示中文名与原始标识；完整 transcript、tool output、stdout、stderr、patch 和 episode trace 仍按需打开。
 - 输入区使用多行 `TextArea`：`Enter` 提交，`Ctrl+Enter` 换行，空输入不提交，`Esc` 关闭当前 modal/overlay 或返回上层交互。焦点只使用一格细左边线、轻微背景和光标变化，不显示高亮粗边框。
+- 输入框下方、快捷键 footer 上方可显示最近一次真实模型 step 的上下文用量：120 列及以上显示绝对 token 与整数占比，80–119 列优先只显示占比，窗口未知时只显示绝对 token；没有可信 provider usage 时整行隐藏。占比使用实际执行模型的输入上限（`limit.input` 优先于 `limit.context`），Anthropic 输入量包含 cache creation/read token；不得用压缩预算的默认窗口估算。模型或会话切换时清空，恢复会话不回放旧值。
 - 聊天 footer 固定为 `/ 命令 · Ctrl+F 搜索 · ? 帮助 · Ctrl+Q 退出`，不显示 `Enter 发送`；运行时用 `Ctrl+X 取消任务` 替换 `/ 命令`。其他上下文 footer 最多四组操作，完整键位进入 `?` 帮助。
 - 计划任务未读数不进入顶部状态栏；数量增加时只发一次非持久通知，完整数量留在计划任务界面。
 - 运行时请求用户补充信息时，输入区进入回答状态，提交后继续同一个 turn，不能变成新 prompt。

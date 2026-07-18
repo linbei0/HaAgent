@@ -6,7 +6,7 @@ haagent/models/capabilities.py - 模型能力与本轮需求合同
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from haagent.context.compression.budget import estimate_message_tokens
@@ -24,6 +24,7 @@ class ModelCapabilities:
     reasoning: CapabilityState = "unknown"
     tools_mode: ToolsMode = "none"
     context_window_tokens: int | None = None
+    input_window_tokens: int | None = None
     protocols: frozenset[ModelProtocol] = frozenset()
 
 
@@ -63,10 +64,53 @@ def missing_capabilities(
         missing.append("streaming")
     if requirements.vision and capabilities.vision == "unsupported":
         missing.append("vision")
-    context_window = capabilities.context_window_tokens
+    context_window = effective_input_window_tokens(capabilities)
     if context_window is not None and requirements.estimated_input_tokens > context_window:
         missing.append("context_window")
     return tuple(missing)
+
+
+def effective_input_window_tokens(capabilities: ModelCapabilities) -> int | None:
+    """返回模型实际输入上限；独立 input limit 优先于总 context window。"""
+
+    if _positive_int(capabilities.input_window_tokens):
+        return capabilities.input_window_tokens
+    if _positive_int(capabilities.context_window_tokens):
+        return capabilities.context_window_tokens
+    return None
+
+
+def apply_context_window_limit(
+    capabilities: ModelCapabilities | None,
+    max_context_tokens: int | None,
+) -> ModelCapabilities | None:
+    """将用户本地上限与 provider/discovery 窗口取最小值。"""
+
+    if max_context_tokens is None:
+        return capabilities
+    if not isinstance(max_context_tokens, int) or isinstance(max_context_tokens, bool) or max_context_tokens <= 0:
+        raise ValueError("max_context_tokens must be a positive integer")
+    current = capabilities or ModelCapabilities()
+    # 目录只提供一个窗口字段时，另一个字段必须继承该约束，不能凭空放宽输入上限。
+    input_window = min(
+        effective_input_window_tokens(current) or max_context_tokens,
+        max_context_tokens,
+    )
+    context_window = min(
+        current.context_window_tokens
+        if _positive_int(current.context_window_tokens)
+        else input_window,
+        max_context_tokens,
+    )
+    return replace(
+        current,
+        context_window_tokens=context_window,
+        input_window_tokens=input_window,
+    )
+
+
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _contains_image(value: object) -> bool:

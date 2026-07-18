@@ -16,6 +16,7 @@ from haagent.runtime.events.bus import (
     AssistantDeltaBusEvent,
     AssistantMessageBusEvent,
     LegacyRawBusEvent,
+    ModelContextUsageBusEvent,
     ToolFailedBusEvent,
     ToolFinishedBusEvent,
     ToolStartedBusEvent,
@@ -33,6 +34,24 @@ def test_assistant_delta_bus_event_round_trips_to_dict() -> None:
     restored = bus_event_from_dict(payload)
     assert isinstance(restored, AssistantDeltaBusEvent)
     assert restored == event
+
+
+def test_model_context_usage_bus_event_round_trips_to_dict() -> None:
+    event = ModelContextUsageBusEvent(
+        turn=2,
+        input_tokens=116_200,
+        input_window_tokens=500_000,
+    )
+
+    payload = bus_event_to_dict(event)
+
+    assert payload == {
+        "event_type": "model_context_usage",
+        "turn": 2,
+        "input_tokens": 116_200,
+        "input_window_tokens": 500_000,
+    }
+    assert bus_event_from_dict(payload) == event
 
 
 def test_tool_finished_bus_event_preserves_full_result() -> None:

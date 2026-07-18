@@ -11,7 +11,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Callable
 
-from haagent.models.catalog import CatalogFetchResult
+from haagent.models.capabilities import ModelCapabilities, apply_context_window_limit
+from haagent.models.catalog import CatalogFetchResult, ModelCatalogModel
 from haagent.models.config.config_store import ModelConfigStore
 from haagent.models.config.connections import (
     ProviderConnectionRecord,
@@ -48,6 +49,8 @@ class ModelRuntime:
         self._gateway_builder = gateway_builder
         self._snapshot = config_store.load()
         self._selection_store = ModelSelectionStore(config_store.path.parent)
+        self._catalog_capabilities: dict[tuple[str, str], ModelCapabilities] = {}
+        self._local_capabilities: dict[tuple[str, str], ModelCapabilities] = {}
 
     @classmethod
     def load(
@@ -78,7 +81,16 @@ class ModelRuntime:
         )
 
     def create_gateway(self, ref: ModelRef) -> ModelGateway:
-        return self._gateway_builder(self.resolve(ref))
+        resolved = self.resolve(ref)
+        if self._gateway_builder is not gateway_from_resolved:
+            return self._gateway_builder(resolved)
+        key = (resolved.ref.connection_id, resolved.ref.model)
+        capabilities = self._raw_capabilities_for(key)
+        context_window_limit = self._context_window_limit_for(resolved)
+        return gateway_from_resolved(
+            resolved,
+            capabilities=apply_context_window_limit(capabilities, context_window_limit),
+        )
 
     def create_route_gateway(
         self,
@@ -90,12 +102,31 @@ class ModelRuntime:
         route = self._selection_store.load_route()
         if self._gateway_builder is not gateway_from_resolved:
             return self._gateway_builder(self.resolve(primary_ref or route.primary))
+        primary_resolved = self.resolve(primary_ref or route.primary)
+        fallback_resolved = self.resolve(route.fallback) if route.fallback else None
+        primary_key = (primary_resolved.ref.connection_id, primary_resolved.ref.model)
+        fallback_key = (
+            (fallback_resolved.ref.connection_id, fallback_resolved.ref.model)
+            if fallback_resolved is not None
+            else None
+        )
+        primary_limit = self._context_window_limit_for(primary_resolved)
+        fallback_limit = self._context_window_limit_for(fallback_resolved) if fallback_resolved else None
         return gateway_from_route(
-            self.resolve(primary_ref or route.primary),
-            fallback_model=self.resolve(route.fallback) if route.fallback else None,
+            primary_resolved,
+            fallback_model=fallback_resolved,
             cloud_fallback_consent=route.cloud_fallback_consent,
             retry_controller=retry_controller,
             route_event_sink=route_event_sink,
+            primary_capabilities=apply_context_window_limit(
+                self._raw_capabilities_for(primary_key),
+                primary_limit,
+            ),
+            fallback_capabilities=(
+                apply_context_window_limit(self._raw_capabilities_for(fallback_key), fallback_limit)
+                if fallback_resolved is not None
+                else None
+            ),
         )
 
     def list_choices(self) -> list[ModelChoice]:
@@ -202,6 +233,7 @@ class ModelRuntime:
 
     def bind_local_discoveries(self, discoveries: Sequence[LocalRuntimeDiscovery]) -> None:
         available: dict[str, set[str]] = {}
+        self._local_capabilities = {}
         for connection in self._snapshot.records:
             discovery = next(
                 (
@@ -213,6 +245,12 @@ class ModelRuntime:
             )
             if discovery is not None:
                 available[connection.id] = {model.id for model in discovery.models}
+                self._local_capabilities.update(
+                    {
+                        (connection.id, model.id): model.capabilities
+                        for model in discovery.models
+                    },
+                )
         self.bind_available_models(available, source="local")
 
     def bind_remote_catalog(self, catalog: CatalogFetchResult) -> None:
@@ -222,7 +260,29 @@ class ModelRuntime:
             for connection in self._snapshot.records
             if connection.runtime_kind == "remote" and connection.provider_id in providers
         }
+        # 目录窗口只保存在当前进程；session package 不复制易过期的远端能力事实。
+        self._catalog_capabilities = {
+            (connection.id, model.id): model_capabilities_from_catalog(model)
+            for connection in self._snapshot.records
+            if connection.runtime_kind == "remote" and connection.provider_id in providers
+            for model in providers[connection.provider_id].models
+        }
         self.bind_available_models(available, source="remote")
+
+    def _raw_capabilities_for(
+        self,
+        key: tuple[str, str] | None,
+    ) -> ModelCapabilities | None:
+        if key is None:
+            return None
+        return self._catalog_capabilities.get(key) or self._local_capabilities.get(key)
+
+    def _context_window_limit_for(self, resolved: ResolvedModel | None) -> int | None:
+        if resolved is None:
+            return None
+        connection = self._snapshot.connection(resolved.ref.connection_id)
+        config = connection.models.get(resolved.ref.model)
+        return config.max_context_tokens if config is not None else None
 
     def _rollback_connection_write(
         self,
@@ -244,3 +304,18 @@ class ModelRuntime:
             invalid_model_configs=previous.invalid_model_configs,
             available_models=previous.available_models,
         )
+
+
+def model_capabilities_from_catalog(model: ModelCatalogModel) -> ModelCapabilities:
+    """把 models.dev 的 limit.input/context 转为可信的正整数窗口事实。"""
+
+    return ModelCapabilities(
+        context_window_tokens=_positive_catalog_limit(model.limits.get("context")),
+        input_window_tokens=_positive_catalog_limit(model.limits.get("input")),
+    )
+
+
+def _positive_catalog_limit(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None

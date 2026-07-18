@@ -10,18 +10,19 @@ import asyncio
 from pathlib import Path
 
 from rich.text import Text
+from haagent.runtime.events import ContextUsageEvent
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.design.failures import failure_from_payload, failure_next_steps
 from haagent.tui.design.keys import footer_text, help_body, key_help_lines
 from haagent.tui.design.copy import MODAL_TITLES, PANEL_TITLES
-from haagent.tui.design.renderers import status_line
+from haagent.tui.design.renderers import context_usage_line, status_line
 from haagent.tui.state import ResponsiveLayout, layout_for_size
 from haagent.tui.design.theme import (
     TuiThemeMode,
     no_color_enabled,
     select_theme,
 )
-from haagent.tui.widgets import ConversationTimeline, PromptInput
+from haagent.tui.widgets import ContextUsageLine, ConversationTimeline, PromptInput
 from textual.widgets import TextArea
 
 from tests.tui.support import FakeAssistantService, _all_text, _memory_candidate, _text, _tool_event
@@ -53,6 +54,52 @@ def test_tui_status_renderers_show_explicit_web_state(tmp_path: Path) -> None:
 
     assert "联网已关" in status_line(offline, ui_state="idle", width=120).plain
     assert "联网已开" in status_line(online, ui_state="idle", width=120).plain
+
+
+def test_context_usage_renderer_adapts_to_width_and_known_limit() -> None:
+    assert context_usage_line(116_200, 500_000, terminal_width=120).plain == "116.2K（23%）"
+    assert context_usage_line(116_200, 500_000, terminal_width=119).plain == "23%"
+    assert context_usage_line(116_200, None, terminal_width=80).plain == "116.2K"
+    assert context_usage_line(600_000, 500_000, terminal_width=120).plain == "600K（120%）"
+    assert context_usage_line(0, 500_000, terminal_width=120).plain == ""
+
+
+def test_context_usage_widget_is_hidden_until_real_usage_and_clears_with_session(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = HaAgentTuiApp(FakeAssistantService(workspace_root=tmp_path))
+        async with app.run_test(size=(120, 40)) as pilot:
+            widget = app.query_one("#context-usage", ContextUsageLine)
+            assert widget.display is False
+
+            app.update_context_usage(
+                ContextUsageEvent(
+                    session_id="session-1",
+                    turn_index=1,
+                    model_turn=1,
+                    input_tokens=116_200,
+                    input_window_tokens=500_000,
+                ),
+            )
+            await pilot.pause()
+
+            assert widget.display is True
+            assert widget._Static__content.plain == "116.2K（23%）"
+
+            app._update_responsive_layout(width=119, height=40)
+            assert widget._Static__content.plain == "23%"
+
+            app._update_responsive_layout(width=79, height=23)
+            assert widget.display is False
+
+            app._update_responsive_layout(width=120, height=40)
+            assert widget.display is True
+            assert widget._Static__content.plain == "116.2K（23%）"
+
+            app.session_flow.clear_conversation_for_new_session()
+            assert widget.display is False
+            assert widget._Static__content == ""
+
+    asyncio.run(run())
 
 
 def test_tui_status_line_uses_widget_content_width_without_clipping_work_state(tmp_path: Path) -> None:

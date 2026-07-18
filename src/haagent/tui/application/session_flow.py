@@ -97,6 +97,7 @@ class SessionFlow:
     def apply_continue_success(self, status: AssistantSessionStatus) -> None:
         self._busy = False
         self._app._reset_image_input_state()
+        self._app.clear_context_usage()
         try:
             history = list(self._app.service.sessions.history())
         except Exception as error:
@@ -125,6 +126,7 @@ class SessionFlow:
         self._app._defer_prompt_focus()
 
     def show_session_history(self, status: AssistantSessionStatus, *, prefix: str) -> None:
+        self._app.clear_context_usage()
         conversation = self._timeline()
         try:
             history = list(self._app.service.sessions.history())
@@ -139,6 +141,7 @@ class SessionFlow:
         self._app._conversation.reset_streaming_state()
 
     def clear_conversation_for_new_session(self) -> None:
+        self._app.clear_context_usage()
         self._app._conversation.reset_streaming_state()
         self._app._active_turn_index = None
         self._app._prompt_input().clear_request_history()

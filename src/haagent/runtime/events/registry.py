@@ -23,6 +23,7 @@ from haagent.runtime.events.types import (
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
+    ContextUsageEvent,
     FailureNoticeEvent,
     RuntimeUiEvent,
     RuntimeUiEventType,
@@ -114,6 +115,21 @@ def _assistant_intermediate_event(
         turn_index=context.turn_index,
         model_turn=context.model_turn,
         content=str(event.get("content", "")),
+    )
+
+
+def _context_usage_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> ContextUsageEvent:
+    window = event.get("input_window_tokens")
+    return ContextUsageEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        model_turn=context.model_turn,
+        input_tokens=_int_value(event.get("input_tokens")),
+        input_window_tokens=(
+            window
+            if isinstance(window, int) and not isinstance(window, bool) and window > 0
+            else None
+        ),
     )
 
 
@@ -448,6 +464,7 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("assistant_delta", AssistantDeltaEvent, _assistant_delta_event),
     _spec("assistant_intermediate_message", AssistantIntermediateEvent, _assistant_intermediate_event),
     _spec("assistant_message", AssistantMessageEvent, _assistant_message_event),
+    _spec("model_context_usage", ContextUsageEvent, _context_usage_event),
     _spec("tool_started", ToolActivityEvent, _tool_started_event),
     _spec("tool_finished", ToolActivityEvent, _tool_finished_event),
     _spec("tool_failed", ToolActivityEvent, _tool_failed_event),

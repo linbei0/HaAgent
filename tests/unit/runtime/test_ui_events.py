@@ -8,6 +8,7 @@ from haagent.runtime.events import (
     ApprovalStateEvent,
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
+    ContextUsageEvent,
     FailureNoticeEvent,
     RAW_RUNTIME_UI_EVENT_REGISTRY,
     RuntimeUiEventMapper,
@@ -80,7 +81,29 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "model_retry_exhausted",
         "model_protocol_fallback",
         "model_fallback",
+        "model_context_usage",
     }
+
+
+def test_runtime_ui_event_mapper_exposes_context_usage() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "model_context_usage",
+            "turn": 3,
+            "input_tokens": 116_200,
+            "input_window_tokens": 500_000,
+        },
+        session_id="session-1",
+        turn_index=2,
+    )
+
+    assert event == ContextUsageEvent(
+        session_id="session-1",
+        turn_index=2,
+        model_turn=3,
+        input_tokens=116_200,
+        input_window_tokens=500_000,
+    )
 
 
 def test_runtime_ui_event_mapper_groups_assistant_delta() -> None:

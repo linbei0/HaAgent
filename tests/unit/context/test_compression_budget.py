@@ -5,6 +5,7 @@ tests/unit/context/test_compression_budget.py - 统一压缩预算测试
 """
 
 from haagent.context.compression.budget import derive_compression_budget
+from haagent.models.types import ModelGatewayMetadata
 
 
 class Metadata:
@@ -32,3 +33,14 @@ def test_budget_uses_fallback_when_metadata_has_no_context_window() -> None:
     budget = derive_compression_budget(object(), fallback_context_window=64_000)
 
     assert budget.context_window_tokens == 64_000
+
+
+def test_budget_uses_effective_gateway_metadata_window() -> None:
+    budget = derive_compression_budget(ModelGatewayMetadata(
+        provider="openai",
+        model="gpt-5",
+        endpoint=None,
+        context_window_tokens=400_000,
+    ))
+
+    assert budget.context_window_tokens == 400_000

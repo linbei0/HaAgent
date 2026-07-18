@@ -14,6 +14,7 @@ from haagent.runtime.events import (
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
+    ContextUsageEvent,
     FailureNoticeEvent,
     MemoryNoticeEvent,
     RuntimeUiEvent,
@@ -43,8 +44,8 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
     if handler is None:
         raise TypeError(f"unsupported RuntimeUiEvent: {type(event).__name__}")
     handler(app, event)
-    # AssistantDelta 走批量 timeline 刷新；全量 _refresh 会读 workspace.status / keyring。
-    if isinstance(event, AssistantDeltaEvent):
+    # delta 与上下文用量都走局部刷新；全量 _refresh 会读 workspace.status / keyring。
+    if isinstance(event, AssistantDeltaEvent | ContextUsageEvent):
         return
     app._refresh()
 
@@ -53,6 +54,10 @@ def _handle_assistant_delta(app, event: AssistantDeltaEvent) -> None:
     app._conversation.merge_assistant_delta(event.turn_index, event.model_turn, event.delta)
     # timeline 自身已有 ~33ms markdown 批同步；这里只调度轻量 stick/scroll，不触 status。
     app._schedule_streaming_refresh()
+
+
+def _handle_context_usage(app, event: ContextUsageEvent) -> None:
+    app.update_context_usage(event)
 
 
 def _handle_assistant_message(app, event: AssistantMessageEvent) -> None:
@@ -206,6 +211,7 @@ RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {
     AssistantDeltaEvent: _handle_assistant_delta,
     AssistantIntermediateEvent: _handle_assistant_intermediate,
     AssistantMessageEvent: _handle_assistant_message,
+    ContextUsageEvent: _handle_context_usage,
     ToolActivityEvent: _handle_tool_activity,
     ApprovalStateEvent: _handle_approval_state,
     UserInputStateEvent: _handle_user_input_state,

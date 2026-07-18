@@ -21,6 +21,7 @@ from haagent.context.messages import (
     build_tool_result_message,
     generate_tool_call_id,
 )
+from haagent.models.capabilities import effective_input_window_tokens
 from haagent.models.telemetry import ModelTransportEvent
 from haagent.models.model_ref import ModelInvocation
 from haagent.models.model_settings import ModelSettings
@@ -44,6 +45,7 @@ from haagent.runtime.events.bus import (
     AssistantDeltaBusEvent,
     AssistantIntermediateBusEvent,
     AssistantMessageBusEvent,
+    ModelContextUsageBusEvent,
     RuntimeBusEvent,
     ToolFailedBusEvent,
     ToolFinishedBusEvent,
@@ -318,6 +320,16 @@ def run_turn_loop(
             model=model_metadata.get("model"),
             usage=model_response.usage,
         )
+        context_input_tokens = _context_input_tokens(model_response.usage)
+        if context_input_tokens is not None:
+            # provider usage 到 UI 的跨层合同：只在真实 step 完成后发布，不在流式中估算。
+            deps.emit_event(
+                ModelContextUsageBusEvent(
+                    turn=turn,
+                    input_tokens=context_input_tokens,
+                    input_window_tokens=_input_window_tokens(deps.model_gateway),
+                ),
+            )
         output_guardrail = (
             check_assistant_output(model_response.content)
             if not model_response.tool_calls
@@ -1337,6 +1349,22 @@ def _usage_record(usage: ModelUsage | None) -> dict[str, object] | None:
         "total_tokens": usage.total_tokens,
         "raw_usage_source": usage.raw_source,
     }
+
+
+def _context_input_tokens(usage: ModelUsage | None) -> int | None:
+    if usage is None:
+        return None
+    value = usage.context_input_tokens if usage.context_input_tokens is not None else usage.input_tokens
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _input_window_tokens(model_gateway: ModelGateway) -> int | None:
+    getter = getattr(model_gateway, "capabilities", None)
+    if not callable(getter):
+        return None
+    return effective_input_window_tokens(getter())
 
 
 def _stable_prefix_fingerprint(

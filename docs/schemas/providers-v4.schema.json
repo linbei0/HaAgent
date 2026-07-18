@@ -52,6 +52,7 @@
       "additionalProperties": false,
       "properties": {
         "options": {"$ref": "#/$defs/optionsObject"},
+        "max_context_tokens": {"type": "integer", "exclusiveMinimum": 0},
         "variants": {
           "type": "object",
           "propertyNames": {

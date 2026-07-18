@@ -332,6 +332,14 @@ ConversationTimeline {
     background: $panel;
 }
 
+#context-usage {
+    width: 1fr;
+    height: 1;
+    padding: 0 4;
+    color: $foreground-muted;
+    text-align: right;
+}
+
 #footer-bar {
     height: 1;
     padding: 0 1;

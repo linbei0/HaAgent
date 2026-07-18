@@ -491,6 +491,69 @@ def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
     assert progress_events[0]["step_id"] == "step-001"
 
 
+def test_turn_loop_emits_context_usage_after_each_model_step(tmp_path: Path) -> None:
+    from haagent.models.capabilities import ModelCapabilities
+    from haagent.models.types import ModelGatewayMetadata, ModelUsage
+    from haagent.runtime.events.bus import bus_event_to_dict
+
+    emitted_events: list[object] = []
+
+    class _ModelGateway:
+        provider_name = "anthropic"
+
+        def generate(self, invocation, **kwargs):
+            del invocation, kwargs
+            return ModelResponse(
+                content="done",
+                tool_calls=[],
+                usage=ModelUsage(
+                    input_tokens=100_000,
+                    output_tokens=10,
+                    total_tokens=100_010,
+                    context_input_tokens=116_200,
+                ),
+            )
+
+        def capabilities(self):
+            return ModelCapabilities(input_window_tokens=500_000)
+
+        def metadata(self):
+            return ModelGatewayMetadata(
+                provider="anthropic",
+                model="claude-test",
+                endpoint=None,
+            )
+
+    deps = _deps(
+        router=_FakeRouter({}),
+        writer=_FakeWriter(tmp_path / "episode"),
+        emit_event=emitted_events.append,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.PLANNING],
+            transition=lambda status: None,
+            finish=lambda status: SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+
+    run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+
+    usage_events = [
+        bus_event_to_dict(event)
+        for event in emitted_events
+        if bus_event_to_dict(event).get("event_type") == "model_context_usage"
+    ]
+    assert usage_events == [
+        {
+            "event_type": "model_context_usage",
+            "turn": 1,
+            "input_tokens": 116_200,
+            "input_window_tokens": 500_000,
+        },
+    ]
+
+
 def test_turn_loop_emits_intermediate_assistant_content_before_tool_followup(tmp_path: Path) -> None:
     from haagent.runtime.events.bus import bus_event_to_dict
 

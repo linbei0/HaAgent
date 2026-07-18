@@ -66,6 +66,28 @@ def test_explicit_null_models_options_and_variants_are_rejected() -> None:
         parse_connection_models({"m1": {"variants": None}}, path="models")
 
 
+def test_model_context_limit_parses_and_defaults_to_none() -> None:
+    models = parse_connection_models(
+        {
+            "large": {"max_context_tokens": 400_000},
+            "default": {},
+        },
+        path="models",
+    )
+
+    assert models["large"].max_context_tokens == 400_000
+    assert models["default"].max_context_tokens is None
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, "400000"])
+def test_model_context_limit_requires_positive_integer(value: object) -> None:
+    with pytest.raises(ModelOptionsError, match="max_context_tokens"):
+        parse_connection_models(
+            {"large": {"max_context_tokens": value}},
+            path="models",
+        )
+
+
 @pytest.mark.parametrize(
     "field",
     [

@@ -55,6 +55,38 @@ def status_line(
     return rendered
 
 
+def context_usage_line(
+    input_tokens: int,
+    input_window_tokens: int | None,
+    *,
+    terminal_width: int,
+) -> Text:
+    """渲染输入框下方的弱化上下文用量；窗口未知时只显示绝对 token。"""
+
+    if input_tokens <= 0:
+        return Text()
+    token_label = _compact_token_count(input_tokens)
+    if input_window_tokens is None or input_window_tokens <= 0:
+        label = token_label
+    else:
+        percentage = (input_tokens * 100 + input_window_tokens // 2) // input_window_tokens
+        label = f"{token_label}（{percentage}%）" if terminal_width >= 120 else f"{percentage}%"
+    return Text(label, style="dim", justify="right")
+
+
+def _compact_token_count(value: int) -> str:
+    if value >= 1_000_000:
+        return _compact_decimal(value / 1_000_000, "M")
+    if value >= 1_000:
+        return _compact_decimal(value / 1_000, "K")
+    return str(value)
+
+
+def _compact_decimal(value: float, suffix: str) -> str:
+    rendered = f"{value:.1f}".rstrip("0").rstrip(".")
+    return f"{rendered}{suffix}"
+
+
 _WORK_STATE_LABELS = {
     "idle": "空闲",
     "running": "正在工作",

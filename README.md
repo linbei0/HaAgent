@@ -159,11 +159,11 @@ HaAgent 使用用户级 profile 管理模型连接配置：
 
 推荐在 TUI 的 `/connect` 中新增供应商连接，在 `/model` 中切换模型。模型中心按 `l` 只扫描 `127.0.0.1:11434`（Ollama）和 `127.0.0.1:1234`（LM Studio），选择模型后才保存本地连接；`b` 设置本地备用，`c` 设置已明确同意的云端备用。远端连接的 API key 通过 masked 输入直接写入系统凭据库；TUI 不回显、复制或写入明文配置。
 
-`providers.json` 当前为 version 3。一个无需凭据的 Ollama 连接如下；本地能力来自实时发现，不写入配置：
+`providers.json` 当前为 version 4。一个无需凭据的 Ollama 连接如下；本地能力来自实时发现，不写入配置：
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "connections": [
     {
       "id": "local-ollama",
@@ -176,10 +176,23 @@ HaAgent 使用用户级 profile 管理模型连接配置：
       "credential_source": "none",
       "runtime_kind": "ollama"
     }
-  ],
-  "custom_models": []
+  ]
 }
 ```
+
+模型配置可选 `max_context_tokens`，用于把 provider 的上下文能力限制为 HaAgent 本地上限。例如将 1M 模型限制为 400K：
+
+```json
+{
+  "models": {
+    "gpt-5": {
+      "max_context_tokens": 400000
+    }
+  }
+}
+```
+
+该字段只影响上下文占比、压缩预算、能力判断和 fallback；不会作为未知参数发送给 provider。未配置时保持 provider 或本地发现的窗口行为。
 
 普通 route 会先协商模型能力和协议。Responses 仅在能力元数据不支持，或首个有效输出前收到 404/405/501 时降级到 Chat Completions；备用模型仅在能力明确不足，或内部重试耗尽后的 network、timeout、可重试 429/5xx 且尚无有效 delta 时启用。认证、无效请求、取消及已有输出后的失败会直接暴露，不会静默重放。
 

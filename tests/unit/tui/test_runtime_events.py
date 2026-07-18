@@ -11,6 +11,7 @@ from haagent.runtime.events import (
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
+    ContextUsageEvent,
     FailureNoticeEvent,
     MemoryNoticeEvent,
     RUNTIME_UI_EVENT_TYPES,
@@ -94,6 +95,7 @@ class FakeRuntimeEventApp:
         self.finalized_streams = 0
         self.refreshes = 0
         self.streaming_refresh_schedules = 0
+        self.context_usage_events: list[ContextUsageEvent] = []
         self._conversation = _FakeConversation(self)
         self.memory_flow = _FakeMemoryFlow(self)
 
@@ -106,6 +108,9 @@ class FakeRuntimeEventApp:
     def _schedule_streaming_refresh(self) -> None:
         # 真实 App 会 16～50ms 批量刷新 timeline；测试只统计调度次数。
         self.streaming_refresh_schedules += 1
+
+    def update_context_usage(self, event: ContextUsageEvent) -> None:
+        self.context_usage_events.append(event)
 
     def set_progress_status(self, status) -> None:
         self.progress_status_text = status.text
@@ -244,6 +249,22 @@ def test_assistant_delta_does_not_trigger_full_refresh() -> None:
     assert app.streaming_refresh_schedules == 2
     assert status_calls == 0
     assert keyring_calls == 0
+
+
+def test_context_usage_event_updates_only_its_widget() -> None:
+    app = FakeRuntimeEventApp()
+    event = ContextUsageEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=2,
+        input_tokens=116_200,
+        input_window_tokens=500_000,
+    )
+
+    handle_runtime_ui_event(app, event)
+
+    assert app.context_usage_events == [event]
+    assert app.refreshes == 0
 
 
 def test_runtime_ui_event_handler_routes_intermediate_assistant_message() -> None:

@@ -13,8 +13,10 @@ from types import SimpleNamespace
 
 from haagent.models.capabilities import ModelCapabilities
 from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel
+from haagent.runtime.events import ContextUsageEvent
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.overlays.models import LocalRuntimeOverlay, ModelCatalogLoadingOverlay
+from haagent.tui.widgets import ContextUsageLine
 from textual.widgets import OptionList
 
 from tests.tui.support import FakeAssistantService, _all_text, _connection_record, _text
@@ -488,6 +490,18 @@ def test_tui_model_overlay_lists_catalog_models_for_each_configured_connection(t
             await pilot.press("m", "o", "d", "e", "l", "enter")
             await pilot.pause(0.2)
 
+            app.update_context_usage(
+                ContextUsageEvent(
+                    session_id="session-test",
+                    turn_index=1,
+                    model_turn=1,
+                    input_tokens=116_200,
+                    input_window_tokens=500_000,
+                ),
+            )
+            usage_widget = app.query_one("#context-usage", ContextUsageLine)
+            assert usage_widget.display is True
+
             text = _all_text(app)
             assert "Requesty / personal" in text
             assert "Requesty / work" in text
@@ -501,6 +515,7 @@ def test_tui_model_overlay_lists_catalog_models_for_each_configured_connection(t
             await pilot.pause(0.1)
             assert service.switched_model_connection == "requesty-work"
             assert service.switched_model == "openai/gpt-5.2-chat"
+            assert usage_widget.display is False
             assert service.default_model_selection is None
 
             await pilot.press("/")
