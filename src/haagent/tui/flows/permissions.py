@@ -15,6 +15,18 @@ if TYPE_CHECKING:
     from haagent.tui.application.app import HaAgentTuiApp
 
 
+def is_wide_external_root(path: Path) -> bool:
+    """识别需二次确认的高风险外部目录。"""
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    risky_roots = {home, home / "Desktop", home / "Downloads", home / "Documents"}
+    if resolved.parent == resolved:
+        return True
+    if resolved.anchor and str(resolved) == resolved.anchor:
+        return True
+    return resolved in {root.resolve() for root in risky_roots}
+
+
 def show_permissions(app: "HaAgentTuiApp") -> None:
     status = app.service.workspace.status()
     app.push_screen(
@@ -58,7 +70,7 @@ def handle_permissions_result(app: "HaAgentTuiApp", result: dict[str, object] | 
             app._conversation.append_block("Permissions", f"已移除外部目录：{path}")
         elif action == "set_access":
             access = str(result.get("access"))
-            if access == "full" and app.is_wide_external_root(path):
+            if access == "full" and is_wide_external_root(path):
                 app.push_screen(
                     ConfirmModal("完全信任高风险目录", f"将允许读取、修改并在该目录执行命令：\n{path}\n确认？"),
                     lambda confirmed, path=path: app._handle_set_full_access_confirmed(path, confirmed),
@@ -120,70 +132,3 @@ def handle_set_full_access_confirmed(app: "HaAgentTuiApp", path: Path, confirmed
     app._refresh()
     app._restore_prompt_focus()
 
-
-def handle_external_directory_decision(app: "HaAgentTuiApp", decision: str | None) -> None:
-    prompt = app._pending_external_prompt
-    path = app._pending_external_path
-    app._pending_external_prompt = None
-    app._pending_external_path = None
-    if prompt is None or path is None:
-        app._restore_prompt_focus()
-        return
-    try:
-        if decision == "read":
-            app.service.sessions.permissions.add_external_root(path, "read")
-            app._set_next_turn_target_path(path)
-            app._conversation.append_block("Permissions", f"已作为只读参考加入：{path}")
-        elif decision == "full":
-            if app.is_wide_external_root(path):
-                app._pending_full_trust_prompt = prompt
-                app._pending_full_trust_path = path
-                app.push_screen(
-                    ConfirmModal("完全信任高风险目录", f"将允许读取、修改并在该目录执行命令：\n{path}\n确认？"),
-                    app._handle_external_full_trust_confirmed,
-                )
-                return
-            app.service.sessions.permissions.add_external_root(path, "full")
-            app._set_next_turn_target_path(path)
-            app._conversation.append_block("Permissions", f"已完全信任：{path}")
-        elif decision == "switch":
-            app.service.sessions.permissions.switch_project_root(path)
-            app._conversation.append_block("Permissions", f"已切换工作区：{path}")
-        else:
-            app._conversation.append_block("Permissions", f"已取消外部目录授权：{path}")
-            app._refresh()
-            app._restore_prompt_focus()
-            return
-    except Exception as error:
-        app._conversation.append_block("Permissions warning", f"外部目录授权失败：{error}")
-        app._refresh()
-        app._restore_prompt_focus()
-        return
-    app._refresh()
-    app._start_prompt(prompt)
-
-
-def handle_external_full_trust_confirmed(app: "HaAgentTuiApp", confirmed: bool) -> None:
-    prompt = app._pending_full_trust_prompt
-    path = app._pending_full_trust_path
-    app._pending_full_trust_prompt = None
-    app._pending_full_trust_path = None
-    if prompt is None or path is None:
-        app._restore_prompt_focus()
-        return
-    if not confirmed:
-        app._conversation.append_block("Permissions", f"已取消完全信任：{path}")
-        app._refresh()
-        app._restore_prompt_focus()
-        return
-    try:
-        app.service.sessions.permissions.add_external_root(path, "full")
-        app._set_next_turn_target_path(path)
-    except Exception as error:
-        app._conversation.append_block("Permissions warning", f"外部目录授权失败：{error}")
-        app._refresh()
-        app._restore_prompt_focus()
-        return
-    app._conversation.append_block("Permissions", f"已完全信任：{path}")
-    app._refresh()
-    app._start_prompt(prompt)

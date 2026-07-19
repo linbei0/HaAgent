@@ -443,6 +443,7 @@ def test_tui_request_history_hover_click_and_dense_keyboard_selection(tmp_path: 
             await pilot.click(rail, offset=(1, row))
             await pilot.pause()
             assert rail.has_focus
+            assert preview.region.x >= rail.region.right
             first_turn = timeline._current_request_turn
             await pilot.press("down", "enter")
             await pilot.pause()

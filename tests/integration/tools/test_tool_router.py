@@ -15,7 +15,7 @@ from haagent.context.messages import build_tool_result_message
 from haagent.mcp.runtime import McpRuntimeTimeoutError
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
-from haagent.runtime.execution.retry import ReplaySafety, RetryController, RetryOperation
+from haagent.runtime.execution.retry import ReplaySafety, RetryController, RetryOperation, RetryPolicy
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
 from haagent.runtime.session.attachments import ImageAttachment
@@ -23,6 +23,7 @@ from haagent.skills import SkillSettings
 from haagent.tools.registry import TOOL_REGISTRY
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
+from haagent.tools.base import tool_error
 from haagent.tools import file_tools
 from haagent.tools.shell import shell
 
@@ -236,12 +237,12 @@ def test_skill_read_blocks_model_disabled_skill(tmp_path: Path, monkeypatch) -> 
 
     result = router.dispatch("skill_read", {"name": "grill-me"})
 
-    assert result == {
-        "status": "error",
-        "error": {
-            "type": "skill_model_invocation_disabled",
-            "message": "skill can only be invoked explicitly by the user: /grill-me",
-        },
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "type": "skill_model_invocation_disabled",
+        "category": "execution",
+        "message": "skill can only be invoked explicitly by the user: /grill-me",
+        "retryable": False,
     }
 
 
@@ -669,13 +670,13 @@ def test_tool_router_reports_dynamic_mcp_timeout_as_tool_error(tmp_path: Path) -
 
     result = router.dispatch("mcp__fixture__echo", {})
 
-    assert result == {
-        "status": "error",
-        "execution_state": "unknown",
-        "error": {
-            "type": "mcp_timeout",
-            "message": "MCP tool fixture.echo timed out after 0.05 seconds",
-        },
+    assert result["status"] == "error"
+    assert result["execution_state"] == "unknown"
+    assert result["error"] == {
+        "type": "mcp_timeout",
+        "category": "execution",
+        "message": "MCP tool fixture.echo timed out after 0.05 seconds",
+        "retryable": False,
     }
 
 
@@ -712,6 +713,95 @@ def test_tool_router_executes_handler_once_through_retry_controller(tmp_path: Pa
     assert retry_controller.operations == [
         RetryOperation("tool.fake_tool", ReplaySafety.NEVER_REPLAY),
     ]
+
+
+def test_safe_read_tool_recovers_from_retryable_failure_and_traces_attempts(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_read"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        retry_controller=RetryController(
+            RetryPolicy(
+                max_attempts=3,
+                minimum_delay_seconds=0,
+                base_delay_seconds=0,
+                throttling_base_delay_seconds=0,
+                max_delay_seconds=0,
+            ),
+            sleep=lambda _seconds: None,
+            random_value=lambda: 0,
+        ),
+    )
+    calls = 0
+
+    def handler(_args, _context=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return tool_error("temporary_io_error", "temporary read interruption", retryable=True)
+        return {"status": "success", "content": "recovered"}
+
+    router._handlers["file_read"] = handler
+
+    result = router.dispatch("file_read", {"path": "notes.txt"})
+
+    assert result == {"status": "success", "content": "recovered"}
+    assert calls == 2
+    trace = json.loads((writer.path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    assert trace["attempt_count"] == 2
+    assert trace["recovered_after_retry"] is True
+    assert [event["category"] for event in trace["retry_events"]] == ["transient"]
+
+
+def test_write_tool_never_replays_even_if_handler_marks_failure_retryable(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["file_write"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["file_write"],
+        approved_tools=["file_write"],
+        retry_controller=RetryController(
+            RetryPolicy(max_attempts=3, minimum_delay_seconds=0),
+            sleep=lambda _seconds: None,
+        ),
+    )
+    calls = 0
+
+    def handler(_args, _context=None):
+        nonlocal calls
+        calls += 1
+        return tool_error("temporary_io_error", "temporary write interruption", retryable=True)
+
+    router._handlers["file_write"] = handler
+
+    result = router.dispatch(
+        "file_write",
+        {"path": "notes.txt", "content": "hello", "mode": "create"},
+    )
+
+    assert result["status"] == "error"
+    assert calls == 1
+    trace = json.loads((writer.path / "tool-calls.jsonl").read_text(encoding="utf-8"))
+    assert trace["attempt_count"] == 1
+    assert "retry_events" not in trace
+
+
+def test_malformed_handler_result_is_reported_as_contract_failure(tmp_path: Path) -> None:
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["fake_tool"], episode_writer=writer, workspace_root=tmp_path)
+    router._handlers["fake_tool"] = lambda _args, _context=None: {
+        "status": "error",
+        "error": {"type": "broken"},
+    }
+
+    result = router.dispatch("fake_tool", {"value": 1})
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "tool_contract_invalid"
+    assert result["error"]["category"] == "contract"
+    assert result["recovery"]["action"] == "stop"
 
 
 def test_approved_high_risk_tool_validates_arguments_before_execution(tmp_path: Path) -> None:
@@ -1010,7 +1100,9 @@ def test_file_read_missing_path_returns_short_argument_error(tmp_path: Path) -> 
     assert result["status"] == "error"
     assert result["error"]["type"] == "tool_argument_invalid"
     assert result["error"]["message"] == "path does not exist: note.txt; path is relative to workspace_root"
-    assert result["suggestions"] == ["notes.txt"]
+    assert result["recovery"]["action"] == "use_tool"
+    assert result["recovery"]["tool_name"] == "file_read"
+    assert result["recovery"]["args"] == {"path": "notes.txt"}
     assert str(tmp_path) not in result["error"]["message"]
 
 
@@ -1025,7 +1117,9 @@ def test_file_read_directory_error_suggests_file_list(tmp_path: Path) -> None:
     assert result["status"] == "error"
     assert result["error"]["type"] == "tool_argument_invalid"
     assert result["error"]["message"] == "path must be a file: src; path is relative to workspace_root"
-    assert result["suggested_tool"] == {"name": "file_list", "args": {"path": "src", "max_depth": 1}}
+    assert result["recovery"]["action"] == "use_tool"
+    assert result["recovery"]["tool_name"] == "file_list"
+    assert result["recovery"]["args"] == {"path": "src", "max_depth": 1}
 
 
 def test_file_list_defaults_to_workspace_root_and_writes_trace(tmp_path: Path) -> None:
@@ -1163,6 +1257,33 @@ def test_external_read_root_allows_file_read_but_denies_file_write(tmp_path: Pat
     assert target.read_text(encoding="utf-8") == "hello\n"
 
 
+def test_external_authorized_grep_returns_absolute_readable_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    target = external / "notes.txt"
+    target.write_text("external needle\n", encoding="utf-8")
+    writer = make_writer(project)
+    router = ToolRouter(
+        allowed_tools=["grep", "file_read"],
+        episode_writer=writer,
+        workspace_root=project,
+        path_policy=PathPolicy(
+            project_root=project,
+            external_roots=[ExternalRoot(path=external, access="read", source="user", created_at="now")],
+        ),
+    )
+
+    searched = router.dispatch("grep", {"pattern": "needle", "path": str(external)})
+
+    assert searched["status"] == "success"
+    assert searched["matches"][0]["path"] == str(target.resolve())
+    read_back = router.dispatch("file_read", {"path": searched["matches"][0]["path"]})
+    assert read_back["status"] == "success"
+    assert read_back["content"] == "external needle\n"
+
+
 def test_full_access_mode_allows_file_write_outside_workspace_and_traces_mode(tmp_path: Path) -> None:
     project = tmp_path / "project"
     external = tmp_path / "external"
@@ -1287,7 +1408,7 @@ def test_grep_explicit_glob_keeps_fixed_noise_directories_excluded(tmp_path: Pat
     (tmp_path / ".tmp").mkdir()
     (tmp_path / ".tmp" / "noise.py").write_text("needle\n", encoding="utf-8")
 
-    result = file_tools.grep({"pattern": "needle", "file_glob": "*.py"}, tmp_path)
+    result = file_tools.grep({"pattern": "needle", "include": "*.py"}, tmp_path)
 
     assert result["status"] == "success"
     assert [match["path"] for match in result["matches"]] == ["src/app.py"]
@@ -1362,7 +1483,7 @@ def test_grep_timeout_preserves_partial_stdout_and_adds_guidance(tmp_path: Path,
     assert result["partial"] is True
     assert result["matches"][0]["path"] == "kept.txt"
     assert result["warnings"][0]["type"] == "timeout"
-    assert "root" in result["guidance"] and "file_glob" in result["guidance"]
+    assert "path" in result["guidance"] and "include" in result["guidance"]
 
 
 def test_grep_python_fallback_uses_git_ignore_and_fixed_exclusions(tmp_path: Path, monkeypatch) -> None:
@@ -1386,7 +1507,7 @@ def test_grep_python_fallback_uses_git_ignore_and_fixed_exclusions(tmp_path: Pat
     assert [match["path"] for match in result["matches"]] == ["kept.txt"]
 
 
-def test_grep_unreadable_root_is_a_hard_failure(tmp_path: Path, monkeypatch) -> None:
+def test_grep_unreadable_path_is_a_hard_failure(tmp_path: Path, monkeypatch) -> None:
     blocked = tmp_path / "blocked"
     blocked.mkdir()
     original_iterdir = Path.iterdir
@@ -1398,33 +1519,33 @@ def test_grep_unreadable_root_is_a_hard_failure(tmp_path: Path, monkeypatch) -> 
 
     monkeypatch.setattr(Path, "iterdir", fake_iterdir)
 
-    result = file_tools.grep({"pattern": "needle", "root": "blocked"}, tmp_path)
+    result = file_tools.grep({"pattern": "needle", "path": "blocked"}, tmp_path)
 
     assert result["status"] == "error"
     assert result["error"]["type"] == "search_failed"
 
 
-def test_grep_missing_root_returns_short_argument_error(tmp_path: Path) -> None:
+def test_grep_missing_path_returns_short_argument_error(tmp_path: Path) -> None:
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("grep", {"pattern": "needle", "root": "missing"})
+    result = router.dispatch("grep", {"pattern": "needle", "path": "missing"})
 
     assert result["status"] == "error"
-    assert result["error"] == {
-        "type": "tool_argument_invalid",
-        "message": 'root does not exist: missing; root is relative to workspace_root and may be a directory or file; use "." or omit root',
-        "retryable": True,
-    }
+    assert result["error"]["type"] == "tool_argument_invalid"
+    assert result["error"]["category"] == "argument"
+    assert result["error"]["message"] == 'path does not exist: missing; path is relative to workspace_root and may be a directory or file; use "." or omit path'
+    assert result["error"]["retryable"] is False
+    assert result["recovery"]["action"] == "correct_arguments"
     assert str(tmp_path) not in result["error"]["message"]
 
 
-def test_grep_file_root_searches_single_file(tmp_path: Path) -> None:
+def test_grep_file_path_searches_single_file(tmp_path: Path) -> None:
     (tmp_path / "alpha.txt").write_text("needle appears here\n", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(allowed_tools=["grep"], episode_writer=writer, workspace_root=tmp_path)
 
-    result = router.dispatch("grep", {"pattern": "needle", "root": "alpha.txt"})
+    result = router.dispatch("grep", {"pattern": "needle", "path": "alpha.txt"})
 
     assert result["status"] == "success"
     assert result["matches"] == [
@@ -1499,11 +1620,11 @@ def test_apply_patch_missing_path_returns_short_argument_error(tmp_path: Path) -
     )
 
     assert result["status"] == "error"
-    assert result["error"] == {
-        "type": "tool_argument_invalid",
-        "message": "path does not exist: missing.txt; path is relative to workspace_root",
-        "retryable": True,
-    }
+    assert result["error"]["type"] == "tool_argument_invalid"
+    assert result["error"]["category"] == "argument"
+    assert result["error"]["message"] == "path does not exist: missing.txt; path is relative to workspace_root"
+    assert result["error"]["retryable"] is False
+    assert result["recovery"]["action"] == "correct_arguments"
     assert str(tmp_path) not in result["error"]["message"]
 
 
@@ -2630,9 +2751,11 @@ def test_shell_rejects_non_positive_timeout_with_argument_error(tmp_path: Path) 
     assert result["status"] == "error"
     assert result["error"] == {
         "type": "tool_argument_invalid",
+        "category": "argument",
         "message": "timeout_seconds must be positive",
-        "retryable": True,
+        "retryable": False,
     }
+    assert result["recovery"]["action"] == "correct_arguments"
 
 
 def test_shell_denial_happens_before_argument_validation(tmp_path: Path) -> None:

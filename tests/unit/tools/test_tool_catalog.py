@@ -58,7 +58,7 @@ def test_candidate_tools_uses_catalog_tags() -> None:
     candidate = ToolAccessManager.candidate_tools(
         catalog=catalog,
         enable_web=True,
-        has_skills=True,
+        include_memory_tool=True,
         image_attachment_history=True,
         mcp_tool_names=[],
     )
@@ -66,6 +66,45 @@ def test_candidate_tools_uses_catalog_tags() -> None:
     assert set(catalog.chat_web_tools()).issubset(candidate)
     assert set(catalog.chat_skill_tools()).issubset(candidate)
     assert "load_image_attachment" in candidate
+
+
+def test_default_candidate_tool_set_preserves_agent_capabilities_and_resource_gates() -> None:
+    from haagent.tools.access import ToolAccessManager
+    from haagent.tools.catalog import default_tool_catalog
+
+    catalog = default_tool_catalog()
+    normal = ToolAccessManager.candidate_tools(
+        catalog=catalog,
+        enable_web=False,
+        include_memory_tool=False,
+        image_attachment_history=False,
+        mcp_tool_names=[],
+    )
+    online = ToolAccessManager.candidate_tools(
+        catalog=catalog,
+        enable_web=True,
+        include_memory_tool=False,
+        image_attachment_history=False,
+        mcp_tool_names=[],
+    )
+
+    expected_default = set(catalog.chat_default_tools()) - {"start_memory_update"}
+    assert expected_default.issubset(normal)
+    assert {"code_run", "apply_patch", "apply_patch_set"}.issubset(normal)
+    assert {"agent", "send_message", "task_get", "task_list", "task_output", "task_stop"}.issubset(normal)
+    assert {"skill_list", "skill_read", "skill_market_search"}.issubset(normal)
+    assert set(online) - set(normal) == {"web_search", "web_fetch"}
+    assert "load_image_attachment" not in normal
+    assert "start_memory_update" not in normal
+
+    fully_enabled = ToolAccessManager.candidate_tools(
+        catalog=catalog,
+        enable_web=True,
+        include_memory_tool=True,
+        image_attachment_history=False,
+        mcp_tool_names=[],
+    )
+    assert "start_memory_update" in fully_enabled
 
 
 def test_contribution_requires_explicit_replay_safety() -> None:
@@ -115,10 +154,24 @@ def test_static_tools_declare_explicit_replay_safety() -> None:
     from haagent.tools.catalog import default_tool_catalog
 
     catalog = default_tool_catalog()
+    replayable = {
+        "file_list",
+        "file_read",
+        "grep",
+        "web_search",
+        "web_fetch",
+        "skill_list",
+        "skill_read",
+        "skill_market_search",
+        "list_mcp_resources",
+        "read_mcp_resource",
+        "load_image_attachment",
+    }
     for name in catalog.names():
         contribution = catalog.get(name)
-        assert contribution.replay_safety is ReplaySafety.NEVER_REPLAY
-        assert TOOL_REGISTRY[name].replay_safety is ReplaySafety.NEVER_REPLAY
+        expected = ReplaySafety.SAFE_TO_REPLAY if name in replayable else ReplaySafety.NEVER_REPLAY
+        assert contribution.replay_safety is expected
+        assert TOOL_REGISTRY[name].replay_safety is expected
 
 
 def test_deleting_contribution_removes_schema_and_projector() -> None:
@@ -154,7 +207,7 @@ def test_grep_observation_exposes_partial_state_without_raw_stderr() -> None:
             "partial": True,
             "warnings": [{"type": "permission_denied", "message": "Skipped 1 inaccessible path."}],
             "skipped_paths": [".tmp/pytest"],
-            "guidance": "Narrow root or file_glob and retry.",
+            "guidance": "Narrow path or include and retry.",
             "stderr": "large raw diagnostic must not be projected",
         },
     )

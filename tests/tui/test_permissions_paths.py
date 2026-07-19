@@ -10,7 +10,6 @@ import asyncio
 from pathlib import Path
 
 from haagent.tui.application.app import HaAgentTuiApp
-from haagent.tui.flows.path_authorization import find_untrusted_absolute_paths
 from haagent.tui.design.renderers import status_line
 
 from tests.tui.support import FakeAssistantService, _all_text, _text
@@ -22,46 +21,6 @@ def test_status_line_hides_permission_mode(tmp_path: Path) -> None:
     line = status_line(status, ui_state="idle", width=120)
     assert "工作区" in line
     assert "perm:" not in line
-
-def test_untrusted_absolute_path_detection_ignores_authorized_roots(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    external = tmp_path / "external"
-    other = tmp_path / "other"
-    project.mkdir()
-    external.mkdir()
-    other.mkdir()
-    prompt = f'介绍 "{external}" 和 "{other}"'
-
-    matches = find_untrusted_absolute_paths(
-        prompt,
-        project_root=project,
-        external_roots=[{"path": str(external), "access": "read", "source": "user"}],
-    )
-
-    assert matches == [other.resolve()]
-
-def test_tui_external_directory_read_decision_continues_prompt(tmp_path: Path) -> None:
-    service = FakeAssistantService(workspace_root=tmp_path / "project")
-    service.workspace_root.mkdir()
-    external = tmp_path / "external"
-    external.mkdir()
-
-    async def run() -> None:
-        app = HaAgentTuiApp(service)
-        async with app.run_test(size=(120, 40)) as pilot:
-            prompt = f'介绍 "{external}"'
-            input_widget = app.query_one("#prompt-input")
-            input_widget.value = prompt
-            await pilot.press("enter")
-            await pilot.press("enter")
-
-            assert service.external_roots == [
-                {"path": str(external.resolve()), "access": "read", "source": "user"},
-            ]
-            assert service.next_turn_target_paths == [str(external.resolve())]
-            assert service.prompts == [prompt]
-
-    asyncio.run(run())
 
 def test_tui_permissions_command_shows_current_external_roots(tmp_path: Path) -> None:
     external = tmp_path / "external"
@@ -165,29 +124,7 @@ def test_tui_permissions_modal_changes_access_removes_and_clears_roots(tmp_path:
 
     asyncio.run(run())
 
-def test_tui_full_access_mode_does_not_prompt_for_external_absolute_path(tmp_path: Path) -> None:
-    service = FakeAssistantService(workspace_root=tmp_path / "project", permission_mode="full_access")
-    service.workspace_root.mkdir()
-    external = tmp_path / "external"
-    external.mkdir()
-
-    async def run() -> None:
-        app = HaAgentTuiApp(service)
-        async with app.run_test(size=(120, 40)) as pilot:
-            prompt = f'介绍 "{external}"'
-            input_widget = app.query_one("#prompt-input")
-            input_widget.value = prompt
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-
-            assert service.external_roots == []
-            assert service.next_turn_target_paths == [str(external.resolve())]
-            assert service.prompts == [prompt]
-            assert "完全访问权限已启用" in _text(app, "#conversation")
-
-    asyncio.run(run())
-
-def test_tui_auto_approve_mode_still_prompts_for_untrusted_external_path(tmp_path: Path) -> None:
+def test_tui_submits_prompt_with_external_path_without_preflight_authorization(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path / "project", permission_mode="auto_approve")
     service.workspace_root.mkdir()
     external = tmp_path / "external"
@@ -202,30 +139,28 @@ def test_tui_auto_approve_mode_still_prompts_for_untrusted_external_path(tmp_pat
             await pilot.press("enter")
             await pilot.pause()
 
-            assert "检测到工作区外目录" in _all_text(app)
-            assert service.prompts == []
+            assert "检测到工作区外目录" not in _all_text(app)
+            assert service.prompts == [prompt]
 
     asyncio.run(run())
 
-def test_tui_wide_external_full_access_requires_confirmation(tmp_path: Path, monkeypatch) -> None:
-    service = FakeAssistantService(workspace_root=tmp_path / "project")
+
+def test_tui_submits_url_without_preflight_directory_authorization(tmp_path: Path) -> None:
+    service = FakeAssistantService(workspace_root=tmp_path / "project", permission_mode="auto_approve")
     service.workspace_root.mkdir()
-    wide_root = tmp_path / "home"
-    wide_root.mkdir()
-    monkeypatch.setattr(Path, "home", lambda: wide_root)
+    prompt = "联网搜索 https://velagrow.com/"
 
     async def run() -> None:
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             input_widget = app.query_one("#prompt-input")
-            input_widget.value = f'整理 "{wide_root}"'
+            input_widget.value = prompt
             await pilot.press("enter")
             await pilot.pause()
-            await pilot.press("f")
-            assert service.external_roots == []
-            await pilot.press("y")
-            assert service.external_roots == [{"path": str(wide_root.resolve()), "access": "full", "source": "user"}]
-            assert service.prompts == [f'整理 "{wide_root}"']
+
+            assert "检测到工作区外目录" not in _all_text(app)
+            assert service.prompts == [prompt]
 
     asyncio.run(run())
+
 

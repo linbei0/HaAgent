@@ -395,7 +395,7 @@ def _loop_suggestion_observation_summary(args: dict[str, Any], result: dict[str,
     del args
     return {
         "status": result.get("status", "unknown"),
-        "suggested_tool": result.get("suggested_tool"),
+        "recovery": result.get("recovery"),
         "reason": _compact_excerpt(_first_present_string(result.get("reason")))[0],
     }
 

@@ -1072,7 +1072,7 @@ verification_commands: []
     inspect_exit = cli.main(["inspect", str(result.episode_path)])
 
     output = capsys.readouterr().out
-    assert result.status is RunStatus.FAILED
+    assert result.status is RunStatus.COMPLETED
     assert inspect_exit == 0
     assert "Tool Argument Errors" in output
     assert "file_read" in output
@@ -1423,6 +1423,7 @@ verification_commands:
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
         model_gateway=OneShotGateway(),
+        max_turns=1,
     ).run(task_path)
 
     commands_path = result.episode_path / "verification" / "commands.jsonl"

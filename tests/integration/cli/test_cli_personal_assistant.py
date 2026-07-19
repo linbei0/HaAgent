@@ -163,9 +163,12 @@ def test_chat_task_does_not_include_web_tools_by_default(tmp_path: Path, monkeyp
 
     assert "web_search" not in task.allowed_tools
     assert "web_fetch" not in task.allowed_tools
-    assert "skill_market_search" not in task.allowed_tools
+    assert "skill_market_search" in task.allowed_tools
     assert "skill_list" in task.allowed_tools
     assert "skill_read" in task.allowed_tools
+    assert "code_run" in task.allowed_tools
+    assert "apply_patch" in task.allowed_tools
+    assert "agent" in task.allowed_tools
 
 
 def test_chat_task_includes_skill_tools_when_user_skills_exist(tmp_path: Path, monkeypatch) -> None:

@@ -58,6 +58,7 @@ class ToolFailedBusEvent:
     args: dict[str, Any]
     error: dict[str, Any]
     execution_state: str = ""
+    recovery: dict[str, Any] = field(default_factory=dict)
     event_type: str = field(default="tool_failed", init=False)
 
 
@@ -262,6 +263,7 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
             args=dict(args) if isinstance(args, dict) else {},
             error=dict(error) if isinstance(error, dict) else {},
             execution_state=str(payload.get("execution_state", "")),
+            recovery=dict(payload.get("recovery")) if isinstance(payload.get("recovery"), dict) else {},
         )
     if event_type == "model_retry_scheduled":
         return ModelRetryScheduledBusEvent(

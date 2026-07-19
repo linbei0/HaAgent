@@ -53,7 +53,8 @@ ELAPSED_REFRESH_INTERVAL_SECONDS = 1.0
 
 
 def _request_status(item: TimelineItem) -> str | None:
-    if item.role == "failure" or item.status == "failed":
+    # 工具过程失败只属于本轮过程，不能覆盖已经成功生成的最终回答摘要。
+    if item.role == "failure":
         return "failed"
     if item.role != "system":
         return None

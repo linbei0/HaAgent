@@ -70,23 +70,27 @@ CORE_CONTRIBUTIONS: list[ToolContribution] = [
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
         router_owned=True,
     ),
     ToolContribution(
         name="request_user_input",
-        description="ask the user for missing information before continuing the task",
+        description=(
+            "Ask the user only when execution requires a preference, requirement, choice, or information that "
+            "tools cannot discover. Do not ask for file paths, project facts, or runtime state that file_list, "
+            "grep, file_read, or other tools can determine. Continue with the returned answer."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
                 "question": {
                     "type": "string",
-                    "description": "question to ask the user",
+                    "description": "one concrete question whose answer is required to continue",
                 },
                 "reason": {
                     "type": "string",
-                    "description": "short reason why the information is needed",
+                    "description": "briefly explain what decision or missing requirement blocks execution",
                 },
             },
             "required": ["question"],

@@ -48,7 +48,7 @@ def test_grep_partial_no_results_does_not_claim_search_was_complete() -> None:
                 "status": "success",
                 "matches": [],
                 "partial": True,
-                "guidance": "Narrow root or file_glob and retry.",
+                "guidance": "Narrow path or include and retry.",
             },
         )
     )
@@ -67,14 +67,14 @@ def test_grep_truncated_results_suggest_narrower_search() -> None:
                 "status": "success",
                 "matches": [{"path": "src/app.py", "line": 1, "text": "needle"}],
                 "truncated": True,
-                "guidance": "Search results were truncated; narrow root or file_glob and retry.",
+                "guidance": "Search results were truncated; narrow path or include and retry.",
             },
         )
     )
 
     assert suggestion is not None
     assert "truncated" in suggestion.message.lower()
-    assert "root" in suggestion.message and "file_glob" in suggestion.message
+    assert "path" in suggestion.message and "include" in suggestion.message
 
 
 def test_grep_partial_results_with_matches_still_warns_search_is_incomplete() -> None:
@@ -86,14 +86,14 @@ def test_grep_partial_results_with_matches_still_warns_search_is_incomplete() ->
                 "status": "success",
                 "matches": [{"path": "src/app.py", "line": 1, "text": "needle"}],
                 "partial": True,
-                "guidance": "Search was incomplete; narrow root or file_glob and retry.",
+                "guidance": "Search was incomplete; narrow path or include and retry.",
             },
         )
     )
 
     assert suggestion is not None
     assert "partial" in suggestion.message.lower()
-    assert "root" in suggestion.message and "file_glob" in suggestion.message
+    assert "path" in suggestion.message and "include" in suggestion.message
 
 
 def test_file_write_success_suggests_read_back() -> None:
@@ -149,8 +149,8 @@ def test_file_read_error_with_suggestion_uses_suggested_path() -> None:
             {"path": "app.py"},
             {
                 "status": "error",
-                "error": {"type": "tool_argument_invalid", "message": "path does not exist: app.py"},
-                "suggestions": ["src/app.py"],
+                "error": {"type": "tool_argument_invalid", "category": "argument", "message": "path does not exist: app.py", "retryable": False},
+                "recovery": {"action": "use_tool", "message": "读取最相似的已存在文件。", "tool_name": "file_read", "args": {"path": "src/app.py"}},
             },
         )
     )
@@ -167,8 +167,8 @@ def test_file_read_directory_error_suggests_file_list() -> None:
             {"path": "src"},
             {
                 "status": "error",
-                "error": {"type": "tool_argument_invalid", "message": "path must be a file: src"},
-                "suggested_tool": {"name": "file_list", "args": {"path": "src", "max_depth": 1}},
+                "error": {"type": "tool_argument_invalid", "category": "argument", "message": "path must be a file: src", "retryable": False},
+                "recovery": {"action": "use_tool", "message": "该路径是目录，请先列出目录内容。", "tool_name": "file_list", "args": {"path": "src", "max_depth": 1}},
             },
         )
     )
@@ -179,11 +179,11 @@ def test_file_read_directory_error_suggests_file_list() -> None:
     assert "src" in suggestion.message
 
 
-def test_grep_file_root_success_suggests_file_read() -> None:
+def test_grep_file_path_success_suggests_file_read() -> None:
     suggestion = suggestion_for_observation(
         _obs(
             "grep",
-            {"pattern": "needle", "root": "alpha.txt"},
+            {"pattern": "needle", "path": "alpha.txt"},
             {
                 "status": "success",
                 "matches": [{"path": "alpha.txt", "line": 1, "text": "needle appears here"}],
@@ -204,16 +204,16 @@ def test_file_list_missing_directory_suggests_parent_listing() -> None:
             {"path": "tools"},
             {
                 "status": "error",
-                "error": {"type": "tool_argument_invalid", "message": "path does not exist: tools"},
-                "suggested_tool": {"name": "file_list", "args": {"path": ".", "max_depth": 2}},
+                "error": {"type": "tool_argument_invalid", "category": "argument", "message": "path does not exist: tools", "retryable": False},
+                "recovery": {"action": "use_tool", "message": "从最近存在的父目录重新定位目标。", "tool_name": "file_list", "args": {"path": ".", "max_depth": 2}},
             },
         )
     )
 
     assert suggestion is not None
     assert suggestion.trigger == "tool_error"
-    assert "nearest existing parent" in suggestion.message
     assert "file_list" in suggestion.message
+    assert "max_depth" in suggestion.message
 
 
 def test_apply_patch_miss_suggests_read_before_retry() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from haagent.runtime.execution.retry import ReplaySafety
@@ -73,6 +73,28 @@ class ToolRuntimeRegistry:
 
     def allowed_definitions(self, names: list[str]) -> list[ToolDefinition]:
         return [self.get(name) for name in names]
+
+    def with_description_overrides(
+        self,
+        overrides: Mapping[str, str],
+    ) -> "ToolRuntimeRegistry":
+        """返回带运行时事实描述的不可变 registry 快照。"""
+        unknown = set(overrides) - set(self.static_tools) - set(self.dynamic_tools)
+        if unknown:
+            raise KeyError(f"unknown tools for description overrides: {', '.join(sorted(unknown))}")
+
+        def apply(definitions: Mapping[str, ToolDefinition]) -> dict[str, ToolDefinition]:
+            return {
+                name: replace(definition, description=overrides[name])
+                if name in overrides
+                else definition
+                for name, definition in definitions.items()
+            }
+
+        return ToolRuntimeRegistry(
+            static_tools=apply(self.static_tools),
+            dynamic_tools=apply(self.dynamic_tools),
+        )
 
     @property
     def schema_version(self) -> str:

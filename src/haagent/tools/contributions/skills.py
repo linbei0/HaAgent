@@ -47,7 +47,11 @@ def _bind_skill_market_search(_deps: ToolRuntimeDeps) -> ToolHandler:
 SKILL_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="skill_list",
-        description="list available local skills as compact metadata without loading skill bodies",
+        description=(
+            "List compact metadata for built-in, user, and project skills without loading their bodies. Use when "
+            "the current prompt does not already identify a matching skill or when the available list must be "
+            "filtered. Do not use it as a substitute for skill_read after an exact matching skill is known."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
@@ -58,7 +62,7 @@ SKILL_CONTRIBUTIONS: list[ToolContribution] = [
                 },
                 "source": {
                     "type": "string",
-                    "description": "optional source filter: user or project",
+                    "description": "optional source filter such as builtin, user, or project",
                 },
                 "max_results": {
                     "type": "integer",
@@ -69,33 +73,41 @@ SKILL_CONTRIBUTIONS: list[ToolContribution] = [
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
         tags=frozenset({"chat_skill"}),
         bind_handler=_bind_skill_list,
     ),
     ToolContribution(
         name="skill_read",
-        description="read one local skill body by name after choosing it from skill_list or available skills",
+        description=(
+            "Load one skill's full instructions only when its name and description clearly match the task. Pass "
+            "the exact skill name returned by the available-skills context or skill_list. Follow referenced paths "
+            "relative to that skill's directory; if no skill matches, continue without inventing a name."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "skill name, command name, or alias",
+                    "description": "exact skill name, command name, or alias from the available skill metadata",
                 },
             },
             "required": ["name"],
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
         tags=frozenset({"chat_skill"}),
         bind_handler=_bind_skill_read,
     ),
     ToolContribution(
         name="skill_market_search",
-        description="search the remote skill marketplace providers skills_sh and skillsmp as compact external metadata",
+        description=(
+            "Search remote skill marketplaces only when the user asks to find, compare, or install a new skill, "
+            "or when local skills are explicitly insufficient and marketplace discovery is part of the request. "
+            "Do not search the marketplace for ordinary work that existing tools or local skills can perform."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
@@ -118,8 +130,8 @@ SKILL_CONTRIBUTIONS: list[ToolContribution] = [
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
-        tags=frozenset({"chat_web"}),
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
+        tags=frozenset({"skill_market"}),
         bind_handler=_bind_skill_market_search,
     ),
 ]

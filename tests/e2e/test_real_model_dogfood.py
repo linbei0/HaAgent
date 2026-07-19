@@ -13,13 +13,9 @@ import pytest
 
 from haagent.models.adapters.openai_chat import OpenAIChatCompletionsGateway
 from haagent.models.adapters.openai_responses import OpenAIResponsesGateway
-from haagent.models.config.connections import (
-    ModelSelection,
-    ProviderProfileError,
-    load_active_model_selection,
-    load_model_selection_profile,
-    load_providers_config_snapshot,
-)
+from haagent.models.config.connections import ProviderProfileError
+from haagent.models.model_ref import ModelRef
+from haagent.models.model_runtime import ModelRuntime
 from haagent.runtime.evaluation.dogfood import render_dogfood_report, run_dogfood_tasks
 
 
@@ -46,24 +42,14 @@ def _real_gateway_or_skip():
     connection_id = os.environ.get("HAAGENT_DOGFOOD_CONNECTION")
     if connection_id:
         try:
-            model = os.environ.get("HAAGENT_DOGFOOD_MODEL") or load_active_model_selection().model
-            profile = load_model_selection_profile(
-                ModelSelection(connection_id, model),
-                snapshot=load_providers_config_snapshot(),
+            runtime = ModelRuntime.load(
+                config_dir=Path.home() / ".haagent",
+                environ=os.environ,
             )
+            model = os.environ.get("HAAGENT_DOGFOOD_MODEL") or runtime.load_active().model
+            return runtime.create_gateway(ModelRef(connection_id, model))
         except ProviderProfileError as error:
             pytest.skip(f"real model dogfood skipped: {error}")
-        gateway_kwargs = {
-            "api_key": profile.api_key,
-            "model": profile.model,
-            "base_url": profile.base_url,
-            "request_config": profile.request_config,
-        }
-        if profile.provider == "openai":
-            return OpenAIResponsesGateway(**gateway_kwargs)
-        if profile.provider == "openai-chat":
-            return OpenAIChatCompletionsGateway(**gateway_kwargs)
-        pytest.skip(f"real model dogfood skipped: unsupported provider {profile.provider}")
 
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("real model dogfood skipped: OPENAI_API_KEY is not set")

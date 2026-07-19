@@ -65,11 +65,13 @@ def test_real_task_smoke_modifies_markdown_file_with_approval(tmp_path: Path) ->
                 "update README",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "README.md",
-                            "old_text": "# Demo\n\nTiny project.\n",
-                            "new_text": "# Demo\n\nTiny project.\n\n## Usage\n\nRun pytest.\n",
+                            "replacements": [{
+                                "path": "README.md",
+                                "old_text": "# Demo\n\nTiny project.\n",
+                                "new_text": "# Demo\n\nTiny project.\n\n## Usage\n\nRun pytest.\n",
+                            }],
                         },
                     ),
                 ],
@@ -82,7 +84,7 @@ def test_real_task_smoke_modifies_markdown_file_with_approval(tmp_path: Path) ->
 
     assert result.status == "completed"
     assert "## Usage" in (workspace / "README.md").read_text(encoding="utf-8")
-    assert _tool_names(result.episode_path) == ["apply_patch"]
+    assert _tool_names(result.episode_path) == ["apply_patch_set"]
     assert "approval_requested" in _transcript_events(result.episode_path)
     assert "approval_granted" in _transcript_events(result.episode_path)
 
@@ -95,11 +97,13 @@ def test_real_task_smoke_modifies_python_file_and_runs_tests(tmp_path: Path) -> 
                 "change greeting",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "src/app.py",
-                            "old_text": 'return f"Hello, {name}!"',
-                            "new_text": 'return f"Hi, {name}!"',
+                            "replacements": [{
+                                "path": "src/app.py",
+                                "old_text": 'return f"Hello, {name}!"',
+                                "new_text": 'return f"Hi, {name}!"',
+                            }],
                         },
                     ),
                 ],
@@ -108,11 +112,13 @@ def test_real_task_smoke_modifies_python_file_and_runs_tests(tmp_path: Path) -> 
                 "update test",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "tests/test_app.py",
-                            "old_text": 'assert greet("Ada") == "Hello, Ada!"',
-                            "new_text": 'assert greet("Ada") == "Hi, Ada!"',
+                            "replacements": [{
+                                "path": "tests/test_app.py",
+                                "old_text": 'assert greet("Ada") == "Hello, Ada!"',
+                                "new_text": 'assert greet("Ada") == "Hi, Ada!"',
+                            }],
                         },
                     ),
                 ],
@@ -136,7 +142,7 @@ def test_real_task_smoke_grep_read_patch_set_and_runs_tests(tmp_path: Path) -> N
     gateway = ScriptedGateway(
         [
             ModelResponse("list files", [ToolCall("file_list", {"path": ".", "max_depth": 2})]),
-            ModelResponse("search greeting feature", [ToolCall("grep", {"pattern": "greet", "root": "."})]),
+            ModelResponse("search greeting feature", [ToolCall("grep", {"pattern": "greet", "path": "."})]),
             ModelResponse("read app", [ToolCall("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})]),
             ModelResponse("read test", [ToolCall("file_read", {"path": "tests/test_app.py", "keyword": "test_greet", "limit": 20})]),
             ModelResponse(
@@ -273,11 +279,13 @@ def test_real_task_smoke_denied_approval_does_not_modify_file(tmp_path: Path) ->
                 "try denied patch",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "README.md",
-                            "old_text": "Tiny project.",
-                            "new_text": "Should not be written.",
+                            "replacements": [{
+                                "path": "README.md",
+                                "old_text": "Tiny project.",
+                                "new_text": "Should not be written.",
+                            }],
                         },
                     ),
                 ],
@@ -308,9 +316,9 @@ def test_real_task_smoke_failed_task_is_clear_in_inspect(tmp_path: Path) -> None
     summary = render_episode_summary(result.episode_path)
 
     assert result.status == "failed"
-    assert result.failure_category == "Tool Argument Failure"
+    assert result.failure_category == "Loop Limit Failure"
     assert "Structured Failure" in summary
-    assert "Tool Argument Failure" in summary
+    assert "Loop Limit Failure" in summary
     assert "path does not exist: missing.py" in summary
     assert "file_read: path does not exist: missing.py" in summary
 
@@ -444,7 +452,8 @@ def test_real_task_smoke_keeps_multi_tool_messages_contiguous_before_suggestion(
     after_assistant = second_call_messages[assistant_index + 1 :]
     assert [message.get("role") for message in after_assistant[:2]] == ["tool", "tool"]
     assert after_assistant[2]["role"] == "user"
-    assert "suggested path" in str(after_assistant[2]["content"]).lower()
+    assert "recovery" in str(after_assistant[2]["content"]).lower()
+    assert "src/app.py" in str(after_assistant[2]["content"])
 
 
 def test_real_task_smoke_adds_tool_messages_for_multiple_tool_calls(tmp_path: Path) -> None:
@@ -491,11 +500,13 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
                 "bad patch",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "README.md",
-                            "old_text": "Tiny old project.",
-                            "new_text": "Tiny repaired project.",
+                            "replacements": [{
+                                "path": "README.md",
+                                "old_text": "Tiny old project.",
+                                "new_text": "Tiny repaired project.",
+                            }],
                         },
                     ),
                 ],
@@ -505,11 +516,13 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
                 "patch exact text",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "README.md",
-                            "old_text": "Tiny project.",
-                            "new_text": "Tiny repaired project.",
+                            "replacements": [{
+                                "path": "README.md",
+                                "old_text": "Tiny project.",
+                                "new_text": "Tiny repaired project.",
+                            }],
                         },
                     ),
                 ],
@@ -523,9 +536,9 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
     assert result.status == "completed"
     assert "Tiny repaired project." in (workspace / "README.md").read_text(encoding="utf-8")
     assert [call["tool_name"] for call in _tool_calls(result.episode_path)] == [
-        "apply_patch",
+        "apply_patch_set",
         "file_read",
-        "apply_patch",
+        "apply_patch_set",
     ]
     assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 
@@ -649,17 +662,19 @@ def test_real_task_smoke_searches_and_reads_before_edit_without_path(tmp_path: P
     gateway = ScriptedGateway(
         [
             ModelResponse("list files", [ToolCall("file_list", {"path": ".", "max_depth": 2})]),
-            ModelResponse("search greeting implementation", [ToolCall("grep", {"pattern": "greet", "root": "."})]),
+            ModelResponse("search greeting implementation", [ToolCall("grep", {"pattern": "greet", "path": "."})]),
             ModelResponse("read candidate", [ToolCall("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})]),
             ModelResponse(
                 "patch found file",
                 [
                     ToolCall(
-                        "apply_patch",
+                        "apply_patch_set",
                         {
-                            "path": "src/app.py",
-                            "old_text": 'return f"Hello, {name}!"',
-                            "new_text": 'return f"Howdy, {name}!"',
+                            "replacements": [{
+                                "path": "src/app.py",
+                                "old_text": 'return f"Hello, {name}!"',
+                                "new_text": 'return f"Howdy, {name}!"',
+                            }],
                         },
                     ),
                 ],
@@ -676,7 +691,7 @@ def test_real_task_smoke_searches_and_reads_before_edit_without_path(tmp_path: P
         "file_list",
         "grep",
         "file_read",
-        "apply_patch",
+        "apply_patch_set",
     ]
     assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 

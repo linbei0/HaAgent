@@ -57,14 +57,26 @@ class CommandResult:
     duration_seconds: float
     timeout_seconds: float
 
+
+@dataclass(frozen=True)
+class ShellContract:
+    """一次 shell 执行实际采用的解释器及其模型可见契约。"""
+
+    kind: str
+    executable: str
+    platform: str
+
+
 def run_command(
     command: str,
     cwd: Path,
     timeout_seconds: float,
     cancellation_token: CancellationToken | None = None,
+    shell_contract: ShellContract | None = None,
 ) -> CommandResult:
     """运行 shell 命令，并用统一结构表达执行结果。"""
-    popen_args, use_shell = resolve_shell_command(command)
+    contract = shell_contract or resolve_shell_contract()
+    popen_args, use_shell = build_shell_command_argv(command, contract)
     return run_process(
         command=command,
         popen_args=popen_args,
@@ -80,44 +92,70 @@ def resolve_shell_command(
     *,
     os_name: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
-    bash_is_usable: Callable[[str], bool] | None = None,
 ) -> tuple[str | list[str], bool]:
-    """选择平台合适的 shell argv，避免 Windows 默认 cmd 误跑 Unix 风格命令。"""
+    """兼容入口：按实际 Shell 契约构造执行 argv。"""
+    return build_shell_command_argv(
+        command,
+        resolve_shell_contract(os_name=os_name, which=which),
+    )
+
+
+def resolve_shell_contract(
+    *,
+    os_name: str | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> ShellContract:
+    """确定本机执行 shell；模型 schema 与执行器必须使用同一契约。"""
     resolved_os = os_name or os.name
-    usable_bash = bash_is_usable or _bash_is_usable
     if resolved_os == "nt":
-        bash = which("bash")
-        if bash and not _is_wsl_bash_path(bash) and usable_bash(bash):
-            return [bash, "-lc", command], False
         pwsh = which("pwsh")
         if pwsh:
-            return [pwsh, "-NoLogo", "-NoProfile", "-Command", _powershell_command(command)], False
+            return ShellContract("powershell", pwsh, "windows")
         powershell = which("powershell")
         if powershell:
-            return [
-                powershell,
-                "-NoLogo",
-                "-NoProfile",
-                "-Command",
-                _powershell_command(command, legacy=True),
-            ], False
-        return [which("cmd.exe") or "cmd.exe", "/d", "/s", "/c", command], False
+            return ShellContract("powershell_legacy", powershell, "windows")
+        return ShellContract("cmd", which("cmd.exe") or "cmd.exe", "windows")
 
     shell = which("bash") or which("sh") or os.environ.get("SHELL") or "/bin/sh"
-    return [shell, "-lc", command], False
+    return ShellContract("posix", shell, "posix")
 
 
-def _bash_is_usable(bash_path: str) -> bool:
-    try:
-        result = subprocess.run(
-            [bash_path, "-lc", "exit 0"],
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+def build_shell_command_argv(
+    command: str,
+    contract: ShellContract,
+) -> tuple[list[str], bool]:
+    """按契约构造 argv；不猜测也不改写模型提供的命令文本。"""
+    if contract.kind == "powershell":
+        return [contract.executable, "-NoLogo", "-NoProfile", "-Command", _powershell_command(command)], False
+    if contract.kind == "powershell_legacy":
+        return [
+            contract.executable,
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            _powershell_command(command, legacy=True),
+        ], False
+    if contract.kind == "cmd":
+        return [contract.executable, "/d", "/s", "/c", command], False
+    if contract.kind == "posix":
+        return [contract.executable, "-lc", command], False
+    raise ValueError(f"unsupported shell contract: {contract.kind}")
+
+
+def describe_shell_contract(contract: ShellContract) -> str:
+    """生成解释器无关的事实说明，不列举脆弱的单条命令写法。"""
+    language = {
+        "powershell": "PowerShell",
+        "powershell_legacy": "Windows PowerShell",
+        "cmd": "cmd.exe command language",
+        "posix": "POSIX shell",
+    }.get(contract.kind, contract.kind)
+    return (
+        f"Runtime shell contract: platform={contract.platform}; interpreter={language}; "
+        f"executable={contract.executable}. The command is interpreted as {language}; use that language's "
+        "native syntax. The tool supplies cwd separately. To use another command language, invoke its "
+        "interpreter explicitly in command."
+    )
 
 
 def _powershell_command(command: str, *, legacy: bool = False) -> str:
@@ -142,11 +180,6 @@ def _powershell_command(command: str, *, legacy: bool = False) -> str:
         "} catch { Write-Error $_; exit 1 } "
         "}"
     )
-
-
-def _is_wsl_bash_path(path: str) -> bool:
-    normalized = path.replace("\\", "/").lower()
-    return normalized.endswith("/windows/system32/bash.exe") or "/microsoft/windowsapps/bash.exe" in normalized
 
 
 def run_process(

@@ -82,6 +82,7 @@ class ChatTurnRequest:
     mcp_runtime: object | None = None
     mcp_tool_names: list[str] = field(default_factory=list)
     prompt_pack_ids: list[str] = field(default_factory=list)
+    include_memory_tool: bool = True
     allowed_tools_override: list[str] | None = None
     approval_allowed_tools_override: list[str] | None = None
     approved_tools_override: list[str] | None = None
@@ -115,6 +116,7 @@ class ChatTurnRunner:
                 target_paths=request.target_paths,
                 mcp_tool_names=request.mcp_tool_names,
                 prompt_pack_ids=prompt_pack_ids,
+                include_memory_tool=request.include_memory_tool,
                 allowed_tools_override=request.allowed_tools_override,
                 approval_allowed_tools_override=request.approval_allowed_tools_override,
                 approved_tools_override=request.approved_tools_override,
@@ -159,6 +161,7 @@ def write_chat_task_yaml(
     target_paths: list[str] | None = None,
     mcp_tool_names: list[str] | None = None,
     prompt_pack_ids: list[str] | None = None,
+    include_memory_tool: bool = True,
     allowed_tools_override: list[str] | None = None,
     approval_allowed_tools_override: list[str] | None = None,
     approved_tools_override: list[str] | None = None,
@@ -175,7 +178,7 @@ def write_chat_task_yaml(
         allowed_tools = ToolAccessManager.candidate_tools(
             catalog=catalog,
             enable_web=enable_web,
-            has_skills=ToolAccessManager.skills_available(workspace_root, skill_catalog),
+            include_memory_tool=include_memory_tool,
             image_attachment_history=bool(image_attachment_history),
             mcp_tool_names=mcp_tools,
         )
@@ -187,18 +190,20 @@ def write_chat_task_yaml(
                 if name not in allowed_tools:
                     allowed_tools.append(name)
     policy = path_policy or default_path_policy(workspace_root)
-    approval_allowed_tools = (
+    requested_approval_tools = (
         list(approval_allowed_tools_override)
         if approval_allowed_tools_override is not None
         else [*catalog.chat_approval_tools(), *mcp_tools]
     )
-    approved_tools = (
+    approval_allowed_tools = [name for name in requested_approval_tools if name in allowed_tools]
+    requested_approved_tools = (
         list(approved_tools_override)
         if approved_tools_override is not None
         else approval_allowed_tools
         if policy.permission_mode in {"auto_approve", "full_access"}
         else []
     )
+    approved_tools = [name for name in requested_approved_tools if name in approval_allowed_tools]
     contract = build_chat_task_contract(
         goal=request,
         workspace_root=workspace_root,

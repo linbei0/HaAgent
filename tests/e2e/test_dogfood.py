@@ -41,7 +41,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     gateway = ScriptedGateway(
         [
             ModelResponse("list files", [ToolCall("file_list", {"path": ".", "max_depth": 2})]),
-            ModelResponse("search greet", [ToolCall("grep", {"pattern": "greet", "root": "."})]),
+            ModelResponse("search greet", [ToolCall("grep", {"pattern": "greet", "path": "."})]),
             ModelResponse("read app", [ToolCall("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})]),
             ModelResponse("read test", [ToolCall("file_read", {"path": "tests/test_app.py", "keyword": "test_greet", "limit": 20})]),
             ModelResponse(
@@ -119,18 +119,42 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
                 ],
             ),
             ModelResponse("done task 3", []),
+            ModelResponse("read project description", [ToolCall("file_read", {"path": "README.md"})]),
+            ModelResponse(
+                "update description",
+                [
+                    ToolCall(
+                        "apply_patch_set",
+                        {
+                            "replacements": [
+                                {
+                                    "path": "README.md",
+                                    "old_text": "Tiny project.",
+                                    "new_text": "Tiny assistant.",
+                                },
+                            ],
+                        },
+                    ),
+                ],
+            ),
+            ModelResponse("done task 4", []),
         ],
     )
 
     report = run_dogfood_tasks(gateway, runs_root=tmp_path / "runs", max_turns=12, auto_approve=True)
 
     assert report.status == "completed"
-    assert [task.status for task in report.tasks] == ["completed", "completed", "completed"]
+    assert [task.status for task in report.tasks] == ["completed", "completed", "completed", "completed"]
     assert report.tasks[0].tools[:4] == ["file_list", "grep", "file_read", "file_read"]
     assert "apply_patch_set" in report.tasks[0].tools
     assert "shell" in report.tasks[1].tools
     assert report.tasks[2].failure_reason == "none"
-    assert "Patch text is not unique" in _transcript_text(report.tasks[2].episode_path)
+    assert report.tasks[3].reliability_metrics["tool_argument_error_count"] == 0
+    assert report.reliability_metrics["tool_argument_error_count"] == 0
+    assert any(
+        (call.get("error") or {}).get("type") == "patch_text_not_unique"
+        for call in _tool_calls(report.tasks[2].episode_path)
+    )
     first_tool_call = _tool_calls(report.tasks[0].episode_path)[2]
     assert first_tool_call["tool_name"] == "file_read"
     patch_call = _tool_calls(report.tasks[0].episode_path)[4]
@@ -140,8 +164,11 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     assert "Use file_list to inspect directory structure" in gateway.calls[0]["model_input"]
     assert "Use grep for exact deterministic text search" in gateway.calls[0]["model_input"]
     assert "context_find" not in gateway.calls[0]["model_input"]
-    assert "Prefer this over repeated apply_patch calls" in json.dumps(gateway.calls[0]["tool_schemas"])
+    visible_tools = {schema["name"] for schema in gateway.calls[0]["tool_schemas"]}
+    assert {"agent", "code_run", "apply_patch", "skill_list", "skill_read"}.issubset(visible_tools)
+    assert "related multi-file or multi-site edits" in json.dumps(gateway.calls[0]["tool_schemas"])
     assert "Most needed improvement: none" in render_dogfood_report(report)
+    assert "tool_argument_error_rate" in render_dogfood_report(report)
 
 
 def test_cli_dogfood_without_real_model_config_skips_explicitly(capsys) -> None:

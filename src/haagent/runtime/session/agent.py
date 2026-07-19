@@ -428,6 +428,7 @@ class AgentSession:
                     path_policy=self.path_policy,
                     enable_web=self.enable_web,
                     target_paths=target_paths,
+                    include_memory_tool=self.memory_extraction_enabled,
                     event_sink=on_runtime_event,
                     interaction_handler=interaction_handler,
                     cancellation_token=self._current_cancellation_token,

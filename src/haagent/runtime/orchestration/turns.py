@@ -558,7 +558,6 @@ def _run_tool_calls(
     state: TurnLoopState,
     deps: TurnLoopDependencies,
 ) -> RunResult | None:
-    turn_broke_early = False
     loaded_image_attached_this_turn = False
     pending_suggestion_messages: list[str] = []
     visible_result_fingerprints: set[str] = set()
@@ -576,6 +575,11 @@ def _run_tool_calls(
                 args=dict(tool_call.args),
                 error=dict(error),
                 execution_state=str(tool_result.get("execution_state", "")),
+                recovery=(
+                    dict(tool_result["recovery"])
+                    if isinstance(tool_result.get("recovery"), dict)
+                    else {}
+                ),
             )
             deps.emit_event(failed_event)
             recovery = map_failure_to_recovery(bus_event_to_dict(failed_event))
@@ -634,7 +638,6 @@ def _run_tool_calls(
             if suggestion is not None:
                 deps.record_suggestion(turn, suggestion)
                 pending_suggestion_messages.append(suggestion.message)
-            turn_broke_early = True
             continue
 
         deps.emit_event(
@@ -943,7 +946,7 @@ def _dispatch_tool_calls(
                 deps=deps,
             ):
                 batch_end += 1
-            failed = _run_read_batch(
+            blocks_later_high_impact = _run_read_batch(
                 turn=turn,
                 tool_calls=tool_calls,
                 start_index=index,
@@ -952,8 +955,8 @@ def _dispatch_tool_calls(
                 deps=deps,
                 interaction_handler=interaction_handler,
             )
-            if failed:
-                # 低风险读取仍可为下一轮恢复提供独立信息，但后续副作用不能冒险继续。
+            if blocks_later_high_impact:
+                # 只有未知执行状态可能留下部分副作用，才阻止本批后续高风险调用。
                 block_high_impact = True
             index = batch_end
             continue
@@ -971,7 +974,7 @@ def _dispatch_tool_calls(
         deps.emit_event(_tool_started_event(turn, tool_call))
         result = _dispatch_tool_call(tool_call, deps, interaction_handler, turn=turn)
         results[index] = result
-        if result.get("status") == "error":
+        if _blocks_later_high_impact(tool_call, result, deps):
             block_high_impact = True
         index += 1
 
@@ -1014,8 +1017,25 @@ def _run_read_batch(
     deps: TurnLoopDependencies,
     interaction_handler: HumanInteractionHandler | None,
 ) -> bool:
-    """滑动窗口执行连续只读批次；返回是否出现 error。"""
-    batch_indices = list(range(start_index, end_index))
+    """滑动窗口执行连续只读批次；仅未知执行状态阻止后续副作用。"""
+    all_indices = list(range(start_index, end_index))
+    first_by_fingerprint: dict[str, int] = {}
+    duplicate_sources: dict[int, int] = {}
+    batch_indices: list[int] = []
+    for index in all_indices:
+        call = tool_calls[index]
+        fingerprint = json.dumps(
+            {"name": call.name, "args": call.args},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        source_index = first_by_fingerprint.get(fingerprint)
+        if source_index is None:
+            first_by_fingerprint[fingerprint] = index
+            batch_indices.append(index)
+        else:
+            duplicate_sources[index] = source_index
     if not batch_indices:
         return False
     if len(batch_indices) == 1:
@@ -1023,12 +1043,20 @@ def _run_read_batch(
         deps.raise_if_cancelled()
         deps.emit_event(_tool_started_event(turn, tool_calls[index]))
         results[index] = _dispatch_tool_call(tool_calls[index], deps, interaction_handler, turn=turn)
-        return results[index].get("status") == "error"
+        for duplicate_index, source_index in duplicate_sources.items():
+            results[duplicate_index] = deps.router.record_reused(
+                tool_calls[duplicate_index].name,
+                tool_calls[duplicate_index].args,
+                source_result=results[source_index],
+                reused_from_call_index=source_index,
+                turn=turn,
+            )
+        return _blocks_later_high_impact(tool_calls[index], results[index], deps)
 
     max_workers = min(deps.max_parallel_read_tools, len(batch_indices))
     next_pos = 0
     in_flight: dict[Future[dict[str, Any]], int] = {}
-    failed = False
+    blocks_later_high_impact = False
     cancelled_error: RunCancelled | None = None
 
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="haagent-tool") as executor:
@@ -1069,8 +1097,8 @@ def _run_read_batch(
                     cancelled_error = error
                     continue
                 results[index] = result
-                if result.get("status") == "error":
-                    failed = True
+                if _blocks_later_high_impact(tool_calls[index], result, deps):
+                    blocks_later_high_impact = True
             if cancelled_error is not None:
                 break
             try:
@@ -1089,13 +1117,22 @@ def _run_read_batch(
                     cancelled_error = error
                     continue
                 results[index] = result
-                if result.get("status") == "error":
-                    failed = True
+                if _blocks_later_high_impact(tool_calls[index], result, deps):
+                    blocks_later_high_impact = True
 
     if cancelled_error is not None:
         raise cancelled_error
 
-    return failed
+    for duplicate_index, source_index in duplicate_sources.items():
+        results[duplicate_index] = deps.router.record_reused(
+            tool_calls[duplicate_index].name,
+            tool_calls[duplicate_index].args,
+            source_result=results[source_index],
+            reused_from_call_index=source_index,
+            turn=turn,
+        )
+
+    return blocks_later_high_impact
 
 
 def _dispatch_tool_call(
@@ -1152,6 +1189,21 @@ def _fail_completion_candidate(*, deps: TurnLoopDependencies, evidence: str) -> 
         },
     )
     return deps.recorder.finish(RunStatus.FAILED)
+
+
+def _blocks_later_high_impact(
+    tool_call: ToolCall,
+    result: dict[str, Any],
+    deps: TurnLoopDependencies,
+) -> bool:
+    """读取失败可继续；副作用工具只有完成状态明确时才允许继续。"""
+    if result.get("status") != "error":
+        return False
+    if result.get("execution_state") == "completed":
+        return False
+    if tool_call.name in deps.allowed_tools and deps.tool_registry.has(tool_call.name):
+        return deps.tool_registry.get(tool_call.name).execution_effect != "read_only"
+    return True
 
 
 def _wait_for_pending_worker_tasks(

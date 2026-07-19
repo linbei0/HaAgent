@@ -43,7 +43,7 @@ class GrepFileRootGateway:
         tool_schemas = invocation.tool_schemas
         self.call_count += 1
         if self.call_count == 1:
-            return ModelResponse("", [ToolCall("grep", {"pattern": "needle", "root": "alpha.txt"})])
+            return ModelResponse("", [ToolCall("grep", {"pattern": "needle", "path": "alpha.txt"})])
         return ModelResponse("done after grep file root", [])
 
 
@@ -160,7 +160,8 @@ verification_commands: []
     observation = next(record for record in transcript if record.get("event") == "tool_observation")
     assert observation["tool_name"] == "file_read"
     assert observation["result"]["error"]["type"] == "tool_argument_invalid"
-    assert observation["result"]["error"]["retryable"] is True
+    assert observation["result"]["error"]["retryable"] is False
+    assert observation["result"]["recovery"]["action"] == "correct_arguments"
     assert failure["failure"] is None
 
 
@@ -227,7 +228,7 @@ verification_commands: []
     assert gateway.call_count == 2
     assert tool_call["status"] == "error"
     assert tool_call["error"]["type"] == "tool_argument_invalid"
-    assert tool_call["error"]["message"] == "unexpected argument: path"
+    assert tool_call["error"]["message"] == "unexpected argument: root"
 
 
 def test_file_write_without_declared_verification_completes_without_file_hash_gate(tmp_path: Path) -> None:

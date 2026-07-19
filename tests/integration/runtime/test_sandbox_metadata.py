@@ -12,6 +12,7 @@ from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.sandbox.base import SandboxAvailability, SandboxMetadata
+from haagent.runtime.execution.command import ShellContract
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 from tests.support.episode_packages import read_json, write_task
 
@@ -43,6 +44,9 @@ class FakeLifecycleSandboxBackend:
                 reason="",
             ),
         )
+
+    def shell_contract(self) -> ShellContract:
+        return ShellContract("posix", "fake-sh", "fake")
 
     def run_shell(self, command):
         raise AssertionError("tool execution is not needed in this test")

@@ -19,6 +19,7 @@ from haagent.models.types import ModelCallError, ModelGateway
 from haagent.models.config.connections import user_config_dir
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.command import describe_shell_contract
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import (
@@ -146,17 +147,26 @@ class RunOrchestrator:
                 command_timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
             )
             writer.write_sandbox_metadata(sandbox_backend.metadata())
+            # 执行器先确定实际解释器，再把同一事实放进模型可见 schema 与任务上下文。
+            runtime_tool_registry = self._tool_registry.with_description_overrides(
+                {
+                    "shell": "\n\n".join(
+                        (
+                            self._tool_registry.get("shell").description,
+                            describe_shell_contract(sandbox_backend.shell_contract()),
+                        ),
+                    ),
+                },
+            )
             model_capabilities = None
             capabilities = getattr(self._model_gateway, "capabilities", None)
             if callable(capabilities):
                 model_capabilities = capabilities()
             access_snapshot = ToolAccessManager.resolve(
                 task.allowed_tools,
-                registry=self._tool_registry,
-                workspace_root=workspace_root,
+                registry=runtime_tool_registry,
                 mcp_runtime=self._mcp_runtime,
                 model_capabilities=model_capabilities,
-                skill_catalog=self._skill_catalog,
                 image_attachment_history=bool(task.image_attachment_history),
             )
             allowed_set = set(access_snapshot.allowed_tools)
@@ -212,7 +222,7 @@ class RunOrchestrator:
                 approval_allowed_tools=task.policy["approval_allowed_tools"],
                 approved_tools=task.policy["approved_tools"],
                 cancellation_token=self._cancellation_token,
-                tool_registry=self._tool_registry,
+                tool_registry=runtime_tool_registry,
                 mcp_runtime=self._mcp_runtime,
                 # 仅当本 run 允许 agent/task 工具时才装配 MultiAgentRuntime，避免普通对话热路径耦合。
                 agent_runtime=_maybe_multi_agent_runtime(
@@ -226,7 +236,7 @@ class RunOrchestrator:
                     approved_tools=task.policy["approved_tools"],
                     event_sink=self._emit_event,
                     interaction_handler=self._interaction_handler,
-                    tool_registry=self._tool_registry,
+                    tool_registry=runtime_tool_registry,
                     mcp_runtime=self._mcp_runtime,
                     worker_max_turns=self._max_turns,
                     parent_task_step_id=_current_task_step_id(self._task_ledger),
@@ -259,7 +269,7 @@ class RunOrchestrator:
                 working_state=self._working_state,
                 task_ledger=self._task_ledger,
                 interaction_resolver=interaction_resolver,
-                tool_registry=self._tool_registry,
+                tool_registry=runtime_tool_registry,
                 instruction_cache=self._instruction_cache,
                 skill_catalog=self._skill_catalog,
             )
@@ -297,7 +307,7 @@ class RunOrchestrator:
                     router=router,
                     task_goal=task.goal,
                     allowed_tools=task.allowed_tools,
-                    tool_registry=self._tool_registry,
+                    tool_registry=runtime_tool_registry,
                     verification_commands=task.verification_commands,
                     workspace_root=workspace_root,
                     max_turns=self._max_turns,
@@ -561,28 +571,14 @@ def _record_progress_block_working_state(
 
 
 def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:
+    """普通工具失败交回模型；审批与策略边界必须暂停或结束当前执行。"""
     error = tool_result.get("error") if isinstance(tool_result.get("error"), dict) else {}
-    error_type = str(error.get("type", ""))
-    # 审批/策略/护栏硬拒绝终态；误用工具名回 observation 让模型自纠
-    if error_type in {"approval_denied", "approval_pending", "policy_denied", "guardrail_denied"}:
-        return True
-    retryable = error.get("retryable")
-    if isinstance(retryable, bool):
-        return not retryable
-    if error_type in {
-        "tool_not_allowed",
-        "unknown_tool",
-        "patch_text_not_found",
-        "patch_text_not_unique",
-        "code_run_failed",
-        "timeout",
-    }:
-        return False
-    if tool_result.get("suggestions"):
-        return False
-    if tool_result.get("suggested_tool"):
-        return False
-    return error_type == "tool_argument_invalid"
+    return str(error.get("type", "")) in {
+        "approval_denied",
+        "approval_pending",
+        "policy_denied",
+        "guardrail_denied",
+    }
 
 
 def _interaction_bridge(

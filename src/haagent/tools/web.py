@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.tool_results import ArtifactWriter, prepare_tool_result_for_model
-from haagent.tools.base import tool_error
+from haagent.tools.base import RecoveryAction, ToolFailureCategory, tool_error
 from haagent.tools.network_guard import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_READ_TIMEOUT_SECONDS,
@@ -84,7 +84,8 @@ def web_search(
     max_results = _bounded_int(args.get("max_results", 5), default=5, minimum=1, maximum=10)
     if isinstance(max_results, dict):
         return max_results
-    provider = str(args.get("provider") or env.get("HAAGENT_WEB_SEARCH_PROVIDER") or "tavily").strip().lower()
+    explicit_provider = args.get("provider")
+    provider = str(explicit_provider or env.get("HAAGENT_WEB_SEARCH_PROVIDER") or "tavily").strip().lower()
     if provider not in ALLOWED_PROVIDERS:
         return tool_error("tool_argument_invalid", "provider must be one of: tavily, brave")
     topic = args.get("topic")
@@ -93,12 +94,56 @@ def web_search(
     freshness = args.get("freshness")
     if freshness is not None and str(freshness) not in ALLOWED_FRESHNESS:
         return tool_error("tool_argument_invalid", "freshness must be one of: day, week, month, year")
+    result = _search_provider(
+        provider,
+        query,
+        max_results=max_results,
+        topic=str(topic) if topic is not None else None,
+        freshness=str(freshness) if freshness is not None else None,
+        env=env,
+        transport=transport,
+        resolver=resolver,
+    )
+    if explicit_provider is not None or result.get("status") == "success":
+        return result
+    error = result.get("error") if isinstance(result.get("error"), dict) else {}
+    if error.get("type") != "web_search_configuration_error" and error.get("retryable") is not True:
+        return result
+    alternate = "brave" if provider == "tavily" else "tavily"
+    if not _provider_configured(alternate, env):
+        return result
+    fallback = _search_provider(
+        alternate,
+        query,
+        max_results=max_results,
+        topic=str(topic) if topic is not None else None,
+        freshness=str(freshness) if freshness is not None else None,
+        env=env,
+        transport=transport,
+        resolver=resolver,
+    )
+    if fallback.get("status") == "success":
+        fallback["provider_fallback"] = {"from": provider, "to": alternate, "reason": str(error.get("type", "unknown"))}
+    return fallback
+
+
+def _search_provider(
+    provider: str,
+    query: str,
+    *,
+    max_results: int,
+    topic: str | None,
+    freshness: str | None,
+    env: Mapping[str, str],
+    transport: httpx.BaseTransport | None,
+    resolver: Resolver | None,
+) -> dict[str, Any]:
     if provider == "tavily":
         return _search_tavily(
             query,
             max_results=max_results,
-            topic=str(topic) if topic is not None else None,
-            freshness=str(freshness) if freshness is not None else None,
+            topic=topic,
+            freshness=freshness,
             env=env,
             transport=transport,
             resolver=resolver,
@@ -106,11 +151,16 @@ def web_search(
     return _search_brave(
         query,
         max_results=max_results,
-        freshness=str(freshness) if freshness is not None else None,
+        freshness=freshness,
         env=env,
         transport=transport,
         resolver=resolver,
     )
+
+
+def _provider_configured(provider: str, env: Mapping[str, str]) -> bool:
+    key = "TAVILY_API_KEY" if provider == "tavily" else "BRAVE_SEARCH_API_KEY"
+    return bool(env.get(key))
 
 
 def web_fetch(
@@ -354,23 +404,54 @@ def _web_network_error(tool_name: str, url: str, error: BaseException) -> dict[s
         proxy=os.environ.get("HAAGENT_WEB_PROXY") if proxy_configured else None,
     ).value
     target_host = _safe_target_host(url)
-    error_type, failure_stage, retriable, message, action_hint, timeout_seconds = _classify_network_error(
+    error_type, failure_stage, retryable, message, recovery_reason, timeout_seconds = _classify_network_error(
         error,
         tool_name=tool_name,
         proxy_configured=proxy_configured,
         resolution_mode=resolution_mode,
     )
+    status_code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
+    retry_after_seconds = _retry_after_seconds(error.response) if isinstance(error, httpx.HTTPStatusError) else None
+    if status_code in {403, 404}:
+        recovery = RecoveryAction(
+            "use_alternate_source",
+            "该 URL 不可抓取或已失效；改用之前搜索结果中的其他来源，不要原样重试。",
+        )
+    elif retryable:
+        recovery = RecoveryAction("retry_same_call", recovery_reason)
+    else:
+        recovery = RecoveryAction("stop", recovery_reason)
     return tool_error(
         error_type,
         message,
+        category=(
+            ToolFailureCategory.TIMEOUT
+            if failure_stage in {"connect", "read"}
+            else ToolFailureCategory.TRANSIENT
+            if retryable
+            else ToolFailureCategory.PROVIDER
+        ),
+        retryable=retryable,
+        recovery=recovery,
         target_host=target_host,
         failure_stage=failure_stage,
+        status_code=status_code,
+        retry_after_seconds=retry_after_seconds,
         timeout_seconds=timeout_seconds,
         proxy_configured=proxy_configured,
         resolution_mode=resolution_mode,
-        retriable=retriable,
-        action_hint=action_hint,
     )
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    raw = response.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def _classify_network_error(
@@ -437,7 +518,7 @@ def _classify_network_error(
         return (
             "web_http_error",
             "http",
-            bool(status is not None and status >= 500),
+            bool(status is not None and (status == 429 or status >= 500)),
             f"HTTP {status}" if status is not None else "HTTP error",
             "检查 URL 是否有效，或改用其他来源。",
             None,

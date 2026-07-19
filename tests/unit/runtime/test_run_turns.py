@@ -41,6 +41,7 @@ class _FakeRouter:
         self.result = result
         self.waited_task_ids: list[str] = []
         self.skipped: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        self.reused: list[tuple[str, dict[str, Any], int]] = []
 
     def dispatch(self, tool_name: str, args: dict[str, Any], interaction_handler=None, *, turn=None) -> dict[str, Any]:
         del tool_name, args, interaction_handler, turn
@@ -53,6 +54,27 @@ class _FakeRouter:
         result: dict[str, Any],
     ) -> dict[str, Any]:
         self.skipped.append((tool_name, dict(args), dict(result)))
+        return result
+
+    def record_reused(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        source_result: dict[str, Any],
+        reused_from_call_index: int,
+        turn: int | None = None,
+    ) -> dict[str, Any]:
+        del turn
+        self.reused.append((tool_name, dict(args), reused_from_call_index))
+        result = {
+            "status": source_result["status"],
+            "execution_state": "not_started",
+            "duplicate_suppressed": True,
+            "model_visible": {"same_as_previous": True},
+        }
+        if source_result["status"] == "error":
+            result["error"] = dict(source_result["error"])
         return result
 
     def raise_for_error(self, result: dict[str, Any]) -> None:
@@ -109,6 +131,7 @@ class _PerToolRouter:
         self.delays = delays or {}
         self.calls: list[str] = []
         self.skipped: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        self.reused: list[tuple[str, dict[str, Any], int]] = []
         self.start_order: list[str] = []
         self.end_order: list[str] = []
         self._lock = threading.Lock()
@@ -149,6 +172,27 @@ class _PerToolRouter:
         self.skipped.append((tool_name, dict(args), dict(result)))
         return result
 
+    def record_reused(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        source_result: dict[str, Any],
+        reused_from_call_index: int,
+        turn: int | None = None,
+    ) -> dict[str, Any]:
+        del turn
+        self.reused.append((tool_name, dict(args), reused_from_call_index))
+        result = {
+            "status": source_result["status"],
+            "execution_state": "not_started",
+            "duplicate_suppressed": True,
+            "model_visible": {"same_as_previous": True},
+        }
+        if source_result["status"] == "error":
+            result["error"] = dict(source_result["error"])
+        return result
+
     def raise_for_error(self, result: dict[str, Any]) -> None:
         raise AssertionError(f"unexpected terminal error: {result}")
 
@@ -174,6 +218,22 @@ def test_read_batch_respects_max_parallel_read_tools() -> None:
     assert router.max_active <= 4
     assert router.max_active > 1
     assert len(router.calls) == 10
+
+
+def test_same_batch_duplicate_read_call_reuses_first_result() -> None:
+    router = _PerToolRouter({"file_read": {"status": "success", "content": "once"}})
+    calls = [
+        ToolCall(name="file_read", args={"path": "same.txt"}, id="call_1"),
+        ToolCall(name="file_read", args={"path": "same.txt"}, id="call_2"),
+    ]
+    state = TurnLoopState(messages=[], context_id="ctx")
+
+    _run_tool_calls(turn=1, tool_calls_with_ids=calls, state=state, deps=_deps(router=router))
+
+    assert router.calls == ["file_read"]
+    assert router.reused == [("file_read", {"path": "same.txt"}, 0)]
+    assert state.messages[1]["tool_call_id"] == "call_2"
+    assert "same_as_previous" in state.messages[1]["content"]
 
 
 def test_serial_barrier_between_write_and_following_read() -> None:
@@ -261,7 +321,7 @@ def test_workspace_writes_do_not_overlap() -> None:
     assert router.start_order == ["file_write", "file_write"]
 
 
-def test_read_batch_failure_skips_unstarted_and_later_calls() -> None:
+def test_read_batch_failure_does_not_skip_later_independent_calls() -> None:
     results = {
         "r0": {"status": "error", "error": {"type": "boom", "message": "fail"}},
         "r1": {"status": "success", "content": "ok"},
@@ -284,22 +344,43 @@ def test_read_batch_failure_skips_unstarted_and_later_calls() -> None:
         state=state,
         deps=_deps(router=router, max_parallel_read_tools=2),
     )
-    assert "file_write" not in router.calls
-    assert len(router.skipped) >= 1
-    skipped_ids = [
-        message["tool_call_id"]
-        for message in state.messages
-        if message.get("tool_call_id") and "tool_call_skipped" in message.get("content", "")
-    ]
-    assert skipped_ids
-    assert any(item[2].get("execution_state") == "not_started" for item in router.skipped)
+    assert router.calls == ["file_read", "file_read", "file_read", "file_read", "file_write"]
+    assert router.skipped == []
 
 
-def test_serial_write_failure_keeps_later_read_and_skips_later_high_impact_call() -> None:
+def test_completed_shell_failure_does_not_skip_later_shell_call() -> None:
+    router = _PerToolRouter(
+        {
+            "first": {
+                "status": "error",
+                "execution_state": "completed",
+                "error": {"type": "command_failed", "message": "exit 1", "retryable": False},
+                "recovery": {"action": "correct_arguments", "reason": "inspect stderr"},
+            },
+            "second": {"status": "success", "content": "ran"},
+        },
+    )
+
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[
+            ToolCall(name="shell", args={"command": "bad", "result_key": "first"}, id="first"),
+            ToolCall(name="shell", args={"command": "good", "result_key": "second"}, id="second"),
+        ],
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=_deps(router=router),
+    )
+
+    assert router.calls == ["shell", "shell"]
+    assert router.skipped == []
+
+
+def test_unknown_write_failure_keeps_later_read_and_skips_later_high_impact_call() -> None:
     router = _PerToolRouter(
         {
             "file_write": {
                 "status": "error",
+                "execution_state": "unknown",
                 "error": {"type": "write_failed", "message": "nope"},
             },
             "file_read": {"status": "success", "content": "x"},
@@ -328,6 +409,7 @@ def test_not_started_emits_tool_failed_without_tool_started() -> None:
         {
             "file_write": {
                 "status": "error",
+                "execution_state": "unknown",
                 "error": {"type": "write_failed", "message": "nope"},
             },
             "file_read": {"status": "success"},
@@ -409,7 +491,7 @@ def test_same_turn_multiple_tool_calls_execute_concurrently() -> None:
         turn=1,
         tool_calls_with_ids=[
             ToolCall(name="file_read", args={"path": "a.txt"}, id="call_1"),
-            ToolCall(name="grep", args={"pattern": "needle", "root": "."}, id="call_2"),
+            ToolCall(name="grep", args={"pattern": "needle", "path": "."}, id="call_2"),
         ],
         state=state,
         deps=deps,
@@ -795,7 +877,7 @@ def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
         turn=1,
         tool_calls_with_ids=[
             ToolCall(name="file_read", args={}, id="call_error"),
-            ToolCall(name="grep", args={"pattern": "needle", "root": "."}, id="call_success"),
+            ToolCall(name="grep", args={"pattern": "needle", "path": "."}, id="call_success"),
         ],
         state=state,
         deps=deps,
@@ -906,7 +988,7 @@ def test_parallel_tool_results_keep_original_tool_call_order() -> None:
         turn=1,
         tool_calls_with_ids=[
             ToolCall(name="file_read", args={"path": "a.txt"}, id="call_slow"),
-            ToolCall(name="grep", args={"pattern": "needle", "root": "."}, id="call_fast"),
+            ToolCall(name="grep", args={"pattern": "needle", "path": "."}, id="call_fast"),
         ],
         state=state,
         deps=deps,
@@ -944,7 +1026,7 @@ def test_parallel_tool_calls_share_one_interaction_bridge() -> None:
         turn=3,
         tool_calls_with_ids=[
             ToolCall(name="file_read", args={"path": "a.txt", "interact": True}, id="call_1"),
-            ToolCall(name="grep", args={"pattern": "needle", "root": ".", "interact": True}, id="call_2"),
+            ToolCall(name="grep", args={"pattern": "needle", "path": ".", "interact": True}, id="call_2"),
         ],
         state=state,
         deps=deps,
@@ -998,7 +1080,7 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
     )
 
     assert len(writer.transcript) == 2
-    assert writer.transcript[1]["result"]["content"] == "raw content"
+    assert writer.transcript[1]["result"]["duplicate_suppressed"] is True
     assert "visible content" in state.messages[0]["content"]
     assert "raw content" not in state.messages[0]["content"]
     assert "same_as_previous" in state.messages[1]["content"]

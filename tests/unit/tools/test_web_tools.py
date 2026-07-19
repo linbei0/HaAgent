@@ -313,13 +313,49 @@ def test_brave_web_search_maps_results_and_freshness_without_leaking_api_key() -
 def test_web_search_missing_api_key_returns_explicit_error() -> None:
     result = web_search({"query": "haagent"}, environ={})
 
-    assert result == {
-        "status": "error",
-        "error": {
-            "type": "web_search_configuration_error",
-            "message": "TAVILY_API_KEY is required for tavily web search",
-        },
+    assert result["status"] == "error"
+    assert result["error"] == {
+        "type": "web_search_configuration_error",
+        "category": "provider",
+        "message": "TAVILY_API_KEY is required for tavily web search",
+        "retryable": False,
     }
+
+
+def test_web_search_falls_back_to_configured_provider_when_default_is_unavailable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.search.brave.com"
+        return httpx.Response(
+            200,
+            json={"web": {"results": [{"title": "Fallback", "url": "https://example.com/fallback", "description": "usable summary"}]}},
+            request=request,
+        )
+
+    result = web_search(
+        {"query": "haagent"},
+        transport=httpx.MockTransport(handler),
+        resolver=_public_resolver,
+        environ={"BRAVE_SEARCH_API_KEY": "brave-secret"},
+    )
+
+    assert result["status"] == "success"
+    assert result["provider"] == "brave"
+    assert result["provider_fallback"] == {
+        "from": "tavily",
+        "to": "brave",
+        "reason": "web_search_configuration_error",
+    }
+
+
+def test_web_search_explicit_provider_never_falls_back() -> None:
+    result = web_search(
+        {"query": "haagent", "provider": "tavily"},
+        environ={"BRAVE_SEARCH_API_KEY": "brave-secret"},
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "web_search_configuration_error"
+    assert "provider_fallback" not in result
 
 
 def test_direct_mode_still_resolves_and_rejects_non_public_dns() -> None:
@@ -448,11 +484,10 @@ def test_web_fetch_maps_connect_timeout_to_structured_error(monkeypatch: pytest.
     assert error["failure_stage"] == "connect"
     assert error["proxy_configured"] is False
     assert error["resolution_mode"] == "direct"
-    assert error["retriable"] is True
+    assert error["retryable"] is True
     assert "timeout_seconds" in error
     assert "timed out" not in error["message"].lower() or "connect" in error["message"].lower()
-    assert "action_hint" in error
-    assert "HAAGENT_WEB_PROXY" in error["action_hint"]
+    assert result["recovery"]["action"] == "retry_same_call"
 
 
 @pytest.mark.parametrize(
@@ -549,6 +584,8 @@ def test_web_fetch_maps_http_status_and_target_denied(monkeypatch: pytest.Monkey
     result = web_fetch({"url": "https://example.com/missing"})
     assert result["error"]["type"] == "web_http_error"
     assert result["error"]["failure_stage"] == "http"
+    assert result["error"]["retryable"] is False
+    assert result["recovery"]["action"] == "use_alternate_source"
 
     def denied(*args: object, **kwargs: object) -> httpx.Response:
         del args, kwargs
@@ -557,4 +594,26 @@ def test_web_fetch_maps_http_status_and_target_denied(monkeypatch: pytest.Monkey
     monkeypatch.setattr("haagent.tools.web.fetch_public_http_response", denied)
     denied_result = web_fetch({"url": "https://example.com/"})
     assert denied_result["error"]["type"] == "web_target_denied"
-    assert denied_result["error"]["retriable"] is False
+    assert denied_result["error"]["retryable"] is False
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_web_fetch_marks_only_transient_http_statuses_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    def status_error(*args: object, **kwargs: object) -> httpx.Response:
+        del args, kwargs
+        request = httpx.Request("GET", "https://example.com/transient")
+        response = httpx.Response(status_code, headers={"Retry-After": "3"}, request=request)
+        response.raise_for_status()
+        return response
+
+    monkeypatch.setattr("haagent.tools.web.fetch_public_http_response", status_error)
+
+    result = web_fetch({"url": "https://example.com/transient"})
+
+    assert result["status"] == "error"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["retry_after_seconds"] == 3
+    assert result["recovery"]["action"] == "retry_same_call"

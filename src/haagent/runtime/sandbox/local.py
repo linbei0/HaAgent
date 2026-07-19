@@ -11,7 +11,9 @@ from pathlib import Path
 
 from haagent.runtime.execution.command import (
     CommandResult,
+    ShellContract,
     build_python_utf8_environment,
+    resolve_shell_contract,
     run_command,
     run_process,
 )
@@ -29,6 +31,7 @@ class LocalSubprocessSandboxBackend:
         self._workspace_root = workspace_root.resolve()
         self._command_timeout_seconds = command_timeout_seconds
         self._degraded_reason = degraded_reason
+        self._shell_contract = resolve_shell_contract()
 
     def metadata(self) -> SandboxMetadata:
         return SandboxMetadata(
@@ -59,7 +62,12 @@ class LocalSubprocessSandboxBackend:
             command.cwd,
             command.timeout_seconds,
             cancellation_token=command.cancellation_token,
+            shell_contract=self._shell_contract,
         )
+
+    def shell_contract(self) -> ShellContract:
+        """本机命令始终使用创建后端时确定的解释器。"""
+        return self._shell_contract
 
     def run_python(self, script_path: Path, command: SandboxCommand) -> CommandResult:
         return run_process(

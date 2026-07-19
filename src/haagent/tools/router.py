@@ -8,13 +8,19 @@ from __future__ import annotations
 
 import time
 import json
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, Callable
 
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.tool_results import prepare_tool_result_for_model
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
-from haagent.runtime.execution.retry import RetryController, RetryOperation
+from haagent.runtime.execution.retry import (
+    RetryController,
+    RetryFailure,
+    RetryOperation,
+    RetryableOperationError,
+)
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.guardrails import GuardrailResult, check_tool_input, guardrail_evidence
 from haagent.runtime.execution.human_interaction import (
@@ -34,7 +40,13 @@ from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.skills import SkillSettings
 from haagent.skills.catalog import SkillCatalogService
-from haagent.tools.base import ToolExecutionContext, ToolRoutingError, tool_error
+from haagent.tools.base import (
+    RecoveryAction,
+    ToolExecutionContext,
+    ToolFailureCategory,
+    ToolRoutingError,
+    tool_error,
+)
 from haagent.tools.handler_factory import build_static_tool_handlers
 from haagent.tools.mcp_tools import run_mcp_tool
 from haagent.tools.registry import (
@@ -185,6 +197,7 @@ class ToolRouter:
         except Exception as error:
             result = tool_error(type(error).__name__, str(error))
 
+        trace_metadata = result.pop("_trace_metadata", None)
         result = self._prepare_model_visible_result(tool_name, result)
         self._write_trace(
             tool_name,
@@ -193,6 +206,7 @@ class ToolRouter:
             started,
             policy_decision,
             guardrail_result,
+            trace_metadata=trace_metadata,
             turn=turn,
         )
         return result
@@ -232,6 +246,47 @@ class ToolRouter:
             guardrail_result=None,
             duration_seconds=0.0,
             turn=None,
+        )
+        return result
+
+    def record_reused(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        source_result: dict[str, Any],
+        reused_from_call_index: int,
+        turn: int | None = None,
+    ) -> dict[str, Any]:
+        """记录同批只读调用复用；handler 未再次执行。"""
+        result = {
+            "status": str(source_result.get("status", "error")),
+            "execution_state": "not_started",
+            "duplicate_suppressed": True,
+            "reused_from_call_index": reused_from_call_index,
+            "model_visible": {
+                "same_as_previous": True,
+                "tool_name": tool_name,
+                "reason": "duplicate_read_call_in_same_batch",
+            },
+        }
+        if result["status"] == "error":
+            result["error"] = dict(source_result.get("error") or {})
+            if isinstance(source_result.get("recovery"), dict):
+                result["recovery"] = dict(source_result["recovery"])
+        self._write_trace(
+            tool_name,
+            args,
+            result,
+            started=0.0,
+            policy_decision=None,
+            guardrail_result=None,
+            duration_seconds=0.0,
+            trace_metadata={
+                "duplicate_suppressed": True,
+                "reused_from_call_index": reused_from_call_index,
+            },
+            turn=turn,
         )
         return result
 
@@ -514,15 +569,54 @@ class ToolRouter:
         invoke: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
         """将通过策略与参数校验的真实工具执行交给统一重试边界。"""
-        # 工具默认不可重放；即使调用失败，控制器也只会保留这一次执行。
-        return self._retry_controller.execute(
-            RetryOperation(
-                name=f"tool.{tool_definition.name}",
-                replay_safety=tool_definition.replay_safety,
-            ),
-            invoke,
-            cancellation_token=self._cancellation_token,
-        )
+        attempts = 0
+        retry_events: list[dict[str, Any]] = []
+        last_result: dict[str, Any] | None = None
+
+        def invoke_checked() -> dict[str, Any]:
+            nonlocal attempts, last_result
+            attempts += 1
+            last_result = _normalize_tool_result(tool_definition.name, invoke())
+            failure = _retry_failure(last_result)
+            if failure is not None:
+                # handler 仍返回 observation；这里只在 Router 内部把临时失败适配给统一重试控制器。
+                raise RetryableOperationError(failure)
+            return last_result
+
+        def record_retry(event: Any) -> None:
+            retry_events.append(
+                {
+                    "attempt": event.attempt,
+                    "next_attempt": event.next_attempt,
+                    "category": event.category,
+                    "delay_seconds": event.delay_seconds,
+                    "source": event.source,
+                    "retry_after_ignored": event.retry_after_ignored,
+                },
+            )
+
+        try:
+            result = self._retry_controller.execute(
+                RetryOperation(
+                    name=f"tool.{tool_definition.name}",
+                    replay_safety=tool_definition.replay_safety,
+                ),
+                invoke_checked,
+                cancellation_token=self._cancellation_token,
+                on_event=record_retry,
+            )
+        except RetryableOperationError:
+            result = last_result or tool_error(
+                "tool_contract_invalid",
+                "retryable tool failure did not preserve its observation",
+                category=ToolFailureCategory.CONTRACT,
+            )
+        trace_metadata: dict[str, Any] = {"attempt_count": attempts}
+        if retry_events:
+            trace_metadata["retry_events"] = retry_events
+            trace_metadata["recovered_after_retry"] = result.get("status") == "success"
+        result["_trace_metadata"] = trace_metadata
+        return result
 
     def _run_handler(
         self,
@@ -550,6 +644,7 @@ class ToolRouter:
         policy_decision: PolicyDecision | None,
         guardrail_result: GuardrailResult | None,
         duration_seconds: float | None = None,
+        trace_metadata: dict[str, Any] | None = None,
         turn: int | None = None,
     ) -> None:
         trace_result = _result_for_trace(result)
@@ -559,8 +654,7 @@ class ToolRouter:
             if duration_seconds is not None
             else time.perf_counter() - started
         )
-        self._episode_writer.append_tool_call(
-            {
+        trace = {
                 "tool_name": tool_name,
                 "args": args,
                 "status": result["status"],
@@ -574,8 +668,10 @@ class ToolRouter:
                 },
                 "guardrail": guardrail_result.to_dict() if guardrail_result else None,
                 "duration_seconds": measured,
-            },
-        )
+            }
+        if trace_metadata:
+            trace.update(trace_metadata)
+        self._episode_writer.append_tool_call(trace)
         # 仅 orchestrator 传入 turn 时记 model-turn 性能；不改 model-visible result。
         if self._performance_sink is not None and turn is not None:
             execution_effect = "unknown"
@@ -629,15 +725,33 @@ def _validate_args(
         )
 
     required = schema.get("required", [])
+    properties = schema.get("properties", {})
+    allowed_arguments = list(properties)
     for name in required:
         if name not in args:
-            return tool_error("tool_argument_invalid", f"missing required argument: {name}")
+            return _argument_error(
+                tool_name,
+                f"missing required argument: {name}",
+                args=args,
+                required=required,
+                allowed=allowed_arguments,
+                field=name,
+                expected=properties.get(name),
+            )
 
-    properties = schema.get("properties", {})
     if schema.get("additionalProperties") is False:
         for name in args:
             if name not in properties:
-                return tool_error("tool_argument_invalid", f"unexpected argument: {name}")
+                suggested_args = _suggested_arguments(args, unexpected=name, allowed=allowed_arguments)
+                return _argument_error(
+                    tool_name,
+                    f"unexpected argument: {name}",
+                    args=args,
+                    required=required,
+                    allowed=allowed_arguments,
+                    field=name,
+                    suggested_args=suggested_args,
+                )
 
     for name, value in args.items():
         property_schema = properties.get(name)
@@ -645,11 +759,168 @@ def _validate_args(
             continue
         expected_type = property_schema.get("type")
         if expected_type and not _matches_json_type(value, expected_type):
-            return tool_error(
-                "tool_argument_invalid",
+            return _argument_error(
+                tool_name,
                 f"argument {name} must be {expected_type}",
+                args=args,
+                required=required,
+                allowed=allowed_arguments,
+                field=name,
+                expected=property_schema,
+                actual=type(value).__name__,
             )
+        enum = property_schema.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            return _argument_error(
+                tool_name,
+                f"argument {name} must be one of: {', '.join(map(str, enum))}",
+                args=args,
+                required=required,
+                allowed=allowed_arguments,
+                field=name,
+                expected=property_schema,
+                actual=value,
+            )
+        minimum = property_schema.get("minimum")
+        maximum = property_schema.get("maximum")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(minimum, (int, float)) and value < minimum:
+                return _argument_error(
+                    tool_name,
+                    f"argument {name} must be >= {minimum}",
+                    args=args,
+                    required=required,
+                    allowed=allowed_arguments,
+                    field=name,
+                    expected=property_schema,
+                    actual=value,
+                )
+            if isinstance(maximum, (int, float)) and value > maximum:
+                return _argument_error(
+                    tool_name,
+                    f"argument {name} must be <= {maximum}",
+                    args=args,
+                    required=required,
+                    allowed=allowed_arguments,
+                    field=name,
+                    expected=property_schema,
+                    actual=value,
+                )
     return None
+
+
+def _argument_error(
+    tool_name: str,
+    message: str,
+    *,
+    args: dict[str, Any],
+    required: list[str],
+    allowed: list[str],
+    field: str,
+    expected: object | None = None,
+    actual: object | None = None,
+    suggested_args: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    recovery_args = suggested_args if suggested_args is not None else None
+    return tool_error(
+        "tool_argument_invalid",
+        message,
+        category=ToolFailureCategory.ARGUMENT,
+        retryable=False,
+        recovery=RecoveryAction(
+            "correct_arguments",
+            "重写调用，使其满足 expected_schema；不要原样重复失败参数。",
+            tool_name=tool_name,
+            args=recovery_args,
+        ),
+        tool_name=tool_name,
+        field_path=f"$.{field}",
+        required_arguments=list(required),
+        allowed_arguments=list(allowed),
+        received_arguments=sorted(args),
+        expected_schema=expected,
+        actual_value=actual,
+        suggested_args=suggested_args,
+    )
+
+
+def _suggested_arguments(
+    args: dict[str, Any],
+    *,
+    unexpected: str,
+    allowed: list[str],
+) -> dict[str, Any] | None:
+    matches = get_close_matches(unexpected, allowed, n=2, cutoff=0.74)
+    if len(matches) != 1 or matches[0] in args:
+        return None
+    suggested = dict(args)
+    suggested[matches[0]] = suggested.pop(unexpected)
+    return suggested
+
+
+def _normalize_tool_result(tool_name: str, result: object) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return tool_error(
+            "tool_contract_invalid",
+            f"tool {tool_name} returned a non-object result",
+            category=ToolFailureCategory.CONTRACT,
+            result_type=type(result).__name__,
+        )
+    status = result.get("status")
+    if status in {"success", "running"}:
+        return result
+    if status != "error":
+        return tool_error(
+            "tool_contract_invalid",
+            f"tool {tool_name} returned invalid status",
+            category=ToolFailureCategory.CONTRACT,
+            result_keys=sorted(str(key) for key in result),
+        )
+    error = result.get("error")
+    required = {"type", "category", "message", "retryable"}
+    if not isinstance(error, dict) or not required <= set(error) or not isinstance(error.get("retryable"), bool):
+        return tool_error(
+            "tool_contract_invalid",
+            f"tool {tool_name} returned an invalid error contract",
+            category=ToolFailureCategory.CONTRACT,
+            result_keys=sorted(str(key) for key in result),
+            error_keys=sorted(str(key) for key in error) if isinstance(error, dict) else [],
+        )
+    recovery = result.get("recovery")
+    if recovery is not None and (
+        not isinstance(recovery, dict)
+        or recovery.get("action") not in {
+            "correct_arguments",
+            "retry_same_call",
+            "use_tool",
+            "use_alternate_source",
+            "inspect_state",
+            "ask_user",
+            "stop",
+        }
+    ):
+        return tool_error(
+            "tool_contract_invalid",
+            f"tool {tool_name} returned an invalid recovery contract",
+            category=ToolFailureCategory.CONTRACT,
+        )
+    return result
+
+
+def _retry_failure(result: dict[str, Any]) -> RetryFailure | None:
+    if result.get("status") != "error":
+        return None
+    error = result.get("error")
+    if not isinstance(error, dict) or error.get("retryable") is not True:
+        return None
+    retry_after = error.get("retry_after_seconds")
+    status_code = error.get("status_code")
+    return RetryFailure(
+        category=str(error.get("category", "transient")),
+        retryable=True,
+        retry_after_seconds=float(retry_after) if isinstance(retry_after, (int, float)) else None,
+        status_code=int(status_code) if isinstance(status_code, int) else None,
+    )
 
 
 def _result_for_trace(result: dict[str, Any]) -> dict[str, Any]:

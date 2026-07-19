@@ -12,7 +12,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from haagent.runtime.execution.command import CommandResult, build_python_utf8_environment, run_process
+from haagent.runtime.execution.command import (
+    CommandResult,
+    ShellContract,
+    build_python_utf8_environment,
+    run_process,
+)
 from haagent.runtime.sandbox.base import SandboxAvailability, SandboxCommand, SandboxMetadata
 from haagent.runtime.sandbox.docker_image import build_default_image, image_exists
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
@@ -198,6 +203,10 @@ class DockerSandboxBackend:
             cancellation_token=command.cancellation_token,
         )
         return self._host_visible_result(result)
+
+    def shell_contract(self) -> ShellContract:
+        """Docker shell 固定由容器内 bash 解释。"""
+        return ShellContract("posix", "bash", "linux")
 
     def run_python(self, script_path: Path, command: SandboxCommand) -> CommandResult:
         container_script_path = self._container_path(script_path)

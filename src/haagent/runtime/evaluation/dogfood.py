@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from haagent.models.types import ModelGateway
 from haagent.runtime.session.agent import AgentSession
+from haagent.runtime.episodes.package_types import ToolCallRecord, decode_tool_calls, summarize_tool_reliability
 from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
 from haagent.runtime.settings import DEFAULT_DOGFOOD_MAX_TURNS
 
@@ -27,6 +28,7 @@ class DogfoodTaskResult:
     episode_path: Path
     workspace_path: Path
     most_needed_improvement: str
+    reliability_metrics: dict[str, int | float]
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class DogfoodReport:
     runs_root: Path
     tasks: list[DogfoodTaskResult]
     most_needed_improvement: str
+    reliability_metrics: dict[str, int | float]
     skipped_reason: str = "none"
 
 
@@ -56,6 +59,7 @@ def run_dogfood_tasks(
     root = runs_root if runs_root is not None else Path(tempfile.mkdtemp(prefix="haagent-dogfood-runs-"))
     root.mkdir(parents=True, exist_ok=True)
     results: list[DogfoodTaskResult] = []
+    all_tool_records: list[ToolCallRecord] = []
     for task in _dogfood_tasks():
         workspace = Path(tempfile.mkdtemp(prefix=f"haagent-dogfood-{task.name}-"))
         task.setup(workspace)
@@ -75,6 +79,9 @@ def run_dogfood_tasks(
         status = "completed" if turn.status == "completed" and verified else "failed"
         failure_reason = "none" if status == "completed" else _failure_reason(turn.reason, verification_reason)
         improvement = _task_improvement(task.name, status, tool_calls, failure_reason)
+        tool_records = decode_tool_calls(tool_calls)
+        all_tool_records.extend(tool_records)
+        metrics = summarize_tool_reliability(tool_records)
         results.append(
             DogfoodTaskResult(
                 name=task.name,
@@ -84,6 +91,7 @@ def run_dogfood_tasks(
                 episode_path=turn.episode_path,
                 workspace_path=workspace,
                 most_needed_improvement=improvement,
+                reliability_metrics=metrics,
             ),
         )
     overall_status = "completed" if all(result.status == "completed" for result in results) else "failed"
@@ -92,6 +100,7 @@ def run_dogfood_tasks(
         runs_root=root,
         tasks=results,
         most_needed_improvement=_overall_improvement(results),
+        reliability_metrics=summarize_tool_reliability(all_tool_records),
     )
 
 
@@ -101,6 +110,7 @@ def skipped_dogfood_report(reason: str) -> DogfoodReport:
         runs_root=Path("none"),
         tasks=[],
         most_needed_improvement="provide a real model profile or OPENAI_API_KEY, then rerun dogfood",
+        reliability_metrics=summarize_tool_reliability([]),
         skipped_reason=reason,
     )
 
@@ -122,8 +132,10 @@ def render_dogfood_report(report: DogfoodReport) -> str:
                 f"  failure_reason={task.failure_reason}",
                 f"  episode_path={task.episode_path}",
                 f"  most_needed_improvement={task.most_needed_improvement}",
+                f"  reliability_metrics={json.dumps(task.reliability_metrics, ensure_ascii=False, sort_keys=True)}",
             ],
         )
+    lines.append(f"reliability_metrics={json.dumps(report.reliability_metrics, ensure_ascii=False, sort_keys=True)}")
     lines.append(f"Most needed improvement: {report.most_needed_improvement}")
     return "\n".join(lines)
 
@@ -159,6 +171,12 @@ def _dogfood_tasks() -> list[_DogfoodTask]:
             setup=_setup_repeated_readme_workspace,
             verify=_verify_repeated_readme_workspace,
         ),
+        _DogfoodTask(
+            name="natural-language-edit",
+            prompt="先了解这个小项目，再把项目说明中的 Tiny project 改成 Tiny assistant，并确认修改准确。",
+            setup=_setup_natural_language_workspace,
+            verify=_verify_natural_language_workspace,
+        ),
     ]
 
 
@@ -181,6 +199,11 @@ def _setup_shout_workspace(workspace: Path) -> None:
 def _setup_repeated_readme_workspace(workspace: Path) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "README.md").write_text("# Demo\n\nTiny project.\n\nTiny project.\n", encoding="utf-8")
+
+
+def _setup_natural_language_workspace(workspace: Path) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "README.md").write_text("# Demo\n\nTiny project.\n", encoding="utf-8")
 
 
 def _write_common_python_project(workspace: Path, *, app: str, test: str) -> None:
@@ -222,6 +245,14 @@ def _verify_repeated_readme_workspace(workspace: Path, tool_calls: list[dict[str
         return False, "expected one duplicate-fragment patch failure"
     if "file_read" not in _tool_names(tool_calls):
         return False, "expected file_read after loop guidance"
+    return True, "none"
+
+
+def _verify_natural_language_workspace(workspace: Path, tool_calls: list[dict[str, Any]]) -> tuple[bool, str]:
+    if (workspace / "README.md").read_text(encoding="utf-8") != "# Demo\n\nTiny assistant.\n":
+        return False, "expected natural-language task to update README exactly"
+    if any(_error_type(call) == "tool_argument_invalid" for call in tool_calls):
+        return False, "expected zero tool argument errors for natural-language task"
     return True, "none"
 
 

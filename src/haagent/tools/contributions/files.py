@@ -245,7 +245,10 @@ def _apply_patch_set_observation(args: dict[str, Any], result: dict[str, Any]) -
 FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="file_list",
-        description="list a compact file tree by absolute or workspace-relative path",
+        description=(
+            "List a compact directory tree. Use this first when the project structure or exact path is unknown. "
+            "Use the narrowest useful path and max_depth. Use grep for file contents and file_read for a known file."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
@@ -267,7 +270,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
         tags=frozenset({"chat_default"}),
         bind_handler=_bind_file_list,
         project_observation=_file_list_observation,
@@ -275,22 +278,26 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="grep",
-        description="search file contents with a regular expression using ripgrep when available",
+        description=(
+            "Fast regular expression search across file contents. Use it for a known phrase, symbol, error, or "
+            "candidate location; narrow with path and include when possible. Returns matching paths and lines. "
+            "For open-ended multi-step investigation, delegate with agent instead of repeatedly guessing searches."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "regular expression to search for in workspace files",
+                    "description": "regular expression, for example 'class\\s+Foo' or 'timeout.*error'",
                 },
-                "root": {
+                "path": {
                     "type": "string",
                     "description": "optional absolute or workspace-relative directory or file to search; external paths require permission",
                 },
-                "file_glob": {
+                "include": {
                     "type": "string",
-                    "description": "optional include glob for directory roots; omitted searches ripgrep's default visible, non-ignored files",
+                    "description": "optional file pattern such as '*.py' or '*.{ts,tsx}'; omit to search all visible files",
                 },
                 "case_sensitive": {
                     "type": "boolean",
@@ -309,14 +316,18 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
         tags=frozenset({"chat_default"}),
         bind_handler=_bind_grep,
         project_observation=_grep_observation,
     ),
     ToolContribution(
         name="file_read",
-        description="read a text file by absolute or workspace-relative path with offset, limit, or keyword context",
+        description=(
+            "Read a known text file with offset, limit, or keyword context. Use file_list when the path is unknown "
+            "and grep when searching for content. Read an existing file before file_write, apply_patch, or "
+            "apply_patch_set. Prefer one useful window over many tiny repeated reads; directories require file_list."
+        ),
         risk_level="low",
         parameters={
             "type": "object",
@@ -342,7 +353,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
             "additionalProperties": False,
         },
         execution_effect="read_only",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
         tags=frozenset({"chat_default"}),
         bind_handler=_bind_file_read,
         summarize_args=_file_read_args,
@@ -353,7 +364,11 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="file_write",
-        description="create, overwrite, or append a text file by absolute or workspace-relative path",
+        description=(
+            "Create, overwrite, or append a text file. Use this for genuinely new files, full replacements, or "
+            "appends. Read an existing file before overwriting it. Prefer apply_patch/apply_patch_set for targeted "
+            "changes, and do not create extra files or documentation unless the user requested them."
+        ),
         risk_level="high",
         parameters={
             "type": "object",
@@ -387,7 +402,11 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="apply_patch",
-        description="replace unique text inside a file by absolute or workspace-relative path",
+        description=(
+            "Replace one exact, unique text fragment in one existing file. Read the file first and copy exact "
+            "indentation and context. If old_text is missing or repeated, read the current file and retry with a "
+            "larger unique fragment. Use apply_patch_set for related or multi-file changes."
+        ),
         risk_level="high",
         parameters={
             "type": "object",
@@ -398,7 +417,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
                 },
                 "old_text": {
                     "type": "string",
-                    "description": "unique text to replace",
+                    "description": "exact text that must occur once; include surrounding lines when needed for uniqueness",
                 },
                 "new_text": {
                     "type": "string",
@@ -422,9 +441,9 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="apply_patch_set",
         description=(
-            "apply multiple unique text replacements atomically after reading current file context; "
-            "no files are written if any replacement does not match exactly once. "
-            "Prefer this over repeated apply_patch calls for related multi-file or multi-site edits"
+            "Apply one or more exact text replacements atomically across one or multiple files. Read every target "
+            "file first. Each old_text must match exactly once; if any replacement is missing or repeated, no file "
+            "is written. Prefer this for related multi-file or multi-site edits and verify changed files afterward."
         ),
         risk_level="high",
         parameters={

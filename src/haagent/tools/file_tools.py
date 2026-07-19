@@ -23,12 +23,12 @@ from haagent.memory.path_policy import (
 )
 from haagent.runtime.execution.path_policy import PathAccess, PathPolicy, default_path_policy
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler, HumanInteractionRequest
-from haagent.tools.base import ToolExecutionContext, tool_error
+from haagent.tools.base import RecoveryAction, ToolExecutionContext, tool_error
 from haagent.tools.path_access import resolve_tool_paths
 
 
 PATH_GUIDANCE = "path is relative to workspace_root"
-ROOT_GUIDANCE = 'root is relative to workspace_root and may be a directory or file; use "." or omit root'
+SEARCH_PATH_GUIDANCE = 'path is relative to workspace_root and may be a directory or file; use "." or omit path'
 NOISE_DIRECTORIES = {
     ".git",
     ".runs",
@@ -43,8 +43,8 @@ GREP_NOISE_DIRECTORIES = NOISE_DIRECTORIES | {".tmp", ".haagent-tmp", ".pytest_c
 FILE_READ_MODEL_VISIBLE_CHAR_BUDGET = 12000
 GREP_DEFAULT_TIMEOUT_SECONDS = 15
 GREP_MAX_TIMEOUT_SECONDS = 60
-GREP_NARROW_GUIDANCE = "Search was incomplete; narrow root or file_glob and retry."
-GREP_TRUNCATED_GUIDANCE = "Search results were truncated; narrow root or file_glob and retry."
+GREP_NARROW_GUIDANCE = "Search was incomplete; narrow path or include and retry."
+GREP_TRUNCATED_GUIDANCE = "Search results were truncated; narrow path or include and retry."
 PERMISSION_ERROR_MARKERS = (
     "access is denied",
     "access denied",
@@ -54,6 +54,10 @@ PERMISSION_ERROR_MARKERS = (
     "(os error 5)",
     "(os error 13)",
 )
+
+
+def _use_tool_recovery(tool_name: str, args: dict[str, Any], reason: str) -> RecoveryAction:
+    return RecoveryAction("use_tool", reason, tool_name=tool_name, args=args)
 
 
 def file_list(
@@ -70,10 +74,20 @@ def file_list(
     if isinstance(root, dict):
         return root
     if not root.exists():
-        result = tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
-        if suggested_tool := _suggest_file_list_parent(root, workspace_root):
-            result["suggested_tool"] = suggested_tool
-        return result
+        suggested_tool = _suggest_file_list_parent(root, workspace_root)
+        return tool_error(
+            "tool_argument_invalid",
+            f"path does not exist: {path_arg}; {PATH_GUIDANCE}",
+            recovery=(
+                _use_tool_recovery(
+                    str(suggested_tool["name"]),
+                    dict(suggested_tool["args"]),
+                    "列出最近存在的父目录，再选择真实子路径。",
+                )
+                if suggested_tool is not None
+                else None
+            ),
+        )
     if not root.is_dir():
         return tool_error("tool_argument_invalid", f"path must be a directory: {path_arg}; {PATH_GUIDANCE}")
 
@@ -118,12 +132,12 @@ def grep(
     if not isinstance(pattern, str) or not pattern:
         return tool_error("tool_argument_invalid", "pattern must be a non-empty string")
 
-    root_arg = args.get("root", ".")
-    if not isinstance(root_arg, str):
-        return tool_error("tool_argument_invalid", "root must be a string")
-    file_glob = args.get("file_glob")
-    if file_glob is not None and (not isinstance(file_glob, str) or not file_glob):
-        return tool_error("tool_argument_invalid", "file_glob must be a non-empty string")
+    path_arg = args.get("path", ".")
+    if not isinstance(path_arg, str):
+        return tool_error("tool_argument_invalid", "path must be a string")
+    include = args.get("include")
+    if include is not None and (not isinstance(include, str) or not include):
+        return tool_error("tool_argument_invalid", "include must be a non-empty string")
     case_sensitive = args.get("case_sensitive", True)
     if not isinstance(case_sensitive, bool):
         return tool_error("tool_argument_invalid", "case_sensitive must be a boolean")
@@ -142,12 +156,12 @@ def grep(
         )
 
     policy = path_policy or default_path_policy(workspace_root)
-    root = _resolve_tool_path(root_arg, policy, "read", execution_context)
+    root = _resolve_tool_path(path_arg, policy, "read", execution_context)
     if isinstance(root, dict):
         return root
     if not root.exists():
-        return tool_error("tool_argument_invalid", f"root does not exist: {root_arg}; {ROOT_GUIDANCE}")
-    if access_error := _search_root_access_error(root, root_arg):
+        return tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {SEARCH_PATH_GUIDANCE}")
+    if access_error := _search_root_access_error(root, path_arg):
         return access_error
 
     rg = shutil.which("rg")
@@ -157,7 +171,7 @@ def grep(
             pattern=pattern,
             root=root,
             workspace_root=workspace_root,
-            file_glob=file_glob,
+            include=include,
             case_sensitive=case_sensitive,
             max_matches=max_matches,
             timeout_seconds=timeout_seconds,
@@ -167,7 +181,7 @@ def grep(
         pattern=pattern,
         root=root,
         workspace_root=workspace_root,
-        file_glob=file_glob,
+        include=include,
         case_sensitive=case_sensitive,
         max_matches=max_matches,
         timeout_seconds=timeout_seconds,
@@ -188,14 +202,36 @@ def file_read(
     if isinstance(path, dict):
         return path
     if not path.exists():
-        result = tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
-        result["suggestions"] = _similar_workspace_paths(path_arg, workspace_root)
-        return result
+        suggestions = _similar_workspace_paths(path_arg, workspace_root)
+        return tool_error(
+            "tool_argument_invalid",
+            f"path does not exist: {path_arg}; {PATH_GUIDANCE}",
+            recovery=(
+                _use_tool_recovery(
+                    "file_read",
+                    {"path": suggestions[0]},
+                    "使用最接近的现有文件路径重试读取。",
+                )
+                if suggestions
+                else _use_tool_recovery(
+                    "file_list",
+                    {"path": ".", "max_depth": 2},
+                    "先列出目录，再选择真实文件路径。",
+                )
+            ),
+        )
     if not path.is_file():
-        result = tool_error("tool_argument_invalid", f"path must be a file: {path_arg}; {PATH_GUIDANCE}")
         if path.is_dir():
-            result["suggested_tool"] = {"name": "file_list", "args": {"path": _display_path(path, workspace_root), "max_depth": 1}}
-        return result
+            return tool_error(
+                "tool_argument_invalid",
+                f"path must be a file: {path_arg}; {PATH_GUIDANCE}",
+                recovery=_use_tool_recovery(
+                    "file_list",
+                    {"path": _display_path(path, workspace_root), "max_depth": 1},
+                    "目标是目录，改用 file_list 查看内容。",
+                ),
+            )
+        return tool_error("tool_argument_invalid", f"path must be a file: {path_arg}; {PATH_GUIDANCE}")
 
     offset = int(args.get("offset", 0))
     limit = int(args.get("limit", 200))
@@ -349,9 +385,25 @@ def apply_patch(
     text = path.read_text(encoding="utf-8")
     count = text.count(old_text)
     if count == 0:
-        return tool_error("patch_text_not_found", "old_text was not found")
+        return tool_error(
+            "patch_text_not_found",
+            "old_text was not found",
+            recovery=_use_tool_recovery(
+                "file_read",
+                {"path": path_arg},
+                "先读取文件当前内容，再使用精确片段重试补丁。",
+            ),
+        )
     if count > 1:
-        return tool_error("patch_text_not_unique", "old_text must match exactly once")
+        return tool_error(
+            "patch_text_not_unique",
+            "old_text must match exactly once",
+            recovery=_use_tool_recovery(
+                "file_read",
+                {"path": path_arg},
+                "读取文件并扩大 old_text 上下文，使其唯一匹配。",
+            ),
+        )
 
     updated_text = text.replace(old_text, new_text, 1)
     change = _file_change_summary(
@@ -673,7 +725,14 @@ def _patch_set_error(
     path: object = "",
     match_count: int | None = None,
 ) -> dict[str, Any]:
-    result = tool_error(error_type, message)
+    recovery = None
+    if error_type in {"patch_text_not_found", "patch_text_not_unique"} and path:
+        recovery = _use_tool_recovery(
+            "file_read",
+            {"path": str(path)},
+            "读取失败文件的当前内容，再构造唯一且精确的替换片段。",
+        )
+    result = tool_error(error_type, message, recovery=recovery)
     failed_summary: dict[str, object] = {
         "index": failed_index,
         "path": str(path or ""),
@@ -781,7 +840,7 @@ def _suggest_file_list_parent(path: Path, workspace_root: Path) -> dict[str, obj
     }
 
 
-def _search_root_access_error(root: Path, root_arg: str) -> dict[str, Any] | None:
+def _search_root_access_error(root: Path, path_arg: str) -> dict[str, Any] | None:
     """搜索根不可读时立即失败，避免把根级权限错误伪装成“无匹配”。"""
     try:
         if root.is_file():
@@ -792,8 +851,8 @@ def _search_root_access_error(root: Path, root_arg: str) -> dict[str, Any] | Non
             next(root.iterdir(), None)
             return None
     except OSError as error:
-        return tool_error("search_failed", f"search root is not readable: {root_arg}: {error}")
-    return tool_error("tool_argument_invalid", f"root must be a directory or file: {root_arg}; {ROOT_GUIDANCE}")
+        return tool_error("search_failed", f"search path is not readable: {path_arg}: {error}")
+    return tool_error("tool_argument_invalid", f"path must be a directory or file: {path_arg}; {SEARCH_PATH_GUIDANCE}")
 
 
 def _grep_with_ripgrep(
@@ -802,7 +861,7 @@ def _grep_with_ripgrep(
     pattern: str,
     root: Path,
     workspace_root: Path,
-    file_glob: str | None,
+    include: str | None,
     case_sensitive: bool,
     max_matches: int,
     timeout_seconds: int,
@@ -811,8 +870,8 @@ def _grep_with_ripgrep(
     command = [rg, "--json", "--no-require-git"]
     if not case_sensitive:
         command.append("-i")
-    if not root.is_file() and file_glob is not None:
-        command.extend(["--glob", file_glob])
+    if not root.is_file() and include is not None:
+        command.extend(["--glob", include])
         # 用户显式 include 时追加固定排除；默认不传 glob，完整保留 rg 的 ignore 语义。
         for directory in sorted(GREP_NOISE_DIRECTORIES):
             command.extend(["--glob", f"!**/{directory}/**"])
@@ -893,7 +952,7 @@ def _grep_with_python(
     pattern: str,
     root: Path,
     workspace_root: Path,
-    file_glob: str | None,
+    include: str | None,
     case_sensitive: bool,
     max_matches: int,
     timeout_seconds: int,
@@ -907,7 +966,7 @@ def _grep_with_python(
     deadline = time.monotonic() + timeout_seconds
     skipped_by_type: dict[str, set[str]] = {}
     try:
-        paths = _python_search_paths(root, workspace_root, file_glob, deadline, skipped_by_type)
+        paths = _python_search_paths(root, workspace_root, include, deadline, skipped_by_type)
     except subprocess.TimeoutExpired:
         return _grep_success(
             pattern=pattern,
@@ -989,14 +1048,14 @@ def _grep_with_python(
 def _python_search_paths(
     root: Path,
     workspace_root: Path,
-    file_glob: str | None,
+    include: str | None,
     deadline: float,
     skipped_by_type: dict[str, set[str]],
 ) -> list[Path]:
     if root.is_file():
         return [root]
 
-    git_paths = _git_search_paths(root, file_glob, deadline)
+    git_paths = _git_search_paths(root, include, deadline)
     if git_paths is not None:
         return git_paths
 
@@ -1014,19 +1073,19 @@ def _python_search_paths(
         directories[:] = sorted(
             directory
             for directory in directories
-            if directory not in GREP_NOISE_DIRECTORIES and (file_glob is not None or not directory.startswith("."))
+            if directory not in GREP_NOISE_DIRECTORIES and (include is not None or not directory.startswith("."))
         )
         for filename in sorted(files):
-            if file_glob is None and filename.startswith("."):
+            if include is None and filename.startswith("."):
                 continue
             path = current_path / filename
             relative = path.relative_to(root)
-            if file_glob is None or relative.match(file_glob):
+            if include is None or relative.match(include):
                 paths.append(path)
     return paths
 
 
-def _git_search_paths(root: Path, file_glob: str | None, deadline: float) -> list[Path] | None:
+def _git_search_paths(root: Path, include: str | None, deadline: float) -> list[Path] | None:
     git = shutil.which("git")
     if git is None or root.name in GREP_NOISE_DIRECTORIES:
         return None
@@ -1076,9 +1135,9 @@ def _git_search_paths(root: Path, file_glob: str | None, deadline: float) -> lis
         relative = path.relative_to(root)
         if any(part in GREP_NOISE_DIRECTORIES for part in relative.parts[:-1]):
             continue
-        if file_glob is None and any(part.startswith(".") for part in relative.parts):
+        if include is None and any(part.startswith(".") for part in relative.parts):
             continue
-        if file_glob is not None and not relative.match(file_glob):
+        if include is not None and not relative.match(include):
             continue
         if path.is_file():
             paths.append(path)
@@ -1113,7 +1172,7 @@ def _parse_rg_matches(
         submatches = data.get("submatches") or [{"start": 0}]
         matches.append(
             {
-                "path": Path(data["path"]["text"]).resolve().relative_to(root).as_posix(),
+                "path": _display_path(Path(data["path"]["text"]), workspace_root),
                 "line": data["line_number"],
                 "column": submatches[0]["start"] + 1,
                 "text": data["lines"]["text"].rstrip("\r\n"),

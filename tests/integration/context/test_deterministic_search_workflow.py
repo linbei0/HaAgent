@@ -77,7 +77,7 @@ def test_grep_then_file_read_workflow_is_deterministic(tmp_path: Path) -> None:
     router = ToolRouter(["file_list", "grep", "file_read"], writer, workspace_root=tmp_path)
 
     listed = router.dispatch("file_list", {"path": ".", "max_depth": 2})
-    searched = router.dispatch("grep", {"pattern": "greet", "root": "."})
+    searched = router.dispatch("grep", {"pattern": "greet", "path": "."})
     read = router.dispatch("file_read", {"path": "src/app.py", "keyword": "greet", "limit": 20})
 
     assert listed["status"] == "success"

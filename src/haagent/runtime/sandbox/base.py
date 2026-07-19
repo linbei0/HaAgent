@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 
 from haagent.runtime.execution.cancellation import CancellationToken
-from haagent.runtime.execution.command import CommandResult
+from haagent.runtime.execution.command import CommandResult, ShellContract
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,9 @@ class SandboxCommand:
 class SandboxBackend(Protocol):
     def metadata(self) -> SandboxMetadata:
         """返回真实执行边界，用于写入 sandbox.json。"""
+
+    def shell_contract(self) -> ShellContract:
+        """返回实际解释器；该事实同步供模型 schema 与执行器使用。"""
 
     def run_shell(self, command: SandboxCommand) -> CommandResult:
         """执行 shell 命令。"""

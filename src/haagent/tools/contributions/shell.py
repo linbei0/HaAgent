@@ -124,14 +124,22 @@ def _shell_observation(args: dict[str, Any], result: dict[str, Any]) -> dict[str
 SHELL_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="code_run",
-        description="run a multiline Python script from a temporary workspace file",
+        description=(
+            "Run multiline Python for calculations, data transformation, or Python-specific automation. "
+            "Use shell for tests, builds, git, package managers, and existing project scripts. Use file_list, "
+            "grep, file_read, and patch tools for file discovery and editing. Declare every workspace-external "
+            "directory the code will access; do not retry a failed write-like script without inspecting its state."
+        ),
         risk_level="high",
         parameters={
             "type": "object",
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code to write to a temporary script and execute",
+                    "description": (
+                        "complete Python program to write to a temporary workspace file and execute; "
+                        "print the concise result or diagnostics needed by the next step"
+                    ),
                 },
                 "timeout_seconds": {
                     "type": "number",
@@ -169,14 +177,23 @@ SHELL_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="shell",
-        description="run a shell command with timeout and captured output",
+        description=(
+            "Run tests, builds, package managers, git, or an existing project command with captured output. "
+            "Set cwd instead of embedding cd in the command. Prefer file_list, grep, file_read, file_write, and "
+            "patch tools for file operations. Quote paths containing spaces. Independent read-only commands may "
+            "be issued in parallel; after failure, inspect exit_code and stderr before changing or retrying it."
+        ),
         risk_level="high",
         parameters={
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "shell command to execute",
+                    "description": (
+                        "single shell command to execute in cwd; quote paths containing spaces and avoid an "
+                        "embedded cd because cwd selects the working directory; use the runtime shell contract "
+                        "provided in this tool description"
+                    ),
                 },
                 "cwd": {
                     "type": "string",

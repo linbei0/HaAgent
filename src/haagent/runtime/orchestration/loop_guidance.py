@@ -75,14 +75,14 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
         path = _first_match_path(result)
         if path:
             if result.get("partial") is True:
-                guidance = str(result.get("guidance") or "Narrow root or file_glob and retry.")
+                guidance = str(result.get("guidance") or "Narrow path or include and retry.")
                 return f"Search returned partial results. {guidance} Read the most relevant returned hit: {path}."
             if result.get("truncated") is True:
-                guidance = str(result.get("guidance") or "Narrow root or file_glob and retry.")
+                guidance = str(result.get("guidance") or "Narrow path or include and retry.")
                 return f"Search results were truncated. {guidance} Read the most relevant returned hit: {path}."
             return f"Choose the most relevant search hit and read it next with file_read: {path}."
         if result.get("partial") is True:
-            guidance = str(result.get("guidance") or "Narrow root or file_glob and retry.")
+            guidance = str(result.get("guidance") or "Narrow path or include and retry.")
             return f"Search was incomplete, so zero returned matches is not conclusive. {guidance}"
         return "No matches found. Refine the grep pattern or use file_list to explore the directory structure."
 
@@ -100,32 +100,23 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
 
 
 def _error_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> str | None:
+    recovery = _dict_or_empty(result.get("recovery"))
+    if recovery:
+        action = str(recovery.get("action", ""))
+        reason = str(recovery.get("reason", "")).strip()
+        recovery_tool = recovery.get("tool_name")
+        recovery_args = recovery.get("args")
+        if action == "use_tool" and isinstance(recovery_tool, str) and isinstance(recovery_args, dict):
+            return f"Recovery: use {recovery_tool} with args={recovery_args!r}. {reason}".strip()
+        if action == "correct_arguments" and isinstance(recovery_args, dict):
+            return f"Recovery: rewrite the tool call with args={recovery_args!r}. {reason}".strip()
+        if reason:
+            return f"Recovery ({action}): {reason}"
     if result.get("execution_state") == "unknown":
         return (
             "Inspect the file, process, or workspace state before retrying. "
             "Only then run a narrower idempotent verification or replan the task."
         )
-    suggestions = result.get("suggestions")
-    if tool_name in {"file_read", "file_list", "grep"} and isinstance(suggestions, list) and suggestions:
-        return f"File path failed; try the suggested path with file_read: {suggestions[0]}."
-
-    suggested_tool = result.get("suggested_tool")
-    if tool_name in {"file_read", "file_list", "grep"} and isinstance(suggested_tool, dict):
-        name = suggested_tool.get("name")
-        args = suggested_tool.get("args")
-        if name == "file_list" and isinstance(args, dict):
-            path = args.get("path", ".")
-            max_depth = args.get("max_depth", 1)
-            if tool_name == "file_read":
-                return f"file_read received a directory. Use file_list with path={path!r} and max_depth={max_depth}."
-            return f"file_list path was unavailable. List the nearest existing parent with path={path!r} and max_depth={max_depth}, then choose a real child path."
-        if name == "file_read" and tool_name == "grep" and isinstance(args, dict):
-            path = args.get("path", "")
-            keyword = args.get("keyword")
-            if keyword:
-                return f"grep root was a file. Use file_read with path={path!r} and keyword={keyword!r}."
-            return f"grep root was a file. Use file_read with path={path!r}."
-
     error = _dict_or_empty(result.get("error"))
     error_type = str(error.get("type", ""))
     message = str(error.get("message", ""))

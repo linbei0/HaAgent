@@ -217,6 +217,13 @@ def map_failure_to_recovery(event_or_result: dict[str, object]) -> TaskRecoveryS
     error = event_or_result.get("error") if isinstance(event_or_result.get("error"), dict) else {}
     error_type = str(error.get("type", "unknown")).lower()
     message = str(error.get("message", ""))
+    recovery = event_or_result.get("recovery") if isinstance(event_or_result.get("recovery"), dict) else {}
+    if recovery:
+        return TaskRecoverySuggestion(
+            category=str(error.get("category", "tool_failure")),
+            reason=_bounded(str(recovery.get("reason", message))),
+            suggested_action=str(recovery.get("action", "inspect_failure_and_replan")),
+        )
     if event_or_result.get("execution_state") == "unknown":
         return TaskRecoverySuggestion(
             category="tool_execution_unknown",

@@ -267,6 +267,26 @@ def test_request_history_entries_follow_timeline_state_and_redact_summaries() ->
     assert entries[1].answer_summary == "已完成第二个请求"
 
 
+def test_request_history_final_answer_wins_over_tool_failure() -> None:
+    timeline = InstrumentedTimeline()
+    timeline.add_user("解释鲜味", turn_index=1)
+    timeline.add_presentation_item(
+        TimelinePresentationItem(
+            kind="notice",
+            title="运行工具失败",
+            summary="网页抓取失败",
+            severity="error",
+            turn_index=1,
+        ),
+        None,
+    )
+    timeline.finalize_assistant(1, "鲜味主要来自谷氨酸和呈味核苷酸。")
+
+    entry = timeline.request_history_entries()[0]
+
+    assert entry.answer_summary == "鲜味主要来自谷氨酸和呈味核苷酸。"
+
+
 def test_request_history_groups_dense_entries_without_losing_turns() -> None:
     timeline = InstrumentedTimeline()
     for turn_index in range(1, 9):

@@ -252,8 +252,9 @@ class RequestHistoryRail(Widget):
         preview = self._preview
         if preview is None or self._hovered_group is None or not self._groups:
             return
+        # 活动标记会占满轨道的最后一格；预览必须从轨道右侧开始，避免覆盖标题首字。
         preview.styles.offset = (
-            4,
+            5,
             max(0, self._groups[self._hovered_group].row + int(self.styles.padding.top) - 2),
         )
 

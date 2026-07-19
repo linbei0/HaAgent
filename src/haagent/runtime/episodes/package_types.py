@@ -198,6 +198,10 @@ class ToolCallRecord:
     path_policy: dict[str, Any] | None = None
     guardrail: dict[str, Any] | None = None
     duration_seconds: float | None = None
+    attempt_count: int = 1
+    retry_events: list[dict[str, Any]] = field(default_factory=list)
+    recovered_after_retry: bool = False
+    duplicate_suppressed: bool = False
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> ToolCallRecord:
@@ -209,6 +213,7 @@ class ToolCallRecord:
         path_policy = raw.get("path_policy")
         guardrail = raw.get("guardrail")
         duration = raw.get("duration_seconds")
+        retry_events = raw.get("retry_events")
         return cls(
             tool_name=_require_str(raw.get("tool_name"), "tool_name"),
             status=_require_str(raw.get("status"), "status"),
@@ -219,6 +224,12 @@ class ToolCallRecord:
             path_policy=dict(path_policy) if isinstance(path_policy, Mapping) else None,
             guardrail=dict(guardrail) if isinstance(guardrail, Mapping) else None,
             duration_seconds=float(duration) if isinstance(duration, (int, float)) else None,
+            attempt_count=int(raw.get("attempt_count", 1)) if isinstance(raw.get("attempt_count", 1), int) else 1,
+            retry_events=[dict(item) for item in retry_events if isinstance(item, Mapping)]
+            if isinstance(retry_events, list)
+            else [],
+            recovered_after_retry=raw.get("recovered_after_retry") is True,
+            duplicate_suppressed=raw.get("duplicate_suppressed") is True,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -232,6 +243,10 @@ class ToolCallRecord:
             "path_policy": self.path_policy,
             "guardrail": self.guardrail,
             "duration_seconds": self.duration_seconds,
+            "attempt_count": self.attempt_count,
+            "retry_events": list(self.retry_events),
+            "recovered_after_retry": self.recovered_after_retry,
+            "duplicate_suppressed": self.duplicate_suppressed,
         }
         return payload
 
@@ -588,6 +603,37 @@ class EpisodePackage:
                 }
             )
         return rows
+
+    def tool_reliability_metrics(self) -> dict[str, int | float]:
+        """汇总工具失败、恢复和重复调用。"""
+        return summarize_tool_reliability(self.tool_calls)
+
+
+def summarize_tool_reliability(
+    tool_calls: list[ToolCallRecord],
+) -> dict[str, int | float]:
+    """从 typed tool trace 计算稳定、可导出的回归指标。"""
+    call_count = len(tool_calls)
+    failure_count = sum(call.status == "error" for call in tool_calls)
+    argument_error_count = sum(call.error_type == "tool_argument_invalid" for call in tool_calls)
+    retrying_calls = sum(bool(call.retry_events) for call in tool_calls)
+    retry_recovered_count = sum(call.recovered_after_retry for call in tool_calls)
+    duplicate_count = sum(call.duplicate_suppressed for call in tool_calls)
+
+    def rate(numerator: int, denominator: int) -> float:
+        return round(numerator / denominator, 4) if denominator else 0.0
+
+    return {
+        "tool_call_count": call_count,
+        "tool_failure_count": failure_count,
+        "tool_argument_error_count": argument_error_count,
+        "retry_recovered_count": retry_recovered_count,
+        "duplicate_suppressed_count": duplicate_count,
+        "tool_failure_rate": rate(failure_count, call_count),
+        "tool_argument_error_rate": rate(argument_error_count, call_count),
+        "retry_recovery_rate": rate(retry_recovered_count, retrying_calls),
+        "duplicate_call_rate": rate(duplicate_count, call_count),
+    }
 
 
 def decode_tool_calls(raw_rows: list[dict[str, Any]]) -> list[ToolCallRecord]:

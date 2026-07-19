@@ -159,6 +159,8 @@ def test_completed_episode_can_export_eval_case(tmp_path: Path) -> None:
     assert eval_case["verification"] == []
     assert eval_case["tool_names_used"] == ["fake_tool"]
     assert eval_case["tool_argument_errors"] == []
+    assert eval_case["tool_reliability_metrics"]["tool_call_count"] == 1
+    assert eval_case["tool_reliability_metrics"]["tool_failure_count"] == 0
     sandbox = json.loads((result.episode_path / "sandbox.json").read_text(encoding="utf-8"))
     assert eval_case["sandbox_summary"] == expanded_sandbox_summary(sandbox)
     assert eval_case["environment_summary"]["model_provider"] == "fake"
@@ -202,9 +204,9 @@ def test_failed_episode_exports_failure_information(tmp_path: Path) -> None:
     assert result.status is RunStatus.FAILED
     assert eval_case["eval_case_version"] == EVAL_CASE_VERSION
     assert eval_case["final_status"] == "failed"
-    assert eval_case["failure"]["category"] == "Loop Limit Failure"
+    assert eval_case["failure"]["category"] == "Verification Failure"
     assert eval_case["failure"]["stage"] == "verifying"
-    assert "verification did not pass before max_turns=3" in eval_case["failure"]["evidence"]
+    assert "verification remained unsuccessful after one recovery turn" in eval_case["failure"]["evidence"]
     assert "exit_code=7" in eval_case["failure"]["evidence"]
     assert len(eval_case["verification"]) == 2
     assert all(
@@ -250,13 +252,15 @@ verification_commands: []
 
     eval_case = export_eval_case(result.episode_path)
 
-    assert result.status is RunStatus.FAILED
+    assert result.status is RunStatus.COMPLETED
     assert eval_case["tool_argument_errors"] == [
         {
             "tool_name": "file_read",
             "message": "missing required argument: path",
         },
     ]
+    assert eval_case["tool_reliability_metrics"]["tool_argument_error_count"] == 1
+    assert eval_case["tool_reliability_metrics"]["tool_argument_error_rate"] == 1.0
 
 
 def test_eval_export_approval_summary_marks_missing_for_denied_high_risk_tool(

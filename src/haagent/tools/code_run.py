@@ -20,7 +20,7 @@ from haagent.runtime.execution.command import (
 )
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy
 from haagent.runtime.sandbox.base import SandboxBackend, SandboxCommand
-from haagent.tools.base import ToolExecutionContext, tool_error
+from haagent.tools.base import RecoveryAction, ToolExecutionContext, ToolFailureCategory, tool_error
 from haagent.tools.path_access import resolve_tool_paths
 
 
@@ -110,20 +110,23 @@ def code_run(
         "script_path": script_path.relative_to(root).as_posix(),
     }
     if command_result.status == "timeout":
-        result["execution_state"] = "unknown"
-        result["error"] = {
-            "type": "timeout",
-            "message": f"python code timed out after {timeout_result} seconds",
-        }
+        result.update(
+            tool_error("timeout", f"python code timed out after {timeout_result} seconds", retryable=False, execution_state="unknown"),
+        )
     elif command_result.status == "cancelled":
-        result["execution_state"] = "unknown"
-        result["error"] = {
-            "type": "cancelled",
-            "message": "python code cancelled by user",
-        }
+        result.update(tool_error("cancelled", "python code cancelled by user", retryable=False, execution_state="unknown"))
     elif command_result.status == "failed":
-        result["error"] = {
-            "type": "code_run_failed",
-            "message": f"python code exited with code {command_result.exit_code}",
-        }
+        result.update(
+            tool_error(
+                "code_run_failed",
+                f"python code exited with code {command_result.exit_code}",
+                category=ToolFailureCategory.EXECUTION,
+                retryable=False,
+                recovery=RecoveryAction(
+                    "correct_arguments",
+                    "代码已完成但返回非零；查看 stderr 后修改 code，不要原样重试。",
+                ),
+                execution_state="completed",
+            ),
+        )
     return result

@@ -46,7 +46,7 @@ from haagent.tui.design.theme import (
 )
 from haagent.tui.design.utils import safe_summary
 from haagent.tui.files.refs import FileReferenceIndex, build_file_reference_index
-from haagent.tui.flows import path_authorization, permissions, skills
+from haagent.tui.flows import permissions, skills
 from haagent.tui.overlays.modals import EditDiffModal, HelpModal, ToolApprovalModal
 from haagent.tui.overlays.search import SearchOverlay
 from haagent.tui.overlays.sessions import SessionOverlayResult
@@ -95,10 +95,6 @@ class HaAgentTuiApp(App[None]):
         self._last_failure: FailureView | None = None
         self._pending_interaction: PendingInteraction | None = None
         self._default_prompt_placeholder = "输入消息；Ctrl+Enter 换行，/ 打开命令"
-        self._pending_external_prompt: str | None = None
-        self._pending_external_path: Path | None = None
-        self._pending_full_trust_prompt: str | None = None
-        self._pending_full_trust_path: Path | None = None
         self._commands = command_registry()
         # controller / flow：各自封装一类职责，App 只做连接与薄分发。
         self._conversation = ConversationController(self)
@@ -113,7 +109,6 @@ class HaAgentTuiApp(App[None]):
         self.completion_flow = CompletionFlow(self)
         self._theme_choice = select_theme()
         self._file_ref_index: FileReferenceIndex | None = None
-        self.is_wide_external_root = path_authorization.is_wide_external_root
         # delta 热路径只调度批量 timeline 刷新，禁止每 token 全量 _refresh。
         self._streaming_refresh_scheduled = False
         self._streaming_refresh_timer: Timer | None = None
@@ -242,8 +237,6 @@ class HaAgentTuiApp(App[None]):
         self._set_prompt_value(prompt_input, "")
         if is_prompt_mode_command(prompt):
             self._start_prompt(prompt)
-            return
-        if path_authorization.handle_prompt_path_authorization(self, prompt):
             return
         self._attachments.reset()
         self._start_prompt(prompt_text, attachments=attachments, display_prompt=prompt)
@@ -633,7 +626,7 @@ class HaAgentTuiApp(App[None]):
     def focus_prompt_input(self) -> None:
         self._prompt_input().focus()
 
-    # ── permissions / skills / 外部目录授权 委托 ──────────────────────────
+    # ── permissions / skills 委托 ───────────────────────────────────────
     def _show_permissions(self) -> None:
         permissions.show_permissions(self)
 
@@ -651,15 +644,6 @@ class HaAgentTuiApp(App[None]):
 
     def _handle_set_full_access_confirmed(self, path: Path, confirmed: bool) -> None:
         permissions.handle_set_full_access_confirmed(self, path, confirmed)
-
-    def _handle_external_directory_decision(self, decision: str | None) -> None:
-        path_authorization.handle_external_directory_decision(self, decision)
-
-    def _handle_external_full_trust_confirmed(self, confirmed: bool) -> None:
-        path_authorization.handle_external_full_trust_confirmed(self, confirmed)
-
-    def _set_next_turn_target_path(self, path: Path) -> None:
-        self.service.sessions.permissions.set_next_turn_targets([path])
 
     def _handle_skills_command(self, argument: str) -> None:
         skills.handle_skills_command(self, argument)

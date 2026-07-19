@@ -159,9 +159,11 @@ def test_timeout_above_execution_boundary_is_rejected(tmp_path: Path) -> None:
     assert result["status"] == "error"
     assert result["error"] == {
         "type": "tool_argument_invalid",
+        "category": "argument",
         "message": "timeout_seconds must be <= 120",
-        "retryable": True,
+        "retryable": False,
     }
+    assert result["recovery"]["action"] == "correct_arguments"
 
 
 def test_shell_timeout_result_is_structured(tmp_path: Path) -> None:
@@ -174,6 +176,16 @@ def test_shell_timeout_result_is_structured(tmp_path: Path) -> None:
     assert "stdout_excerpt" in result
     assert "stderr_excerpt" in result
     assert "truncated" in result
+
+
+def test_shell_non_zero_exit_is_recoverable_observation(tmp_path: Path) -> None:
+    result = shell({"command": f"{sys.executable} -c \"import sys; sys.exit(7)\""}, tmp_path)
+
+    assert result["status"] == "error"
+    assert result["exit_code"] == 7
+    assert result["execution_state"] == "completed"
+    assert result["error"]["type"] == "command_failed"
+    assert result["recovery"]["action"] == "correct_arguments"
 
 
 def test_shell_long_stdout_and_stderr_are_excerpted(tmp_path: Path) -> None:

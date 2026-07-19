@@ -13,7 +13,7 @@ from haagent.runtime.execution.command import CWD_GUIDANCE, normalize_timeout, r
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.path_policy import PathPolicy, classify_path_access, default_path_policy
 from haagent.runtime.sandbox.base import SandboxBackend, SandboxCommand
-from haagent.tools.base import ToolExecutionContext, tool_error
+from haagent.tools.base import RecoveryAction, ToolExecutionContext, ToolFailureCategory, tool_error
 from haagent.tools.path_access import resolve_tool_paths
 from haagent.tools.shell_paths import collect_shell_paths
 
@@ -80,20 +80,23 @@ def shell(
         "timeout_seconds": command_result.timeout_seconds,
     }
     if command_result.status == "timeout":
-        result["execution_state"] = "unknown"
-        result["error"] = {
-            "type": "timeout",
-            "message": f"command timed out after {timeout_result} seconds",
-        }
+        result.update(
+            tool_error("timeout", f"command timed out after {timeout_result} seconds", retryable=False, execution_state="unknown"),
+        )
     elif command_result.status == "cancelled":
-        result["execution_state"] = "unknown"
-        result["error"] = {
-            "type": "cancelled",
-            "message": "command cancelled by user",
-        }
+        result.update(tool_error("cancelled", "command cancelled by user", retryable=False, execution_state="unknown"))
     elif command_result.status == "failed":
-        result["error"] = {
-            "type": "command_failed",
-            "message": f"command exited with code {command_result.exit_code}",
-        }
+        result.update(
+            tool_error(
+                "command_failed",
+                f"command exited with code {command_result.exit_code}",
+                category=ToolFailureCategory.EXECUTION,
+                retryable=False,
+                recovery=RecoveryAction(
+                    "correct_arguments",
+                    "命令已完成但返回非零；查看 stderr 后修改 command，不要原样重试。",
+                ),
+                execution_state="completed",
+            ),
+        )
     return result

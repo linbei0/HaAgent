@@ -8,13 +8,9 @@ src/haagent/tools/access.py - 工具访问统一控制
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Iterable
 
 from haagent.models.capabilities import ModelCapabilities
-from haagent.skills import load_skill_registry
-from haagent.skills.catalog import SkillCatalogService
-from haagent.skills.settings import load_skill_settings
 from haagent.tools.registry import ToolRuntimeRegistry
 
 
@@ -34,15 +30,19 @@ class ToolAccessManager:
         *,
         catalog: Any,
         enable_web: bool,
-        has_skills: bool,
+        include_memory_tool: bool,
         image_attachment_history: bool,
         mcp_tool_names: Iterable[str],
     ) -> list[str]:
         names = list(catalog.chat_default_tools())
+        if not include_memory_tool:
+            names = [name for name in names if name != "start_memory_update"]
+        # 普通 Agent 与内置/本地 Skill 能力保持默认可见；权限在执行边界约束调用，
+        # 不再用资源探测隐藏这些已注册能力。Web、图片和 MCP 仍按确定性状态加载。
+        names.extend(catalog.chat_skill_tools())
+        names.extend(catalog.names_with_tag("skill_market"))
         if enable_web:
             names.extend(catalog.chat_web_tools())
-        if has_skills:
-            names.extend(catalog.chat_skill_tools())
         if image_attachment_history and catalog.has("load_image_attachment"):
             names.append("load_image_attachment")
         mcp_names = list(mcp_tool_names)
@@ -54,25 +54,18 @@ class ToolAccessManager:
                 names.append("read_mcp_resource")
         return _unique(names)
 
-    @staticmethod
-    def skills_available(workspace_root: Path, catalog: SkillCatalogService | None) -> bool:
-        return _skills_available(workspace_root, catalog)
-
     @classmethod
     def resolve(
         cls,
         requested_tools: Iterable[str],
         *,
         registry: ToolRuntimeRegistry,
-        workspace_root: Path,
         mcp_runtime: Any | None,
         model_capabilities: ModelCapabilities | None,
-        skill_catalog: SkillCatalogService | None,
         image_attachment_history: bool,
     ) -> ToolAccessSnapshot:
         allowed: list[str] = []
         denied: dict[str, str] = {}
-        skills_available = _skills_available(workspace_root, skill_catalog)
         mcp_available = _mcp_available(mcp_runtime)
         vision_supported = model_capabilities is None or model_capabilities.vision != "unsupported"
         for name in _unique(requested_tools):
@@ -80,7 +73,6 @@ class ToolAccessManager:
                 name,
                 registry=registry,
                 mcp_available=mcp_available,
-                skills_available=skills_available,
                 image_attachment_history=image_attachment_history,
                 vision_supported=vision_supported,
             )
@@ -96,7 +88,6 @@ class ToolAccessManager:
         *,
         registry: ToolRuntimeRegistry,
         mcp_available: bool,
-        skills_available: bool,
         image_attachment_history: bool,
         vision_supported: bool,
     ) -> str | None:
@@ -105,8 +96,6 @@ class ToolAccessManager:
         if name.startswith("mcp__") or name in {"list_mcp_resources", "read_mcp_resource"}:
             if not mcp_available:
                 return "mcp_unavailable"
-        if name in {"skill_list", "skill_read"} and not skills_available:
-            return "skills_unavailable"
         if name == "load_image_attachment":
             if not image_attachment_history:
                 return "image_attachment_unavailable"
@@ -117,12 +106,6 @@ class ToolAccessManager:
 
 def _unique(names: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(str(name) for name in names))
-
-
-def _skills_available(workspace_root: Path, catalog: SkillCatalogService | None) -> bool:
-    if catalog is not None:
-        return bool(catalog.snapshot(workspace_root, load_skill_settings()).skills)
-    return bool(load_skill_registry(workspace_root=workspace_root).list_skills())
 
 
 def _mcp_available(runtime: Any | None) -> bool:

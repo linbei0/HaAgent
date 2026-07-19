@@ -52,6 +52,7 @@ def export_eval_case(episode_path: Path) -> dict[str, Any]:
         "cost_summary": _cost_summary(package.cost),
         "tool_names_used": package.tool_names_used(),
         "tool_argument_errors": package.tool_argument_errors(),
+        "tool_reliability_metrics": package.tool_reliability_metrics(),
         "approval_summary": package.approval_summaries(),
         "human_interactions": _human_interactions_summary(package.transcript),
         "final_response": final_response,

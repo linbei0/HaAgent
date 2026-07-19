@@ -162,18 +162,34 @@ def test_export_file_list_schema_describes_discovery_defaults() -> None:
     schemas = export_tool_schemas(["file_list"])
     schema = schemas[0]
 
-    assert schema["description"] == "list a compact file tree by absolute or workspace-relative path"
+    assert "project structure or exact path is unknown" in schema["description"]
+    assert "Use grep for file contents" in schema["description"]
     assert schema["parameters"]["required"] == []
     assert set(schema["parameters"]["properties"]) == {"path", "max_depth", "max_entries"}
 
 
 def test_export_shell_schema_describes_cwd_relative_to_workspace_root() -> None:
     schemas = export_tool_schemas(["shell"])
+    description = schemas[0]["description"]
     cwd_description = schemas[0]["parameters"]["properties"]["cwd"]["description"]
 
+    assert "Run tests, builds, package managers" in description
+    assert "USERPROFILE" not in description
+    assert "cmd syntax" not in description
     assert "workspace_root" in cwd_description
     assert "." in cwd_description
     assert "omit" in cwd_description
+
+
+def test_runtime_tool_registry_can_add_shell_contract_without_mutating_static_schema() -> None:
+    base = default_tool_runtime_registry()
+    runtime = base.with_description_overrides(
+        {"shell": f"{base.get('shell').description}\n\nRuntime shell contract: interpreter=POSIX shell"},
+    )
+
+    assert "interpreter=POSIX shell" in runtime.get("shell").description
+    assert "interpreter=POSIX shell" not in base.get("shell").description
+    assert "interpreter=POSIX shell" in export_tool_schemas(["shell"], registry=runtime)[0]["description"]
 
 
 def test_file_read_schema_supports_keyword() -> None:
@@ -192,14 +208,14 @@ def test_grep_schema_stays_deterministic() -> None:
     assert schema["parameters"]["required"] == ["pattern"]
     assert set(schema["parameters"]["properties"]) == {
         "pattern",
-        "root",
-        "file_glob",
+        "path",
+        "include",
         "case_sensitive",
         "max_matches",
         "timeout_seconds",
     }
-    assert "directory or file" in schema["parameters"]["properties"]["root"]["description"]
-    assert "defaults to **/*" not in schema["parameters"]["properties"]["file_glob"]["description"]
+    assert "directory or file" in schema["parameters"]["properties"]["path"]["description"]
+    assert "defaults to **/*" not in schema["parameters"]["properties"]["include"]["description"]
     assert TOOL_REGISTRY["grep"].risk_level == "low"
 
 
@@ -221,7 +237,8 @@ def test_request_user_input_schema_requires_question() -> None:
     schemas = export_tool_schemas(["request_user_input"])
     schema = schemas[0]
 
-    assert schema["description"] == "ask the user for missing information before continuing the task"
+    assert "tools cannot discover" in schema["description"]
+    assert "file_list, grep, file_read" in schema["description"]
     assert schema["parameters"]["required"] == ["question"]
     assert schema["parameters"]["properties"]["question"]["type"] == "string"
     assert schema["parameters"]["properties"]["reason"]["type"] == "string"
@@ -352,7 +369,8 @@ def test_apply_patch_set_schema_describes_atomic_replacements() -> None:
     schema = schemas[0]
 
     assert "atomically" in schema["description"]
-    assert "Prefer this over repeated apply_patch calls" in schema["description"]
+    assert "related multi-file or multi-site edits" in schema["description"]
+    assert "no file is written" in schema["description"]
     assert schema["parameters"]["required"] == ["replacements"]
     assert schema["parameters"]["properties"]["replacements"]["type"] == "array"
     assert TOOL_REGISTRY["apply_patch_set"].risk_level == "high"
