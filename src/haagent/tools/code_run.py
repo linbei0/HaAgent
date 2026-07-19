@@ -16,12 +16,12 @@ from haagent.runtime.execution.command import (
     CWD_GUIDANCE,
     build_python_utf8_environment,
     normalize_timeout,
-    resolve_execution_cwd,
     run_process,
 )
-from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
+from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy
 from haagent.runtime.sandbox.base import SandboxBackend, SandboxCommand
-from haagent.tools.base import tool_error
+from haagent.tools.base import ToolExecutionContext, tool_error
+from haagent.tools.path_access import resolve_tool_paths
 
 
 def code_run(
@@ -30,6 +30,7 @@ def code_run(
     path_policy: PathPolicy | None = None,
     cancellation_token: CancellationToken | None = None,
     sandbox_backend: SandboxBackend | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     code = args.get("code")
     if not isinstance(code, str) or not code:
@@ -38,18 +39,36 @@ def code_run(
     cwd_arg = args.get("cwd")
     if cwd_arg is not None and not isinstance(cwd_arg, str):
         return tool_error("tool_argument_invalid", f"cwd must be a string; {CWD_GUIDANCE}")
-    if path_policy is None:
-        cwd_result = resolve_execution_cwd(cwd_arg, workspace_root)
-    else:
-        cwd_result = resolve_cwd_for_execution(cwd_arg, path_policy or default_path_policy(workspace_root))
-    if isinstance(cwd_result, str):
-        error_type = "path_policy_denied" if path_policy is not None else "tool_argument_invalid"
-        return tool_error(error_type, cwd_result)
+    external_directories = args.get("external_directories", [])
+    if not isinstance(external_directories, list) or any(
+        not isinstance(path, str) or not path for path in external_directories
+    ):
+        return tool_error(
+            "tool_argument_invalid",
+            "external_directories must be a list of non-empty paths",
+        )
+    policy = path_policy or default_path_policy(workspace_root)
+    requested_paths = ["." if cwd_arg in (None, ".") else cwd_arg, *external_directories]
+    scope = resolve_tool_paths(requested_paths, policy, "full", execution_context)
+    if isinstance(scope, dict):
+        return scope
+    cwd_result = scope[0]
+    if not cwd_result.exists():
+        return tool_error("tool_argument_invalid", f"cwd does not exist: {cwd_arg}; {CWD_GUIDANCE}")
+    if not cwd_result.is_dir():
+        return tool_error("tool_argument_invalid", f"cwd must be a directory: {cwd_arg}; {CWD_GUIDANCE}")
+    for directory in scope[1:]:
+        if not directory.exists() or not directory.is_dir():
+            return tool_error(
+                "tool_argument_invalid",
+                f"declared external directory does not exist: {directory}",
+            )
 
     timeout_result = normalize_timeout(args.get("timeout_seconds"))
     if isinstance(timeout_result, str):
         return tool_error("tool_argument_invalid", timeout_result)
 
+    # 任意 Python 代码无法可靠静态分析；调用方必须显式声明外部目录，真实隔离由 sandbox 提供。
     root = workspace_root.resolve()
     tmp_dir = root / ".haagent-tmp"
     tmp_dir.mkdir(exist_ok=True)

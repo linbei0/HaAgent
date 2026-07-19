@@ -22,7 +22,7 @@
 - `RunOrchestrator` 负责 task contract、模型调用、工具执行、episode trace 和 verification。
 - 所有模型调用必须经过 `ModelGateway`。
 - 所有工具调用必须经过 `ToolRouter`。
-- 文件和命令工具必须受 workspace root 限制。
+- workspace root 是文件和命令工具的默认信任根；外部目录访问必须由工具执行器发现并在同一工具调用内获得用户授权。
 - 每条用户 prompt 仍写独立 episode；session package 只保存索引、摘要和有界工作状态，不复制 episode 证据。
 
 ## 3. Profile、凭据与 Secret
@@ -96,10 +96,13 @@
 
 ## 8. 工具执行与运行边界
 
-- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell` 和 `code_run` 等 workspace-bound 原子工具。
+- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell` 和 `code_run` 等默认 workspace-bound 原子工具。
+- 文件工具接受绝对路径或 workspace 相对路径；未授权外部路径触发 `external_directory` 审批，允许一次只作用于当前调用，始终允许写入有界 session 权限规则。
 - `file_read` 应支持范围读取、关键词定位和路径建议，服务普通 Agent 使用。
 - `apply_patch` 继续保持 fail-fast；失败应帮助模型从结构化错误中恢复，而不是吞掉错误。
-- `shell` / `code_run` 的 cwd 必须留在 workspace root 内。
+- `shell` / `code_run` 的 cwd 默认位于 workspace root；显式外部 cwd 经 `external_directory` 批准后可用于当前调用。
+- `shell` 在执行前对常见 Bash/PowerShell 文件命令做 best-effort 路径扫描并合并申请外部目录权限；该扫描不是进程级 sandbox，未知命令和动态脚本仍以高风险工具审批及实际 sandbox 为准。
+- `code_run` 无法可靠静态分析任意 Python 路径，访问外部目录时必须通过 `external_directories` 显式声明并在执行前审批。
 - `shell` / `code_run` timeout 默认 60 秒，上限 120 秒。
 - `code_run` 用于降低多行脚本和 shell 转义成本；临时脚本保留在 workspace 内 `.haagent-tmp/` 以便失败复盘。
 - 工具输出向工具结果和 context 暴露摘要、excerpt、timeout、truncated 等字段，并对 secret-like 输出做脱敏。

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from haagent.models.config.connections import (
     DEFAULT_CREDENTIAL_SOURCE,
@@ -21,7 +21,7 @@ from haagent.models.config.connections import (
     ProvidersConfigSnapshot,
     user_provider_connections_path,
 )
-from haagent.models.model_options import ModelOptionsError, ModelParameterConfig, parse_connection_models
+from haagent.models.model_options import ModelOptionsError, parse_connection_models
 
 
 ConfigSnapshot = ProvidersConfigSnapshot
@@ -46,7 +46,8 @@ class ModelConfigStore:
                 load_error=f"cannot read provider connection config: {self.path}: {error}",
             )
         try:
-            records = tuple(_parse_records(raw.decode("utf-8"), self.path))
+            # Windows 工具可能写入 UTF-8 BOM；读取兼容，HaAgent 自身仍写无 BOM 的 UTF-8。
+            records = tuple(_parse_records(raw.decode("utf-8-sig"), self.path))
         except UnicodeDecodeError:
             error = f"provider connection config must be UTF-8: {self.path}"
         except ProviderProfileError as exc:

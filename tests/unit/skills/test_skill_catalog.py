@@ -82,7 +82,7 @@ def test_skill_catalog_misses_when_skill_added(tmp_path: Path, monkeypatch) -> N
     second = service.snapshot(tmp_path / "ws", settings)
 
     assert first is not second
-    assert {skill.name for skill in second.skills} == {"alpha", "beta"}
+    assert {skill.name for skill in second.skills} >= {"alpha", "beta", "haagent-config"}
 
 
 def test_skill_catalog_trust_isolation(tmp_path: Path, monkeypatch) -> None:

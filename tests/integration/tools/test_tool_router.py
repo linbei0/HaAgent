@@ -191,16 +191,15 @@ def test_skill_list_returns_metadata_without_skill_body(tmp_path: Path, monkeypa
     result = router.dispatch("skill_list", {})
 
     assert result["status"] == "success"
-    assert result["skills"] == [
-        {
-            "name": "review",
-            "description": "Review workflow.",
-            "source": "user",
-            "command_name": "review",
-            "user_invocable": True,
-            "disable_model_invocation": False,
-        }
-    ]
+    assert {
+        "name": "review",
+        "description": "Review workflow.",
+        "source": "user",
+        "command_name": "review",
+        "user_invocable": True,
+        "disable_model_invocation": False,
+    } in result["skills"]
+    assert any(skill["source"] == "builtin" for skill in result["skills"])
     assert "SECRET BODY" not in json.dumps(result, ensure_ascii=False)
 
 
@@ -266,7 +265,9 @@ def test_project_skill_list_marks_untrusted_project_roots(tmp_path: Path, monkey
     result = router.dispatch("skill_list", {})
 
     assert result["status"] == "success"
-    assert result["skills"] == []
+    assert result["skills"]
+    assert all(skill["source"] == "builtin" for skill in result["skills"])
+    assert not any(skill["name"] == "local" for skill in result["skills"])
     assert result["blocked_project_skill_roots"] == [str((repo / ".haagent" / "skills").resolve())]
 
 
@@ -1072,8 +1073,60 @@ def test_file_list_rejects_path_outside_workspace_root(tmp_path: Path) -> None:
     result = router.dispatch("file_list", {"path": ".."})
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "path_policy_denied"
-    assert "目录未授权" in result["error"]["message"]
+    assert result["error"]["type"] == "approval_required"
+    assert "用户确认" in result["error"]["message"]
+
+
+def test_file_read_allow_once_requests_external_directory_again(tmp_path: Path) -> None:
+    external = tmp_path.parent / "haagent-external-read"
+    external.mkdir()
+    target = external / "notes.txt"
+    target.write_text("external content", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="once")
+
+    first = router.dispatch(
+        "file_read",
+        {"path": str(target)},
+        interaction_handler=interaction,
+    )
+    second = router.dispatch(
+        "file_read",
+        {"path": str(target)},
+        interaction_handler=interaction,
+    )
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    assert len(requests) == 2
+    assert requests[0].tool_name == "external_directory"
+    assert requests[0].args_summary["access"] == "read"
+
+
+def test_file_read_always_reuses_external_directory_authorization(tmp_path: Path) -> None:
+    external = tmp_path.parent / "haagent-external-read-always"
+    external.mkdir()
+    target = external / "notes.txt"
+    target.write_text("external content", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=tmp_path)
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="always")
+
+    first = router.dispatch("file_read", {"path": str(target)}, interaction_handler=interaction)
+    second = router.dispatch("file_read", {"path": str(target)})
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    assert len(requests) == 1
 
 
 def test_external_read_root_allows_file_read_but_denies_file_write(tmp_path: Path) -> None:
@@ -1105,8 +1158,8 @@ def test_external_read_root_allows_file_read_but_denies_file_write(tmp_path: Pat
     assert read_result["status"] == "success"
     assert read_result["content"] == "hello\n"
     assert write_result["status"] == "error"
-    assert write_result["error"]["type"] == "path_policy_denied"
-    assert "外部目录只读" in write_result["error"]["message"]
+    assert write_result["error"]["type"] == "approval_required"
+    assert "用户确认" in write_result["error"]["message"]
     assert target.read_text(encoding="utf-8") == "hello\n"
 
 
@@ -1361,6 +1414,7 @@ def test_grep_missing_root_returns_short_argument_error(tmp_path: Path) -> None:
     assert result["error"] == {
         "type": "tool_argument_invalid",
         "message": 'root does not exist: missing; root is relative to workspace_root and may be a directory or file; use "." or omit root',
+        "retryable": True,
     }
     assert str(tmp_path) not in result["error"]["message"]
 
@@ -1448,6 +1502,7 @@ def test_apply_patch_missing_path_returns_short_argument_error(tmp_path: Path) -
     assert result["error"] == {
         "type": "tool_argument_invalid",
         "message": "path does not exist: missing.txt; path is relative to workspace_root",
+        "retryable": True,
     }
     assert str(tmp_path) not in result["error"]["message"]
 
@@ -1559,8 +1614,53 @@ def test_apply_patch_set_rejects_workspace_escape(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "path_policy_denied"
+    assert result["error"]["type"] == "approval_required"
     assert outside.read_text(encoding="utf-8") == "old"
+
+
+def test_apply_patch_set_batches_external_directory_permission(tmp_path: Path) -> None:
+    first_dir = tmp_path.parent / f"{tmp_path.name}-external-a"
+    second_dir = tmp_path.parent / f"{tmp_path.name}-external-b"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = first_dir / "first.txt"
+    second = second_dir / "second.txt"
+    first.write_text("old-a", encoding="utf-8")
+    second.write_text("old-b", encoding="utf-8")
+    writer = make_writer(tmp_path)
+    router = ToolRouter(
+        allowed_tools=["apply_patch_set"],
+        episode_writer=writer,
+        workspace_root=tmp_path,
+        approval_allowed_tools=["apply_patch_set"],
+        approved_tools=["apply_patch_set"],
+    )
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True, answer="once")
+
+    result = router.dispatch(
+        "apply_patch_set",
+        {
+            "replacements": [
+                {"path": str(first), "old_text": "old-a", "new_text": "new-a"},
+                {"path": str(second), "old_text": "old-b", "new_text": "new-b"},
+            ],
+        },
+        interaction_handler=interaction,
+    )
+
+    assert result["status"] == "success"
+    external_requests = [request for request in requests if request.tool_name == "external_directory"]
+    assert len(external_requests) == 1
+    assert set(external_requests[0].args_summary["directories"]) == {
+        str(first_dir.resolve()),
+        str(second_dir.resolve()),
+    }
+    assert first.read_text(encoding="utf-8") == "new-a"
+    assert second.read_text(encoding="utf-8") == "new-b"
 
 
 def test_apply_patch_set_policy_denial_happens_before_handler(tmp_path: Path) -> None:
@@ -1756,7 +1856,7 @@ def test_file_write_rejects_workspace_escape_and_missing_parent(tmp_path: Path) 
     missing_parent = router.dispatch("file_write", {"path": "missing/notes.txt", "content": "x", "mode": "create"})
 
     assert escaped["status"] == "error"
-    assert escaped["error"]["type"] == "path_policy_denied"
+    assert escaped["error"]["type"] == "approval_required"
     assert missing_parent["status"] == "error"
     assert missing_parent["error"]["type"] == "tool_argument_invalid"
     assert not (tmp_path.parent / "file_write_outside.txt").exists()
@@ -2142,7 +2242,7 @@ def test_code_run_cwd_is_workspace_bound(tmp_path: Path) -> None:
     assert absolute_success["status"] == "success"
     assert absolute_success["stdout_excerpt"].strip() == "pkg"
     assert escaped["status"] == "error"
-    assert escaped["error"]["type"] == "path_policy_denied"
+    assert escaped["error"]["type"] == "approval_required"
 
 
 def test_code_run_denied_before_handler(tmp_path: Path) -> None:
@@ -2368,7 +2468,12 @@ def test_high_risk_tool_with_missing_approval_prompts_and_runs_when_granted(tmp_
     assert len(requests) == 2
     assert requests[0].interaction_type == "approval"
     assert requests[0].tool_name == "file_write"
-    assert requests[0].args_summary == {"content_chars": 8, "mode": "create", "path": "notes.txt"}
+    assert {
+        key: requests[0].args_summary[key]
+        for key in ("content_chars", "mode", "path")
+    } == {"content_chars": 8, "mode": "create", "path": "notes.txt"}
+    assert requests[0].args_summary["permission_patterns"]
+    assert requests[0].args_summary["permission_always"]
     assert requests[1].interaction_type == "edit_diff"
     assert requests[1].tool_name == "file_write"
     assert requests[1].args_summary["path"] == "notes.txt"
@@ -2512,10 +2617,8 @@ def test_shell_rejects_cwd_outside_workspace_root(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "tool_argument_invalid"
-    message = result["error"]["message"]
-    assert "cwd must stay inside workspace_root" in message
-    assert 'cwd is relative to workspace_root; use "." or omit cwd for workspace root' in message
+    assert result["error"]["type"] == "approval_required"
+    assert "用户确认" in result["error"]["message"]
 
 
 def test_shell_rejects_non_positive_timeout_with_argument_error(tmp_path: Path) -> None:
@@ -2528,6 +2631,7 @@ def test_shell_rejects_non_positive_timeout_with_argument_error(tmp_path: Path) 
     assert result["error"] == {
         "type": "tool_argument_invalid",
         "message": "timeout_seconds must be positive",
+        "retryable": True,
     }
 
 

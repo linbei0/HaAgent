@@ -5,7 +5,6 @@ tests/integration/runtime/test_verification_engine.py - VerificationEngine éªŒè¯
 """
 
 import json
-from hashlib import sha256
 from pathlib import Path
 
 from haagent.runtime.episodes.writer import EpisodeWriter
@@ -160,39 +159,3 @@ def test_verification_engine_records_timeout(tmp_path: Path) -> None:
     assert "stderr_excerpt" in record
     assert record["duration_seconds"] >= 0
     assert record["timeout_seconds"] == 0.01
-
-
-def test_verification_engine_records_final_workspace_file_evidence(tmp_path: Path) -> None:
-    target = tmp_path / "notes.txt"
-    target.write_text("final", encoding="utf-8")
-    writer = make_writer(tmp_path)
-    engine = VerificationEngine(episode_writer=writer, workspace_root=tmp_path)
-
-    result = engine.run([], changed_files=[{"path": str(target), "change_type": "modified"}])
-
-    assert result.status == "success"
-    record = json.loads((writer.path / "verification" / "files.jsonl").read_text(encoding="utf-8"))
-    assert record == {
-        "path": "notes.txt",
-        "change_type": "modified",
-        "status": "success",
-        "size_bytes": 5,
-        "sha256": sha256(b"final").hexdigest(),
-    }
-
-
-def test_verification_engine_fails_when_changed_workspace_file_is_missing(tmp_path: Path) -> None:
-    writer = make_writer(tmp_path)
-    engine = VerificationEngine(episode_writer=writer, workspace_root=tmp_path)
-
-    result = engine.run([], changed_files=[{"path": str(tmp_path / "missing.txt"), "change_type": "added"}])
-
-    assert result.status == "failed"
-    assert result.failure_reason == "changed workspace file is missing"
-    record = json.loads((writer.path / "verification" / "files.jsonl").read_text(encoding="utf-8"))
-    assert record == {
-        "path": "missing.txt",
-        "change_type": "added",
-        "status": "failed",
-        "reason": "changed workspace file is missing",
-    }

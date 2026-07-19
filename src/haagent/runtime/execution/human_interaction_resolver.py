@@ -1,15 +1,16 @@
 """
 src/haagent/runtime/execution/human_interaction_resolver.py - 人机交互解析器
 
-记录同一次 run 内已完成的人机交互，并按稳定签名复用审批和补充信息结果。
-edit_diff 的「本会话始终允许」与 permission_mode 自动跳过由结构化 session 状态决定，
-不得用完整 path/diff 签名冒充同类改动，也不得伪造用户手动点击事件。
+记录已完成的人机交互。用户补充信息按稳定签名复用；普通审批的“允许一次”
+只完成当前调用，“始终允许”写入结构化 session 权限模式。edit_diff 的会话规则
+与 permission_mode 自动跳过也由同一 session 状态决定，不得伪造用户点击事件。
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from typing import Any
 
 from haagent.runtime.execution.command import redact_secret_like_text
@@ -29,9 +30,10 @@ STATUS_SESSION_ALWAYS = "session_always_allowed"
 
 @dataclass
 class SessionInteractionState:
-    """跨 turn / resume 的会话级交互状态（仅结构化标志，不含完整 diff）。"""
+    """跨 turn / resume 的会话级交互状态。"""
 
     edit_diff_session_always: bool = False
+    permission_rules: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,11 @@ class HumanInteractionResolver:
                     status=STATUS_SESSION_ALWAYS,
                     answer=SESSION_ALWAYS_ANSWER,
                 )
+        if request.interaction_type == "approval" and self._session_rule_allows(request):
+            return self._synthetic_permission(request)
+        # “允许一次”和拒绝只完成当前工具调用，不能被下一次同签名请求复用。
+        if request.interaction_type == "approval":
+            return None
         return self._resolutions.get(interaction_signature(request))
 
     def record(
@@ -109,13 +116,19 @@ class HumanInteractionResolver:
         turn: int,
     ) -> HumanInteractionResolution:
         signature = interaction_signature(request)
-        # always 只提升 edit_diff 会话标志，绝不扩展到 shell/code_run 等 approval 类别
+        # edit_diff always 只提升该类别标志；普通工具权限使用独立 pattern 规则。
         if (
             request.interaction_type == "edit_diff"
             and response.approved
             and response.answer == "always"
         ):
             self._session_state.edit_diff_session_always = True
+        if (
+            request.interaction_type == "approval"
+            and response.approved
+            and response.answer == "always"
+        ):
+            self._record_permission_rules(request)
         resolution = HumanInteractionResolution(
             signature=signature,
             interaction_type=request.interaction_type,
@@ -159,6 +172,42 @@ class HumanInteractionResolver:
             args_summary=dict(request.args_summary),
         )
 
+    def _session_rule_allows(self, request: HumanInteractionRequest) -> bool:
+        patterns = _string_list(request.args_summary.get("permission_patterns"))
+        if not patterns:
+            return False
+        permission = request.tool_name.casefold()
+        rules = [
+            rule
+            for rule in self._session_state.permission_rules
+            if rule.get("permission", "").casefold() == permission
+        ]
+        return all(
+            any(fnmatchcase(pattern.casefold(), rule.get("pattern", "").casefold()) for rule in rules)
+            for pattern in patterns
+        )
+
+    def _record_permission_rules(self, request: HumanInteractionRequest) -> None:
+        for pattern in _string_list(request.args_summary.get("permission_always")):
+            rule = {"permission": request.tool_name, "pattern": pattern}
+            if rule not in self._session_state.permission_rules:
+                # 会话规则有界，避免长期 session 因重复命令无限增长。
+                self._session_state.permission_rules.append(rule)
+        del self._session_state.permission_rules[:-128]
+
+    def _synthetic_permission(self, request: HumanInteractionRequest) -> HumanInteractionResolution:
+        return HumanInteractionResolution(
+            signature=interaction_signature(request),
+            interaction_type=request.interaction_type,
+            tool_name=request.tool_name,
+            question=request.question,
+            status=STATUS_SESSION_ALWAYS,
+            approved=True,
+            answer=SESSION_ALWAYS_ANSWER,
+            turn=0,
+            args_summary=dict(request.args_summary),
+        )
+
 
 def interaction_signature(request: HumanInteractionRequest) -> str:
     payload = {
@@ -174,6 +223,12 @@ def _status_for(interaction_type: str, approved: bool) -> str:
     if interaction_type == "user_input":
         return "answered" if approved else "declined"
     return "approved" if approved else "denied"
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
 
 
 def _normalize_value(value: Any) -> Any:

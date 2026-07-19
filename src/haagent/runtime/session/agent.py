@@ -888,6 +888,7 @@ class AgentSession:
             created_at=self._created_at,
             turn_count=self.turn_count,
             edit_diff_session_always=self._session_interaction_state.edit_diff_session_always,
+            permission_rules=self._session_interaction_state.permission_rules,
             first_request=first_request,
             session_snapshot_schema_version=self.snapshot.schema_version,
         )

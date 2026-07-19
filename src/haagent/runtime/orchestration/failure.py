@@ -13,6 +13,7 @@ class FailureCategory(StrEnum):
     TASK_SPEC = "Task Spec Failure"
     CONTEXT = "Context Failure"
     MODEL = "Model Failure"
+    MODEL_PROTOCOL = "Model Protocol Failure"
     MODEL_CALL = "Model Call Failure"
     TOOL_INTERFACE = "Tool Interface Failure"
     TOOL_ARGUMENT = "Tool Argument Failure"

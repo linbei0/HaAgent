@@ -47,7 +47,7 @@ from haagent.runtime.session.working_state import (
 from haagent.tools.registry import default_tool_runtime_registry
 
 # 磁盘 session package 的逻辑 schema；迁移只经 SessionSnapshot 入口。
-SESSION_SNAPSHOT_SCHEMA_VERSION = 1
+SESSION_SNAPSHOT_SCHEMA_VERSION = 2
 # 无 session_snapshot_schema_version 字段的旧 package 视为 v0。
 SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION = 0
 
@@ -74,9 +74,9 @@ def resolve_session_snapshot_schema_version(metadata: dict[str, object]) -> int:
 
 
 def migrate_session_snapshot_schema_version(disk_version: int) -> int:
-    """把磁盘版本迁到当前逻辑版本；当前仅支持 0→1 与 1 保持。"""
-    if disk_version == SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION:
-        # 旧 package 字段布局已兼容 v1，显式升级而非假装磁盘本就是最新版。
+    """把 v0/v1 磁盘状态迁到包含会话权限规则的 v2。"""
+    if disk_version in {SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION, 1}:
+        # 旧 package 没有 permission_rules，按空规则迁移。
         return SESSION_SNAPSHOT_SCHEMA_VERSION
     if disk_version == SESSION_SNAPSHOT_SCHEMA_VERSION:
         return disk_version
@@ -345,6 +345,7 @@ def build_resume_state(
         # resume 同一 session：恢复 edit_diff 始终允许；缺失字段视为 False
         session_interaction_state=SessionInteractionState(
             edit_diff_session_always=bool(metadata.get("edit_diff_session_always", False)),
+            permission_rules=_load_permission_rules(metadata.get("permission_rules")),
         ),
     )
     resources = SessionResources(
@@ -366,6 +367,23 @@ def build_resume_state(
         tool_registry=registry,
     )
     return SessionRuntimeState(snapshot=snapshot, resources=resources)
+
+
+def _load_permission_rules(raw: object) -> list[dict[str, str]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ChatSessionError("invalid session.json: permission_rules must be a list")
+    rules: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ChatSessionError("invalid session.json: permission rule must be an object")
+        permission = item.get("permission")
+        pattern = item.get("pattern")
+        if not isinstance(permission, str) or not permission or not isinstance(pattern, str) or not pattern:
+            raise ChatSessionError("invalid session.json: permission rule requires permission and pattern")
+        rules.append({"permission": permission, "pattern": pattern})
+    return rules[-128:]
 
 
 def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:

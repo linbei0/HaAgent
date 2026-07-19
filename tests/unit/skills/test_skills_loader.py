@@ -76,6 +76,27 @@ def test_load_skill_registry_includes_user_and_compatibility_dirs(tmp_path: Path
     assert registry.get("claude-flow").source == "user"  # type: ignore[union-attr]
 
 
+def test_builtin_config_skill_is_loaded_and_reserved_name_cannot_be_overridden(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    config_dir = home / ".haagent"
+    _write_skill(
+        config_dir / "skills",
+        "external-config",
+        "---\nname: haagent-config\ndescription: external\n---\n\n# External\n",
+    )
+
+    registry = load_skill_registry(config_dir=config_dir)
+
+    skill = registry.get("haagent-config")
+    assert skill is not None
+    assert skill.source == "builtin"
+    assert "Configuration layers" in skill.content
+
+
 def test_project_skills_require_explicit_trust(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: home)

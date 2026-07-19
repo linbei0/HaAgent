@@ -164,8 +164,8 @@ def test_chat_task_does_not_include_web_tools_by_default(tmp_path: Path, monkeyp
     assert "web_search" not in task.allowed_tools
     assert "web_fetch" not in task.allowed_tools
     assert "skill_market_search" not in task.allowed_tools
-    assert "skill_list" not in task.allowed_tools
-    assert "skill_read" not in task.allowed_tools
+    assert "skill_list" in task.allowed_tools
+    assert "skill_read" in task.allowed_tools
 
 
 def test_chat_task_includes_skill_tools_when_user_skills_exist(tmp_path: Path, monkeypatch) -> None:
@@ -193,9 +193,11 @@ def test_chat_task_includes_skill_tools_when_user_skills_exist(tmp_path: Path, m
     assert "skill_list" in task.allowed_tools
     assert "skill_read" in task.allowed_tools
     assert "Available Skills:" in gateway.model_inputs[0]
+    assert "When a listed skill clearly applies to the task" in gateway.model_inputs[0]
     assert "- review [user]: Review workflow." in gateway.model_inputs[0]
+    assert "- haagent-config (invoke: customize-haagent) [builtin]" in gateway.model_inputs[0]
     assert "PRIVATE BODY" not in gateway.model_inputs[0]
-    assert manifest["source_diagnostics"]["skills"]["available_count"] == 1
+    assert manifest["source_diagnostics"]["skills"]["available_count"] == 2
 
 
 def test_chat_task_includes_web_tools_when_explicitly_enabled(tmp_path: Path) -> None:

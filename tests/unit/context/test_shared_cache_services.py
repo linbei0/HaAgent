@@ -119,7 +119,7 @@ def test_shared_caches_reuse_across_two_context_builds(tmp_path: Path, monkeypat
     assert first_cache["skills"]["status"] == "miss"
     assert second_cache["instructions"]["status"] == "hit"
     assert second_cache["skills"]["status"] == "hit"
-    assert second_cache["skills"]["count"] == 1
+    assert second_cache["skills"]["count"] == 2
     assert second_cache["skills"]["chars"] > 0
 
     # metadata 变化后必须 reload

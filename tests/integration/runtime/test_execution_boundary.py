@@ -16,12 +16,14 @@ import pytest
 
 from haagent.context.builder import ContextBuilder
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.path_policy import ExternalRoot, PathPolicy
 from haagent.runtime.contracts.plan import build_plan
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.runtime.sandbox.local import LocalSubprocessSandboxBackend
 from haagent.tools.code_run import code_run
+from haagent.tools.base import ToolExecutionContext
 from haagent.tools.router import ToolRouter
 from haagent.tools.shell import shell
 
@@ -128,8 +130,8 @@ def test_shell_rejects_workspace_escape_before_execution(tmp_path: Path) -> None
     )
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "tool_argument_invalid"
-    assert "cwd must stay inside workspace_root" in result["error"]["message"]
+    assert result["error"]["type"] == "approval_required"
+    assert "用户确认" in result["error"]["message"]
     assert not outside.exists()
 
 
@@ -146,7 +148,7 @@ def test_code_run_rejects_workspace_escape_before_script_creation(tmp_path: Path
     )
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "tool_argument_invalid"
+    assert result["error"]["type"] == "approval_required"
     assert not outside.exists()
     assert not (tmp_path / ".haagent-tmp").exists()
 
@@ -158,6 +160,7 @@ def test_timeout_above_execution_boundary_is_rejected(tmp_path: Path) -> None:
     assert result["error"] == {
         "type": "tool_argument_invalid",
         "message": "timeout_seconds must be <= 120",
+        "retryable": True,
     }
 
 
@@ -283,8 +286,8 @@ def test_external_read_root_cannot_be_execution_cwd(tmp_path: Path) -> None:
     )
 
     assert result["status"] == "error"
-    assert result["error"]["type"] == "path_policy_denied"
-    assert "需要完全信任" in result["error"]["message"]
+    assert result["error"]["type"] == "approval_required"
+    assert "用户确认" in result["error"]["message"]
 
 
 def test_external_full_root_can_be_execution_cwd(tmp_path: Path) -> None:
@@ -334,6 +337,122 @@ def test_full_access_path_policy_allows_external_execution_cwd(tmp_path: Path) -
 
     assert result["status"] == "success"
     assert result["stdout_excerpt"].strip() == str(external.resolve())
+
+
+def test_request_approval_allows_external_execution_cwd_after_confirmation(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=True)
+
+    result = shell(
+        {"command": f"{sys.executable} -c \"from pathlib import Path; print(Path.cwd().resolve())\"", "cwd": str(external), "timeout_seconds": 5},
+        project,
+        path_policy=PathPolicy(project_root=project, permission_mode="request_approval"),
+        execution_context=ToolExecutionContext(interaction_handler=interaction),
+    )
+
+    assert result["status"] == "success"
+    assert result["stdout_excerpt"].strip() == str(external.resolve())
+    assert len(requests) == 1
+    assert requests[0].tool_name == "external_directory"
+    assert requests[0].args_summary["access"] == "full"
+
+
+def test_shell_requests_external_directory_from_powershell_command_before_execution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "profile"
+    project.mkdir()
+    external.mkdir()
+    target = external / "providers.json"
+    target.write_text('{"version": 4}', encoding="utf-8")
+    monkeypatch.setenv("HAAGENT_TEST_PROFILE", str(external))
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=False, answer="deny")
+
+    result = shell(
+        {
+            "command": r"Get-Content $env:HAAGENT_TEST_PROFILE\providers.json",
+            "timeout_seconds": 5,
+        },
+        project,
+        path_policy=PathPolicy(project_root=project, permission_mode="request_approval"),
+        execution_context=ToolExecutionContext(interaction_handler=interaction),
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "approval_denied"
+    assert [request.tool_name for request in requests] == ["external_directory"]
+    assert requests[0].args_summary["directories"] == [str(external.resolve())]
+
+
+def test_code_run_declared_external_directory_requests_permission(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=False, answer="deny")
+
+    result = code_run(
+        {
+            "code": "print('must not run')",
+            "external_directories": [str(external)],
+            "timeout_seconds": 5,
+        },
+        project,
+        path_policy=PathPolicy(project_root=project, permission_mode="request_approval"),
+        execution_context=ToolExecutionContext(interaction_handler=interaction),
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "approval_denied"
+    assert [request.tool_name for request in requests] == ["external_directory"]
+    assert not (project / ".haagent-tmp").exists()
+
+
+def test_low_privilege_allows_local_shell_in_workspace(tmp_path: Path) -> None:
+    result = shell(
+        {"command": "echo should-not-run", "timeout_seconds": 5},
+        tmp_path,
+        path_policy=PathPolicy(project_root=tmp_path, permission_mode="auto_approve"),
+        sandbox_backend=LocalSubprocessSandboxBackend(
+            workspace_root=tmp_path,
+            command_timeout_seconds=5,
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["stdout_excerpt"].strip() == "should-not-run"
+
+
+def test_low_privilege_allows_local_code_run_in_workspace(tmp_path: Path) -> None:
+    result = code_run(
+        {"code": "print('should-not-run')", "timeout_seconds": 5},
+        tmp_path,
+        path_policy=PathPolicy(project_root=tmp_path, permission_mode="request_approval"),
+        sandbox_backend=LocalSubprocessSandboxBackend(
+            workspace_root=tmp_path,
+            command_timeout_seconds=5,
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["stdout_excerpt"].strip() == "should-not-run"
 
 
 def _task() -> TaskSpec:

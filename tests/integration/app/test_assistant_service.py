@@ -1470,8 +1470,8 @@ def test_service_lists_trusts_and_reads_skills(tmp_path: Path, monkeypatch) -> N
     trusted = service.skills.trust_project()
     content = service.skills.read_for_user("grill-me")
 
-    assert [skill["name"] for skill in initial.skills] == ["grill-me"]
+    assert [skill["name"] for skill in initial.skills] == ["grill-me", "haagent-config"]
     assert initial.blocked_project_skill_roots == [str((workspace / ".haagent" / "skills").resolve())]
-    assert {skill["name"] for skill in trusted.skills} == {"grill-me", "Project Flow"}
+    assert {skill["name"] for skill in trusted.skills} == {"grill-me", "Project Flow", "haagent-config"}
     assert content.command_name == "grill-me"
     assert "Ask sharp questions." in content.content

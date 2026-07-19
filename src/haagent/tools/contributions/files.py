@@ -30,22 +30,22 @@ from haagent.tools.file_tools import (
 
 
 def _bind_file_list(deps: ToolRuntimeDeps) -> ToolHandler:
-    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
-        return file_list(args, deps.workspace_root, deps.path_policy)
+    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+        return file_list(args, deps.workspace_root, deps.path_policy, context)
 
     return handler
 
 
 def _bind_grep(deps: ToolRuntimeDeps) -> ToolHandler:
-    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
-        return grep(args, deps.workspace_root, deps.path_policy)
+    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+        return grep(args, deps.workspace_root, deps.path_policy, context)
 
     return handler
 
 
 def _bind_file_read(deps: ToolRuntimeDeps) -> ToolHandler:
-    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
-        return file_read(args, deps.workspace_root, deps.path_policy)
+    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+        return file_read(args, deps.workspace_root, deps.path_policy, context)
 
     return handler
 
@@ -57,7 +57,7 @@ def _bind_file_write(deps: ToolRuntimeDeps) -> ToolHandler:
             args,
             deps.workspace_root,
             deps.path_policy,
-            context.interaction_handler,
+            context,
         )
 
     return handler
@@ -69,7 +69,7 @@ def _bind_apply_patch(deps: ToolRuntimeDeps) -> ToolHandler:
             args,
             deps.workspace_root,
             deps.path_policy,
-            context.interaction_handler,
+            context,
         )
 
     return handler
@@ -81,7 +81,7 @@ def _bind_apply_patch_set(deps: ToolRuntimeDeps) -> ToolHandler:
             args,
             deps.workspace_root,
             deps.path_policy,
-            context.interaction_handler,
+            context,
         )
 
     return handler
@@ -245,14 +245,14 @@ def _apply_patch_set_observation(args: dict[str, Any], result: dict[str, Any]) -
 FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="file_list",
-        description="list a compact workspace file tree for project discovery",
+        description="list a compact file tree by absolute or workspace-relative path",
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": 'optional workspace-relative directory to list; defaults to "."',
+                    "description": 'optional absolute or workspace-relative directory; external paths require permission; defaults to "."',
                 },
                 "max_depth": {
                     "type": "integer",
@@ -286,7 +286,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
                 },
                 "root": {
                     "type": "string",
-                    "description": "optional workspace-relative directory or file to search",
+                    "description": "optional absolute or workspace-relative directory or file to search; external paths require permission",
                 },
                 "file_glob": {
                     "type": "string",
@@ -316,14 +316,14 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="file_read",
-        description="read a workspace text file with offset, limit, or keyword context",
+        description="read a text file by absolute or workspace-relative path with offset, limit, or keyword context",
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "workspace-relative file path",
+                    "description": "absolute or workspace-relative file path; external paths require permission",
                 },
                 "offset": {
                     "type": "integer",
@@ -353,14 +353,14 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="file_write",
-        description="create, overwrite, or append a workspace text file",
+        description="create, overwrite, or append a text file by absolute or workspace-relative path",
         risk_level="high",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "workspace-relative file path",
+                    "description": "absolute or workspace-relative file path; external paths require permission",
                 },
                 "content": {
                     "type": "string",
@@ -387,14 +387,14 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ),
     ToolContribution(
         name="apply_patch",
-        description="replace unique text inside a workspace file",
+        description="replace unique text inside a file by absolute or workspace-relative path",
         risk_level="high",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "workspace-relative file path",
+                    "description": "absolute or workspace-relative file path; external paths require permission",
                 },
                 "old_text": {
                     "type": "string",
@@ -433,7 +433,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
                 "replacements": {
                     "type": "array",
                     "description": (
-                        "non-empty list of replacements; each item has workspace-relative path, "
+                        "non-empty list of replacements; each item has an absolute or workspace-relative path, "
                         "old_text, and new_text"
                     ),
                 },

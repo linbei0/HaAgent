@@ -351,11 +351,11 @@ def test_agent_session_emits_recovery_for_model_failure(tmp_path: Path) -> None:
     assert recovery_events[-1].suggested_action == "retry_or_switch_model"
 
 
-def test_edit_diff_session_always_persists_on_resume_not_new_session(
+def test_session_always_permissions_persist_on_resume_not_new_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """always 随 session metadata 恢复；new() 与新 session 不继承。"""
+    """edit_diff 与工具权限 always 随 session 恢复；new() 不继承。"""
     from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
     from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
 
@@ -373,6 +373,19 @@ def test_edit_diff_session_always_persists_on_resume_not_new_session(
                 tool_name="file_write",
                 question="Approve?",
                 args_summary={"path": "a.txt", "diff_preview": "+a"},
+            ),
+            HumanInteractionResponse(approved=True, answer="always"),
+            turn=1,
+        )
+        resolver.record(
+            HumanInteractionRequest(
+                interaction_type="approval",
+                tool_name="external_directory",
+                question="Allow external directory?",
+                args_summary={
+                    "permission_patterns": ["C:/Users/test/.haagent/*"],
+                    "permission_always": ["C:/Users/test/.haagent/*"],
+                },
             ),
             HumanInteractionResponse(approved=True, answer="always"),
             turn=1,
@@ -405,17 +418,24 @@ def test_edit_diff_session_always_persists_on_resume_not_new_session(
     )
     session.run_prompt_events("write files")
     assert session._session_interaction_state.edit_diff_session_always is True
+    assert session._session_interaction_state.permission_rules == [
+        {"permission": "external_directory", "pattern": "C:/Users/test/.haagent/*"},
+    ]
 
     metadata = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
     assert metadata["edit_diff_session_always"] is True
+    assert metadata["permission_rules"] == session._session_interaction_state.permission_rules
 
     resumed = AgentSession.resume(session.session_path, model_gateway=None)
     assert resumed._session_interaction_state.edit_diff_session_always is True
+    assert resumed._session_interaction_state.permission_rules == session._session_interaction_state.permission_rules
 
     session.new()
     assert session._session_interaction_state.edit_diff_session_always is False
+    assert session._session_interaction_state.permission_rules == []
     new_meta = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
     assert new_meta.get("edit_diff_session_always") is False
+    assert new_meta.get("permission_rules") == []
 def test_switch_model_gateway_failure_restores_all_fields_and_closes_rejected_gateway(tmp_path) -> None:
     class Gateway:
         provider_name = "fake"

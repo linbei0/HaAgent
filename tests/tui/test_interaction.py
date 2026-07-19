@@ -90,6 +90,7 @@ def test_tui_help_modal_is_contextual_for_approval_modal(tmp_path: Path) -> None
             assert after_help == before
             assert "审批确认" in rendered
             assert "y" in rendered
+            assert "a" in rendered
             assert "n" in rendered
 
     asyncio.run(run())
@@ -248,9 +249,28 @@ def test_tui_approval_allow_returns_approved_true_to_same_prompt(tmp_path: Path)
             await pilot.press("y")
             await pilot.pause(0.2)
             assert service.prompts == ["Run checks"]
-            assert service.interaction_responses == [HumanInteractionResponse(approved=True, answer="")]
+            assert service.interaction_responses == [HumanInteractionResponse(approved=True, answer="once")]
             assert "审批已允许：shell" not in _text(app, "#conversation")
             assert "assistant: Run checks" in _text(app, "#conversation")
+
+    asyncio.run(run())
+
+
+def test_tui_approval_always_returns_session_rule_to_same_prompt(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_approval_request())
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Run checks"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            await pilot.press("a")
+            await pilot.pause(0.2)
+            assert service.prompts == ["Run checks"]
+            assert service.interaction_responses == [
+                HumanInteractionResponse(approved=True, answer="always"),
+            ]
 
     asyncio.run(run())
 
@@ -266,7 +286,7 @@ def test_tui_approval_deny_returns_approved_false_to_same_prompt(tmp_path: Path)
             await pilot.press("n")
             await pilot.pause(0.2)
             assert service.prompts == ["Run checks"]
-            assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
+            assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="deny")]
             conversation = app.query_one("#conversation", ConversationTimeline)
             assert "已拒绝：运行命令" in conversation.plain_text
             status = _text(app, "#status-bar")

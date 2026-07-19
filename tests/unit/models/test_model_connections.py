@@ -4,6 +4,7 @@ tests/unit/models/test_model_connections.py - providers v4 存储与解析测试
 
 from __future__ import annotations
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -56,6 +57,19 @@ def test_store_round_trips_per_model_context_limit(tmp_path) -> None:
     raw = json.loads(store.path.read_text(encoding="utf-8"))
     assert raw["connections"][0]["models"]["gpt-5"]["max_context_tokens"] == 400_000
     assert store.load().connection("main").models["gpt-5"].max_context_tokens == 400_000
+
+
+def test_store_loads_valid_utf8_bom_config_without_changing_digest_bytes(tmp_path) -> None:
+    path = tmp_path / "providers.json"
+    document = {"version": 4, "connections": [_record().to_dict()]}
+    raw = b"\xef\xbb\xbf" + json.dumps(document).encode("utf-8")
+    path.write_bytes(raw)
+
+    snapshot = ModelConfigStore(path).load()
+
+    assert snapshot.load_error is None
+    assert [record.id for record in snapshot.records] == ["main"]
+    assert snapshot.digest == hashlib.sha256(raw).hexdigest()[:16]
 
 
 def test_store_rejects_unknown_v4_field_and_digest_conflict(tmp_path) -> None:

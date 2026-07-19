@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PROJECT_SKILL_DIRS = (".haagent/skills", ".agents/skills", ".claude/skills")
 USER_COMPAT_SKILL_DIRS = ((".agents", "skills"), (".claude", "skills"))
+BUILTIN_SKILL_DIR = Path(__file__).with_name("builtin")
+BUILTIN_SKILL_PREFIX = "haagent-"
 
 
 def load_skill_registry(
@@ -30,14 +32,20 @@ def load_skill_registry(
     user_skill_dirs: Iterable[str | Path] | None = None,
     settings: SkillSettings | None = None,
 ) -> SkillRegistry:
-    """加载用户级和受信任项目级 skills。"""
+    """加载内置、用户级和受信任项目级 skills。"""
     registry = SkillRegistry()
+    for skill in load_skills_from_dirs(
+        [BUILTIN_SKILL_DIR],
+        source="builtin",
+        create_missing=False,
+    ):
+        registry.register(skill)
     for skill in load_skills_from_dirs(
         get_user_skill_dirs(config_dir=config_dir) if user_skill_dirs is None else user_skill_dirs,
         source="user",
         create_missing=user_skill_dirs is None,
     ):
-        registry.register(skill)
+        _register_non_builtin_skill(registry, skill)
 
     if workspace_root is not None:
         resolved_settings = settings or load_skill_settings(config_dir=config_dir)
@@ -47,8 +55,17 @@ def load_skill_registry(
                 source="project",
                 create_missing=False,
             ):
-                registry.register(skill)
+                _register_non_builtin_skill(registry, skill)
     return registry
+
+
+def _register_non_builtin_skill(registry: SkillRegistry, skill: SkillDefinition) -> None:
+    """保留 HaAgent 内置 skill 名称，避免外部内容静默覆盖产品规则。"""
+
+    if skill.name.lower().startswith(BUILTIN_SKILL_PREFIX):
+        logger.warning("Ignoring external skill reserved for HaAgent: %s", skill.name)
+        return
+    registry.register(skill)
 
 
 def get_user_skill_dirs(*, config_dir: Path | None = None) -> list[Path]:

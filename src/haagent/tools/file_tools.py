@@ -1,7 +1,7 @@
 """
 haagent/tools/file_tools.py - 文件类本地工具
 
-实现文件发现、读取、写入和补丁类工具，并限制路径在 workspace 内。
+实现文件发现、读取、写入和补丁类工具；外部路径统一进入目录权限审批。
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ from haagent.memory.path_policy import (
     MEMORY_STORE_PATH_MESSAGE,
     is_workspace_memory_store_path,
 )
-from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_path_for_access
+from haagent.runtime.execution.path_policy import PathAccess, PathPolicy, default_path_policy
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler, HumanInteractionRequest
-from haagent.tools.base import tool_error
+from haagent.tools.base import ToolExecutionContext, tool_error
+from haagent.tools.path_access import resolve_tool_paths
 
 
 PATH_GUIDANCE = "path is relative to workspace_root"
@@ -55,14 +56,19 @@ PERMISSION_ERROR_MARKERS = (
 )
 
 
-def file_list(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def file_list(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    execution_context: ToolExecutionContext | None = None,
+) -> dict[str, Any]:
     path_arg = args.get("path", ".")
     if not isinstance(path_arg, str):
         return tool_error("tool_argument_invalid", "path must be a string")
     policy = path_policy or default_path_policy(workspace_root)
-    root = resolve_path_for_access(path_arg, policy, "read")
-    if isinstance(root, str):
-        return tool_error("path_policy_denied", root)
+    root = _resolve_tool_path(path_arg, policy, "read", execution_context)
+    if isinstance(root, dict):
+        return root
     if not root.exists():
         result = tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
         if suggested_tool := _suggest_file_list_parent(root, workspace_root):
@@ -101,7 +107,12 @@ def file_list(args: dict[str, Any], workspace_root: Path, path_policy: PathPolic
     }
 
 
-def grep(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def grep(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    execution_context: ToolExecutionContext | None = None,
+) -> dict[str, Any]:
     """优先使用 ripgrep 搜索文本；rg 不可用时退回 Python 遍历。"""
     pattern = args.get("pattern")
     if not isinstance(pattern, str) or not pattern:
@@ -131,9 +142,9 @@ def grep(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | N
         )
 
     policy = path_policy or default_path_policy(workspace_root)
-    root = resolve_path_for_access(root_arg, policy, "read")
-    if isinstance(root, str):
-        return tool_error("path_policy_denied", root)
+    root = _resolve_tool_path(root_arg, policy, "read", execution_context)
+    if isinstance(root, dict):
+        return root
     if not root.exists():
         return tool_error("tool_argument_invalid", f"root does not exist: {root_arg}; {ROOT_GUIDANCE}")
     if access_error := _search_root_access_error(root, root_arg):
@@ -163,14 +174,19 @@ def grep(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | N
     )
 
 
-def file_read(args: dict[str, Any], workspace_root: Path, path_policy: PathPolicy | None = None) -> dict[str, Any]:
+def file_read(
+    args: dict[str, Any],
+    workspace_root: Path,
+    path_policy: PathPolicy | None = None,
+    execution_context: ToolExecutionContext | None = None,
+) -> dict[str, Any]:
     path_arg = args.get("path")
     if not isinstance(path_arg, str):
         return tool_error("tool_argument_invalid", "path must be a string")
     policy = path_policy or default_path_policy(workspace_root)
-    path = resolve_path_for_access(path_arg, policy, "read")
-    if isinstance(path, str):
-        return tool_error("path_policy_denied", path)
+    path = _resolve_tool_path(path_arg, policy, "read", execution_context)
+    if isinstance(path, dict):
+        return path
     if not path.exists():
         result = tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
         result["suggestions"] = _similar_workspace_paths(path_arg, workspace_root)
@@ -237,7 +253,7 @@ def file_write(
     args: dict[str, Any],
     workspace_root: Path,
     path_policy: PathPolicy | None = None,
-    interaction_handler: HumanInteractionHandler | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     path_arg = args.get("path")
     content = args.get("content")
@@ -248,9 +264,9 @@ def file_write(
         return tool_error("tool_argument_invalid", "mode must be create, overwrite, or append")
 
     policy = path_policy or default_path_policy(workspace_root)
-    path = resolve_path_for_access(path_arg, policy, "full")
-    if isinstance(path, str):
-        return tool_error("path_policy_denied", path)
+    path = _resolve_tool_path(path_arg, policy, "full", execution_context)
+    if isinstance(path, dict):
+        return path
     if is_workspace_memory_store_path(path, workspace_root):
         return tool_error(MEMORY_STORE_PATH_ERROR, MEMORY_STORE_PATH_MESSAGE)
     if not path.parent.exists():
@@ -278,7 +294,7 @@ def file_write(
         deletions=0 if mode == "append" else None,
     )
     if approval_error := _request_edit_approval(
-        interaction_handler,
+        execution_context.interaction_handler if execution_context is not None else None,
         tool_name="file_write",
         question=f"Approve file edit for {path_arg}?",
         reason=f"file_write will {mode} {path_arg}",
@@ -310,7 +326,7 @@ def apply_patch(
     args: dict[str, Any],
     workspace_root: Path,
     path_policy: PathPolicy | None = None,
-    interaction_handler: HumanInteractionHandler | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     """仅允许工作区内文件，并要求 old_text 唯一匹配后再写回。"""
     path_arg = args.get("path")
@@ -320,9 +336,9 @@ def apply_patch(
         return tool_error("tool_argument_invalid", "path, old_text, and new_text must be strings")
 
     policy = path_policy or default_path_policy(workspace_root)
-    path = resolve_path_for_access(path_arg, policy, "full")
-    if isinstance(path, str):
-        return tool_error("path_policy_denied", path)
+    path = _resolve_tool_path(path_arg, policy, "full", execution_context)
+    if isinstance(path, dict):
+        return path
     if is_workspace_memory_store_path(path, workspace_root):
         return tool_error(MEMORY_STORE_PATH_ERROR, MEMORY_STORE_PATH_MESSAGE)
     if not path.exists():
@@ -346,7 +362,7 @@ def apply_patch(
         replacements=1,
     )
     if approval_error := _request_edit_approval(
-        interaction_handler,
+        execution_context.interaction_handler if execution_context is not None else None,
         tool_name="apply_patch",
         question=f"Approve file edit for {path_arg}?",
         reason=f"apply_patch will modify {path_arg}",
@@ -369,26 +385,23 @@ def apply_patch_set(
     args: dict[str, Any],
     workspace_root: Path,
     path_policy: PathPolicy | None = None,
-    interaction_handler: HumanInteractionHandler | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     """原子校验多个唯一文本替换；全部可应用后才写文件。"""
     replacements = args.get("replacements")
     if not isinstance(replacements, list) or not replacements:
         return tool_error("tool_argument_invalid", "replacements must be a non-empty list")
 
-    staged_texts: dict[Path, str] = {}
-    original_texts: dict[Path, str] = {}
-    summaries: list[dict[str, object]] = []
+    validated: list[tuple[str, str, str]] = []
     for index, replacement in enumerate(replacements):
         if not isinstance(replacement, dict):
             return _patch_set_error(
                 "tool_argument_invalid",
                 "each replacement must be an object",
-                summaries,
+                [],
                 replacements,
                 index,
             )
-
         path_arg = replacement.get("path")
         old_text = replacement.get("old_text")
         new_text = replacement.get("new_text")
@@ -396,23 +409,27 @@ def apply_patch_set(
             return _patch_set_error(
                 "tool_argument_invalid",
                 "path, old_text, and new_text must be strings",
-                summaries,
+                [],
                 replacements,
                 index,
                 path_arg,
             )
+        validated.append((path_arg, old_text, new_text))
 
-        policy = path_policy or default_path_policy(workspace_root)
-        path = resolve_path_for_access(path_arg, policy, "full")
-        if isinstance(path, str):
-            return _patch_set_error(
-                "path_policy_denied",
-                path,
-                summaries,
-                replacements,
-                index,
-                path_arg,
-            )
+    policy = path_policy or default_path_policy(workspace_root)
+    resolved_paths = resolve_tool_paths(
+        [item[0] for item in validated],
+        policy,
+        "full",
+        execution_context,
+    )
+    if isinstance(resolved_paths, dict):
+        return resolved_paths
+
+    staged_texts: dict[Path, str] = {}
+    original_texts: dict[Path, str] = {}
+    summaries: list[dict[str, object]] = []
+    for index, ((path_arg, old_text, new_text), path) in enumerate(zip(validated, resolved_paths)):
         if is_workspace_memory_store_path(path, workspace_root):
             return _patch_set_error(
                 MEMORY_STORE_PATH_ERROR,
@@ -490,7 +507,7 @@ def apply_patch_set(
         for path, text in sorted(staged_texts.items(), key=lambda item: str(item[0]))
     ]
     if approval_error := _request_edit_approval(
-        interaction_handler,
+        execution_context.interaction_handler if execution_context is not None else None,
         tool_name="apply_patch_set",
         question="Approve file edits?",
         reason=f"apply_patch_set will modify {len(changed_files)} file(s)",
@@ -601,6 +618,18 @@ def _request_edit_approval(
     if response.approved:
         return None
     return tool_error("approval_denied", f"edit approval denied for {tool_name}")
+
+
+def _resolve_tool_path(
+    path: str,
+    policy: PathPolicy,
+    access: PathAccess,
+    execution_context: ToolExecutionContext | None,
+) -> Path | dict[str, Any]:
+    resolved = resolve_tool_paths([path], policy, access, execution_context)
+    if isinstance(resolved, dict):
+        return resolved
+    return resolved[0]
 
 
 def _diff_preview(path: str, old_text: str, new_text: str, *, max_lines: int = 80) -> str:

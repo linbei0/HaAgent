@@ -285,6 +285,7 @@ def write_session_metadata(
     created_at: str,
     turn_count: int,
     edit_diff_session_always: bool = False,
+    permission_rules: list[dict[str, str]] | None = None,
     first_request: str | None = None,
     session_snapshot_schema_version: int | None = None,
 ) -> str:
@@ -313,6 +314,8 @@ def write_session_metadata(
         "path_policy": serialize_path_policy(path_policy),
         # 仅布尔标志，不保存完整 diff；新 session 默认 False
         "edit_diff_session_always": bool(edit_diff_session_always),
+        # 仅保存用户选择“始终允许”的结构化权限模式，不保存一次性批准。
+        "permission_rules": list(permission_rules or []),
         # 持久化 SessionSnapshot 逻辑版本；resume 据此迁移/拒绝未知版本。
         "session_snapshot_schema_version": schema_version,
         "provider": provider,

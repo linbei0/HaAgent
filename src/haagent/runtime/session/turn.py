@@ -23,27 +23,10 @@ from haagent.runtime.orchestration.recorder import RunResult
 from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.session.chat_task_contract import build_chat_task_contract
-from haagent.skills import load_skill_registry
 from haagent.skills.catalog import SkillCatalogService
-from haagent.skills.settings import load_skill_settings
+from haagent.tools.access import ToolAccessManager
 from haagent.tools.registry import ToolRuntimeRegistry
 from haagent.tools.presentation import summarize_tool_args, summarize_tool_result
-
-
-def _chat_tool_lists() -> tuple[list[str], list[str], list[str], list[str]]:
-    # chat 可见工具集由静态 ToolCatalog tags 派生，避免与 registry 分头维护。
-    from haagent.tools.catalog import default_tool_catalog
-
-    catalog = default_tool_catalog()
-    return (
-        catalog.chat_default_tools(),
-        catalog.chat_web_tools(),
-        catalog.chat_skill_tools(),
-        catalog.chat_approval_tools(),
-    )
-
-
-CHAT_ALLOWED_TOOLS, CHAT_WEB_TOOLS, CHAT_SKILL_TOOLS, CHAT_APPROVED_TOOLS = _chat_tool_lists()
 
 
 class OrchestratorFactory(Protocol):
@@ -185,33 +168,29 @@ def write_chat_task_yaml(
     skill_catalog: SkillCatalogService | None = None,
 ) -> None:
     mcp_tools = list(mcp_tool_names or [])
+    from haagent.tools.catalog import default_tool_catalog
+
+    catalog = default_tool_catalog()
     if allowed_tools_override is None:
-        allowed_tools = list(CHAT_ALLOWED_TOOLS)
-        if image_attachment_history:
-            allowed_tools.append("load_image_attachment")
-        if enable_web:
-            allowed_tools.extend(CHAT_WEB_TOOLS)
-        if skill_catalog is not None:
-            has_skills = bool(skill_catalog.snapshot(workspace_root, load_skill_settings()).skills)
-        else:
-            has_skills = bool(load_skill_registry(workspace_root=workspace_root).list_skills())
-        if has_skills:
-            allowed_tools.extend(CHAT_SKILL_TOOLS)
-        if mcp_tools:
-            allowed_tools.extend(mcp_tools)
-            allowed_tools.extend(["list_mcp_resources", "read_mcp_resource"])
+        allowed_tools = ToolAccessManager.candidate_tools(
+            catalog=catalog,
+            enable_web=enable_web,
+            has_skills=ToolAccessManager.skills_available(workspace_root, skill_catalog),
+            image_attachment_history=bool(image_attachment_history),
+            mcp_tool_names=mcp_tools,
+        )
     else:
         allowed_tools = list(allowed_tools_override)
-        # 显式 override 时仍尊重 enable_web：计划任务可能存了无 web 的工具快照
+        # override 只是请求集合，最终仍由 ToolAccessManager 按当前能力过滤。
         if enable_web:
-            for name in CHAT_WEB_TOOLS:
+            for name in catalog.chat_web_tools():
                 if name not in allowed_tools:
                     allowed_tools.append(name)
     policy = path_policy or default_path_policy(workspace_root)
     approval_allowed_tools = (
         list(approval_allowed_tools_override)
         if approval_allowed_tools_override is not None
-        else [*CHAT_APPROVED_TOOLS, *mcp_tools]
+        else [*catalog.chat_approval_tools(), *mcp_tools]
     )
     approved_tools = (
         list(approved_tools_override)

@@ -39,7 +39,7 @@ class HelpModal(ModalScreen[None]):
         self.dismiss(None)
 
 
-class ToolApprovalModal(ModalScreen[bool]):
+class ToolApprovalModal(ModalScreen[str]):
     BINDINGS = APPROVAL_BINDINGS
 
     def __init__(self, request: HumanInteractionRequest) -> None:
@@ -51,25 +51,33 @@ class ToolApprovalModal(ModalScreen[bool]):
             yield Static(MODAL_TITLES["approval"], id="approval-title")
             yield Static(Text(approval_body(self.request)), id="approval-body")
             with Horizontal(id="approval-buttons"):
-                yield Button("允许 y", id="approval-allow", variant="success", classes="action-success")
+                yield Button("允许本次 y", id="approval-once", variant="success", classes="action-success")
+                yield Button("始终允许 a", id="approval-always", variant="primary")
                 yield Button("拒绝 n", id="approval-deny", variant="error", classes="action-danger")
 
     def on_mount(self) -> None:
         self.query_one("#approval-deny", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "approval-allow")
+        decisions = {
+            "approval-once": "once",
+            "approval-always": "always",
+        }
+        self.dismiss(decisions.get(event.button.id, "deny"))
 
     def on_key(self, event: events.Key) -> None:
         if event.key in {"?", "question_mark"} or event.character == "?":
             event.stop()
             self.action_help()
 
-    def action_allow(self) -> None:
-        self.dismiss(True)
+    def action_allow_once(self) -> None:
+        self.dismiss("once")
+
+    def action_allow_always(self) -> None:
+        self.dismiss("always")
 
     def action_deny(self) -> None:
-        self.dismiss(False)
+        self.dismiss("deny")
 
     def action_help(self) -> None:
         self.app.push_screen(HelpModal("approval"))

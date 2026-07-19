@@ -30,6 +30,19 @@ class HumanInteractionResponse:
 HumanInteractionHandler = Callable[[HumanInteractionRequest], HumanInteractionResponse]
 
 
+@dataclass(frozen=True)
+class ToolPermissionRequest:
+    """工具执行期间提交给统一权限入口的结构化请求。"""
+
+    permission: str
+    patterns: tuple[str, ...]
+    always: tuple[str, ...] = ()
+    metadata: dict[str, object] = field(default_factory=dict)
+    question: str = ""
+    reason: str = ""
+    risk_level: str | None = None
+
+
 def interaction_args_summary(tool_name: str, args: dict[str, Any]) -> dict[str, object]:
     # 静态工具摘要由 ToolCatalog contribution 提供；未知/动态工具走通用回退。
     from haagent.tools.catalog import default_tool_catalog

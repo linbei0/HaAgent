@@ -7,6 +7,7 @@ haagent/tools/router.py - 工具路由器
 from __future__ import annotations
 
 import time
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,6 +20,7 @@ from haagent.runtime.execution.guardrails import GuardrailResult, check_tool_inp
 from haagent.runtime.execution.human_interaction import (
     HumanInteractionHandler,
     HumanInteractionRequest,
+    ToolPermissionRequest,
     interaction_args_summary,
 )
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy
@@ -451,16 +453,17 @@ class ToolRouter:
                 policy_decision,
                 None,
             )
-        response = interaction_handler(
-            HumanInteractionRequest(
-                interaction_type="approval",
-                tool_name=tool_name,
-                question=f"Approve high risk tool {tool_name}?",
-                reason=policy_decision.approval.reason,
-                risk_level=policy_decision.risk_level,
-                args_summary=interaction_args_summary(tool_name, args),
-            ),
-        )
+        context = ToolExecutionContext(interaction_handler=interaction_handler)
+        response = context.ask(_tool_permission_request(tool_name, args, policy_decision))
+        if response is None:
+            return (
+                tool_error(
+                    "policy_denied",
+                    f"{policy_decision.reason}; interactive approval is unavailable",
+                ),
+                policy_decision,
+                None,
+            )
         if not response.approved:
             denied_policy = deny_tool_approval(policy_decision)
             return (
@@ -587,6 +590,30 @@ class ToolRouter:
             )
 
 
+def _tool_permission_request(
+    tool_name: str,
+    args: dict[str, Any],
+    decision: PolicyDecision,
+) -> ToolPermissionRequest:
+    summary = interaction_args_summary(tool_name, args)
+    pattern = json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    always = pattern
+    if tool_name == "shell":
+        command = str(summary.get("command", "")).strip()
+        prefix = command.split(maxsplit=1)[0] if command else "shell"
+        always = f"{prefix} *"
+        pattern = command or pattern
+    return ToolPermissionRequest(
+        permission=tool_name,
+        patterns=(pattern,),
+        always=(always,),
+        metadata=summary,
+        question=f"Approve high risk tool {tool_name}?",
+        reason=decision.approval.reason,
+        risk_level=decision.risk_level,
+    )
+
+
 def _validate_args(
     tool_name: str,
     args: dict[str, Any],
@@ -595,7 +622,11 @@ def _validate_args(
     runtime_registry = registry or default_tool_runtime_registry()
     schema = runtime_registry.get(tool_name).parameters
     if schema.get("type") != "object":
-        return tool_error("tool_argument_invalid", "tool arguments schema must be object")
+        return tool_error(
+            "tool_registry_invalid",
+            "tool arguments schema must be object",
+            retryable=False,
+        )
 
     required = schema.get("required", [])
     for name in required:

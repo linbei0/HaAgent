@@ -302,5 +302,17 @@ class OpenAIResponsesGateway:
             content=output_text,
             tool_calls=tool_calls,
             usage=_parse_openai_responses_usage(response),
+            termination=_openai_responses_termination(response, bool(tool_calls)),
             provider_turn_state=(ProviderTurnState("openai", continuation) if continuation else None),
         )
+
+
+def _openai_responses_termination(response: dict[str, object], has_tool_calls: bool) -> str:
+    if has_tool_calls:
+        return "tool_calls"
+    if response.get("status") == "completed":
+        return "completed"
+    incomplete = response.get("incomplete_details")
+    if isinstance(incomplete, dict) and incomplete.get("reason") in {"max_output_tokens", "max_tokens"}:
+        return "length"
+    return "unknown"

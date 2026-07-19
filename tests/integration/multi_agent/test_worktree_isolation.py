@@ -16,6 +16,7 @@ from haagent.runtime.execution.path_policy import default_path_policy
 
 def test_code_worker_writes_only_inside_its_worktree(tmp_path: Path) -> None:
     repo = _init_git_repo(tmp_path / "repo")
+
     runtime = MultiAgentRuntime(
         runs_root=tmp_path / ".runs",
         workspace_root=repo,
@@ -28,6 +29,11 @@ def test_code_worker_writes_only_inside_its_worktree(tmp_path: Path) -> None:
                         name="file_write",
                         args={"path": "README.md", "content": "changed in worktree\n", "mode": "overwrite"},
                         id="call-write-readme",
+                    ),
+                    ToolCall(
+                        name="file_read",
+                        args={"path": "README.md"},
+                        id="call-read-readme",
                     ),
                 ],
             ),
@@ -49,7 +55,7 @@ def test_code_worker_writes_only_inside_its_worktree(tmp_path: Path) -> None:
         subagent_type="worker",
         system_prompt="你是代码实现助手。",
         model_profile=None,
-        allowed_tools=["fake_tool", "file_write"],
+        allowed_tools=["fake_tool", "file_write", "file_read"],
         approval_allowed_tools=["file_write"],
         approved_tools=["file_write"],
         max_turns=None,

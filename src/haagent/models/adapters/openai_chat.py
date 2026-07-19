@@ -28,6 +28,7 @@ from haagent.models.adapters.transport import (
 )
 from haagent.models.types import (
     ModelCallError,
+    ModelFailureDetails,
     ModelGatewayMetadata,
     ModelResponse,
     ModelUsage,
@@ -69,10 +70,43 @@ def _parse_chat_completion_response(response: dict[str, object]) -> ModelRespons
         content = ""
     if not isinstance(content, str):
         raise ModelCallError("OpenAI chat message content must be a string")
+    tool_calls = _parse_chat_tool_calls(message.get("tool_calls"))
+    if not tool_calls and _contains_embedded_tool_markup(content):
+        # 某些 OpenAI-compatible 服务把内部 DSML/XML 工具协议塞进 content；
+        # 这不是结构化工具调用，禁止把协议文本误当成最终回答或直接执行。
+        raise ModelCallError(
+            "OpenAI chat response contained embedded tool markup without structured tool_calls",
+            details=ModelFailureDetails(category="protocol", retryable=False),
+        )
     return ModelResponse(
         content=content,
-        tool_calls=_parse_chat_tool_calls(message.get("tool_calls")),
+        tool_calls=tool_calls,
         usage=_parse_openai_chat_usage(response),
+        termination=_openai_chat_termination(first_choice.get("finish_reason"), bool(tool_calls)),
+    )
+
+
+def _openai_chat_termination(raw: object, has_tool_calls: bool) -> str:
+    if has_tool_calls:
+        return "tool_calls"
+    return {
+        "stop": "completed",
+        "length": "length",
+        "content_filter": "content_filter",
+    }.get(raw, "unknown")
+
+
+def _contains_embedded_tool_markup(content: str) -> bool:
+    """识别已知 provider 工具协议标记；不对普通 XML/Markdown 做宽泛猜测。"""
+
+    return any(
+        marker in content
+        for marker in (
+            "<｜｜DSML｜｜tool_calls>",
+            "<｜｜DSML｜｜invoke",
+            "<tool_call>",
+            "</tool_call>",
+        )
     )
 
 

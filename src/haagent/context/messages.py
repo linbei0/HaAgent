@@ -199,16 +199,6 @@ def build_suggestion_message(suggestion_text: str) -> dict[str, Any]:
     return {"role": "user", "content": f"[Suggestion] {suggestion_text}"}
 
 
-def build_final_response_request_message() -> dict[str, Any]:
-    return {
-        "role": "user",
-        "content": (
-            "The runtime has enough successful evidence. "
-            "Produce a concise final answer now; do not call tools again."
-        ),
-    }
-
-
 def _format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     status = result.get("status", "unknown")
     if status == "error":

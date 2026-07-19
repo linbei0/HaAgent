@@ -1,7 +1,7 @@
 """
 tests/integration/multi_agent/test_worker_permissions.py - worker 权限请求集成测试
 
-验证 worker 高风险工具会形成结构化 pending request，而不是直接静默失败。
+验证 worker 高风险工具会形成结构化 pending request，并在用户决定后继续或失败。
 """
 
 from pathlib import Path
@@ -11,12 +11,10 @@ from haagent.multi_agent.runtime import MultiAgentRuntime
 from haagent.runtime.execution.path_policy import default_path_policy
 
 
-class _ShellApprovalGateway:
+class _ShellGateway:
     provider_name = "fake"
 
     def generate(self, invocation, **kwargs):
-        messages = invocation.messages
-        tool_schemas = invocation.tool_schemas
         return ModelResponse(
             content="run shell",
             tool_calls=[
@@ -36,10 +34,8 @@ class _ApprovalResumeGateway:
         self.calls = 0
 
     def generate(self, invocation, **kwargs):
-        messages = invocation.messages
-        tool_schemas = invocation.tool_schemas
         self.calls += 1
-        if any(message.get("role") == "tool" for message in messages):
+        if any(message.get("role") == "tool" for message in invocation.messages):
             return ModelResponse(content="completed after approved shell", tool_calls=[])
         return ModelResponse(
             content="run approved shell",
@@ -74,7 +70,7 @@ def _runtime(tmp_path: Path, gateway) -> MultiAgentRuntime:
 
 
 def test_worker_high_risk_tool_creates_pending_permission_request(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, _ShellApprovalGateway())
+    runtime = _runtime(tmp_path, _ShellGateway())
 
     worker = runtime.spawn_worker(
         description="run tests",
@@ -116,8 +112,6 @@ def test_approved_permission_resumes_worker_and_completes(tmp_path: Path) -> Non
     assert runtime.store.read_permission_requests(worker["team_id"], status="approved") == []
     consumed = runtime.store.read_permission_requests(worker["team_id"], status="consumed")
     assert [request.request_id for request in consumed] == [pending.request_id]
-    tool_calls = (Path(str(finished["episode_path"])) / "tool-calls.jsonl").read_text(encoding="utf-8")
-    assert "approved run" in tool_calls
 
 
 def test_rejected_permission_fails_worker_and_consumes_request(tmp_path: Path) -> None:

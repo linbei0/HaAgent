@@ -29,6 +29,8 @@ ModelFailureCategory = Literal[
     "stream_interrupted",
 ]
 
+ModelTermination = Literal["completed", "tool_calls", "length", "content_filter", "unknown"]
+
 
 @dataclass(frozen=True)
 class ModelFailureDetails:
@@ -96,6 +98,8 @@ class ModelResponse:
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: ModelUsage | None = None
+    # provider 的停止原因经 adapter 归一化；runtime 据此拒绝截断或内容过滤的伪完成回答。
+    termination: ModelTermination = "unknown"
     # runtime 只保存和透传；provider adapter 独占 payload 语义。
     provider_turn_state: "ProviderTurnState | None" = None
 

@@ -17,6 +17,7 @@ KEY_VALUE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SECRET_REQUEST_VERBS = ["print", "show", "read", "dump", "leak", "expose", "读取", "打印", "泄露", "导出"]
+_INTENT_SEGMENT_BOUNDARY = re.compile(r"[\r\n。！？.!?；;]+")
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,7 @@ class GuardrailResult:
 def check_user_input(text: str) -> GuardrailResult | None:
     normalized = text.lower()
     asks_for_secret = any(pattern in normalized for pattern in ["~/.ssh", "id_rsa"])
-    mentions_key = any(pattern in normalized for pattern in ["api key", "apikey", "api keys", "secret key"])
-    has_secret_verb = any(verb in normalized for verb in SECRET_REQUEST_VERBS)
-    if asks_for_secret or (mentions_key and has_secret_verb):
+    if asks_for_secret or _requests_secret_in_same_segment(text):
         return GuardrailResult(
             status="blocked",
             scope="input",
@@ -59,6 +58,18 @@ def check_user_input(text: str) -> GuardrailResult | None:
             severity="high",
         )
     return None
+
+
+def _requests_secret_in_same_segment(text: str) -> bool:
+    """只拦截同一句或同一行中的索取密钥意图，避免文档上下文误伤。"""
+
+    for segment in _INTENT_SEGMENT_BOUNDARY.split(text):
+        normalized = segment.lower()
+        mentions_key = any(pattern in normalized for pattern in ["api key", "apikey", "api keys", "secret key"])
+        has_secret_verb = any(verb in normalized for verb in SECRET_REQUEST_VERBS)
+        if mentions_key and has_secret_verb:
+            return True
+    return False
 
 
 def check_tool_input(tool_name: str, args: dict[str, Any]) -> GuardrailResult | None:

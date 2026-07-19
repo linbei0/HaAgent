@@ -16,7 +16,6 @@ from typing import Any, Callable
 
 from haagent.context.messages import (
     build_assistant_message,
-    build_final_response_request_message,
     build_suggestion_message,
     build_tool_result_message,
     generate_tool_call_id,
@@ -72,12 +71,7 @@ from haagent.verification.engine import VerificationEngine
 class TurnLoopState:
     messages: list[dict[str, Any]]
     context_id: str
-    completion_observations: list[dict[str, object]] = field(default_factory=list)
-    final_response_requested: bool = False
-    has_file_change: bool = False
-    has_shell_verification: bool = False
-    passed_verification_commands: set[str] = field(default_factory=set)
-    changed_files: list[dict[str, object]] = field(default_factory=list)
+    completion_recovery_attempted: bool = False
     verification_engine: VerificationEngine | None = None
     pending_worker_task_ids: list[str] = field(default_factory=list)
     progress_warn_emitted: bool = False
@@ -107,10 +101,6 @@ class TurnLoopDependencies:
     record_guardrail: Callable[[object, int | None], None]
     record_suggestion: Callable[[int, object], None]
     tool_error_is_terminal: Callable[[dict[str, object]], bool]
-    update_in_band_verification_progress: Callable[[str, dict[str, object], dict[str, object], list[str], set[str]], None]
-    all_declared_verification_commands_passed: Callable[[list[str], set[str]], bool]
-    successful_file_change_without_declared_verification: Callable[[list[dict[str, object]], list[str]], bool]
-    verification_observation: Callable[[object], dict[str, object]]
     verification_evidence: Callable[[object], str]
     verification_loop_limit_evidence: Callable[[int, object], str]
     task_step_id: str = "step-001"
@@ -147,7 +137,7 @@ def run_turn_loop(
             if deps.performance_trace is not None:
                 deps.performance_trace.record_cache_diagnostic("tool_schema", value)
 
-        tool_schemas = [] if state.final_response_requested else export_tool_schemas(
+        tool_schemas = export_tool_schemas(
             deps.allowed_tools,
             registry=deps.tool_registry,
             cache=deps.tool_schema_cache,
@@ -349,6 +339,7 @@ def run_turn_loop(
                 {"name": tc.name, "args": tc.args}
                 for tc in model_response.tool_calls
             ],
+            "termination": model_response.termination,
         }
         usage_record = _usage_record(model_response.usage)
         if usage_record is not None:
@@ -362,17 +353,6 @@ def run_turn_loop(
                     "stage": "executing",
                     "category": FailureCategory.GUARDRAIL.value,
                     "evidence": guardrail_evidence(output_guardrail),
-                },
-            )
-            return deps.recorder.finish(RunStatus.FAILED)
-
-        if state.final_response_requested and model_response.tool_calls:
-            deps.recorder.transition(RunStatus.FAILED)
-            deps.writer.write_failure_attribution(
-                {
-                    "stage": "executing",
-                    "category": FailureCategory.MODEL.value,
-                    "evidence": "model returned tool calls during final response turn",
                 },
             )
             return deps.recorder.finish(RunStatus.FAILED)
@@ -440,16 +420,23 @@ def _handle_no_tool_response(
     state: TurnLoopState,
     deps: TurnLoopDependencies,
 ) -> RunResult | None:
-    if state.final_response_requested and not model_response.content.strip():
-        deps.recorder.transition(RunStatus.FAILED)
-        deps.writer.write_failure_attribution(
-            {
-                "stage": "executing",
-                "category": FailureCategory.MODEL.value,
-                "evidence": "model returned empty final response during final response turn",
-            },
+    if model_response.termination in {"length", "content_filter"}:
+        return _fail_completion_candidate(
+            deps=deps,
+            evidence=f"model completion candidate rejected: termination={model_response.termination}",
         )
-        return deps.recorder.finish(RunStatus.FAILED)
+    if not model_response.content.strip():
+        return _fail_completion_candidate(
+            deps=deps,
+            evidence="model returned empty completion candidate without tool calls",
+        )
+    deps.writer.append_transcript(
+        {
+            "event": "completion_candidate_reviewed",
+            "turn": turn,
+            "termination": model_response.termination,
+        },
+    )
     if state.pending_worker_task_ids:
         notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
         deps.writer.append_transcript(
@@ -469,24 +456,40 @@ def _handle_no_tool_response(
             "trigger": None,
         },
     )
-    deps.emit_event(AssistantMessageBusEvent(turn=turn, content=model_response.content))
     deps.recorder.transition(RunStatus.VERIFYING)
     if state.verification_engine is None:
         state.verification_engine = VerificationEngine(deps.writer, deps.workspace_root)
     deps.raise_if_cancelled()
-    if state.changed_files:
-        verification_result = state.verification_engine.run(
-            deps.verification_commands,
-            changed_files=state.changed_files,
-        )
-    else:
-        verification_result = state.verification_engine.run(deps.verification_commands)
+    verification_result = state.verification_engine.run(deps.verification_commands)
     if verification_result.status == "success":
+        deps.emit_event(AssistantMessageBusEvent(turn=turn, content=model_response.content))
         deps.recorder.transition(RunStatus.COMPLETED)
         deps.writer.write_failure_attribution(None)
         return deps.recorder.finish(RunStatus.COMPLETED)
 
-    verification_obs = deps.verification_observation(verification_result)
+    verification_evidence = deps.verification_evidence(verification_result)
+    if state.completion_recovery_attempted:
+        deps.emit_event(
+            coerce_bus_event(
+                task_step_blocked_event(
+                    step_id=deps.task_step_id,
+                    title=_task_step_title(deps),
+                    category="verification_stalled",
+                    reason=verification_evidence,
+                    suggested_action="continue, replan, or stop",
+                ),
+            ),
+        )
+        deps.recorder.transition(RunStatus.FAILED)
+        deps.writer.write_failure_attribution(
+            {
+                "stage": "verifying",
+                "category": FailureCategory.VERIFICATION.value,
+                "evidence": f"verification remained unsuccessful after one recovery turn: {verification_evidence}",
+            },
+        )
+        return deps.recorder.finish(RunStatus.FAILED)
+    state.completion_recovery_attempted = True
     deps.emit_event(
         coerce_bus_event(
             task_checkpoint_saved_event(
@@ -501,7 +504,7 @@ def _handle_no_tool_response(
     recovery = map_failure_to_recovery(
         {
             "event_type": "verification_failed",
-            "reason": deps.verification_evidence(verification_result),
+            "reason": verification_evidence,
         },
     )
     if recovery is not None:
@@ -517,11 +520,10 @@ def _handle_no_tool_response(
             ),
         )
     ver_msg = build_suggestion_message(
-        f"Verification failed: {deps.verification_evidence(verification_result)}. "
-        "Use the failure details to repair the workspace, then try again."
+        f"Verification failed: {verification_evidence}. "
+        "Use the failure details to repair the task, then retry the declared verification command."
     )
     state.messages.append(ver_msg)
-    state.final_response_requested = False
     if deps.max_turns is not None and turn == deps.max_turns:
         deps.emit_event(
             coerce_bus_event(
@@ -561,7 +563,6 @@ def _run_tool_calls(
     pending_suggestion_messages: list[str] = []
     visible_result_fingerprints: set[str] = set()
     terminal_error: dict[str, object] | None = None
-    verification_count_before = len(state.passed_verification_commands)
     tool_results = _dispatch_tool_calls(turn=turn, tool_calls=tool_calls_with_ids, deps=deps)
     for tool_call, tool_result in zip(tool_calls_with_ids, tool_results):
         deps.raise_if_cancelled()
@@ -649,22 +650,6 @@ def _run_tool_calls(
             deps.record_suggestion(turn, suggestion)
             pending_suggestion_messages.append(suggestion.message)
 
-        if tool_call.name in {"apply_patch", "apply_patch_set", "file_write"}:
-            state.completion_observations = [observation]
-            state.has_file_change = True
-            _record_changed_files(state.changed_files, tool_result)
-        else:
-            state.completion_observations.append(observation)
-        if tool_call.name in {"shell", "code_run"} and tool_result.get("exit_code") == 0:
-            state.has_shell_verification = True
-        deps.update_in_band_verification_progress(
-            tool_call.name,
-            tool_call.args,
-            tool_result,
-            deps.verification_commands,
-            state.passed_verification_commands,
-        )
-
     for suggestion_message in pending_suggestion_messages:
         if suggestion_message:
             state.messages.append(build_suggestion_message(suggestion_message))
@@ -689,7 +674,6 @@ def _run_tool_calls(
         tool_results=tool_results,
         state=state,
         deps=deps,
-        verification_count_before=verification_count_before,
     )
     if progress_result is not None:
         return progress_result
@@ -697,19 +681,6 @@ def _run_tool_calls(
     if terminal_error is not None:
         deps.router.raise_for_error(terminal_error)
 
-    if not turn_broke_early and not loaded_image_attached_this_turn and (
-        deps.all_declared_verification_commands_passed(
-            deps.verification_commands,
-            state.passed_verification_commands,
-        )
-        or (state.has_file_change and state.has_shell_verification and not deps.verification_commands)
-        or deps.successful_file_change_without_declared_verification(
-            state.completion_observations,
-            deps.verification_commands,
-        )
-    ):
-        state.final_response_requested = True
-        state.messages.append(build_final_response_request_message())
     return None
 
 
@@ -720,18 +691,16 @@ def _apply_progress_guard(
     tool_results: list[dict[str, Any]],
     state: TurnLoopState,
     deps: TurnLoopDependencies,
-    verification_count_before: int,
 ) -> RunResult | None:
     """完整工具 batch 后观察 ProgressGuard；mode 控制 warn/block 行为。"""
     guard = deps.progress_guard
     if guard is None:
         return None
-    mode = deps.progress_guard_mode or "warn"
+    mode = deps.progress_guard_mode or "block"
     frame = _build_progress_frame(
         tool_calls=tool_calls,
         tool_results=tool_results,
         state=state,
-        verification_count_before=verification_count_before,
     )
     decision = guard.observe(frame)
     if frame.workspace_changed or frame.verification_progressed:
@@ -881,7 +850,6 @@ def _build_progress_frame(
     tool_calls: list[ToolCall],
     tool_results: list[dict[str, Any]],
     state: TurnLoopState,
-    verification_count_before: int,
 ) -> ProgressFrame:
     pairs: list[tuple[str, dict[str, Any], str, str]] = []
     has_running_tool = False
@@ -910,11 +878,9 @@ def _build_progress_frame(
             workspace_changed = True
         if status != "error" and tool_result.get("changed_files"):
             workspace_changed = True
-    verification_progressed = len(state.passed_verification_commands) > verification_count_before
     return ProgressFrame(
         pairs=tuple(pairs),
         workspace_changed=workspace_changed,
-        verification_progressed=verification_progressed,
         context_chars=_estimate_context_chars(state.messages),
         has_running_tool=has_running_tool,
         has_running_worker=bool(state.pending_worker_task_ids),
@@ -965,18 +931,9 @@ def _dispatch_tool_calls(
     interaction_handler = _interaction_handler_for_turn(turn, deps)
     results: list[dict[str, Any] | None] = [None] * len(tool_calls)
     index = 0
-    stop_remaining = False
+    block_high_impact = False
 
     while index < len(tool_calls):
-        if stop_remaining:
-            _skip_remaining_tool_calls(
-                tool_calls=tool_calls,
-                results=results,
-                start_index=index,
-                deps=deps,
-            )
-            break
-
         deps.raise_if_cancelled()
         tool_call = tool_calls[index]
         if _tool_call_is_parallel_safe(tool_call, deps=deps):
@@ -996,31 +953,26 @@ def _dispatch_tool_calls(
                 interaction_handler=interaction_handler,
             )
             if failed:
-                stop_remaining = True
-                if batch_end < len(tool_calls):
-                    _skip_remaining_tool_calls(
-                        tool_calls=tool_calls,
-                        results=results,
-                        start_index=batch_end,
-                        deps=deps,
-                    )
+                # 低风险读取仍可为下一轮恢复提供独立信息，但后续副作用不能冒险继续。
+                block_high_impact = True
             index = batch_end
             continue
 
         # 串行屏障：写入、外部副作用、交互、高风险与未知工具独占执行
+        if block_high_impact:
+            results[index] = deps.router.record_skipped(
+                tool_call.name,
+                tool_call.args,
+                _not_started_tool_result(),
+            )
+            index += 1
+            continue
         deps.raise_if_cancelled()
         deps.emit_event(_tool_started_event(turn, tool_call))
         result = _dispatch_tool_call(tool_call, deps, interaction_handler, turn=turn)
         results[index] = result
         if result.get("status") == "error":
-            stop_remaining = True
-            _skip_remaining_tool_calls(
-                tool_calls=tool_calls,
-                results=results,
-                start_index=index + 1,
-                deps=deps,
-            )
-            break
+            block_high_impact = True
         index += 1
 
     return [item if item is not None else _not_started_tool_result() for item in results]
@@ -1050,22 +1002,6 @@ def _not_started_tool_result() -> dict[str, Any]:
         },
         "execution_state": "not_started",
     }
-
-
-def _skip_remaining_tool_calls(
-    *,
-    tool_calls: list[ToolCall],
-    results: list[dict[str, Any] | None],
-    start_index: int,
-    deps: TurnLoopDependencies,
-) -> None:
-    for index in range(start_index, len(tool_calls)):
-        if results[index] is not None:
-            continue
-        tool_call = tool_calls[index]
-        skipped = _not_started_tool_result()
-        # 未启动调用只写 trace，不进入 dispatch/policy/handler
-        results[index] = deps.router.record_skipped(tool_call.name, tool_call.args, skipped)
 
 
 def _run_read_batch(
@@ -1098,10 +1034,9 @@ def _run_read_batch(
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="haagent-tool") as executor:
         def submit_available() -> None:
             nonlocal next_pos
-            # 只维持最多 max_workers 个 in-flight，失败后不再领取
+            # 只维持最多 max_workers 个 in-flight；独立读取失败不取消其余读取。
             while (
-                not failed
-                and cancelled_error is None
+                cancelled_error is None
                 and next_pos < len(batch_indices)
                 and len(in_flight) < max_workers
             ):
@@ -1138,12 +1073,11 @@ def _run_read_batch(
                     failed = True
             if cancelled_error is not None:
                 break
-            if not failed:
-                try:
-                    submit_available()
-                except RunCancelled as error:
-                    cancelled_error = error
-                    break
+            try:
+                submit_available()
+            except RunCancelled as error:
+                cancelled_error = error
+                break
 
         while in_flight:
             done, _ = wait(set(in_flight), return_when=FIRST_COMPLETED)
@@ -1161,16 +1095,6 @@ def _run_read_batch(
     if cancelled_error is not None:
         raise cancelled_error
 
-    if failed:
-        for index in batch_indices:
-            if results[index] is None:
-                tool_call = tool_calls[index]
-                skipped = _not_started_tool_result()
-                results[index] = deps.router.record_skipped(
-                    tool_call.name,
-                    tool_call.args,
-                    skipped,
-                )
     return failed
 
 
@@ -1218,13 +1142,16 @@ def _tool_started_event(turn: int, tool_call: ToolCall) -> ToolStartedBusEvent:
     )
 
 
-def _record_changed_files(changed_files: list[dict[str, object]], tool_result: dict[str, object]) -> None:
-    raw_changes = tool_result.get("changed_files")
-    if not isinstance(raw_changes, list):
-        return
-    for change in raw_changes:
-        if isinstance(change, dict):
-            changed_files.append(dict(change))
+def _fail_completion_candidate(*, deps: TurnLoopDependencies, evidence: str) -> RunResult:
+    deps.recorder.transition(RunStatus.FAILED)
+    deps.writer.write_failure_attribution(
+        {
+            "stage": "executing",
+            "category": FailureCategory.MODEL.value,
+            "evidence": evidence,
+        },
+    )
+    return deps.recorder.finish(RunStatus.FAILED)
 
 
 def _wait_for_pending_worker_tasks(

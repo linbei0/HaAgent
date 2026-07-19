@@ -239,8 +239,20 @@ def _parse_anthropic_response(response: dict[str, object]) -> ModelResponse:
         content="".join(text_parts),
         tool_calls=tool_calls,
         usage=_parse_anthropic_usage(response),
+        termination=_anthropic_termination(response.get("stop_reason"), bool(tool_calls)),
         provider_turn_state=(ProviderTurnState("anthropic", continuation) if continuation else None),
     )
+
+
+def _anthropic_termination(raw: object, has_tool_calls: bool) -> str:
+    if has_tool_calls:
+        return "tool_calls"
+    return {
+        "end_turn": "completed",
+        "stop_sequence": "completed",
+        "max_tokens": "length",
+        "refusal": "content_filter",
+    }.get(raw, "unknown")
 
 
 def _parse_anthropic_usage(response: dict[str, object]) -> ModelUsage | None:

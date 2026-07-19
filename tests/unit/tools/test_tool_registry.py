@@ -162,7 +162,7 @@ def test_export_file_list_schema_describes_discovery_defaults() -> None:
     schemas = export_tool_schemas(["file_list"])
     schema = schemas[0]
 
-    assert schema["description"] == "list a compact workspace file tree for project discovery"
+    assert schema["description"] == "list a compact file tree by absolute or workspace-relative path"
     assert schema["parameters"]["required"] == []
     assert set(schema["parameters"]["properties"]) == {"path", "max_depth", "max_entries"}
 

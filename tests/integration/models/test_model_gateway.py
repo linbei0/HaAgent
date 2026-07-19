@@ -363,6 +363,30 @@ def test_provider_gateways_retry_a_retryable_model_failure(
     assert attempts == 2
 
 
+def test_openai_chat_rejects_embedded_tool_markup_without_structured_calls() -> None:
+    gateway = OpenAIChatCompletionsGateway(
+        api_key="key",
+        model="model",
+        transport=lambda payload, api_key: {
+            "choices": [
+                {
+                    "message": {
+                        "content": "<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"file_read\"></｜｜DSML｜｜tool_calls>",
+                        "tool_calls": [],
+                    },
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ModelCallError, match="embedded tool markup") as raised:
+        gateway.generate([], [])
+
+    assert raised.value.details is not None
+    assert raised.value.details.category == "protocol"
+    assert raised.value.details.retryable is False
+
+
 def test_stream_delta_then_failure_is_not_retried() -> None:
     attempts = 0
     deltas: list[str] = []
@@ -1880,6 +1904,7 @@ def test_openai_chat_gateway_normalizes_tool_calls_and_tools_payload() -> None:
     assert response == ModelResponse(
         content="",
         tool_calls=[ToolCall(name="fake_tool", args={"value": 1})],
+        termination="tool_calls",
     )
     assert captured["payload"] == {
         "model": "chat-test",
@@ -2062,6 +2087,7 @@ def test_openai_gateway_normalizes_tool_call_response() -> None:
     assert response == ModelResponse(
         content="",
         tool_calls=[ToolCall(name="fake_tool", args={"value": 1})],
+        termination="tool_calls",
     )
 
 

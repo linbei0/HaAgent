@@ -7,6 +7,7 @@ src/haagent/runtime/orchestration/orchestrator.py - Run Orchestrator 状态机
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,6 +50,7 @@ from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.sandbox import SandboxBackend, create_sandbox_backend
 from haagent.runtime.settings import DEFAULT_RUN_MAX_TURNS, load_runtime_settings
 from haagent.runtime.contracts.task import TaskLoadError
+from haagent.tools.access import ToolAccessManager
 from haagent.tools.base import ToolRoutingError
 from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 from haagent.tools.router import ToolRouter
@@ -144,6 +146,35 @@ class RunOrchestrator:
                 command_timeout_seconds=DEFAULT_COMMAND_TIMEOUT_SECONDS,
             )
             writer.write_sandbox_metadata(sandbox_backend.metadata())
+            model_capabilities = None
+            capabilities = getattr(self._model_gateway, "capabilities", None)
+            if callable(capabilities):
+                model_capabilities = capabilities()
+            access_snapshot = ToolAccessManager.resolve(
+                task.allowed_tools,
+                registry=self._tool_registry,
+                workspace_root=workspace_root,
+                mcp_runtime=self._mcp_runtime,
+                model_capabilities=model_capabilities,
+                skill_catalog=self._skill_catalog,
+                image_attachment_history=bool(task.image_attachment_history),
+            )
+            allowed_set = set(access_snapshot.allowed_tools)
+            task = replace(
+                task,
+                allowed_tools=list(access_snapshot.allowed_tools),
+                policy={
+                    key: [name for name in values if name in allowed_set]
+                    for key, values in task.policy.items()
+                },
+            )
+            writer.append_transcript(
+                {
+                    "event": "tool_access_snapshot",
+                    "allowed_tools": list(access_snapshot.allowed_tools),
+                    "denied_tools": dict(access_snapshot.denied_tools),
+                },
+            )
             input_guardrail = check_user_input(task.goal)
             if input_guardrail is not None:
                 _record_guardrail(writer, self._emit_event, input_guardrail)
@@ -207,11 +238,8 @@ class RunOrchestrator:
                 skill_catalog=self._skill_catalog,
             )
             verification_engine: VerificationEngine | None = None
-            passed_verification_commands: set[str] = set()
-            has_file_change = False
-            has_shell_verification = False
             progress_guard = ProgressGuard()
-            # permission_mode 控制 edit_diff 自动跳过；session always 来自跨 turn 状态
+            # permission_mode 与 always 权限规则都经结构化 session 状态跨 turn 复用。
             interaction_resolver = HumanInteractionResolver(
                 permission_mode=path_policy.permission_mode,
                 session_interaction_state=self._session_interaction_state,
@@ -303,10 +331,6 @@ class RunOrchestrator:
                         suggestion,
                     ),
                     tool_error_is_terminal=_tool_error_is_terminal,
-                    update_in_band_verification_progress=_update_in_band_verification_progress,
-                    all_declared_verification_commands_passed=_all_declared_verification_commands_passed,
-                    successful_file_change_without_declared_verification=_successful_file_change_without_declared_verification,
-                    verification_observation=_verification_observation,
                     verification_evidence=_verification_evidence,
                     verification_loop_limit_evidence=_verification_loop_limit_evidence,
                     task_step_id=task_step_id,
@@ -362,6 +386,7 @@ class RunOrchestrator:
             )
             return recorder.finish(RunStatus.FAILED)
         except ModelCallError as error:
+            failed_stage = recorder.state_history[-1].value if recorder.state_history else "planning"
             _emit_task_recovery(
                 self._emit_event,
                 self._task_ledger,
@@ -372,8 +397,12 @@ class RunOrchestrator:
             transition(RunStatus.FAILED)
             writer.write_failure_attribution(
                 {
-                    "stage": "planning",
-                    "category": FailureCategory.MODEL.value,
+                    "stage": failed_stage,
+                    "category": (
+                        FailureCategory.MODEL_PROTOCOL.value
+                        if error.details is not None and error.details.category == "protocol"
+                        else FailureCategory.MODEL.value
+                    ),
                     "evidence": str(error),
                 },
             )
@@ -460,22 +489,6 @@ def _verification_loop_limit_evidence(max_turns: int, verification_result) -> st
     )
 
 
-def _successful_file_change_without_declared_verification(
-    completion_observations: list[dict[str, object]],
-    verification_commands: list[str],
-) -> bool:
-    if verification_commands or not completion_observations:
-        return False
-    latest = completion_observations[-1]
-    tool_name = latest.get("tool_name")
-    result = latest.get("result")
-    return (
-        tool_name == "file_write"
-        and isinstance(result, dict)
-        and result.get("status") == "success"
-    )
-
-
 def _record_suggestion(
     writer: EpisodeWriter,
     emit_event: Callable[[RuntimeBusEvent | dict[str, object]], None],
@@ -553,6 +566,9 @@ def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:
     # 审批/策略/护栏硬拒绝终态；误用工具名回 observation 让模型自纠
     if error_type in {"approval_denied", "approval_pending", "policy_denied", "guardrail_denied"}:
         return True
+    retryable = error.get("retryable")
+    if isinstance(retryable, bool):
+        return not retryable
     if error_type in {
         "tool_not_allowed",
         "unknown_tool",
@@ -566,8 +582,6 @@ def _tool_error_is_terminal(tool_result: dict[str, object]) -> bool:
         return False
     if tool_result.get("suggested_tool"):
         return False
-    if error_type == "tool_argument_invalid" and str(error.get("message", "")).startswith("unexpected argument:"):
-        return False
     return error_type == "tool_argument_invalid"
 
 
@@ -579,7 +593,7 @@ def _interaction_bridge(
 ) -> HumanInteractionHandler:
     def handle(request: HumanInteractionRequest) -> HumanInteractionResponse:
         if resolution := interaction_resolver.resolve(request):
-            # mode_auto / session_always / 精确签名复用：写 interaction_reused，不伪造用户点击
+            # 自动模式、session always 或用户输入复用：只写 reused，不伪造用户点击。
             reused_event = _interaction_reused_event(turn, resolution)
             writer.append_interaction_event("interaction_reused", _transcript_event(reused_event))
             orchestrator._emit_event(reused_event)
@@ -674,49 +688,6 @@ def _transcript_event(event: dict[str, object]) -> dict[str, object]:
     record = dict(event)
     record.pop("event_type", None)
     return record
-
-
-def _verification_observation(verification_result) -> dict[str, object]:
-    return {
-        "tool_name": "verification",
-        "args": {"command": verification_result.failed_command},
-        "result": {
-            "status": "error",
-            "command": verification_result.failed_command,
-            "exit_code": verification_result.exit_code,
-            "failure_reason": verification_result.failure_reason,
-            "timeout": verification_result.timeout,
-            "stdout": verification_result.stdout_excerpt,
-            "stderr": verification_result.stderr_excerpt,
-        },
-    }
-
-
-def _update_in_band_verification_progress(
-    tool_name: str,
-    tool_args: dict[str, object],
-    tool_result: dict[str, object],
-    verification_commands: list[str],
-    passed_verification_commands: set[str],
-) -> None:
-    if tool_name in {"apply_patch", "apply_patch_set"}:
-        passed_verification_commands.clear()
-        return
-    if tool_name != "shell":
-        return
-    command = tool_args.get("command")
-    if not isinstance(command, str) or command not in verification_commands:
-        return
-    if tool_result.get("status") == "success" and tool_result.get("exit_code") == 0:
-        passed_verification_commands.add(command)
-
-
-def _all_declared_verification_commands_passed(
-    verification_commands: list[str],
-    passed_verification_commands: set[str],
-) -> bool:
-    expected_commands = set(verification_commands)
-    return bool(expected_commands) and expected_commands.issubset(passed_verification_commands)
 
 
 def _unexpected_failure_category(error: Exception, state_history: list[RunStatus]) -> FailureCategory:

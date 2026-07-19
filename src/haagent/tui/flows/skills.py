@@ -108,7 +108,10 @@ def handle_skill_command(app: "HaAgentTuiApp", argument: str) -> None:
         ],
     )
     app._conversation.append_block("Skills", f"已加载 skill：{skill.name}")
-    app._start_prompt(prompt)
+    # skill 正文是提供给模型的内部上下文，不能伪装成用户消息进入时间线。
+    # 否则长 skill 会造成无意义的全文渲染，也会让用户无法分辨实际请求。
+    display_prompt = skill_invocation_summary(skill.name, request)
+    app._start_prompt(prompt, display_prompt=display_prompt)
 
 
 def open_skill_picker(app: "HaAgentTuiApp", *, mode: str) -> None:
@@ -191,6 +194,15 @@ def skills_usage_text() -> str:
             "- /skills install <result-id>",
         ],
     )
+
+
+def skill_invocation_summary(skill_name: str, request: str) -> str:
+    """返回 skill 调用在对话中的最小可见投影。"""
+
+    normalized_request = request.strip()
+    if not normalized_request:
+        normalized_request = f"遵循 {skill_name} skill 完成当前任务。"
+    return f"已调用 skill：{skill_name}\n请求：{normalized_request}"
 
 
 def skill_marketplace_summary_text(result: AssistantMarketplaceSearch) -> str:

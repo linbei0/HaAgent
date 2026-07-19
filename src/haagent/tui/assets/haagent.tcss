@@ -65,7 +65,8 @@ Screen > .screen--selection {
 #conversation {
     width: 1fr;
     height: 1fr;
-    padding: 1 3;
+    /* 左侧历史轨道位于 overlay 层；预留槽位，避免覆盖时间线正文首字符。 */
+    padding: 1 3 1 5;
     border: none;
     background: $background;
     color: $foreground;

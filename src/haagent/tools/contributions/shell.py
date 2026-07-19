@@ -22,26 +22,28 @@ from haagent.tools.shell import shell
 
 
 def _bind_code_run(deps: ToolRuntimeDeps) -> ToolHandler:
-    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
         return code_run(
             args,
             deps.workspace_root,
             deps.path_policy,
             cancellation_token=deps.cancellation_token,
             sandbox_backend=deps.sandbox_backend,
+            execution_context=context,
         )
 
     return handler
 
 
 def _bind_shell(deps: ToolRuntimeDeps) -> ToolHandler:
-    def handler(args: dict[str, Any], _context: ToolExecutionContext) -> dict[str, Any]:
+    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
         return shell(
             args,
             deps.workspace_root,
             deps.path_policy,
             cancellation_token=deps.cancellation_token,
             sandbox_backend=deps.sandbox_backend,
+            execution_context=context,
         )
 
     return handler
@@ -49,11 +51,15 @@ def _bind_shell(deps: ToolRuntimeDeps) -> ToolHandler:
 
 def _code_run_interaction(args: dict[str, Any]) -> dict[str, object]:
     code = str(args.get("code", ""))
-    return {
+    summary: dict[str, object] = {
         "code_chars": len(code),
         "cwd": str(args.get("cwd", ".")),
         "timeout_seconds": args.get("timeout_seconds"),
     }
+    external_directories = args.get("external_directories")
+    if isinstance(external_directories, list) and external_directories:
+        summary["external_directories"] = list(external_directories)
+    return summary
 
 
 def _code_run_result(result: dict[str, Any]) -> dict[str, object]:
@@ -134,8 +140,16 @@ SHELL_CONTRIBUTIONS: list[ToolContribution] = [
                 "cwd": {
                     "type": "string",
                     "description": (
-                        'working directory relative to workspace_root; use "." or omit '
-                        "for workspace root"
+                        'absolute or relative to workspace_root working directory; use "." or omit '
+                        "for workspace_root; external directories require user permission"
+                    ),
+                },
+                "external_directories": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "workspace-external directories the Python code will access; "
+                        "HaAgent requests directory permission before execution"
                     ),
                 },
             },
@@ -167,8 +181,8 @@ SHELL_CONTRIBUTIONS: list[ToolContribution] = [
                 "cwd": {
                     "type": "string",
                     "description": (
-                        'working directory relative to workspace_root; use "." or omit '
-                        "for workspace root"
+                        'absolute or relative to workspace_root working directory; use "." or omit '
+                        "for workspace_root; external directories require user permission"
                     ),
                 },
                 "timeout_seconds": {

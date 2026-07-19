@@ -9,11 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from haagent.runtime.execution.command import CWD_GUIDANCE, normalize_timeout, resolve_execution_cwd, run_command
+from haagent.runtime.execution.command import CWD_GUIDANCE, normalize_timeout, run_command
 from haagent.runtime.execution.cancellation import CancellationToken
-from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, resolve_cwd_for_execution
+from haagent.runtime.execution.path_policy import PathPolicy, classify_path_access, default_path_policy
 from haagent.runtime.sandbox.base import SandboxBackend, SandboxCommand
-from haagent.tools.base import tool_error
+from haagent.tools.base import ToolExecutionContext, tool_error
+from haagent.tools.path_access import resolve_tool_paths
+from haagent.tools.shell_paths import collect_shell_paths
 
 
 def shell(
@@ -22,6 +24,7 @@ def shell(
     path_policy: PathPolicy | None = None,
     cancellation_token: CancellationToken | None = None,
     sandbox_backend: SandboxBackend | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
     """运行 shell 命令，捕获 stdout/stderr/exit_code，并把失败结构化返回。"""
     command = args.get("command")
@@ -31,13 +34,23 @@ def shell(
     cwd_arg = args.get("cwd")
     if cwd_arg is not None and not isinstance(cwd_arg, str):
         return tool_error("tool_argument_invalid", f"cwd must be a string; {CWD_GUIDANCE}")
-    if path_policy is None:
-        cwd_result = resolve_execution_cwd(cwd_arg, workspace_root)
-    else:
-        cwd_result = resolve_cwd_for_execution(cwd_arg, path_policy or default_path_policy(workspace_root))
-    if isinstance(cwd_result, str):
-        error_type = "path_policy_denied" if path_policy is not None else "tool_argument_invalid"
-        return tool_error(error_type, cwd_result)
+    policy = path_policy or default_path_policy(workspace_root)
+    cwd_path = "." if cwd_arg in (None, ".") else cwd_arg
+    cwd_preflight = classify_path_access(cwd_path, policy, "full")
+    if cwd_preflight.path is None:
+        return tool_error(cwd_preflight.error_type, cwd_preflight.message, retryable=False)
+    cwd_result = cwd_preflight.path
+    if not cwd_result.exists():
+        return tool_error("tool_argument_invalid", f"cwd does not exist: {cwd_arg}; {CWD_GUIDANCE}")
+    if not cwd_result.is_dir():
+        return tool_error("tool_argument_invalid", f"cwd must be a directory: {cwd_arg}; {CWD_GUIDANCE}")
+
+    # 与 OpenCode 相同，这只是常见文件命令的静态预检；真正隔离仍由 sandbox backend 提供。
+    command_paths = collect_shell_paths(command, cwd=cwd_result)
+    command_scope = resolve_tool_paths([cwd_result, *command_paths], policy, "full", execution_context)
+    if isinstance(command_scope, dict):
+        return command_scope
+    cwd_result = command_scope[0]
 
     timeout_result = normalize_timeout(args.get("timeout_seconds"))
     if isinstance(timeout_result, str):

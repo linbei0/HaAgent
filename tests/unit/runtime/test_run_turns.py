@@ -33,6 +33,7 @@ from haagent.runtime.orchestration.turns import (
 )
 from haagent.runtime.performance import PerformanceTrace
 from haagent.tools.registry import ToolDefinition, default_tool_runtime_registry
+from haagent.verification.engine import VerificationResult
 
 
 class _FakeRouter:
@@ -294,7 +295,7 @@ def test_read_batch_failure_skips_unstarted_and_later_calls() -> None:
     assert any(item[2].get("execution_state") == "not_started" for item in router.skipped)
 
 
-def test_serial_write_failure_skips_later_calls() -> None:
+def test_serial_write_failure_keeps_later_read_and_skips_later_high_impact_call() -> None:
     router = _PerToolRouter(
         {
             "file_write": {
@@ -316,8 +317,8 @@ def test_serial_write_failure_skips_later_calls() -> None:
         state=state,
         deps=_deps(router=router),
     )
-    assert router.calls == ["file_write"]
-    assert [name for name, _, _ in router.skipped] == ["file_read", "shell"]
+    assert router.calls == ["file_write", "file_read"]
+    assert [name for name, _, _ in router.skipped] == ["shell"]
 
 
 def test_not_started_emits_tool_failed_without_tool_started() -> None:
@@ -338,6 +339,7 @@ def test_not_started_emits_tool_failed_without_tool_started() -> None:
         tool_calls_with_ids=[
             ToolCall(name="file_write", args={"path": "a.txt"}, id="w"),
             ToolCall(name="file_read", args={"path": "a.txt"}, id="r"),
+            ToolCall(name="shell", args={"command": "echo"}, id="s"),
         ],
         state=TurnLoopState(messages=[], context_id="ctx"),
         deps=_deps(router=router, emit_event=events.append),
@@ -345,10 +347,10 @@ def test_not_started_emits_tool_failed_without_tool_started() -> None:
     payloads = [bus_event_to_dict(event) for event in events]
     started_tools = [p["tool_name"] for p in payloads if p.get("event_type") == "tool_started"]
     failed = [p for p in payloads if p.get("event_type") == "tool_failed"]
-    assert started_tools == ["file_write"]
+    assert started_tools == ["file_write", "file_read"]
     not_started = [p for p in failed if p.get("execution_state") == "not_started"]
     assert len(not_started) == 1
-    assert not_started[0]["tool_name"] == "file_read"
+    assert not_started[0]["tool_name"] == "shell"
 
 
 def test_high_risk_read_only_tool_is_serial() -> None:
@@ -981,10 +983,6 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
         record_guardrail=lambda violation, turn: None,
         record_suggestion=lambda turn, suggestion: None,
         tool_error_is_terminal=lambda result: False,
-        update_in_band_verification_progress=lambda name, args, result, commands, passed: None,
-        all_declared_verification_commands_passed=lambda commands, passed: False,
-        successful_file_change_without_declared_verification=lambda observations, commands: False,
-        verification_observation=lambda result: {},
         verification_evidence=lambda result: "",
         verification_loop_limit_evidence=lambda max_turns, result: "",
     )
@@ -1005,6 +1003,81 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
     assert "raw content" not in state.messages[0]["content"]
     assert "same_as_previous" in state.messages[1]["content"]
     assert "raw content" not in state.messages[1]["content"]
+
+
+def test_file_write_does_not_require_readback_when_no_verification_command_is_declared(tmp_path: Path) -> None:
+    emitted: list[object] = []
+    deps = _deps(router=_FakeRouter({}), writer=_FakeWriter(tmp_path), emit_event=emitted.append)
+    state = TurnLoopState(messages=[], context_id="ctx")
+
+    result = _handle_no_tool_response(
+        turn=2,
+        model_response=ModelResponse(content="完成", tool_calls=[], termination="completed"),
+        state=state,
+        deps=deps,
+    )
+
+    assert result is None
+    assert any(type(event).__name__ == "AssistantMessageBusEvent" for event in emitted)
+
+
+def test_repeated_unchanged_verification_failure_blocks_after_one_recovery_turn(tmp_path: Path) -> None:
+    writer = _FakeWriter(tmp_path)
+    transitions: list[RunStatus] = []
+    finished: list[RunStatus] = []
+    deps = _deps(
+        router=_FakeRouter({}),
+        writer=writer,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.EXECUTING],
+            transition=transitions.append,
+            finish=lambda status: finished.append(status) or status,
+        ),
+    )
+    deps = _replace_dep(deps, "workspace_root", tmp_path)
+    deps = _replace_dep(deps, "verification_evidence", lambda result: str(result.failure_reason))
+    state = TurnLoopState(
+        messages=[],
+        context_id="ctx",
+        verification_engine=SimpleNamespace(
+            run=lambda commands: VerificationResult(
+                status="failed",
+                failure_reason="test_failed",
+            ),
+        ),
+    )
+    response = ModelResponse(content="完成", tool_calls=[], termination="completed")
+
+    assert _handle_no_tool_response(turn=2, model_response=response, state=state, deps=deps) is None
+    assert _handle_no_tool_response(turn=3, model_response=response, state=state, deps=deps) is RunStatus.FAILED
+    assert finished == [RunStatus.FAILED]
+    assert "unsuccessful after one recovery turn" in str(writer.failure_records[-1])
+
+
+def test_truncated_completion_candidate_fails_without_publishing_answer() -> None:
+    transitions: list[RunStatus] = []
+    finished: list[RunStatus] = []
+    emitted: list[object] = []
+    deps = _deps(
+        router=_FakeRouter({}),
+        emit_event=emitted.append,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.EXECUTING],
+            transition=transitions.append,
+            finish=lambda status: finished.append(status) or status,
+        ),
+    )
+
+    result = _handle_no_tool_response(
+        turn=1,
+        model_response=ModelResponse(content="partial", tool_calls=[], termination="length"),
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=deps,
+    )
+
+    assert result is RunStatus.FAILED
+    assert finished == [RunStatus.FAILED]
+    assert not any(type(event).__name__ == "AssistantMessageBusEvent" for event in emitted)
 
 
 def test_agent_tool_result_is_tracked_as_pending_worker_task() -> None:
@@ -1120,7 +1193,6 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
         ),
     )
     deps = _replace_dep(deps, "model_gateway", _ModelGateway())
-    deps = _replace_dep(deps, "all_declared_verification_commands_passed", lambda commands, passed: True)
 
     result = run_turn_loop(
         state=TurnLoopState(
@@ -1202,7 +1274,6 @@ def test_turn_loop_adds_loaded_image_attachment_to_next_model_call(tmp_path: Pat
     )
     deps = _replace_dep(deps, "model_gateway", _ModelGateway())
     deps = _replace_dep(deps, "allowed_tools", ["load_image_attachment"])
-    deps = _replace_dep(deps, "all_declared_verification_commands_passed", lambda commands, passed: True)
 
     result = run_turn_loop(
         state=TurnLoopState(messages=[], context_id="ctx"),
@@ -1536,10 +1607,6 @@ def _deps(
         record_guardrail=lambda violation, turn: None,
         record_suggestion=lambda turn, suggestion: None,
         tool_error_is_terminal=lambda result: False,
-        update_in_band_verification_progress=lambda name, args, result, commands, passed: None,
-        all_declared_verification_commands_passed=lambda commands, passed: False,
-        successful_file_change_without_declared_verification=lambda observations, commands: False,
-        verification_observation=lambda result: {},
         verification_evidence=lambda result: "",
         verification_loop_limit_evidence=lambda max_turns, result: "",
         max_parallel_read_tools=max_parallel_read_tools,

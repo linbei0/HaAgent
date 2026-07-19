@@ -535,8 +535,14 @@ class HaAgentTuiApp(App[None]):
             self._set_answer_required(request.question)
         self._refresh()
 
-    def _complete_approval(self, approved: bool | None) -> None:
-        self._complete_interaction(HumanInteractionResponse(approved=bool(approved), answer=""))
+    def _complete_approval(self, decision: str | None) -> None:
+        normalized = decision or "deny"
+        self._complete_interaction(
+            HumanInteractionResponse(
+                approved=normalized in {"once", "always"},
+                answer=normalized,
+            ),
+        )
 
     def _complete_edit_diff(self, decision: str | None) -> None:
         normalized = decision or "deny"

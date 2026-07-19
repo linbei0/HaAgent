@@ -303,24 +303,6 @@ def _normalize_process_newlines(output: str) -> str:
     return output.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def resolve_execution_cwd(cwd_arg: str | None, workspace_root: Path) -> Path | str:
-    """解析执行 cwd，确保结果留在 workspace root 内。"""
-    if cwd_arg in (None, "."):
-        cwd_arg = "."
-    root = workspace_root.resolve()
-    candidate = Path(cwd_arg)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    resolved = candidate.resolve()
-    if resolved != root and root not in resolved.parents:
-        return f"cwd must stay inside workspace_root; {CWD_GUIDANCE}"
-    if not resolved.exists():
-        return f"cwd does not exist; {CWD_GUIDANCE}"
-    if not resolved.is_dir():
-        return f"cwd must be a directory; {CWD_GUIDANCE}"
-    return resolved
-
-
 def normalize_timeout(value: Any) -> float | str:
     """校验执行 timeout，省略时使用默认值，超过上限直接拒绝。"""
     if value is None:

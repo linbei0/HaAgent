@@ -28,7 +28,8 @@ APP_BINDINGS = [
 ]
 
 APPROVAL_BINDINGS = [
-    ("y", "allow", "允许"),
+    ("y", "allow_once", "允许本次"),
+    ("a", "allow_always", "始终允许"),
     ("n", "deny", "拒绝"),
     ("escape", "deny", "拒绝"),
     ("?", "help", "帮助"),
@@ -101,7 +102,8 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
         ("Ctrl+Q", "退出 TUI"),
     ],
     "approval": [
-        ("y", "允许当前工具调用"),
+        ("y", "允许当前工具调用一次"),
+        ("a", "始终允许当前会话内同类权限模式"),
         ("n", "拒绝当前工具调用"),
         ("Esc", "拒绝并关闭审批"),
         ("?", "打开此帮助"),
@@ -137,7 +139,7 @@ _FOOTER_KEYS: dict[KeyContext, list[str]] = {
     "memory_list": ["↑/↓", "Enter", "a/y/r", "Esc"],
     "memory_detail": ["a/y/r", "Esc", "?"],
     "pending_input": ["Esc", "?", "Ctrl+Q"],
-    "approval": ["y", "n", "?"],
+    "approval": ["y", "a", "n", "?"],
     "edit_diff": ["y", "a", "n", "?"],
     "too_small": ["Ctrl+Q"],
 }

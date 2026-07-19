@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from haagent.skills.loader import (
+    BUILTIN_SKILL_DIR,
     discover_project_skill_dirs,
     get_user_skill_dirs,
     load_skill_registry,
@@ -190,7 +191,7 @@ class SkillCatalogService:
                 project_trusted=project_trusted,
                 settings_fingerprint=settings_fingerprint,
             ),
-            self._source_fingerprint(user_roots + project_roots),
+            self._source_fingerprint((str(BUILTIN_SKILL_DIR.resolve()),) + user_roots + project_roots),
         )
 
     def _source_fingerprint(self, roots: tuple[str, ...]) -> str:

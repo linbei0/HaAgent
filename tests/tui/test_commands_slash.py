@@ -359,6 +359,7 @@ def test_tui_skills_install_reports_marketplace_errors(tmp_path: Path) -> None:
 def test_tui_skill_command_starts_prompt_with_explicit_skill_context(tmp_path: Path) -> None:
     service = FakeAssistantService(
         workspace_root=tmp_path,
+        assistant_content="已按 skill 处理请求。",
         skills=[
             {
                 "name": "review",
@@ -384,6 +385,10 @@ def test_tui_skill_command_starts_prompt_with_explicit_skill_context(tmp_path: P
             assert service.prompts[0].startswith("Use skill review explicitly.")
             assert "Follow this workflow." in service.prompts[0]
             assert "check this" in service.prompts[0]
+            conversation = _text(app, "#conversation")
+            assert "已调用 skill：review" in conversation
+            assert "请求：check this" in conversation
+            assert "Follow this workflow." not in conversation
 
     asyncio.run(run_test())
 

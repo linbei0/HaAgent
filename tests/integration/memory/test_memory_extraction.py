@@ -864,7 +864,7 @@ def test_agent_session_allows_profile_file_write_then_extracts_pending_candidate
                     ),
                 ],
             ),
-            ModelResponse("我会把这些作为候选记忆等待你确认。", []),
+            ModelResponse("", [ToolCall(name="file_read", args={"path": "user_profile.md"}, id="call_verify_profile")]),
             ModelResponse(
                 json.dumps(
                     {

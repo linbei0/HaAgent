@@ -12,7 +12,8 @@ def test_failure_taxonomy_contains_current_categories() -> None:
     assert {category.value for category in FailureCategory} == {
         "Task Spec Failure",
         "Context Failure",
-        "Model Failure",
+            "Model Failure",
+            "Model Protocol Failure",
         "Model Call Failure",
         "Tool Interface Failure",
         "Tool Argument Failure",
@@ -42,3 +43,24 @@ def test_tool_error_terminality_matches_runtime_boundary() -> None:
         )
 
         assert result is terminal
+
+    assert _tool_error_is_terminal(
+        {
+            "status": "error",
+            "error": {
+                "type": "tool_argument_invalid",
+                "message": "path does not exist: ~/.haagent/providers.json",
+                "retryable": True,
+            },
+        }
+    ) is False
+    assert _tool_error_is_terminal(
+        {
+            "status": "error",
+            "error": {
+                "type": "tool_argument_invalid",
+                "message": "missing required argument: path",
+                "retryable": True,
+            },
+        }
+    ) is False

@@ -229,12 +229,24 @@ def _parse_gemini_response(response: dict[str, object]) -> ModelResponse:
         content="".join(text_parts),
         tool_calls=tool_calls,
         usage=_parse_gemini_usage(response),
+        termination=_gemini_termination(first_candidate.get("finishReason"), bool(tool_calls)),
         provider_turn_state=(
             ProviderTurnState("google", {"content": dict(content)})
             if has_thought_state
             else None
         ),
     )
+
+
+def _gemini_termination(raw: object, has_tool_calls: bool) -> str:
+    if has_tool_calls:
+        return "tool_calls"
+    return {
+        "STOP": "completed",
+        "MAX_TOKENS": "length",
+        "SAFETY": "content_filter",
+        "RECITATION": "content_filter",
+    }.get(raw, "unknown")
 
 
 def _parse_gemini_usage(response: dict[str, object]) -> ModelUsage | None:

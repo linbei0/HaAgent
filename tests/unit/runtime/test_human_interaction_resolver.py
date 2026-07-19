@@ -20,13 +20,19 @@ def _user_input_request(question: str = "Which file?", path: str = "README.md") 
 
 
 def _approval_request(command: str = "echo approved", tool_name: str = "shell") -> HumanInteractionRequest:
+    command_prefix = command.split(maxsplit=1)[0]
     return HumanInteractionRequest(
         interaction_type="approval",
         tool_name=tool_name,
         question=f"Approve high risk tool {tool_name}?",
         reason="policy requires approval",
         risk_level="high",
-        args_summary={"command": command, "cwd": "."},
+        args_summary={
+            "command": command,
+            "cwd": ".",
+            "permission_patterns": [command],
+            "permission_always": [f"{command_prefix} *"],
+        },
     )
 
 
@@ -78,20 +84,40 @@ def test_resolver_reuses_declined_user_input() -> None:
     assert reused.to_response() == HumanInteractionResponse(approved=False, answer="")
 
 
-def test_resolver_reuses_approval_decisions() -> None:
+def test_resolver_does_not_reuse_allow_once_or_denial() -> None:
     resolver = HumanInteractionResolver()
 
-    approved = resolver.record(_approval_request(), HumanInteractionResponse(approved=True), turn=1)
-    denied = resolver.record(
+    resolver.record(
+        _approval_request(),
+        HumanInteractionResponse(approved=True, answer="once"),
+        turn=1,
+    )
+    resolver.record(
         _approval_request(command="rm -rf scratch"),
-        HumanInteractionResponse(approved=False),
+        HumanInteractionResponse(approved=False, answer="deny"),
         turn=2,
     )
 
-    assert resolver.resolve(_approval_request()) == approved
-    assert resolver.resolve(_approval_request(command="rm -rf scratch")) == denied
-    assert resolver.resolve(_approval_request()).to_response().approved is True
-    assert resolver.resolve(_approval_request(command="rm -rf scratch")).to_response().approved is False
+    assert resolver.resolve(_approval_request()) is None
+    assert resolver.resolve(_approval_request(command="rm -rf scratch")) is None
+
+
+def test_resolver_reuses_always_permission_rule_by_pattern() -> None:
+    resolver = HumanInteractionResolver()
+    resolver.record(
+        _approval_request(command="pytest tests/unit"),
+        HumanInteractionResponse(approved=True, answer="always"),
+        turn=1,
+    )
+
+    reused = resolver.resolve(_approval_request(command="pytest tests/integration"))
+
+    assert reused is not None
+    assert reused.status == "session_always_allowed"
+    assert reused.to_response() == HumanInteractionResponse(
+        approved=True,
+        answer="session_always",
+    )
 
 
 def test_resolver_does_not_reuse_different_args_summary() -> None:

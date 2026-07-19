@@ -45,12 +45,12 @@ uv run haagent
 - `RunOrchestrator` 负责 task contract、模型调用、工具执行、episode trace 和 verification。
 - 所有模型调用必须经过 `ModelGateway`。
 - 所有工具调用必须经过 `ToolRouter`。
-- 文件和命令工具必须受 workspace root 限制。
+- workspace root 是文件和命令工具的默认信任根；访问外部目录必须由工具执行器发现并在同一工具调用内获得用户授权。
 - 每条用户 prompt 仍写独立 episode；session package 只保存索引、摘要和有界工作状态，不复制 episode 证据。
 
 ## 工具、权限与上下文
 
-- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell` 和 `code_run` 等 workspace-bound 原子工具。
+- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell` 和 `code_run` 等默认 workspace-bound 原子工具；文件工具支持绝对路径，外部路径走统一目录审批。
 - 自然语言入口不要求用户写 `task.yaml`，但 runtime 仍应生成结构化临时 `TaskSpec`，并写入 episode 供 inspect。
 - `policy` 只影响 Policy Engine 对工具调用的决策，不改变工具自身执行方式，也不自动引入交互式审批。
 - 高风险工具缺少允许或批准时必须被 policy 拒绝，handler 不执行，并记录 `policy_denied` 与 `approval.status=missing`。

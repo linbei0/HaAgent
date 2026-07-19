@@ -7,14 +7,17 @@ src/haagent/runtime/execution/path_policy.py - 路径信任策略
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
+import re
 from typing import Any, Literal
-
 
 PathAccess = Literal["read", "full"]
 PermissionMode = Literal["request_approval", "auto_approve", "full_access"]
 PathSource = Literal["user", "project"]
+PathAccessStatus = Literal["allowed", "approval_required", "denied"]
 PERMISSION_MODES: set[str] = {"request_approval", "auto_approve", "full_access"}
+_PERCENT_ENVIRONMENT_VARIABLE = re.compile(r"%([^%]+)%")
 
 
 @dataclass(frozen=True)
@@ -47,47 +50,75 @@ class PathPolicy:
         )
 
 
+@dataclass(frozen=True)
+class PathAccessDecision:
+    """路径访问判定；未授权外部目录可以进入显式审批，而非直接失败。"""
+
+    status: PathAccessStatus
+    path: Path | None = None
+    authorization_root: Path | None = None
+    message: str = ""
+    error_type: str = "path_policy_denied"
+
+
 def default_path_policy(project_root: Path) -> PathPolicy:
     return PathPolicy(project_root=project_root.resolve())
 
 
 def resolve_path_for_access(path: str, policy: PathPolicy, required_access: PathAccess) -> Path | str:
     """解析文件路径，并按 read/full 权限返回可用路径或中文错误。"""
+    decision = classify_path_access(path, policy, required_access)
+    if decision.status == "allowed" and decision.path is not None:
+        return decision.path
+    return decision.message
+
+
+def classify_path_access(path: str, policy: PathPolicy, required_access: PathAccess) -> PathAccessDecision:
+    """返回允许、需外部目录审批或拒绝，供文件/命令工具统一处理。"""
     candidate_result = _resolve_candidate(path, policy.project_root)
     if isinstance(candidate_result, str):
-        return candidate_result
+        return PathAccessDecision(status="denied", message=candidate_result)
     if policy.permission_mode == "full_access":
-        return candidate_result
+        return PathAccessDecision(status="allowed", path=candidate_result)
     matched = _matching_root(candidate_result, policy)
     if matched is None:
-        return "目录未授权：该路径不在当前项目根或已授权外部目录内"
+        if policy.permission_mode == "request_approval":
+            return PathAccessDecision(
+                status="approval_required",
+                path=candidate_result,
+                authorization_root=_authorization_root(candidate_result),
+                message="目录未授权：需要用户确认后访问外部目录",
+                error_type="approval_required",
+            )
+        return PathAccessDecision(
+            status="denied",
+            path=candidate_result,
+            message="目录未授权：该路径不在当前项目根或已授权外部目录内",
+        )
     if required_access == "full" and matched.access != "full":
-        return "外部目录只读：需要完全信任后才能修改该路径"
-    return candidate_result
+        if policy.permission_mode == "request_approval":
+            return PathAccessDecision(
+                status="approval_required",
+                path=candidate_result,
+                authorization_root=matched.path,
+                message="外部目录只读：需要用户确认后提升为完全访问",
+                error_type="approval_required",
+            )
+        return PathAccessDecision(
+            status="denied",
+            path=candidate_result,
+            message="外部目录只读：需要完全信任后才能修改该路径",
+        )
+    return PathAccessDecision(status="allowed", path=candidate_result)
 
 
-def resolve_cwd_for_execution(cwd_arg: str | None, policy: PathPolicy) -> Path | str:
-    """解析执行 cwd；执行只允许项目根或完全信任的外部目录。"""
-    path_arg = "." if cwd_arg in (None, ".") else cwd_arg
-    candidate_result = _resolve_candidate(path_arg, policy.project_root)
-    if isinstance(candidate_result, str):
-        return candidate_result
-    if policy.permission_mode == "full_access":
-        if not candidate_result.exists():
-            return "执行目录不存在"
-        if not candidate_result.is_dir():
-            return "执行目录必须是目录"
-        return candidate_result
-    matched = _matching_root(candidate_result, policy)
-    if matched is None:
-        return "目录未授权：执行目录不在当前项目根或已授权外部目录内"
-    if matched.access != "full":
-        return "需要完全信任：只读外部目录不能作为执行目录"
-    if not candidate_result.exists():
-        return "执行目录不存在"
-    if not candidate_result.is_dir():
-        return "执行目录必须是目录"
-    return candidate_result
+def authorize_external_root(policy: PathPolicy, path: Path, access: PathAccess) -> None:
+    """把用户选择“始终允许”的目录加入本次会话共享策略。"""
+    root = path.resolve()
+    roots = [item for item in policy.external_roots if item.path.resolve() != root]
+    roots.append(ExternalRoot(path=root, access=access, source="user"))
+    # PathPolicy 保持不可替换；列表是运行时共享状态，原地更新让已绑定 handler 同步看到授权。
+    policy.external_roots[:] = roots
 
 
 def serialize_path_policy(policy: PathPolicy) -> dict[str, Any]:
@@ -154,10 +185,25 @@ def _resolve_candidate(path: str, project_root: Path) -> Path | str:
     if not isinstance(path, str):
         return "path must be a string"
     root = project_root.resolve()
-    candidate = Path(path)
+    try:
+        # `~` 与 Windows 的 `%USERPROFILE%` 均先展开为真实用户目录。
+        # 展开不授予权限，后续仍按 project/external-root/full_access 策略判断。
+        candidate = Path(_expand_environment_variables(path)).expanduser()
+    except RuntimeError:
+        return "无法解析用户目录：请使用明确的绝对路径"
     if not candidate.is_absolute():
         candidate = root / candidate
     return candidate.resolve()
+
+
+def _expand_environment_variables(path: str) -> str:
+    """展开当前进程环境变量，并跨平台支持 Windows 的 `%NAME%` 语法。"""
+
+    expanded = os.path.expandvars(path)
+    return _PERCENT_ENVIRONMENT_VARIABLE.sub(
+        lambda match: os.environ.get(match.group(1), match.group(0)),
+        expanded,
+    )
 
 
 @dataclass(frozen=True)
@@ -174,3 +220,10 @@ def _matching_root(path: Path, policy: PathPolicy) -> _MatchedRoot | None:
     if not matches:
         return None
     return max(matches, key=lambda root: len(root.path.parts))
+
+
+def _authorization_root(path: Path) -> Path:
+    candidate = path if path.is_dir() else path.parent
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate.resolve()

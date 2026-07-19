@@ -50,20 +50,22 @@ def test_default_catalog_matches_tool_registry_and_handlers(tmp_path: Path) -> N
     assert set(handlers) == set(TOOL_REGISTRY)
 
 
-def test_chat_tags_match_product_tool_lists() -> None:
-    from haagent.runtime.session.turn import (
-        CHAT_ALLOWED_TOOLS,
-        CHAT_APPROVED_TOOLS,
-        CHAT_SKILL_TOOLS,
-        CHAT_WEB_TOOLS,
-    )
+def test_candidate_tools_uses_catalog_tags() -> None:
+    from haagent.tools.access import ToolAccessManager
     from haagent.tools.catalog import default_tool_catalog
 
     catalog = default_tool_catalog()
-    assert catalog.chat_default_tools() == CHAT_ALLOWED_TOOLS
-    assert catalog.chat_web_tools() == CHAT_WEB_TOOLS
-    assert catalog.chat_skill_tools() == CHAT_SKILL_TOOLS
-    assert catalog.chat_approval_tools() == CHAT_APPROVED_TOOLS
+    candidate = ToolAccessManager.candidate_tools(
+        catalog=catalog,
+        enable_web=True,
+        has_skills=True,
+        image_attachment_history=True,
+        mcp_tool_names=[],
+    )
+    assert candidate[: len(catalog.chat_default_tools())] == catalog.chat_default_tools()
+    assert set(catalog.chat_web_tools()).issubset(candidate)
+    assert set(catalog.chat_skill_tools()).issubset(candidate)
+    assert "load_image_attachment" in candidate
 
 
 def test_contribution_requires_explicit_replay_safety() -> None:

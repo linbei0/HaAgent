@@ -20,9 +20,15 @@ from haagent.runtime.orchestration.state import RunStatus
 class BadFileReadGateway:
     provider_name = "bad-file-read"
 
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def generate(self, invocation, **kwargs):
         messages = invocation.messages
         tool_schemas = invocation.tool_schemas
+        self.call_count += 1
+        if self.call_count > 1:
+            return ModelResponse("corrected after tool feedback", [])
         return ModelResponse("bad args", [ToolCall("file_read", {"offset": 1})])
 
 
@@ -92,10 +98,36 @@ class FileWriteGateway:
                 "",
                 [ToolCall("file_write", {"path": "notes.txt", "content": "final", "mode": "create"})],
             )
+        if self.call_count == 2:
+            return ModelResponse("", [ToolCall("file_read", {"path": "notes.txt"})])
         return ModelResponse("done after writing", [])
 
 
-def test_tool_observation_is_written_before_terminal_tool_routing_failure(tmp_path: Path) -> None:
+class RecoverablePathErrorGateway:
+    provider_name = "recoverable-path-error"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    def generate(self, invocation, **kwargs):
+        del invocation, kwargs
+        self.call_count += 1
+        if self.call_count == 1:
+            return ModelResponse(
+                "",
+                [ToolCall("apply_patch", {"path": "missing.txt", "old_text": "x", "new_text": "y"})],
+            )
+        if self.call_count == 2:
+            return ModelResponse(
+                "",
+                [ToolCall("file_write", {"path": "notes.txt", "content": "fixed", "mode": "create"})],
+            )
+        if self.call_count == 3:
+            return ModelResponse("", [ToolCall("file_read", {"path": "notes.txt"})])
+        return ModelResponse("done after correcting the path", [])
+
+
+def test_tool_argument_error_is_observed_and_returned_to_model(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
         """
@@ -109,9 +141,10 @@ verification_commands: []
         encoding="utf-8",
     )
 
+    gateway = BadFileReadGateway()
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
-        model_gateway=BadFileReadGateway(),
+        model_gateway=gateway,
     ).run(task_path)
 
     transcript = [
@@ -120,17 +153,15 @@ verification_commands: []
     ]
     failure = json.loads((result.episode_path / "failure.json").read_text(encoding="utf-8"))
 
-    assert result.status is RunStatus.FAILED
+    assert result.status is RunStatus.COMPLETED
+    assert gateway.call_count == 2
     assert any(record.get("event") == "model_call" for record in transcript)
     assert any(record.get("event") == "model_response" for record in transcript)
     observation = next(record for record in transcript if record.get("event") == "tool_observation")
     assert observation["tool_name"] == "file_read"
     assert observation["result"]["error"]["type"] == "tool_argument_invalid"
-    assert failure["failure"] == {
-        "stage": "executing",
-        "category": "Tool Argument Failure",
-        "evidence": "missing required argument: path",
-    }
+    assert observation["result"]["error"]["retryable"] is True
+    assert failure["failure"] is None
 
 
 def test_grep_file_root_continues_turn_loop(tmp_path: Path) -> None:
@@ -199,7 +230,7 @@ verification_commands: []
     assert tool_call["error"]["message"] == "unexpected argument: path"
 
 
-def test_file_write_records_final_file_evidence_before_completion(tmp_path: Path) -> None:
+def test_file_write_without_declared_verification_completes_without_file_hash_gate(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
         """
@@ -207,6 +238,7 @@ goal: Write a note
 constraints: []
 allowed_tools:
   - file_write
+  - file_read
 acceptance_criteria: []
 verification_commands: []
 policy:
@@ -224,19 +256,42 @@ policy:
     ).run(task_path)
 
     assert result.status is RunStatus.COMPLETED
-    evidence = [
-        json.loads(line)
-        for line in (result.episode_path / "verification" / "files.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
-    assert evidence == [
-        {
-            "path": "notes.txt",
-            "change_type": "added",
-            "status": "success",
-            "size_bytes": len(b"final"),
-            "sha256": "2443630b4620165c8b173e7265e17526fe2787ae594364dd6d839ad58f2fc007",
-        },
-    ]
+    assert (result.episode_path / "verification" / "files.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_recoverable_path_argument_error_returns_to_model(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text(
+        """
+goal: Recover from a bad patch path
+constraints: []
+allowed_tools:
+  - apply_patch
+  - file_write
+  - file_read
+acceptance_criteria: []
+verification_commands: []
+policy:
+  approval_allowed_tools:
+    - apply_patch
+    - file_write
+  approved_tools:
+    - apply_patch
+    - file_write
+""".strip(),
+        encoding="utf-8",
+    )
+    gateway = RecoverablePathErrorGateway()
+
+    result = RunOrchestrator(
+        runs_root=tmp_path / ".runs",
+        model_gateway=gateway,
+        max_turns=4,
+    ).run(task_path)
+
+    assert result.status is RunStatus.COMPLETED
+    assert gateway.call_count == 4
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "fixed"
 
 
 def test_parallel_tool_calls_do_not_skip_siblings_after_tool_error(tmp_path: Path) -> None:
