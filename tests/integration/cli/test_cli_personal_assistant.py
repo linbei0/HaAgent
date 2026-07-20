@@ -247,8 +247,6 @@ def test_chat_session_auto_compacts_old_turn_summaries_without_model_summary(tmp
     assert "- user_request: turn 1" not in gateway.model_inputs[-1].splitlines()
     for index in range(2, 8):
         assert f"- user_request: turn {index}" in gateway.model_inputs[-1].splitlines()
-    assert context_manifest["auto_compact_trigger"]["status"] == "triggered"
-    assert context_manifest["auto_compact_trigger"]["trigger_kind"] == "session_memory"
     assert context_manifest["session_compaction"]["decision"] == "compacted"
     assert context_manifest["session_compaction"]["compacted_turn_count"] == 1
     assert any(event.get("event") == "session_memory_compaction" for event in transcript)

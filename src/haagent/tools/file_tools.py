@@ -32,7 +32,6 @@ SEARCH_PATH_GUIDANCE = 'path is relative to workspace_root and may be a director
 NOISE_DIRECTORIES = {
     ".git",
     ".runs",
-    ".smoke-runs",
     ".venv",
     "__pycache__",
     "node_modules",

@@ -145,6 +145,7 @@ verification_commands: []
     result = RunOrchestrator(
         runs_root=tmp_path / ".runs",
         model_gateway=gateway,
+        leader_session_id="session-123",
     ).run(task_path)
 
     transcript = [
@@ -163,6 +164,8 @@ verification_commands: []
     assert observation["result"]["error"]["retryable"] is False
     assert observation["result"]["recovery"]["action"] == "correct_arguments"
     assert failure["failure"] is None
+    episode_parts = result.episode_path.relative_to(tmp_path / ".runs").parts
+    assert episode_parts[4] == "session-123"
 
 
 def test_grep_file_root_continues_turn_loop(tmp_path: Path) -> None:

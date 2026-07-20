@@ -96,6 +96,7 @@ class RunOrchestrator:
         self._cancellation_token = cancellation_token
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
+        self._episode_session_id = leader_session_id
         self._leader_session_id = leader_session_id or "leader"
         self._worker_permission_requester = worker_permission_requester
         # 跨 turn 共享；always 写回此对象，由 AgentSession 持久化
@@ -120,7 +121,11 @@ class RunOrchestrator:
         """执行一次 run，并把所有阶段变化写入 transcript.jsonl。"""
         performance_trace = self._performance_trace or PerformanceTrace.start()
         performance_trace.mark_run_start()
-        writer = EpisodeWriter.create(self._runs_root, task_path)
+        writer = EpisodeWriter.create(
+            self._runs_root,
+            task_path,
+            session_id=self._episode_session_id,
+        )
         recorder = RunRecorder(writer, performance_trace=performance_trace)
         transition = recorder.transition
 

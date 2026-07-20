@@ -80,6 +80,33 @@ def test_create_save_resume_snapshot_equivalence(tmp_path: Path) -> None:
     assert resumed.resources.mcp_runtime is not None
 
 
+def test_new_session_is_grouped_by_creation_day_and_resumes_by_id(tmp_path: Path) -> None:
+    runs_root = tmp_path / ".runs"
+    session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
+
+    parts = session.session_path.relative_to(runs_root).parts
+    assert parts[0] == "sessions"
+    assert parts[-1] == session.session_id
+    assert len(parts) == 5
+
+    resumed = AgentSession.resume(session.session_id, runs_root=runs_root, max_turns=2)
+    assert resumed.session_path == session.session_path
+
+
+def test_resume_uses_user_runs_root_when_not_explicitly_provided(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    runs_root = home / ".haagent" / "runs"
+    session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
+
+    resumed = AgentSession.resume(session.session_id, max_turns=2)
+
+    assert resumed.session_path == session.session_path
+    assert resumed.runs_root == runs_root
+
+
 def test_reload_keeps_resources_and_refreshes_snapshot(tmp_path: Path) -> None:
     runs_root = tmp_path / ".runs"
     session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=4)

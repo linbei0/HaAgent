@@ -144,33 +144,24 @@ def _find_task_ledger_for_episode(episode_path: Path) -> Path | None:
     runs_root = _find_runs_root_for_episode(episode_path)
     if runs_root is None:
         return None
-    sessions_root = runs_root / "sessions"
-    if not sessions_root.exists():
+    session_id = episode_path.parent.name
+    if session_id == "runs":
         return None
-    targets = {str(episode_path)}
+    from haagent.runtime.session.package import ChatSessionError, resolve_session_path
+
     try:
-        targets.add(str(episode_path.resolve()))
-    except OSError:
-        pass
-    for turns_path in sessions_root.glob("*/turns.jsonl"):
-        try:
-            lines = turns_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict) and str(record.get("episode_path", "")) in targets:
-                ledger_path = turns_path.parent / "task-ledger.json"
-                return ledger_path if ledger_path.exists() else None
+        session_path = resolve_session_path(session_id, runs_root)
+    except ChatSessionError:
+        return None
+    ledger_path = session_path / "task-ledger.json"
+    if ledger_path.exists():
+        return ledger_path
     return None
 
 
 def _find_runs_root_for_episode(episode_path: Path) -> Path | None:
     for candidate in (episode_path.parent, *episode_path.parents):
-        if candidate.name == ".runs":
+        if (candidate / "sessions").is_dir():
             return candidate
     return None
 

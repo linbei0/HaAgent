@@ -52,6 +52,28 @@ verification_commands: []
     assert (writer.path / "cost.json").exists()
 
 
+def test_episode_writer_groups_packages_by_day_and_session(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("goal: Create episode package\n", encoding="utf-8")
+    runs_root = tmp_path / ".runs"
+
+    session_writer = EpisodeWriter.create(
+        runs_root=runs_root,
+        task_path=task_path,
+        session_id="session-123",
+    )
+    standalone_writer = EpisodeWriter.create(runs_root=runs_root, task_path=task_path)
+
+    session_parts = session_writer.path.relative_to(runs_root).parts
+    assert session_parts[0] == "episodes"
+    assert session_parts[4] == "session-123"
+    assert len(session_parts) == 6
+    standalone_parts = standalone_writer.path.relative_to(runs_root).parts
+    assert standalone_parts[0] == "episodes"
+    assert standalone_parts[4] == "runs"
+    assert len(standalone_parts) == 6
+
+
 def test_episode_writer_initializes_cost_metadata(tmp_path: Path) -> None:
     writer = create_writer(tmp_path)
 

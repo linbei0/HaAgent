@@ -33,7 +33,7 @@
 - `providers.json` 的每个模型可选配置 `max_context_tokens` 作为 HaAgent 本地有效上限；它与 provider/本地发现窗口取较小值，不作为 provider 请求参数发送。
 - `settings.json` 可保存一个 `fallback_model` 和 `cloud_fallback_consent`。本地到云端 fallback 必须有明确 consent，本地到本地不需要；fallback 不得在已有输出后重放。
 - 默认 profile 存放在用户级 `~/.haagent/providers.json`；active profile 存放在 `~/.haagent/settings.json`。
-- Workspace 和 session 是目录相关运行状态，默认写入当前目录的 `.runs/sessions`。
+- Workspace 和 session 是目录相关运行状态，默认写入用户级 `~/.haagent/runs`：session 位于 `sessions/YYYY/MM/DD/<session-id>`，其每条 prompt 的 episode 位于 `episodes/YYYY/MM/DD/<session-id>/<episode-id>`；无 session 的高级入口写入 `episodes/YYYY/MM/DD/runs/<episode-id>`。`--runs-root` 可为当前命令显式覆盖该位置。
 - 真实 API key 解析优先级是：当前环境变量、系统凭据库、显式 opt-in 的明文用户文件。
 - TUI 模型配置默认使用系统凭据库；环境变量适合 CI 或临时覆盖；明文用户文件必须显式选择并标记为 insecure。
 - 真实 API key 不写入项目配置、episode、transcript、日志、session summary、UI snapshot 或 tool-calls。

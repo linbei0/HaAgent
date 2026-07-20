@@ -94,6 +94,34 @@ def test_cli_run_parser_accepts_goal_authoring_arguments() -> None:
     assert args.provider == "fake"
 
 
+def test_cli_run_roots_default_to_user_state_directory(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    parser = cli.build_parser()
+
+    for arguments in (
+        [],
+        ["run", "task.yaml"],
+        ["smoke"],
+        ["eval", "case.json"],
+        ["check"],
+    ):
+        assert parser.parse_args(arguments).runs_root == home / ".haagent" / "runs"
+
+    for arguments in (
+        ["--runs-root", "E:/isolated-runs"],
+        ["--runs-root", "E:/isolated-runs", "run", "task.yaml"],
+        ["--runs-root", "E:/isolated-runs", "smoke"],
+        ["--runs-root", "E:/isolated-runs", "eval", "case.json"],
+        ["--runs-root", "E:/isolated-runs", "check"],
+        ["run", "task.yaml", "--runs-root", "E:/isolated-runs"],
+        ["smoke", "--runs-root", "E:/isolated-runs"],
+        ["eval", "case.json", "--runs-root", "E:/isolated-runs"],
+        ["check", "--runs-root", "E:/isolated-runs"],
+    ):
+        assert parser.parse_args(arguments).runs_root == Path("E:/isolated-runs")
+
+
 def test_default_parser_starts_tui_with_explicit_web_flag() -> None:
     parser = cli.build_parser()
 

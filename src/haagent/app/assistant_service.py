@@ -23,7 +23,7 @@ from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import GatewayFactory
 from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.models.catalog import load_cached_model_catalog
-from haagent.models.config.connections import user_provider_connections_path
+from haagent.models.config.connections import user_provider_connections_path, user_runs_dir
 from haagent.models.model_runtime import ModelRuntime
 from haagent.runtime.session.agent import AgentSession
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
@@ -35,7 +35,7 @@ class AssistantService:
         self,
         *,
         workspace_root: Path | None = None,
-        runs_root: Path = Path(".runs"),
+        runs_root: Path | None = None,
         environ: Mapping[str, str] | None = None,
         gateway_factory: GatewayFactory | None = None,
         session_cls: type[AgentSession] = AgentSession,
@@ -52,7 +52,7 @@ class AssistantService:
         )
         self._context = AssistantContext(
             workspace_root=(workspace_root or Path.cwd()).resolve(),
-            runs_root=runs_root,
+            runs_root=runs_root or user_runs_dir(),
             environ=os.environ if environ is None else environ,
             gateway_factory=gateway_factory or gateway_from_resolved,
             session_factory=session_cls,

@@ -1327,10 +1327,11 @@ def test_file_list_truncates_many_files(tmp_path: Path) -> None:
 
 
 def test_file_list_skips_noise_directories_by_default(tmp_path: Path) -> None:
-    for directory in [".git", ".runs", ".smoke-runs", ".venv", "__pycache__", "node_modules", "dist", "build"]:
+    for directory in [".git", ".runs", ".venv", "__pycache__", "node_modules", "dist", "build"]:
         noise_dir = tmp_path / directory
         noise_dir.mkdir()
         (noise_dir / "noise.txt").write_text("ignore me\n", encoding="utf-8")
+    (tmp_path / ".smoke-runs").mkdir()
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
     writer = make_writer(tmp_path)
@@ -1340,11 +1341,11 @@ def test_file_list_skips_noise_directories_by_default(tmp_path: Path) -> None:
 
     assert result["status"] == "success"
     assert "src/app.py" in result["tree"]
+    assert ".smoke-runs" in result["tree"]
     assert "noise.txt" not in result["tree"]
     assert set(result["skipped_dirs"]) == {
         ".git",
         ".runs",
-        ".smoke-runs",
         ".venv",
         "__pycache__",
         "node_modules",

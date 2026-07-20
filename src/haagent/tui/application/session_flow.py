@@ -97,14 +97,7 @@ class SessionFlow:
     def apply_continue_success(self, status: AssistantSessionStatus) -> None:
         self._busy = False
         self._app._reset_image_input_state()
-        self._app.clear_context_usage()
-        try:
-            history = list(self._app.service.sessions.history())
-        except Exception as error:
-            self._app._prompt_input().clear_request_history()
-            self._app._conversation.append_block("Session warning", f"恢复会话历史读取失败：{error}")
-        else:
-            self._set_prompt_history(history)
+        self.show_session_history(status, prefix="已恢复会话")
         self._app._conversation.append_line(f"已恢复会话：{status.session_id}")
         self._app._refresh()
         self._app._defer_prompt_focus()

@@ -18,6 +18,7 @@ from haagent.mcp.settings import load_mcp_settings
 from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.types import ModelGateway
 from haagent.models.model_ref import ModelRef
+from haagent.models.config.connections import user_runs_dir
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, load_path_policy
@@ -215,6 +216,7 @@ def build_create_state(
 ) -> SessionRuntimeState:
     resolved_workspace = workspace_root.resolve()
     sid = session_id or new_session_id()
+    created_at = datetime.now(UTC)
     mcp_settings, runtime, owns, mcp_tool_names, tool_registry = bootstrap_mcp(mcp_runtime)
     snapshot = SessionSnapshot(
         schema_version=SESSION_SNAPSHOT_SCHEMA_VERSION,
@@ -233,8 +235,15 @@ def build_create_state(
         image_attachment_history=[],
         working_state=empty_working_state(),
         task_ledger=empty_task_ledger(),
-        session_path=runs_root / "sessions" / sid,
-        created_at=datetime.now(UTC).isoformat(),
+        session_path=(
+            runs_root
+            / "sessions"
+            / created_at.strftime("%Y")
+            / created_at.strftime("%m")
+            / created_at.strftime("%d")
+            / sid
+        ),
+        created_at=created_at.isoformat(),
         session_interaction_state=SessionInteractionState(),
     )
     resources = SessionResources(
@@ -276,7 +285,7 @@ def build_resume_state(
     mcp_tool_names: list[str] | None = None,
     owns_mcp_runtime: bool | None = None,
 ) -> SessionRuntimeState:
-    session_path = resolve_session_path(session, runs_root or Path(".runs"))
+    session_path = resolve_session_path(session, runs_root or user_runs_dir())
     metadata = read_session_metadata(session_path)
     turns = read_session_turns(session_path)
     workspace_root = Path(str(metadata["workspace_root"])).resolve()
@@ -321,7 +330,7 @@ def build_resume_state(
         schema_version=schema_version,
         workspace_root=workspace_root,
         path_policy=path_policy,
-        runs_root=session_path.parent.parent,
+        runs_root=_runs_root_for_session_path(session_path),
         model_ref=(
             model_ref
             if model_ref is not None
@@ -386,9 +395,17 @@ def _load_permission_rules(raw: object) -> list[dict[str, str]]:
     return rules[-128:]
 
 
+def _runs_root_for_session_path(session_path: Path) -> Path:
+    for parent in session_path.parents:
+        if parent.name == "sessions":
+            return parent.parent
+    raise ChatSessionError(f"invalid session path outside runs/sessions: {session_path}")
+
+
 def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
     """在保留 workspace/model/MCP 的前提下重置为新 session package。"""
     sid = new_session_id()
+    created_at = datetime.now(UTC)
     snap = state.snapshot
     res = state.resources
     snapshot = SessionSnapshot(
@@ -408,8 +425,15 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         image_attachment_history=[],
         working_state=empty_working_state(),
         task_ledger=empty_task_ledger(),
-        session_path=snap.runs_root / "sessions" / sid,
-        created_at=datetime.now(UTC).isoformat(),
+        session_path=(
+            snap.runs_root
+            / "sessions"
+            / created_at.strftime("%Y")
+            / created_at.strftime("%m")
+            / created_at.strftime("%d")
+            / sid
+        ),
+        created_at=created_at.isoformat(),
         # 新 session 不继承上一会话的 edit_diff always
         session_interaction_state=SessionInteractionState(),
     )

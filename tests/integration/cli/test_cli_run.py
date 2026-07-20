@@ -12,6 +12,7 @@ import inspect
 import pytest
 
 from haagent import cli
+from haagent.models.config.connections import user_runs_dir
 from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.contracts.task import load_task
@@ -202,7 +203,7 @@ def test_cli_run_uses_default_runs_root_and_prints_result(
     exit_code = cli.main(["run", str(task_path)])
 
     assert exit_code == 0
-    assert calls == {"runs_root": Path(".runs"), "task_path": task_path}
+    assert calls == {"runs_root": user_runs_dir(), "task_path": task_path}
     output = capsys.readouterr().out
     assert "status=completed" in output
     assert f"episode_path={tmp_path / '.runs' / 'episode-1'}" in output
@@ -328,7 +329,7 @@ def test_cli_run_goal_entry_generates_current_task_contract(
 
     task = calls["task"]
     assert exit_code == 0
-    assert calls["runs_root"] == Path(".runs")
+    assert calls["runs_root"] == user_runs_dir()
     assert calls["max_turns"] == 9
     assert calls["task_path_name"] == "task.yaml"
     assert task.goal == "Fix a small bug."
@@ -402,7 +403,7 @@ def test_cli_run_task_yaml_entry_still_ignores_goal_entry_arguments(
     )
 
     assert exit_code == 0
-    assert calls == {"runs_root": Path(".runs"), "task_path": task_path}
+    assert calls == {"runs_root": user_runs_dir(), "task_path": task_path}
 
 
 def test_cli_run_uses_default_max_turns(
@@ -428,7 +429,7 @@ def test_cli_run_uses_default_max_turns(
 
     assert exit_code == 0
     assert calls == {
-        "runs_root": Path(".runs"),
+        "runs_root": user_runs_dir(),
         "max_turns": 3,
         "task_path": task_path,
     }
@@ -502,7 +503,7 @@ def test_cli_run_explicit_fake_provider_keeps_default_gateway_path(
     exit_code = cli.main(["run", str(task_path), "--provider", "fake"])
 
     assert exit_code == 0
-    assert calls == {"runs_root": Path(".runs"), "task_path": task_path}
+    assert calls == {"runs_root": user_runs_dir(), "task_path": task_path}
 
 
 def test_cli_run_fake_provider_ignores_base_url(
@@ -535,7 +536,7 @@ def test_cli_run_fake_provider_ignores_base_url(
     )
 
     assert exit_code == 0
-    assert calls == {"runs_root": Path(".runs"), "task_path": task_path}
+    assert calls == {"runs_root": user_runs_dir(), "task_path": task_path}
 
 
 def test_cli_run_openai_provider_passes_gateway_to_orchestrator(
@@ -574,7 +575,7 @@ def test_cli_run_openai_provider_passes_gateway_to_orchestrator(
     )
 
     assert exit_code == 0
-    assert calls["runs_root"] == Path(".runs")
+    assert calls["runs_root"] == user_runs_dir()
     assert calls["task_path"] == task_path
     assert calls["model"] == "gpt-test"
     assert isinstance(calls["model_gateway"], FakeOpenAIGateway)
@@ -734,7 +735,7 @@ def test_cli_run_openai_chat_provider_passes_gateway_to_orchestrator(
     )
 
     assert exit_code == 0
-    assert calls["runs_root"] == Path(".runs")
+    assert calls["runs_root"] == user_runs_dir()
     assert calls["task_path"] == task_path
     assert calls["model"] == "deepseek-chat"
     assert calls["base_url"] == "https://api.deepseek.com/v1"

@@ -12,6 +12,7 @@ from haagent.models.types import ModelResponse, ToolCall
 from haagent.runtime.execution.human_interaction import HumanInteractionResponse
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
+from haagent.runtime.session.package import _write_session_locator
 from haagent.runtime.session.task_ledger import TaskCheckpoint, TaskLedger, TaskStep
 from haagent.tools.contributions import shell as shell_contribution_module
 
@@ -713,14 +714,16 @@ verification_commands: []
 
 
 def test_cli_inspect_outputs_task_ledger_summary(tmp_path: Path) -> None:
-    episode = tmp_path / ".runs" / "episodes" / "episode-ledger"
+    runs_root = tmp_path / "home" / ".haagent" / "runs"
+    episode = runs_root / "episodes" / "2026" / "07" / "20" / "session-1" / "episode-ledger"
     write_minimal_episode(
         episode,
         episode_json=valid_episode_json(tmp_path),
         failure_json={"status": "success", "failure": None},
     )
-    session = tmp_path / ".runs" / "sessions" / "session-1"
+    session = runs_root / "sessions" / "2026" / "07" / "20" / "session-1"
     session.mkdir(parents=True)
+    _write_session_locator(session, "session-1")
     (session / "turns.jsonl").write_text(
         json.dumps({"turn_index": 1, "episode_path": str(episode)}, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -784,13 +787,13 @@ def test_cli_inspect_outputs_task_ledger_summary(tmp_path: Path) -> None:
 
 
 def test_cli_inspect_finds_task_ledger_for_direct_runs_episode(tmp_path: Path) -> None:
-    episode = tmp_path / ".runs" / "episode-direct"
+    episode = tmp_path / "custom-runs" / "episode-direct"
     write_minimal_episode(
         episode,
         episode_json=valid_episode_json(tmp_path),
         failure_json={"status": "success", "failure": None},
     )
-    session = tmp_path / ".runs" / "sessions" / "session-1"
+    session = episode.parent / "sessions" / "session-1"
     session.mkdir(parents=True)
     (session / "turns.jsonl").write_text(
         json.dumps({"turn_index": 1, "episode_path": str(episode)}, ensure_ascii=False) + "\n",
@@ -820,10 +823,7 @@ def test_cli_inspect_finds_task_ledger_for_direct_runs_episode(tmp_path: Path) -
 
     output = cli_inspect.render_episode_summary(episode)
 
-    assert "Task Ledger" in output
-    assert "- status: completed" in output
-    assert "- current_step_id: step-001" in output
-    assert "- steps: total=1 completed=1 blocked=0" in output
+    assert "Task Ledger\n- none" in output
 
 
 def test_cli_inspect_outputs_context_compaction_summary(tmp_path: Path) -> None:

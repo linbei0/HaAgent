@@ -34,10 +34,23 @@ class EpisodeWriter:
     _write_lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
 
     @classmethod
-    def create(cls, runs_root: Path, task_path: Path) -> "EpisodeWriter":
+    def create(
+        cls,
+        runs_root: Path,
+        task_path: Path,
+        *,
+        session_id: str | None = None,
+    ) -> "EpisodeWriter":
         """创建新的 episode 目录，并初始化本阶段要求的核心文件。"""
-        run_id = datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-        episode_path = runs_root / run_id
+        created_at = datetime.now(UTC)
+        run_id = created_at.strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+        day_root = runs_root / "episodes" / created_at.strftime("%Y") / created_at.strftime("%m") / created_at.strftime("%d")
+        if session_id is None:
+            episode_path = day_root / "runs" / run_id
+        else:
+            if Path(session_id).name != session_id:
+                raise ValueError("session_id must be a single path segment")
+            episode_path = day_root / session_id / run_id
         episode_path.mkdir(parents=True, exist_ok=False)
         shutil.copyfile(task_path, episode_path / "task.yaml")
         attachments_dir = task_path.parent / "attachments"

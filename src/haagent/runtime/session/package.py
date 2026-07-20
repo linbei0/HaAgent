@@ -8,6 +8,7 @@ src/haagent/runtime/session/package.py - session package 磁盘读写
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,7 +51,19 @@ def resolve_session_path(session: str | Path, runs_root: Path) -> Path:
     raw = Path(session)
     if raw.is_absolute() or raw.exists() or raw.name != str(session):
         return raw.resolve()
-    return (runs_root / "sessions" / str(session)).resolve()
+    sessions_root = runs_root / "sessions"
+    locator = _session_locator_path(sessions_root, str(session))
+    if not locator.exists():
+        raise ChatSessionError(f"session not found: {session}")
+    relative_path = locator.read_text(encoding="utf-8").strip()
+    candidate = (sessions_root / relative_path).resolve()
+    try:
+        candidate.relative_to(sessions_root.resolve())
+    except ValueError as error:
+        raise ChatSessionError(f"invalid session locator: {locator}") from error
+    if not candidate.is_dir():
+        raise ChatSessionError(f"session path missing: {candidate}")
+    return candidate
 
 
 def peek_first_turn_request(session_path: Path) -> str:
@@ -85,9 +98,8 @@ def list_sessions(runs_root: Path, workspace_root: Path) -> list[SessionSummary]
         return []
     resolved_workspace = workspace_root.resolve()
     summaries: list[SessionSummary] = []
-    for session_path in sessions_root.iterdir():
-        if not session_path.is_dir():
-            continue
+    for metadata_path in sessions_root.glob("*/*/*/*/session.json"):
+        session_path = metadata_path.parent
         metadata = read_session_metadata(session_path)
         if Path(str(metadata["workspace_root"])).resolve() != resolved_workspace:
             continue
@@ -337,6 +349,7 @@ def write_session_metadata(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    _write_session_locator(session_path, session_id)
     return effective_created_at
 
 
@@ -395,6 +408,27 @@ def optional_string(value: object) -> str | None:
 
 def new_session_id() -> str:
     return "session-" + uuid.uuid4().hex[:8]
+
+
+def _write_session_locator(session_path: Path, session_id: str) -> None:
+    sessions_root = _sessions_root_for_path(session_path)
+    locator = _session_locator_path(sessions_root, session_id)
+    if locator.exists():
+        return
+    locator.parent.mkdir(parents=True, exist_ok=True)
+    locator.write_text(str(session_path.resolve().relative_to(sessions_root.resolve())), encoding="utf-8")
+
+
+def _session_locator_path(sessions_root: Path, session_id: str) -> Path:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return sessions_root / "by-id" / digest[:2] / f"{session_id}.json"
+
+
+def _sessions_root_for_path(session_path: Path) -> Path:
+    for parent in session_path.parents:
+        if parent.name == "sessions":
+            return parent
+    raise ChatSessionError(f"invalid session path outside runs/sessions: {session_path}")
 
 
 def manual_compaction_summary_text(messages: list[dict[str, object]]) -> str | None:

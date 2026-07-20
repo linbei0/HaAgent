@@ -24,6 +24,7 @@ from haagent.cli_commands import (
     handle_tui_migration,
 )
 from haagent.cli_runtime import CliRuntime
+from haagent.models.config.connections import user_runs_dir
 from haagent.runtime.settings import (
     DEFAULT_DOGFOOD_MAX_TURNS,
     DEFAULT_RUN_MAX_TURNS,
@@ -43,7 +44,7 @@ class _RootHelpParser(argparse.ArgumentParser):
             "  -h, --help           show this help message and exit\n"
             "  --workspace-root PATH\n"
             "                       workspace root for the assistant session\n"
-            "  --runs-root PATH     directory for assistant session packages (default: .runs)\n"
+            "  --runs-root PATH     directory for assistant session packages (default: ~/.haagent/runs)\n"
             "  --resume SESSION     resume a session by id or session package path\n"
             "  --continue           resume the latest session for the current workspace\n"
             "  --web                enable read-only web tools for the TUI session\n\n"
@@ -66,7 +67,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         dest="continue_session",
         help="resume the latest session for the current workspace",
     )
-    _add_runs_root(parser, help_text="directory for assistant session packages (default: .runs)")
+    _add_runs_root(
+        parser,
+        help_text="directory for assistant session packages (default: ~/.haagent/runs)",
+        default=user_runs_dir(),
+    )
     _add_web_flag(parser)
     parser.set_defaults(command="tui", handler=handle_tui_entry)
     subparsers = parser.add_subparsers(dest="command", required=False, parser_class=argparse.ArgumentParser)
@@ -109,7 +114,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         help="workspace root used when task_yaml is omitted",
     )
     run_parser.add_argument("--verify", help="verification command used when task_yaml is omitted")
-    _add_runs_root(run_parser, help_text="directory for episode packages (default: .runs)")
+    _add_runs_root(
+        run_parser,
+        help_text="directory for episode packages (default: ~/.haagent/runs)",
+        default=argparse.SUPPRESS,
+    )
     _add_model_provider(run_parser)
     _add_max_turns(
         run_parser,
@@ -119,7 +128,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     run_parser.set_defaults(handler=lambda args: handle_run(args, runtime))
 
     smoke_parser = subparsers.add_parser("smoke", help="run the minimal HaAgent smoke suite")
-    _add_runs_root(smoke_parser, help_text="directory for episode packages (default: .runs)")
+    _add_runs_root(
+        smoke_parser,
+        help_text="directory for episode packages (default: ~/.haagent/runs)",
+        default=argparse.SUPPRESS,
+    )
     smoke_parser.add_argument("--profile", help="real provider profile name from .haagent/providers.json")
     _add_max_turns(
         smoke_parser,
@@ -189,7 +202,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         type=Path,
         help="write eval report JSON to this file instead of only printing a summary",
     )
-    _add_runs_root(eval_parser, help_text="directory for eval run episode packages (default: .runs)")
+    _add_runs_root(
+        eval_parser,
+        help_text="directory for eval run episode packages (default: ~/.haagent/runs)",
+        default=argparse.SUPPRESS,
+    )
     _add_model_provider(eval_parser)
     eval_parser.set_defaults(handler=lambda args: handle_eval(args, runtime))
 
@@ -201,7 +218,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
         help="eval suite path to run (default: examples/evals)",
     )
     check_parser.add_argument("--output", type=Path, help="write check report JSON to this file")
-    _add_runs_root(check_parser, help_text="directory for check episode packages (default: .runs)")
+    _add_runs_root(
+        check_parser,
+        help_text="directory for check episode packages (default: ~/.haagent/runs)",
+        default=argparse.SUPPRESS,
+    )
     check_parser.add_argument(
         "--pytest",
         action="store_true",
@@ -258,11 +279,11 @@ def build_cli_parser(runtime: CliRuntime) -> argparse.ArgumentParser:
     return parser
 
 
-def _add_runs_root(parser: argparse.ArgumentParser, *, help_text: str) -> None:
+def _add_runs_root(parser: argparse.ArgumentParser, *, help_text: str, default) -> None:
     parser.add_argument(
         "--runs-root",
         type=Path,
-        default=Path(".runs"),
+        default=default,
         help=help_text,
     )
 

@@ -80,7 +80,7 @@ def turn_summary(prompt: str, result: ChatTurnResult) -> str:
         [
             f"- user_request: {summary_value(prompt, 160)}",
             f"  status: {result.status}",
-            f"  episode_path: {result.episode_path}",
+            f"  episode_id: {result.episode_path.name}",
             f"  assistant_final_response: {summary_value(result.final_response, 220)}",
             f"  verification: {result.verification_status}",
         ],

@@ -310,7 +310,7 @@ def test_execute_new_session_success_records_links(
     home = tmp_path / "home"
     ws = tmp_path / "ws"
     ws.mkdir()
-    runs = tmp_path / "runs"
+    runs = home / ".haagent" / "runs"
     _write_connection(home)
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setenv("HAAGENT_TEST_KEY", "test-key")
@@ -319,18 +319,22 @@ def test_execute_new_session_success_records_links(
     now = _utc(2026, 7, 13, 12, 0, 0)
     definition = _definition(ws)
     gateway = RecordingGateway("hello from schedule")
+    captured: dict[str, Path] = {}
+
+    def service_factory(**kwargs) -> AssistantService:
+        captured["runs_root"] = kwargs["runs_root"]
+        return AssistantService(
+            workspace_root=kwargs["workspace_root"],
+            runs_root=kwargs["runs_root"],
+            environ=kwargs.get("environ"),
+            gateway_factory=lambda profile, **_kw: gateway,
+        )
 
     with ScheduleStore(db) as store:
         run_id = _seed_running_run(store, definition, now=now)
         executor = ScheduledRunExecutor(
             store,
-            service_factory=lambda **kwargs: AssistantService(
-                workspace_root=kwargs["workspace_root"],
-                runs_root=kwargs.get("runs_root", runs),
-                environ=kwargs.get("environ"),
-                gateway_factory=lambda profile, **_kw: gateway,
-            ),
-            runs_root=runs,
+            service_factory=service_factory,
             clock=lambda: now,
         )
         result = executor.execute(RunClaim(run_id=run_id, worker_id="worker-1", attempt=1))
@@ -348,6 +352,7 @@ def test_execute_new_session_success_records_links(
         assert session_path.exists()
         assert Path(finished.episode_path).exists()
         assert gateway.calls >= 1
+        assert captured["runs_root"] == runs
 
 
 def test_execute_resume_session_reuses_session(

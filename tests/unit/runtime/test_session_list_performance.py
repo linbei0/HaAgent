@@ -43,7 +43,7 @@ def _write_session_package(
     turn_count: int,
     first_request: str,
 ) -> Path:
-    session_path = runs_root / "sessions" / session_id
+    session_path = runs_root / "sessions" / "2026" / "01" / "01" / session_id
     session_path.mkdir(parents=True)
     write_session_metadata(
         session_path,

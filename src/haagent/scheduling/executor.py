@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.app.assistant_service import AssistantService
-from haagent.models.config.connections import ProviderProfileError, user_config_dir
+from haagent.models.config.connections import ProviderProfileError, user_config_dir, user_runs_dir
 from haagent.models.model_ref import ModelRef
 from haagent.models.types import ModelCallError
 from haagent.runtime.execution.command import redact_secret_like_text
@@ -145,7 +145,7 @@ class ScheduledRunExecutor:
     def _default_service_factory(self, **kwargs: Any) -> AssistantService:
         return AssistantService(
             workspace_root=kwargs["workspace_root"],
-            runs_root=kwargs.get("runs_root", Path(".runs")),
+            runs_root=kwargs.get("runs_root", user_runs_dir()),
             environ=kwargs.get("environ"),
             gateway_factory=kwargs.get("gateway_factory"),
             session_cls=kwargs.get("session_cls", AgentSession),
@@ -262,7 +262,7 @@ class ScheduledRunExecutor:
             )
 
         environ = dict(self._environ) if self._environ is not None else dict(os.environ)
-        runs_root = self._runs_root if self._runs_root is not None else resolved / ".runs"
+        runs_root = self._runs_root if self._runs_root is not None else user_runs_dir()
 
         service = self._service_factory(
             workspace_root=resolved,

@@ -141,6 +141,9 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
             await pilot.pause(0.1)
             assert service.continued_latest_count == 1
             assert service.current_session_id == "session-alpha"
+            conversation = _text(app, "#conversation")
+            assert "整理会议纪要" in conversation
+            assert "用户要整理会议纪要。" in conversation
             await pilot.press("up")
             assert input_widget.value == "整理会议纪要"
 
@@ -165,6 +168,39 @@ def test_tui_sessions_overlay_search_resume_continue_new_and_escape(tmp_path: Pa
 
     asyncio.run(run_resume())
     asyncio.run(run_continue_new_escape())
+
+def test_tui_resume_command_replays_latest_session_history(tmp_path: Path) -> None:
+    session = _session_summary(tmp_path, "session-alpha", "整理会议纪要", 1)
+    service = FakeAssistantService(
+        workspace_root=tmp_path,
+        sessions=[session],
+        session_histories={
+            "session-alpha": [
+                AssistantSessionTurn(
+                    turn_index=1,
+                    request="整理会议纪要",
+                    summary="用户要整理会议纪要。",
+                    status="completed",
+                    episode_path=tmp_path / ".runs" / "episode-alpha",
+                    verification_status="success",
+                ),
+            ],
+        },
+    )
+
+    async def run() -> None:
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "/resume"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            conversation = _text(app, "#conversation")
+            assert "整理会议纪要" in conversation
+            assert "用户要整理会议纪要。" in conversation
+
+    asyncio.run(run())
+
 
 def test_tui_new_session_command_clears_previous_timeline(tmp_path: Path) -> None:
     service = FakeAssistantService(workspace_root=tmp_path, assistant_content="旧回答")

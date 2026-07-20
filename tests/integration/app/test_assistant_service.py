@@ -278,6 +278,19 @@ def _service(
     )
 
 
+def test_assistant_service_defaults_runs_root_to_user_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _set_home(monkeypatch, home)
+
+    service = AssistantService(workspace_root=workspace, environ={})
+
+    assert service.workspace.status().runs_root == home / ".haagent" / "runs"
+
+
 def test_assistant_service_keeps_startup_providers_snapshot(tmp_path: Path, monkeypatch) -> None:
     _set_home(monkeypatch, tmp_path)
     config_dir = tmp_path / ".haagent"

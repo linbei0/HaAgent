@@ -139,13 +139,13 @@ git pull --ff-only
 uv sync --locked
 ```
 
-卸载不会删除用户级 `~/.haagent/` 配置，也不会删除各工作区中的 `.runs/` 会话数据：
+卸载不会删除用户级 `~/.haagent/` 配置和运行数据（包括 `~/.haagent/runs/` 中的会话与 episode）：
 
 ```powershell
 uv tool uninstall haagent
 ```
 
-如需彻底清理数据，请先自行备份，再分别处理用户配置目录和工作区 `.runs/`；HaAgent 不提供自动删除用户数据的命令。
+如需彻底清理数据，请先自行备份，再处理用户目录 `~/.haagent/`；会话按 `runs/sessions/YYYY/MM/DD/`、episode 按 `runs/episodes/YYYY/MM/DD/` 分层存放。HaAgent 不提供自动删除用户数据的命令。
 
 ## 配置模型
 

@@ -152,6 +152,11 @@ def user_config_dir() -> Path:
     return Path.home() / USER_CONFIG_DIR_NAME
 
 
+def user_runs_dir() -> Path:
+    """返回用户级运行包根目录；实际创建由运行时写入流程负责。"""
+    return user_config_dir() / "runs"
+
+
 def user_provider_connections_path() -> Path:
     return user_config_dir() / USER_PROVIDERS_FILE
 
