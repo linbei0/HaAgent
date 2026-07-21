@@ -8,6 +8,8 @@
 ![Textual](https://img.shields.io/badge/TUI-Textual-5b5bd6?style=flat-square)
 ![uv](https://img.shields.io/badge/uv-managed-2b6cb0?style=flat-square)
 ![pytest](https://img.shields.io/badge/tests-pytest-0a7f64?style=flat-square)
+[![CI](https://github.com/linbei0/HaAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/linbei0/HaAgent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
 [功能亮点](#功能亮点) • [安装与启动](#安装与启动) • [TUI 常用操作](#tui-常用操作) • [升级与卸载](#升级与卸载) • [开发与发布](#开发与发布)
 
@@ -200,7 +202,7 @@ HaAgent 使用用户级 profile 管理模型连接配置：
 
 ### 开发与验证
 
-常用开发命令：
+GitHub Actions（`.github/workflows/ci.yml`）在 `push`/`pull_request` 到 `main`/`master` 时自动运行 `uv sync --locked --all-extras`、`uv run pytest -q` 与 `uv run haagent check`（默认 fake provider，无需 API key）。本地常用命令：
 
 ```powershell
 uv sync
