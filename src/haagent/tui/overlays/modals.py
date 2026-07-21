@@ -20,6 +20,7 @@ from haagent.runtime.execution.path_policy import PermissionMode
 from haagent.tui.design.copy import MODAL_TITLES
 from haagent.tui.design.keys import APPROVAL_BINDINGS, EDIT_DIFF_BINDINGS, HELP_DISMISS_BINDINGS, help_body
 from haagent.tui.design.renderers import approval_body, edit_diff_body
+from haagent.tui.design.screen_helpers import safe_dismiss
 
 
 class HelpModal(ModalScreen[None]):
@@ -36,7 +37,7 @@ class HelpModal(ModalScreen[None]):
             yield Static("[Esc]关闭")
 
     def action_dismiss_help(self) -> None:
-        self.dismiss(None)
+        safe_dismiss(self, None)
 
 
 class ToolApprovalModal(ModalScreen[str]):
@@ -63,7 +64,7 @@ class ToolApprovalModal(ModalScreen[str]):
             "approval-once": "once",
             "approval-always": "always",
         }
-        self.dismiss(decisions.get(event.button.id, "deny"))
+        safe_dismiss(self, decisions.get(event.button.id, "deny"))
 
     def on_key(self, event: events.Key) -> None:
         if event.key in {"?", "question_mark"} or event.character == "?":
@@ -71,13 +72,13 @@ class ToolApprovalModal(ModalScreen[str]):
             self.action_help()
 
     def action_allow_once(self) -> None:
-        self.dismiss("once")
+        safe_dismiss(self, "once")
 
     def action_allow_always(self) -> None:
-        self.dismiss("always")
+        safe_dismiss(self, "always")
 
     def action_deny(self) -> None:
-        self.dismiss("deny")
+        safe_dismiss(self, "deny")
 
     def action_help(self) -> None:
         self.app.push_screen(HelpModal("approval"))
@@ -104,11 +105,11 @@ class EditDiffModal(ModalScreen[str]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "edit-allow-once":
-            self.dismiss("once")
+            safe_dismiss(self, "once")
         elif event.button.id == "edit-allow-always":
-            self.dismiss("always")
+            safe_dismiss(self, "always")
         else:
-            self.dismiss("deny")
+            safe_dismiss(self, "deny")
 
     def on_key(self, event: events.Key) -> None:
         if event.key in {"?", "question_mark"} or event.character == "?":
@@ -116,13 +117,13 @@ class EditDiffModal(ModalScreen[str]):
             self.action_help()
 
     def action_allow_once(self) -> None:
-        self.dismiss("once")
+        safe_dismiss(self, "once")
 
     def action_allow_always(self) -> None:
-        self.dismiss("always")
+        safe_dismiss(self, "always")
 
     def action_deny(self) -> None:
-        self.dismiss("deny")
+        safe_dismiss(self, "deny")
 
     def action_help(self) -> None:
         self.app.push_screen(HelpModal("edit_diff"))
@@ -146,16 +147,16 @@ class ConfirmModal(ModalScreen[bool]):
         self.query_one("#confirm-no", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "confirm-yes")
+        safe_dismiss(self, event.button.id == "confirm-yes")
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape" or event.character == "n":
             event.stop()
-            self.dismiss(False)
+            safe_dismiss(self, False)
             return
         if event.character == "y":
             event.stop()
-            self.dismiss(True)
+            safe_dismiss(self, True)
 
 
 class ExternalDirectoryDecisionModal(ModalScreen[str | None]):
@@ -183,21 +184,21 @@ class ExternalDirectoryDecisionModal(ModalScreen[str | None]):
             "external-full": "full",
             "external-cancel": None,
         }
-        self.dismiss(mapping.get(event.button.id))
+        safe_dismiss(self, mapping.get(event.button.id))
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape" or event.character == "c":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
         elif event.character in {"r", "o"}:
             event.stop()
-            self.dismiss("read")
+            safe_dismiss(self, "read")
         elif event.character == "s":
             event.stop()
-            self.dismiss("switch")
+            safe_dismiss(self, "switch")
         elif event.character == "f":
             event.stop()
-            self.dismiss("full")
+            safe_dismiss(self, "full")
 
 
 PERMISSION_MODE_ORDER: list[PermissionMode] = ["request_approval", "auto_approve", "full_access"]
@@ -234,7 +235,7 @@ class PermissionsModal(ModalScreen[dict[str, object] | None]):
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if event.key == "down":
             event.stop()
@@ -250,24 +251,24 @@ class PermissionsModal(ModalScreen[dict[str, object] | None]):
             return
         if event.key == "enter":
             event.stop()
-            self.dismiss({"action": "set_mode", "mode": PERMISSION_MODE_ORDER[self.mode_index]})
+            safe_dismiss(self, {"action": "set_mode", "mode": PERMISSION_MODE_ORDER[self.mode_index]})
             return
         if event.character == "c":
             event.stop()
-            self.dismiss({"action": "clear"})
+            safe_dismiss(self, {"action": "clear"})
             return
         if not self.external_roots:
             return
         selected = self.external_roots[self.selected]
         if event.character == "o":
             event.stop()
-            self.dismiss({"action": "set_access", "path": selected["path"], "access": "read"})
+            safe_dismiss(self, {"action": "set_access", "path": selected["path"], "access": "read"})
         elif event.character == "f":
             event.stop()
-            self.dismiss({"action": "set_access", "path": selected["path"], "access": "full"})
+            safe_dismiss(self, {"action": "set_access", "path": selected["path"], "access": "full"})
         elif event.character == "r":
             event.stop()
-            self.dismiss({"action": "remove", "path": selected["path"]})
+            safe_dismiss(self, {"action": "remove", "path": selected["path"]})
 
     def _move(self, delta: int) -> None:
         if not self.external_roots:

@@ -12,6 +12,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from haagent.tui.design.copy import MODAL_TITLES
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.state.search import ConversationSearchState
 
 
@@ -27,7 +28,7 @@ class SearchOverlay(ModalScreen[None]):
         key = event.key
         if key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "backspace":
             event.stop()

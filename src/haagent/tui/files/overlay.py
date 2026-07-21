@@ -103,10 +103,11 @@ class FileReferenceOverlay(Vertical):
         return self.matches[min(self.selected_index, len(self.matches) - 1)]
 
     def _move(self, delta: int) -> None:
+        # 方向键只改索引/高亮与摘要；禁止每次 set_options 全量重建。
         if self.matches:
             self.selected_index = min(max(self.selected_index + delta, 0), len(self.matches) - 1)
             self._ensure_selection_visible()
-        self._refresh()
+        self._refresh_header_and_highlight()
 
     def _reload(self) -> None:
         self.matches = self.index.matches(self.filter_text) if self.index is not None else []
@@ -129,6 +130,15 @@ class FileReferenceOverlay(Vertical):
         if not options:
             options = [Option(EMPTY_LABELS["no_matching_files"], id="empty", disabled=True)]
         option_list.set_options(options)
+        option_list.highlighted = self.selected_index if self.matches else None
+
+    def _refresh_header_and_highlight(self) -> None:
+        try:
+            summary = self.query_one("#file-ref-summary", Static)
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            return
+        summary.update(self._body())
         option_list.highlighted = self.selected_index if self.matches else None
 
     def _ensure_selection_visible(self) -> None:

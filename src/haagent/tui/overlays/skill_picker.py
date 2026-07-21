@@ -14,6 +14,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from haagent.tui.design.copy import EMPTY_LABELS
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.design.utils import safe_summary
 
 
@@ -118,7 +119,7 @@ class SkillPickerOverlay(ModalScreen[dict[str, object] | None]):
         key = event.key
         if key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "up":
             event.stop()
@@ -138,7 +139,7 @@ class SkillPickerOverlay(ModalScreen[dict[str, object] | None]):
                 return
             selected = self.state.selected_skill
             if selected is not None:
-                self.dismiss(selected)
+                safe_dismiss(self, selected)
             return
         if event.character and event.character.isprintable():
             event.stop()

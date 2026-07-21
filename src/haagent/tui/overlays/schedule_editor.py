@@ -25,6 +25,7 @@ from haagent.scheduling.models import (
     SCHEDULE_WEB_TOOLS,
     merge_web_tools,
 )
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.design.utils import safe_summary
 
 FrequencyKind = Literal["once", "interval", "daily", "weekly", "monthly", "custom"]
@@ -581,7 +582,7 @@ class ScheduleEditorOverlay(ModalScreen[ScheduleEditorState | None]):
         key = event.key
         if key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "tab":
             event.stop()
@@ -602,7 +603,7 @@ class ScheduleEditorOverlay(ModalScreen[ScheduleEditorState | None]):
             if err:
                 self._set_state(replace(self.state, message=err))
                 return
-            self.dismiss(self.state)
+            safe_dismiss(self, self.state)
             return
         if key == "exclamation_mark" or event.character == "!":
             if self.state.page == 3:
@@ -611,7 +612,7 @@ class ScheduleEditorOverlay(ModalScreen[ScheduleEditorState | None]):
                 if err:
                     self._set_state(replace(self.state, message=err))
                     return
-                self.dismiss(replace(self.state, message="run_now_test"))
+                safe_dismiss(self, replace(self.state, message="run_now_test"))
                 return
         if self.state.page == 0:
             self._handle_task_key(event)

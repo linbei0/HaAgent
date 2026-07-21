@@ -11,6 +11,7 @@ from typing import Any
 
 from haagent.models.gateway_registry import catalog_provider_capability
 from haagent.app.assistant_types import ModelSelectionRequest
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.overlays.connections import (
     ConnectionCenterOverlay,
     ConnectionCenterResult,
@@ -289,7 +290,7 @@ class ModelFlow:
 
     def dismiss_loading_overlay(self) -> None:
         if isinstance(self._app.screen, ModelCatalogLoadingOverlay):
-            self._app.screen.dismiss(None)
+            safe_dismiss(self._app.screen, None)
 
 
 def configurable_catalog_providers(providers: list[object]) -> list[object]:

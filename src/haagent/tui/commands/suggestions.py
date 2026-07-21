@@ -110,11 +110,11 @@ class CommandSuggestionOverlay(Vertical):
             return ""
         if key == "up":
             event.stop()
-            self._set_state(self.state.move(-1))
+            self._move_selection(-1)
             return None
         if key == "down":
             event.stop()
-            self._set_state(self.state.move(1))
+            self._move_selection(1)
             return None
         if key == "enter":
             event.stop()
@@ -136,6 +136,12 @@ class CommandSuggestionOverlay(Vertical):
             return None
         return self._visible_commands[index]
 
+    def _move_selection(self, delta: int) -> None:
+        # 方向键只改索引/高亮与摘要；过滤变更才 set_options。
+        self.state = self.state.move(delta)
+        self._visible_commands = self.state.visible_commands
+        self._refresh_header_and_highlight()
+
     def _set_state(self, state: CommandSuggestionState) -> None:
         self.state = state
         self._visible_commands = state.visible_commands
@@ -153,3 +159,12 @@ class CommandSuggestionOverlay(Vertical):
             options = [Option(EMPTY_LABELS["no_matching_commands"], id="empty", disabled=True)]
         option_list.set_options(options)
         option_list.highlighted = state.selected_index if self._visible_commands else None
+
+    def _refresh_header_and_highlight(self) -> None:
+        try:
+            summary = self.query_one("#command-suggestions-summary", Static)
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            return
+        summary.update(self.state.render())
+        option_list.highlighted = self.state.selected_index if self._visible_commands else None

@@ -18,6 +18,7 @@ from textual.widgets.option_list import Option
 
 from haagent.app.assistant_types import AssistantModelConnection, ModelConnectionConfigureRequest
 from haagent.models.gateway_registry import catalog_provider_capability
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.design.utils import safe_summary
 
 ConnectionCenterAction = Literal[
@@ -133,15 +134,15 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
         key = event.key
         if key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "up":
             event.stop()
-            self._set_state(self.state.move(-1))
+            self._move_selection(-1)
             return
         if key == "down":
             event.stop()
-            self._set_state(self.state.move(1))
+            self._move_selection(1)
             return
         if key == "backspace":
             event.stop()
@@ -152,26 +153,37 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
             self._sync_selected_from_option_list()
             selected = self.state.selected_connection
             if selected is not None:
-                self.dismiss(ConnectionCenterResult(action="delete_connection", connection_id=selected.id))
+                safe_dismiss(
+                    self,
+                    ConnectionCenterResult(action="delete_connection", connection_id=selected.id),
+                )
             return
         if key == "n":
             event.stop()
-            self.dismiss(ConnectionCenterResult(action="new_connection"))
+            safe_dismiss(self, ConnectionCenterResult(action="new_connection"))
             return
         if key == "r":
             event.stop()
-            self.dismiss(ConnectionCenterResult(action="refresh_catalog"))
+            safe_dismiss(self, ConnectionCenterResult(action="refresh_catalog"))
             return
         if key == "t":
             event.stop()
             self._sync_selected_from_option_list()
             selected = self.state.selected_connection
             if selected is not None:
-                self.dismiss(ConnectionCenterResult(action="test_connection", connection_id=selected.id))
+                safe_dismiss(
+                    self,
+                    ConnectionCenterResult(action="test_connection", connection_id=selected.id),
+                )
             return
         if event.character and event.character.isprintable():
             event.stop()
             self._set_state(self.state.with_query(self.state.query + event.character))
+
+    def _move_selection(self, delta: int) -> None:
+        # 方向键只改索引/高亮与头部；禁止 set_options 全量重建。
+        self.state = self.state.move(delta)
+        self._refresh_header_and_highlight()
 
     def _set_state(self, state: ConnectionCenterState) -> None:
         self.state = state
@@ -180,6 +192,25 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
             option_list = self.query_one(OptionList)
         except NoMatches:
             return
+        body.update(self._header_text(state))
+        options = [_connection_option(connection) for connection in state.visible_connections]
+        if not options:
+            options = [Option("无匹配连接", id="empty", disabled=True)]
+        option_list.set_options(options)
+        option_list.highlighted = state.selected_index if state.visible_connections else None
+
+    def _refresh_header_and_highlight(self) -> None:
+        try:
+            body = self.query_one("#connection-center-dialog", Static)
+            option_list = self.query_one(OptionList)
+        except NoMatches:
+            return
+        body.update(self._header_text(self.state))
+        option_list.highlighted = (
+            self.state.selected_index if self.state.visible_connections else None
+        )
+
+    def _header_text(self, state: ConnectionCenterState) -> str:
         # 头部引导：本列表是已配置连接，不是全量供应商目录；n 进入新建向导。
         lines = [
             "供应商连接（已配置）",
@@ -191,16 +222,8 @@ class ConnectionCenterOverlay(ModalScreen[ConnectionCenterResult | None]):
         selected = state.selected_connection
         diagnostics = selected.model_config_diagnostics if selected else ()
         if diagnostics:
-            lines.append(
-                "模型参数配置错误："
-                + safe_summary(diagnostics[0], 160)
-            )
-        body.update("\n".join(lines))
-        options = [_connection_option(connection) for connection in state.visible_connections]
-        if not options:
-            options = [Option("无匹配连接", id="empty", disabled=True)]
-        option_list.set_options(options)
-        option_list.highlighted = state.selected_index if state.visible_connections else None
+            lines.append("模型参数配置错误：" + safe_summary(diagnostics[0], 160))
+        return "\n".join(lines)
 
     def _sync_selected_from_option_list(self) -> None:
         if not self.is_mounted:
@@ -279,7 +302,8 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
                 self.model_index = 0
                 self._set_step_ui()
             else:
-                self.dismiss(None)
+                # 卡顿队列里可能在 screen 已 pop 后仍收到 Esc；禁止二次 dismiss 炸栈。
+                self._safe_dismiss(None)
             return
         if self.step not in {"provider", "model"}:
             return
@@ -308,11 +332,12 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
         self._advance_from_list()
 
     def _move_selection(self, delta: int) -> None:
+        # 只改索引/高亮与头部文案；禁止对 100+ 项每次 set_options 全量重建。
         if self.step == "provider":
             self._move_provider(delta)
         else:
             self._move_model(delta)
-        self._set_step_ui()
+        self._refresh_header_and_highlight()
 
     def _trim_query(self) -> None:
         if self.step == "provider":
@@ -374,6 +399,21 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
         secret_input.value = ""
         secret_input.focus()
 
+    def _refresh_header_and_highlight(self) -> None:
+        """方向键路径：只刷新头部与 highlighted，不重建 OptionList。"""
+        try:
+            body = self.query_one("#connection-setup-dialog", Static)
+            option_list = self.query_one("#connection-setup-list", OptionList)
+        except NoMatches:
+            return
+        body.update(self._header_text())
+        items = self.visible_providers if self.step == "provider" else self.visible_models
+        selected_index = self.provider_index if self.step == "provider" else self.model_index
+        if not items:
+            option_list.highlighted = None
+            return
+        option_list.highlighted = min(max(selected_index, 0), len(items) - 1)
+
     def _populate_option_list(self, option_list: OptionList) -> None:
         if self.step == "provider":
             items = self.visible_providers
@@ -391,6 +431,9 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
         option_list.set_options(options)
         option_list.highlighted = min(max(selected_index, 0), len(items) - 1)
 
+    def _safe_dismiss(self, result: ConnectionSetupResult | None) -> None:
+        safe_dismiss(self, result)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
         if self.step == "connection_name":
@@ -402,7 +445,7 @@ class ConnectionSetupWizard(ModalScreen[ConnectionSetupResult | None]):
             return
         result = self._new_connection_result(event.value)
         if result is not None:
-            self.dismiss(result)
+            self._safe_dismiss(result)
             return
         self.input_error = "API key 不能为空"
         self._set_step_ui()

@@ -14,6 +14,7 @@ from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.design.utils import safe_summary
 
 ChannelsOverlayAction = Literal[
@@ -95,7 +96,7 @@ class ChannelsOverlay(ModalScreen[ChannelsOverlayResult | None]):
         key = event.key
         if key in {"escape"}:
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "up":
             event.stop()
@@ -107,7 +108,7 @@ class ChannelsOverlay(ModalScreen[ChannelsOverlayResult | None]):
             return
         if key == "n":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="add_weixin"))
+            safe_dismiss(self, ChannelsOverlayResult(action="add_weixin"))
             return
         selected = self.state.selected_instance
         if selected is None:
@@ -115,31 +116,31 @@ class ChannelsOverlay(ModalScreen[ChannelsOverlayResult | None]):
         instance_id = str(getattr(selected, "id", ""))
         if key == "r":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="relogin", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="relogin", instance_id=instance_id))
             return
         if key == "e":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="enable", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="enable", instance_id=instance_id))
             return
         if key == "d":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="disable", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="disable", instance_id=instance_id))
             return
         if key == "t":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="test", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="test", instance_id=instance_id))
             return
         if key == "p":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="pair", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="pair", instance_id=instance_id))
             return
         if key == "w":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="workspace", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="workspace", instance_id=instance_id))
             return
         if key == "x":
             event.stop()
-            self.dismiss(ChannelsOverlayResult(action="delete", instance_id=instance_id))
+            safe_dismiss(self, ChannelsOverlayResult(action="delete", instance_id=instance_id))
             return
 
     def _set_state(self, state: ChannelsOverlayState) -> None:

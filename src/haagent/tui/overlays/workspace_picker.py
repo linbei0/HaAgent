@@ -14,6 +14,8 @@ from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from haagent.tui.design.screen_helpers import safe_dismiss
+
 
 VISIBLE_ENTRY_COUNT = 10
 
@@ -177,7 +179,7 @@ class WorkspacePickerOverlay(ModalScreen[str | None]):
         key = event.key
         if key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "up":
             event.stop()
@@ -205,7 +207,7 @@ class WorkspacePickerOverlay(ModalScreen[str | None]):
             event.stop()
             path = self.state.confirm_current()
             if path is not None:
-                self.dismiss(str(path))
+                safe_dismiss(self, str(path))
             else:
                 self._set_state(self.state)
             return
@@ -213,7 +215,7 @@ class WorkspacePickerOverlay(ModalScreen[str | None]):
             event.stop()
             path = self.state.confirm_path()
             if path is not None:
-                self.dismiss(str(path))
+                safe_dismiss(self, str(path))
             else:
                 self._set_state(self.state)
             return

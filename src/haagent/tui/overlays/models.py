@@ -10,11 +10,12 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from textual import events
-from textual.app import ComposeResult, ScreenStackError
+from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from haagent.models.model_ref import ModelChoice, ModelRef
+from haagent.tui.design.screen_helpers import safe_dismiss, visible_window_start
 from haagent.tui.design.utils import safe_summary
 from haagent.models.local_runtime import LocalRuntimeDiscovery, LocalRuntimeModel
 
@@ -26,6 +27,7 @@ ModelSwitchAction = Literal[
     "scan_local",
 ]
 MODEL_SWITCH_PAGE_SIZE = 15
+LOCAL_RUNTIME_PAGE_SIZE = 15
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,9 @@ class ModelSwitchState:
         if not visible:
             return 0, []
         selected = min(max(self.selected_index, 0), len(visible) - 1)
-        start = max(0, min(selected - MODEL_SWITCH_PAGE_SIZE + 1, len(visible) - MODEL_SWITCH_PAGE_SIZE))
+        start = visible_window_start(
+            total=len(visible), selected=selected, page_size=MODEL_SWITCH_PAGE_SIZE
+        )
         return start, visible[start : start + MODEL_SWITCH_PAGE_SIZE]
 
     def with_query(self, query: str) -> ModelSwitchState:
@@ -269,12 +273,7 @@ class ModelSwitchOverlay(ModalScreen[ModelSwitchResult | None]):
         self.query_one("#model-switch-dialog", Static).update(state.render())
 
     def _safe_dismiss(self, result: ModelSwitchResult | None) -> None:
-        try:
-            if self.app.screen is not self:
-                return
-            self.dismiss(result)
-        except ScreenStackError:
-            return
+        safe_dismiss(self, result)
 
 
 class ModelCatalogLoadingOverlay(ModalScreen[None]):
@@ -312,23 +311,28 @@ class LocalRuntimeOverlay(ModalScreen[LocalModelSelection | None]):
         for discovery in self.discoveries:
             if discovery.status != "available":
                 lines.append(f"{discovery.runtime_kind}: {discovery.status} - {discovery.reason or ''}")
-        for index, row in enumerate(self.rows):
-            caps = row.model.capabilities
-            selected = ">" if index == self.selected_index else " "
-            lines.append(
-                f"{selected} {row.discovery.runtime_kind} / {row.model.id}  "
-                f"loaded={'yes' if row.model.loaded else 'no'}  context={caps.context_window_tokens or '?'}  "
-                f"tools={caps.tools_mode}  vision={caps.vision}  reasoning={caps.reasoning}"
-            )
         if not self.rows:
             lines.append("未发现可用的本地聊天模型")
+        else:
+            selected = min(max(self.selected_index, 0), len(self.rows) - 1)
+            start = visible_window_start(
+                total=len(self.rows), selected=selected, page_size=LOCAL_RUNTIME_PAGE_SIZE
+            )
+            for index, row in enumerate(self.rows[start : start + LOCAL_RUNTIME_PAGE_SIZE], start=start):
+                caps = row.model.capabilities
+                marker = ">" if index == selected else " "
+                lines.append(
+                    f"{marker} {row.discovery.runtime_kind} / {row.model.id}  "
+                    f"loaded={'yes' if row.model.loaded else 'no'}  context={caps.context_window_tokens or '?'}  "
+                    f"tools={caps.tools_mode}  vision={caps.vision}  reasoning={caps.reasoning}"
+                )
         lines.extend(["", "↑/↓ 移动  Enter 保存并切换  Esc 关闭"])
         return "\n".join(lines)
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
         elif event.key in {"up", "down"} and self.rows:
             event.stop()
             delta = -1 if event.key == "up" else 1
@@ -336,4 +340,4 @@ class LocalRuntimeOverlay(ModalScreen[LocalModelSelection | None]):
             self.query_one("#local-runtime-dialog", Static).update(self._render_text())
         elif event.key == "enter" and self.rows:
             event.stop()
-            self.dismiss(self.rows[self.selected_index])
+            safe_dismiss(self, self.rows[self.selected_index])

@@ -16,9 +16,11 @@ from textual.widgets import Static
 
 from haagent.app.assistant_types import AssistantSessionSummary
 from haagent.tui.design.copy import EMPTY_LABELS, MODAL_TITLES
+from haagent.tui.design.screen_helpers import safe_dismiss, visible_window_start
 from haagent.tui.design.utils import safe_summary
 
 SessionOverlayAction = Literal["resume", "continue_latest", "new"]
+SESSION_PAGE_SIZE = 15
 
 
 @dataclass(frozen=True)
@@ -71,10 +73,16 @@ class SessionOverlayState:
         visible = self.visible_sessions
         if not visible:
             lines.append(EMPTY_LABELS["no_matching_sessions"])
-        for index, session in enumerate(visible):
-            marker = ">" if index == min(self.selected_index, len(visible) - 1) else " "
-            request = safe_summary(session.first_request or "-", 42)
-            lines.append(f"{marker} {session.session_id}  turns:{session.turn_count}  {request}")
+        else:
+            selected = min(max(self.selected_index, 0), len(visible) - 1)
+            lines.append(f"会话 {selected + 1}/{len(visible)}")
+            start = visible_window_start(
+                total=len(visible), selected=selected, page_size=SESSION_PAGE_SIZE
+            )
+            for index, session in enumerate(visible[start : start + SESSION_PAGE_SIZE], start=start):
+                marker = ">" if index == selected else " "
+                request = safe_summary(session.first_request or "-", 42)
+                lines.append(f"{marker} {session.session_id}  turns:{session.turn_count}  {request}")
         lines.extend(["", "输入过滤  ↑/↓ 移动  Enter 恢复  l 继续最新  n 新建  Esc 关闭"])
         return "\n".join(lines)
 
@@ -91,7 +99,7 @@ class SessionOverlay(ModalScreen[SessionOverlayResult | None]):
         key = event.key
         if key in {"escape"}:
             event.stop()
-            self.dismiss(None)
+            safe_dismiss(self, None)
             return
         if key == "up":
             event.stop()
@@ -109,15 +117,15 @@ class SessionOverlay(ModalScreen[SessionOverlayResult | None]):
             event.stop()
             selected = self.state.selected_session
             if selected is not None:
-                self.dismiss(SessionOverlayResult(action="resume", session=selected))
+                safe_dismiss(self, SessionOverlayResult(action="resume", session=selected))
             return
         if key == "l":
             event.stop()
-            self.dismiss(SessionOverlayResult(action="continue_latest"))
+            safe_dismiss(self, SessionOverlayResult(action="continue_latest"))
             return
         if key == "n":
             event.stop()
-            self.dismiss(SessionOverlayResult(action="new"))
+            safe_dismiss(self, SessionOverlayResult(action="new"))
             return
         if event.character and event.character.isprintable():
             event.stop()

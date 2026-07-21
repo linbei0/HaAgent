@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from textual import events
-from textual.app import ComposeResult, ScreenStackError
+from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
@@ -21,6 +21,7 @@ from haagent.app.assistant_types import (
     AssistantScheduleRun,
     AssistantScheduleSummary,
 )
+from haagent.tui.design.screen_helpers import safe_dismiss
 from haagent.tui.design.utils import format_local_datetime, safe_summary, workspace_label
 from haagent.tui.overlays.schedule_background import ScheduleBackgroundState
 from haagent.tui.overlays.schedule_runs import ScheduleRunsState, filter_runs
@@ -476,12 +477,7 @@ class SchedulesOverlay(ModalScreen[SchedulesOverlayResult | None]):
 
     def _safe_dismiss(self, result: SchedulesOverlayResult | None) -> None:
         # 焦点恢复/重复 Esc：仅在当前 screen 是自己时 dismiss，吞掉 stack 错误
-        try:
-            if self.app.screen is not self:
-                return
-            self.dismiss(result)
-        except ScreenStackError:
-            return
+        safe_dismiss(self, result)
 
     def apply_refresh(
         self,

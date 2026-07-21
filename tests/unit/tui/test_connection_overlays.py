@@ -151,6 +151,55 @@ def test_model_switch_overlay_ignores_escape_after_it_is_already_closed() -> Non
     asyncio.run(run())
 
 
+def test_connection_setup_ignores_escape_after_it_is_already_closed() -> None:
+    """卡顿后 Esc 可能在 screen 已 pop 后仍投递；不得再 dismiss 炸栈。"""
+
+    async def run() -> None:
+        overlay = ConnectionSetupWizard([_provider("p1", model_count=3)])
+        app = App()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.push_screen(overlay)
+            await pilot.pause(0.05)
+            overlay.dismiss(None)
+            await pilot.pause(0.05)
+
+            overlay.on_key(_FakeKeyEvent("escape"))
+
+    asyncio.run(run())
+
+
+def test_connection_setup_move_does_not_rebuild_option_list() -> None:
+    """143+ provider 时每次 ↑/↓ 全量 set_options 会卡死；移动只改高亮。"""
+
+    async def run() -> None:
+        providers = [_provider(f"provider-{index:03d}", model_count=2) for index in range(80)]
+        overlay = ConnectionSetupWizard(providers)
+        app = App()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.push_screen(overlay)
+            await pilot.pause(0.05)
+            option_list = overlay.query_one("#connection-setup-list", OptionList)
+            assert option_list.option_count == 80
+            calls = {"set_options": 0}
+            original_set_options = option_list.set_options
+
+            def counting_set_options(*args, **kwargs):
+                calls["set_options"] += 1
+                return original_set_options(*args, **kwargs)
+
+            option_list.set_options = counting_set_options  # type: ignore[method-assign]
+
+            overlay.on_key(_FakeKeyEvent("down"))
+            await pilot.pause(0.05)
+
+            assert overlay.provider_index == 1
+            assert option_list.highlighted == 1
+            assert calls["set_options"] == 0
+            assert option_list.option_count == 80
+
+    asyncio.run(run())
+
+
 class _FakeKeyEvent:
     def __init__(self, key: str, character: str | None = None) -> None:
         self.key = key
@@ -183,4 +232,19 @@ def _connection(connection_id: str, name: str, provider_id: str) -> AssistantMod
         credential_available=True,
         credential_source_used="keyring",
         model_config_diagnostics=(),
+    )
+
+
+def _provider(provider_id: str, *, model_count: int = 1) -> SimpleNamespace:
+    models = [
+        SimpleNamespace(id=f"{provider_id}-model-{index}", name=f"Model {index}")
+        for index in range(model_count)
+    ]
+    return SimpleNamespace(
+        id=provider_id,
+        name=provider_id.replace("-", " ").title(),
+        api_base_url=f"https://example.com/{provider_id}",
+        env_names=[f"{provider_id.upper().replace('-', '_')}_API_KEY"],
+        provider_package="@ai-sdk/openai-compatible",
+        models=models,
     )
