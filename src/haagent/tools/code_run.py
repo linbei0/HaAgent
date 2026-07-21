@@ -1,13 +1,13 @@
 """
 haagent/tools/code_run.py - Python 脚本执行工具
 
-把多行 Python 代码写入工作区临时脚本后执行，避免 shell 转义复杂脚本。
+把多行 Python 代码写入系统临时脚本后执行，避免 shell 转义复杂脚本，且不污染 workspace。
 """
 
 from __future__ import annotations
 
 import sys
-import uuid
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -69,64 +69,76 @@ def code_run(
         return tool_error("tool_argument_invalid", timeout_result)
 
     # 任意 Python 代码无法可靠静态分析；调用方必须显式声明外部目录，真实隔离由 sandbox 提供。
-    root = workspace_root.resolve()
-    tmp_dir = root / ".haagent-tmp"
-    tmp_dir.mkdir(exist_ok=True)
-    script_path = tmp_dir / f"code-run-{uuid.uuid4().hex[:12]}.py"
-    script_path.write_text(code, encoding="utf-8")
+    # 脚本放系统 temp，cwd 仍指向 workspace，避免污染用户项目树。
+    script_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="haagent-code-run-",
+            suffix=".py",
+            delete=False,
+            mode="w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(code)
+            script_path = Path(handle.name)
 
-    if sandbox_backend is None:
-        command_result = run_process(
-            command=f"{sys.executable} -X utf8 {script_path}",
-            popen_args=[sys.executable, "-X", "utf8", str(script_path)],
-            shell=False,
-            cwd=cwd_result,
-            timeout_seconds=timeout_result,
-            cancellation_token=cancellation_token,
-            env=build_python_utf8_environment(),
-        )
-    else:
-        command_result = sandbox_backend.run_python(
-            script_path,
-            SandboxCommand(
-                command=f"python -X utf8 {script_path}",
+        if sandbox_backend is None:
+            command_result = run_process(
+                command=f"{sys.executable} -X utf8 {script_path}",
+                popen_args=[sys.executable, "-X", "utf8", str(script_path)],
+                shell=False,
                 cwd=cwd_result,
                 timeout_seconds=timeout_result,
                 cancellation_token=cancellation_token,
-                env=build_python_utf8_environment(inherit=False),
-            ),
-        )
-    result = {
-        "status": "success" if command_result.status == "success" else "error",
-        "exit_code": command_result.exit_code,
-        "stdout_excerpt": command_result.stdout_excerpt,
-        "stderr_excerpt": command_result.stderr_excerpt,
-        "stdout_truncated": command_result.stdout_truncated,
-        "stderr_truncated": command_result.stderr_truncated,
-        "truncated": command_result.truncated,
-        "timeout": command_result.timeout,
-        "redacted": command_result.redacted,
-        "timeout_seconds": command_result.timeout_seconds,
-        "script_path": script_path.relative_to(root).as_posix(),
-    }
-    if command_result.status == "timeout":
-        result.update(
-            tool_error("timeout", f"python code timed out after {timeout_result} seconds", retryable=False, execution_state="unknown"),
-        )
-    elif command_result.status == "cancelled":
-        result.update(tool_error("cancelled", "python code cancelled by user", retryable=False, execution_state="unknown"))
-    elif command_result.status == "failed":
-        result.update(
-            tool_error(
-                "code_run_failed",
-                f"python code exited with code {command_result.exit_code}",
-                category=ToolFailureCategory.EXECUTION,
-                retryable=False,
-                recovery=RecoveryAction(
-                    "correct_arguments",
-                    "代码已完成但返回非零；查看 stderr 后修改 code，不要原样重试。",
+                env=build_python_utf8_environment(),
+            )
+        else:
+            command_result = sandbox_backend.run_python(
+                script_path,
+                SandboxCommand(
+                    command=f"python -X utf8 {script_path}",
+                    cwd=cwd_result,
+                    timeout_seconds=timeout_result,
+                    cancellation_token=cancellation_token,
+                    env=build_python_utf8_environment(inherit=False),
                 ),
-                execution_state="completed",
-            ),
-        )
-    return result
+            )
+        result = {
+            "status": "success" if command_result.status == "success" else "error",
+            "exit_code": command_result.exit_code,
+            "stdout_excerpt": command_result.stdout_excerpt,
+            "stderr_excerpt": command_result.stderr_excerpt,
+            "stdout_truncated": command_result.stdout_truncated,
+            "stderr_truncated": command_result.stderr_truncated,
+            "truncated": command_result.truncated,
+            "timeout": command_result.timeout,
+            "redacted": command_result.redacted,
+            "timeout_seconds": command_result.timeout_seconds,
+            # 诊断字段：绝对路径；成功失败后文件均已删除，复盘依赖 episode 中的 code 参数。
+            "script_path": str(script_path.resolve()),
+        }
+        if command_result.status == "timeout":
+            result.update(
+                tool_error("timeout", f"python code timed out after {timeout_result} seconds", retryable=False, execution_state="unknown"),
+            )
+        elif command_result.status == "cancelled":
+            result.update(tool_error("cancelled", "python code cancelled by user", retryable=False, execution_state="unknown"))
+        elif command_result.status == "failed":
+            result.update(
+                tool_error(
+                    "code_run_failed",
+                    f"python code exited with code {command_result.exit_code}",
+                    category=ToolFailureCategory.EXECUTION,
+                    retryable=False,
+                    recovery=RecoveryAction(
+                        "correct_arguments",
+                        "代码已完成但返回非零；查看 stderr 后修改 code，不要原样重试。",
+                    ),
+                    execution_state="completed",
+                ),
+            )
+        return result
+    finally:
+        # 成功与失败都清理临时脚本，避免污染系统 temp 与 workspace。
+        if script_path is not None:
+            script_path.unlink(missing_ok=True)

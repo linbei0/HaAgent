@@ -7,6 +7,7 @@ tests/unit/runtime/test_sandbox_docker_backend.py - Docker 沙箱后端测试
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -212,6 +213,66 @@ def test_docker_run_python_forces_utf8_mode_and_environment(tmp_path: Path, monk
     assert "PYTHONUTF8=1" in argv
     assert "PYTHONIOENCODING=utf-8" in argv
     assert argv[-4:] == ["python", "-X", "utf8", "/workspace/script.py"]
+
+
+def test_docker_run_python_copies_host_temp_script_into_container(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("haagent.runtime.sandbox.docker_backend.shutil.which", lambda name: "docker")
+    backend = DockerSandboxBackend(
+        settings=_settings(),
+        workspace_root=tmp_path,
+        session_id="abc123",
+        command_timeout_seconds=60,
+    )
+    host_script = Path(tempfile.gettempdir()) / "haagent-code-run-outside.py"
+    host_script.write_text("print('hi')\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+    docker_calls: list[list[str]] = []
+
+    def fake_run_process(**kwargs):
+        captured.update(kwargs)
+        return CommandResult(
+            command="python script.py",
+            status="success",
+            exit_code=0,
+            stdout="",
+            stderr="",
+            stdout_excerpt="",
+            stderr_excerpt="",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            truncated=False,
+            timeout=False,
+            redacted=False,
+            duration_seconds=0.01,
+            timeout_seconds=60,
+        )
+
+    def fake_subprocess_run(argv, **kwargs):
+        docker_calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("haagent.runtime.sandbox.docker_backend.run_process", fake_run_process)
+    monkeypatch.setattr("haagent.runtime.sandbox.docker_backend.subprocess.run", fake_subprocess_run)
+
+    try:
+        backend.run_python(
+            host_script,
+            SandboxCommand(
+                command="python script.py",
+                cwd=tmp_path,
+                timeout_seconds=60,
+            ),
+        )
+    finally:
+        host_script.unlink(missing_ok=True)
+
+    assert any(call[:2] == ["docker", "cp"] for call in docker_calls)
+    argv = captured["popen_args"]
+    assert isinstance(argv, list)
+    container_script = argv[-1]
+    assert isinstance(container_script, str)
+    assert container_script.startswith("/tmp/haagent-code-run/")
+    assert argv[-4:-1] == ["python", "-X", "utf8"]
 
 
 def test_docker_exec_argv_maps_workspace_child_cwd_to_container_path(tmp_path: Path, monkeypatch) -> None:

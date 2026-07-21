@@ -209,21 +209,42 @@ class DockerSandboxBackend:
         return ShellContract("posix", "bash", "linux")
 
     def run_python(self, script_path: Path, command: SandboxCommand) -> CommandResult:
-        container_script_path = self._container_path(script_path)
+        # workspace 内脚本走 bind mount；系统 temp 脚本需 docker cp 进容器后再执行。
+        container_script_path, staged = self._prepare_container_script(script_path)
         python_env = build_python_utf8_environment(command.env, inherit=False)
-        result = run_process(
-            command=f"python -X utf8 {script_path}",
-            popen_args=self.build_exec_argv(
-                ["python", "-X", "utf8", container_script_path],
-                cwd=command.cwd,
-                env=python_env,
-            ),
-            shell=False,
-            cwd=self._workspace_root,
-            timeout_seconds=command.timeout_seconds,
-            cancellation_token=command.cancellation_token,
-        )
-        return self._host_visible_result(result)
+        try:
+            result = run_process(
+                command=f"python -X utf8 {script_path}",
+                popen_args=self.build_exec_argv(
+                    ["python", "-X", "utf8", container_script_path],
+                    cwd=command.cwd,
+                    env=python_env,
+                ),
+                shell=False,
+                cwd=self._workspace_root,
+                timeout_seconds=command.timeout_seconds,
+                cancellation_token=command.cancellation_token,
+            )
+            return self._host_visible_result(result)
+        finally:
+            if staged:
+                self._remove_container_path(container_script_path)
+
+    def _prepare_container_script(self, script_path: Path) -> tuple[str, bool]:
+        resolved = script_path.resolve()
+        try:
+            relative = resolved.relative_to(self._workspace_root)
+        except ValueError:
+            container_script = posixpath.join(
+                "/tmp/haagent-code-run",
+                resolved.name,
+            )
+            self._ensure_container_dir(posixpath.dirname(container_script))
+            self._docker_cp_to_container(resolved, container_script)
+            return container_script, True
+        if str(relative) == ".":
+            return self._container_workspace_root, False
+        return posixpath.join(self._container_workspace_root, *relative.parts), False
 
     def _container_path(self, path: Path) -> str:
         resolved = path.resolve()
@@ -234,6 +255,45 @@ class DockerSandboxBackend:
         if str(relative) == ".":
             return self._container_workspace_root
         return posixpath.join(self._container_workspace_root, *relative.parts)
+
+    def _ensure_container_dir(self, container_dir: str) -> None:
+        docker = shutil.which("docker") or "docker"
+        result = subprocess.run(
+            [docker, "exec", self._container_name, "mkdir", "-p", container_dir],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0:
+            reason = result.stderr.strip() or result.stdout.strip() or "failed to prepare container temp dir"
+            raise DockerSandboxUnavailable(reason)
+
+    def _docker_cp_to_container(self, host_path: Path, container_path: str) -> None:
+        docker = shutil.which("docker") or "docker"
+        result = subprocess.run(
+            [docker, "cp", str(host_path), f"{self._container_name}:{container_path}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0:
+            reason = result.stderr.strip() or result.stdout.strip() or "failed to copy script into container"
+            raise DockerSandboxUnavailable(reason)
+
+    def _remove_container_path(self, container_path: str) -> None:
+        docker = shutil.which("docker") or "docker"
+        subprocess.run(
+            [docker, "exec", self._container_name, "rm", "-f", container_path],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
 
     def _host_visible_result(self, result: CommandResult) -> CommandResult:
         return CommandResult(

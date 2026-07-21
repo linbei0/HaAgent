@@ -229,13 +229,18 @@ def test_secret_like_output_is_redacted_from_tool_result_and_context(
     assert secret not in context.model_input
 
 
-def test_code_run_script_path_stays_inside_workspace(tmp_path: Path) -> None:
+def test_code_run_uses_system_temp_script_and_cleans_up(tmp_path: Path) -> None:
     result = code_run({"code": "print('ok')", "timeout_seconds": 5}, tmp_path)
 
     assert result["status"] == "success"
-    assert result["script_path"].startswith(".haagent-tmp/")
-    assert (tmp_path / result["script_path"]).resolve().is_file()
-    assert tmp_path.resolve() in (tmp_path / result["script_path"]).resolve().parents
+    assert result["stdout_excerpt"].strip() == "ok"
+    assert "script_path" in result
+    script_path = Path(result["script_path"])
+    assert script_path.is_absolute()
+    assert not script_path.exists()
+    assert tmp_path.resolve() not in script_path.parents
+    assert not (tmp_path / ".haagent-tmp").exists()
+    assert not any(tmp_path.rglob("code-run-*.py"))
 
 
 def test_guardrail_blocks_shell_and_code_run_before_real_execution(tmp_path: Path) -> None:

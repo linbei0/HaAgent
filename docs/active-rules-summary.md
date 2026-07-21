@@ -104,7 +104,7 @@
 - `shell` 在执行前对常见 Bash/PowerShell 文件命令做 best-effort 路径扫描并合并申请外部目录权限；该扫描不是进程级 sandbox，未知命令和动态脚本仍以高风险工具审批及实际 sandbox 为准。
 - `code_run` 无法可靠静态分析任意 Python 路径，访问外部目录时必须通过 `external_directories` 显式声明并在执行前审批。
 - `shell` / `code_run` timeout 默认 60 秒，上限 120 秒。
-- `code_run` 用于降低多行脚本和 shell 转义成本；临时脚本保留在 workspace 内 `.haagent-tmp/` 以便失败复盘。
+- `code_run` 用于降低多行脚本和 shell 转义成本；临时脚本写入系统 temp 并在执行后删除，不污染 workspace；复盘依赖 episode 中的 `code` 参数与工具结果。
 - 工具输出向工具结果和 context 暴露摘要、excerpt、timeout、truncated 等字段，并对 secret-like 输出做脱敏。
 - 明显泄密、workspace 绕过和高风险工具参数必须在 runtime 层显式失败或拒绝。
 - 高风险或信息不足场景应通过审批或用户补充输入机制处理，不要让模型硬猜。

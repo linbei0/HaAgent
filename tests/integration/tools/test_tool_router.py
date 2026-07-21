@@ -914,7 +914,7 @@ def test_shell_uses_sandbox_backend_when_provided(tmp_path: Path) -> None:
     assert backend.shell_commands[0].timeout_seconds == 5
 
 
-def test_code_run_uses_sandbox_backend_and_workspace_script(tmp_path: Path) -> None:
+def test_code_run_uses_sandbox_backend_and_system_temp_script(tmp_path: Path) -> None:
     backend = FakeSandboxBackend()
     writer = make_writer(tmp_path)
     router = ToolRouter(
@@ -931,9 +931,11 @@ def test_code_run_uses_sandbox_backend_and_workspace_script(tmp_path: Path) -> N
     assert result["status"] == "success"
     assert result["stdout_excerpt"] == "sandbox python"
     script_path, command = backend.python_scripts[0]
-    assert script_path.is_file()
-    assert script_path.is_relative_to(tmp_path.resolve())
+    # Fake backend 在执行瞬间看到脚本；handler 返回后临时文件应已清理。
+    assert not script_path.exists()
+    assert not script_path.is_relative_to(tmp_path.resolve())
     assert command.cwd == tmp_path.resolve()
+    assert not (tmp_path / ".haagent-tmp").exists()
 
 
 def test_tool_router_does_not_swallow_run_cancelled_for_mcp_tool(tmp_path: Path) -> None:
@@ -2321,7 +2323,10 @@ def test_code_run_success_nonzero_timeout_and_truncation(tmp_path: Path) -> None
     assert success["status"] == "success"
     assert success["exit_code"] == 0
     assert success["stdout_excerpt"] == "ok\n"
-    assert success["script_path"].startswith(".haagent-tmp/")
+    success_script = Path(success["script_path"])
+    assert success_script.is_absolute()
+    assert not success_script.exists()
+    assert not (tmp_path / ".haagent-tmp").exists()
     assert failed["status"] == "error"
     assert failed["exit_code"] == 7
     assert failed["error"]["type"] == "code_run_failed"

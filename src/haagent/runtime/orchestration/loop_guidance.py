@@ -134,7 +134,7 @@ def _error_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, An
         return f"Patch did not match in {path}. Read the file first to get the exact current content."
 
     if tool_name == "code_run" and error_type == "tool_argument_invalid":
-        return "code_run argument invalid. Check that the script path is correct and the file exists."
+        return "code_run argument invalid. Check code, cwd, timeout_seconds, and external_directories."
 
     return None
 

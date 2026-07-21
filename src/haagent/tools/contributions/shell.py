@@ -137,8 +137,8 @@ SHELL_CONTRIBUTIONS: list[ToolContribution] = [
                 "code": {
                     "type": "string",
                     "description": (
-                        "complete Python program to write to a temporary workspace file and execute; "
-                        "print the concise result or diagnostics needed by the next step"
+                        "complete Python program to write to a system temporary file and execute "
+                        "(cleaned up after the run); print the concise result or diagnostics needed by the next step"
                     ),
                 },
                 "timeout_seconds": {
