@@ -17,12 +17,24 @@ def test_team_store_writes_and_reads_worker_messages(tmp_path: Path) -> None:
     store.write_worker_message(
         "team-1",
         "worker-1",
-        WorkerMessage(sender="coordinator", recipient="worker-1", content="first"),
+        WorkerMessage(
+            sender="coordinator",
+            recipient="worker-1",
+            content="first",
+            message_id="z-first",
+            created_at=100.0,
+        ),
     )
     store.write_worker_message(
         "team-1",
         "worker-1",
-        WorkerMessage(sender="coordinator", recipient="worker-1", content="second"),
+        WorkerMessage(
+            sender="coordinator",
+            recipient="worker-1",
+            content="second",
+            message_id="a-second",
+            created_at=100.0,
+        ),
     )
 
     messages = store.read_worker_messages("team-1", "worker-1")

@@ -1371,13 +1371,18 @@ def test_grep_finds_matching_text_and_writes_trace(tmp_path: Path) -> None:
     assert json.loads(trace_lines[0])["tool_name"] == "grep"
 
 
-def test_grep_default_respects_ignore_files_and_noise_directories(tmp_path: Path) -> None:
+def test_grep_python_fallback_respects_ignore_files_and_noise_directories(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
     (tmp_path / "ignored").mkdir()
     (tmp_path / "ignored" / "ignored.txt").write_text("needle\n", encoding="utf-8")
     (tmp_path / ".tmp").mkdir()
     (tmp_path / ".tmp" / "blocked.txt").write_text("needle\n", encoding="utf-8")
     (tmp_path / "kept.txt").write_text("needle\n", encoding="utf-8")
+    original_which = file_tools.shutil.which
+    monkeypatch.setattr(file_tools.shutil, "which", lambda name: None if name == "rg" else original_which(name))
 
     result = file_tools.grep({"pattern": "needle"}, tmp_path)
 

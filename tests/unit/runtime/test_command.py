@@ -20,11 +20,21 @@ from haagent.runtime.execution.command import (
     build_shell_command_argv,
     build_python_utf8_environment,
     describe_shell_contract,
+    redact_secret_like_text,
     resolve_shell_command,
     resolve_shell_contract,
     run_command,
     run_process,
 )
+
+
+def test_secret_environment_value_does_not_redact_substrings_of_regular_output(monkeypatch) -> None:
+    monkeypatch.setenv("HAAGENT_TEST_SECRET_TOKEN", "root")
+
+    redacted, changed = redact_secret_like_text("C:/tmp/workspace_root0")
+
+    assert redacted == "C:/tmp/workspace_root0"
+    assert changed is False
 
 
 def test_shell_contract_selects_powershell_on_windows_and_drives_argv() -> None:

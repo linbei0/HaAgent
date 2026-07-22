@@ -373,7 +373,11 @@ def redact_secret_like_text(text: str) -> tuple[str, bool]:
     redacted = KEY_VALUE_PATTERN.sub(lambda match: f"{match.group(1)}={REDACTED_SECRET}", text)
     redacted = SECRET_TOKEN_PATTERN.sub(REDACTED_TOKEN, redacted)
     for value in _secret_environment_values():
-        redacted = redacted.replace(value, REDACTED_SECRET)
+        redacted = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(value)}(?![A-Za-z0-9_])",
+            REDACTED_SECRET,
+            redacted,
+        )
     return redacted, redacted != text
 
 

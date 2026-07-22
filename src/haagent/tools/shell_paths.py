@@ -146,6 +146,7 @@ def _resolve_path_token(
     expanded = _expand_environment(value, environ)
     if expanded is None:
         return None
+    expanded = _normalize_path_separators(expanded)
     wildcard = min((expanded.find(mark) for mark in "*?[" if mark in expanded), default=-1)
     if wildcard >= 0:
         prefix = expanded[:wildcard].rstrip("/\\")
@@ -154,6 +155,11 @@ def _resolve_path_token(
     if not candidate.is_absolute():
         candidate = cwd / candidate
     return candidate.resolve()
+
+
+def _normalize_path_separators(value: str) -> str:
+    """将 PowerShell 分隔符转换为当前宿主文件系统可识别的形式。"""
+    return value if os.name == "nt" else value.replace("\\", "/")
 
 
 def _expand_environment(value: str, environ: Mapping[str, str]) -> str | None:

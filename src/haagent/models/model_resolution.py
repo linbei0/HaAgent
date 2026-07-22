@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from haagent.models.config import connections as model_connections
 from haagent.models.config.connections import (
-    DEFAULT_CREDENTIAL_STORE,
     ProviderProfileError,
     ProvidersConfigSnapshot,
     credential_record,
@@ -54,7 +54,7 @@ def resolve_model(
             resolved = resolve_api_key(
                 credential_record(connection),
                 environ=environ,
-                credential_store=credential_store or DEFAULT_CREDENTIAL_STORE,
+                credential_store=credential_store or model_connections.DEFAULT_CREDENTIAL_STORE,
                 config_dir=snapshot.path.parent,
             )
         except CredentialError as error:
