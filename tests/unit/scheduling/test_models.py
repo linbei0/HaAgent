@@ -25,7 +25,7 @@ def _valid_definition(**overrides: object) -> ScheduleDefinition:
         "id": "sch_test",
         "name": "daily report",
         "prompt": "Summarize the workspace",
-        "workspace_root": Path("E:/workspace/project"),
+        "workspace_root": Path.cwd(),
         "destination_kind": "new_session",
         "destination_session_path": None,
         "connection_id": "conn_local",

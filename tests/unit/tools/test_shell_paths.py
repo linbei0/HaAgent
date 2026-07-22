@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import haagent.tools.shell_paths as shell_paths
 from haagent.tools.shell_paths import collect_shell_paths
+
+
+def test_normalize_path_separators_converts_powershell_separators_on_posix(monkeypatch) -> None:
+    monkeypatch.setattr(shell_paths.os, "name", "posix")
+
+    assert shell_paths._normalize_path_separators(r"home\.config\settings.json") == "home/.config/settings.json"
 
 
 def test_collect_shell_paths_expands_powershell_environment_path(

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import time
 from difflib import SequenceMatcher, unified_diff
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -1059,6 +1060,7 @@ def _python_search_paths(
         return git_paths
 
     paths: list[Path] = []
+    gitignore_rules = _gitignore_rules(root)
 
     def onerror(error: OSError) -> None:
         skipped = Path(error.filename) if error.filename else root
@@ -1079,9 +1081,70 @@ def _python_search_paths(
                 continue
             path = current_path / filename
             relative = path.relative_to(root)
+            if _is_gitignored(relative, gitignore_rules):
+                continue
             if include is None or relative.match(include):
                 paths.append(path)
     return paths
+
+
+def _gitignore_rules(root: Path) -> list[tuple[Path, str, bool, bool]]:
+    """读取 Python 后备搜索所需的最小 .gitignore 规则集。"""
+    rules: list[tuple[Path, str, bool, bool]] = []
+    for current, directories, files in os.walk(root, topdown=True):
+        directories[:] = sorted(
+            directory
+            for directory in directories
+            if directory not in GREP_NOISE_DIRECTORIES and not directory.startswith(".")
+        )
+        if ".gitignore" not in files:
+            continue
+        ignore_file = Path(current) / ".gitignore"
+        try:
+            lines = ignore_file.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        base = ignore_file.parent.relative_to(root)
+        for raw_pattern in lines:
+            pattern = raw_pattern.strip()
+            if not pattern or pattern.startswith("#"):
+                continue
+            negated = pattern.startswith("!")
+            if negated:
+                pattern = pattern[1:]
+            directory_only = pattern.endswith("/")
+            pattern = pattern.rstrip("/")
+            if pattern:
+                rules.append((base, pattern, negated, directory_only))
+    return rules
+
+
+def _is_gitignored(path: Path, rules: list[tuple[Path, str, bool, bool]]) -> bool:
+    ignored = False
+    for base, pattern, negated, directory_only in rules:
+        try:
+            relative = path.relative_to(base)
+        except ValueError:
+            continue
+        if _gitignore_rule_matches(relative, pattern, directory_only):
+            ignored = not negated
+    return ignored
+
+
+def _gitignore_rule_matches(path: Path, pattern: str, directory_only: bool) -> bool:
+    anchored = pattern.startswith("/")
+    pattern = pattern.lstrip("/")
+    candidates = [path]
+    if directory_only:
+        candidates = [Path(*path.parts[:index]) for index in range(1, len(path.parts))]
+    for candidate in candidates:
+        relative = candidate.as_posix()
+        if anchored or "/" in pattern:
+            if fnmatchcase(relative, pattern):
+                return True
+        elif any(fnmatchcase(part, pattern) for part in candidate.parts):
+            return True
+    return False
 
 
 def _git_search_paths(root: Path, include: str | None, deadline: float) -> list[Path] | None:

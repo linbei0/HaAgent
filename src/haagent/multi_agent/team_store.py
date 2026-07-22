@@ -10,6 +10,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from itertools import count
 from pathlib import Path
 from typing import Any, Literal
 
@@ -50,6 +51,7 @@ class TeamRecord:
 class TeamStore:
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._message_sequence = count()
 
     def ensure_team(
         self,
@@ -179,7 +181,9 @@ class TeamStore:
         payload = message.to_dict()
         inbox = self._team_dir(team_id) / "agents" / _safe_id(agent_id) / "messages"
         inbox.mkdir(parents=True, exist_ok=True)
-        path = inbox / f"{payload['created_at']}-{payload['message_id']}.json"
+        # Windows 上连续创建消息可能得到相同时间戳，序号保留实际写入顺序。
+        sequence = next(self._message_sequence)
+        path = inbox / f"{payload['created_at']}-{sequence:020d}-{payload['message_id']}.json"
         return _atomic_write_json(path, payload)
 
     def read_worker_messages(self, team_id: str, agent_id: str) -> list[WorkerMessage]:

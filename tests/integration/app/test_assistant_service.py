@@ -24,6 +24,7 @@ from tests.support.model_credentials import FakeCredentialStore
 from haagent.models.types import ModelGatewayMetadata, ModelResponse
 from haagent.models.model_settings import ModelSettings
 from haagent.models.config import connections as model_connections
+from haagent.models import model_resolution
 from haagent.models.config.config_store import ModelConfigStore
 from haagent.models.config.connections import ProviderConnectionRecord
 from haagent.models.model_ref import ModelRef
@@ -581,6 +582,7 @@ def test_service_selects_models_from_named_connection_without_rewriting_key(
     _set_home(monkeypatch, home)
     store = FakeCredentialStore()
     monkeypatch.setattr(model_connections, "DEFAULT_CREDENTIAL_STORE", store)
+    monkeypatch.setattr(model_resolution, "DEFAULT_CREDENTIAL_STORE", FakeCredentialStore({}), raising=False)
     service = _service(tmp_path)
 
     connection = service.models.configure_connection(
