@@ -40,6 +40,10 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "apply_patch",
         "apply_patch_set",
         "shell",
+        "job_start",
+        "job_status",
+        "job_logs",
+        "job_cancel",
         "agent",
         "send_message",
         "task_stop",
@@ -77,6 +81,10 @@ def test_tool_registry_static_execution_effects() -> None:
         "read_mcp_resource": "read_only",
         "code_run": "external_effect",
         "shell": "external_effect",
+        "job_start": "external_effect",
+        "job_status": "read_only",
+        "job_logs": "read_only",
+        "job_cancel": "external_effect",
     }
     assert {name: TOOL_REGISTRY[name].execution_effect for name in expected} == expected
     assert ALLOWED_EXECUTION_EFFECTS == {
@@ -387,6 +395,10 @@ def test_mutating_tools_are_high_risk() -> None:
     assert TOOL_REGISTRY["shell"].risk_level == "high"
     assert TOOL_REGISTRY["file_write"].risk_level == "high"
     assert TOOL_REGISTRY["code_run"].risk_level == "high"
+    assert TOOL_REGISTRY["job_start"].risk_level == "high"
+    assert TOOL_REGISTRY["job_cancel"].risk_level == "high"
+    assert TOOL_REGISTRY["job_status"].risk_level == "low"
+    assert TOOL_REGISTRY["job_logs"].risk_level == "low"
 
 
 def test_current_tool_registry_self_check_passes() -> None:

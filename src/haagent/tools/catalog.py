@@ -17,6 +17,7 @@ from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.guardrails import GuardrailResult
 from haagent.runtime.execution.path_policy import PathPolicy
 from haagent.runtime.execution.retry import ReplaySafety
+from haagent.runtime.execution.jobs import JobManager
 from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.skills import SkillSettings
 from haagent.skills.catalog import SkillCatalogService
@@ -57,6 +58,7 @@ class ToolRuntimeDeps:
     mcp_runtime: Any | None = None
     sandbox_backend: SandboxBackend | None = None
     skill_catalog: SkillCatalogService | None = None
+    job_manager: JobManager | None = None
     router_handlers: dict[str, ToolHandler] = field(default_factory=dict)
 
 
@@ -104,6 +106,10 @@ _CHAT_DEFAULT_ORDER = (
     "apply_patch",
     "apply_patch_set",
     "shell",
+    "job_start",
+    "job_status",
+    "job_logs",
+    "job_cancel",
     "agent",
     "send_message",
     "task_stop",
@@ -119,6 +125,8 @@ _CHAT_APPROVAL_ORDER = (
     "apply_patch",
     "apply_patch_set",
     "shell",
+    "job_start",
+    "job_cancel",
 )
 
 

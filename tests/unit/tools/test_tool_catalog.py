@@ -166,6 +166,8 @@ def test_static_tools_declare_explicit_replay_safety() -> None:
         "list_mcp_resources",
         "read_mcp_resource",
         "load_image_attachment",
+        "job_status",
+        "job_logs",
     }
     for name in catalog.names():
         contribution = catalog.get(name)

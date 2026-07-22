@@ -10,6 +10,7 @@ from haagent.tools.catalog import ToolContribution
 from haagent.tools.contributions.agent import AGENT_CONTRIBUTIONS
 from haagent.tools.contributions.core import CORE_CONTRIBUTIONS
 from haagent.tools.contributions.files import FILE_CONTRIBUTIONS
+from haagent.tools.contributions.jobs import JOB_CONTRIBUTIONS
 from haagent.tools.contributions.mcp import MCP_CONTRIBUTIONS
 from haagent.tools.contributions.shell import SHELL_CONTRIBUTIONS
 from haagent.tools.contributions.skills import SKILL_CONTRIBUTIONS
@@ -25,4 +26,5 @@ def all_static_contributions() -> list[ToolContribution]:
         *WEB_CONTRIBUTIONS,
         *MCP_CONTRIBUTIONS,
         *SHELL_CONTRIBUTIONS,
+        *JOB_CONTRIBUTIONS,
     ]

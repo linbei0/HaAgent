@@ -179,9 +179,11 @@ SHELL_CONTRIBUTIONS: list[ToolContribution] = [
         name="shell",
         description=(
             "Run tests, builds, package managers, git, or an existing project command with captured output. "
-            "Set cwd instead of embedding cd in the command. Prefer file_list, grep, file_read, file_write, and "
-            "patch tools for file operations. Quote paths containing spaces. Independent read-only commands may "
-            "be issued in parallel; after failure, inspect exit_code and stderr before changing or retrying it."
+            "Timeout defaults to 60s and must be <= 120s. For work that may take longer, use job_start then "
+            "job_status/job_logs instead of raising timeout_seconds. Set cwd instead of embedding cd. Prefer "
+            "file_list, grep, file_read, file_write, and patch tools for file operations. Quote paths containing "
+            "spaces. Independent read-only commands may be issued in parallel; after failure, inspect exit_code "
+            "and stderr before changing or retrying it."
         ),
         risk_level="high",
         parameters={

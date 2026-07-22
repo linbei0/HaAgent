@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.jobs import JobManager, default_job_manager
 from haagent.runtime.execution.path_policy import PathPolicy
 from haagent.runtime.sandbox.base import SandboxBackend
 from haagent.skills import SkillSettings
@@ -28,6 +29,7 @@ def build_static_tool_handlers(
     sandbox_backend: SandboxBackend | None,
     router_handlers: dict[str, ToolHandler],
     skill_catalog: SkillCatalogService | None = None,
+    job_manager: JobManager | None = None,
 ) -> dict[str, ToolHandler]:
     """组合静态工具 handler；策略、审批和审计仍由 router 负责。"""
     deps = ToolRuntimeDeps(
@@ -38,6 +40,7 @@ def build_static_tool_handlers(
         mcp_runtime=mcp_runtime,
         sandbox_backend=sandbox_backend,
         skill_catalog=skill_catalog,
+        job_manager=job_manager if job_manager is not None else default_job_manager(),
         router_handlers=router_handlers,
     )
     return default_tool_catalog().build_static_handlers(deps)

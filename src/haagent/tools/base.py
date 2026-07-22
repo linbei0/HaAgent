@@ -150,7 +150,7 @@ def _failure_defaults(
         return ToolFailureCategory.ARGUMENT, False, RecoveryAction(
             "correct_arguments", "根据工具 schema 修正参数或选择已允许的工具。",
         )
-    if error_type in {"file_not_found", "keyword_not_found", "patch_text_not_found"}:
+    if error_type in {"file_not_found", "keyword_not_found", "patch_text_not_found", "job_not_found"}:
         return ToolFailureCategory.NOT_FOUND, False, None
     if error_type in {"approval_required", "approval_pending"}:
         return ToolFailureCategory.PERMISSION, False, RecoveryAction(
@@ -176,6 +176,6 @@ def _failure_defaults(
         )
     if error_type in {"RunCancelled", "run_cancelled", "cancelled"}:
         return ToolFailureCategory.CANCELLED, False, None
-    if error_type in {"patch_text_not_unique", "code_run_failed", "search_failed"}:
+    if error_type in {"patch_text_not_unique", "code_run_failed", "search_failed", "job_start_failed"}:
         return ToolFailureCategory.EXECUTION, False, None
     return ToolFailureCategory.EXECUTION, False, None

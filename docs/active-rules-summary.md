@@ -96,14 +96,15 @@
 
 ## 8. 工具执行与运行边界
 
-- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell` 和 `code_run` 等默认 workspace-bound 原子工具。
+- 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell`、`code_run` 以及 `job_start` / `job_status` / `job_logs` / `job_cancel` 等默认 workspace-bound 原子工具。
 - 文件工具接受绝对路径或 workspace 相对路径；未授权外部路径触发 `external_directory` 审批，允许一次只作用于当前调用，始终允许写入有界 session 权限规则。
 - `file_read` 应支持范围读取、关键词定位和路径建议，服务普通 Agent 使用。
 - `apply_patch` 继续保持 fail-fast；失败应帮助模型从结构化错误中恢复，而不是吞掉错误。
 - `shell` / `code_run` 的 cwd 默认位于 workspace root；显式外部 cwd 经 `external_directory` 批准后可用于当前调用。
 - `shell` 在执行前对常见 Bash/PowerShell 文件命令做 best-effort 路径扫描并合并申请外部目录权限；该扫描不是进程级 sandbox，未知命令和动态脚本仍以高风险工具审批及实际 sandbox 为准。
 - `code_run` 无法可靠静态分析任意 Python 路径，访问外部目录时必须通过 `external_directories` 显式声明并在执行前审批。
-- `shell` / `code_run` timeout 默认 60 秒，上限 120 秒。
+- `shell` / `code_run` timeout 默认 60 秒，上限 120 秒；适合短命令。长任务使用后台 job 工具：`job_start` 立即返回 `job_id`，`job_status` 默认在工具层等待最多 30 秒并在终态附带近期日志摘要，仍运行时再调用；`job_logs` 只用于实时诊断或补充输出，必要时用 `job_cancel`。等待不得由模型高频轮询驱动；job 日志与元数据写在用户级 `~/.haagent/jobs/`，不污染 workspace。
+- 后台 job 的 wall-clock timeout 默认 3600 秒，上限 7200 秒；超时或取消会终止进程树。
 - `code_run` 用于降低多行脚本和 shell 转义成本；临时脚本写入系统 temp 并在执行后删除，不污染 workspace；复盘依赖 episode 中的 `code` 参数与工具结果。
 - 工具输出向工具结果和 context 暴露摘要、excerpt、timeout、truncated 等字段，并对 secret-like 输出做脱敏。
 - 明显泄密、workspace 绕过和高风险工具参数必须在 runtime 层显式失败或拒绝。
