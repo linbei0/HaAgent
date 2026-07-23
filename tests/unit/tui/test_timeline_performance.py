@@ -448,6 +448,12 @@ def test_long_timeline_mounts_only_the_active_window() -> None:
             assert min(block._item.turn_index for block in timeline._blocks.values()) == 425
             assert max(block._item.turn_index for block in timeline._blocks.values()) == 474
             assert timeline._window_start == 425
+            # `_restore_window_anchor` 通过 call_after_refresh 执行；CI 的 Python 3.12
+            # 可能在首个 Pilot pause 后仍未投递该回调，不能把单次 pause 当作完成信号。
+            for _ in range(20):
+                if not timeline._window_shift_in_progress:
+                    break
+                await pilot.pause(0.01)
             assert timeline._window_shift_in_progress is False
             assert all(
                 timeline._blocks[item_id] is block
