@@ -175,7 +175,8 @@ def test_legacy_powershell_reads_bomless_utf8_file(tmp_path: Path) -> None:
         ],
         shell=False,
         cwd=tmp_path,
-        timeout_seconds=5,
+        # Windows PowerShell 5.1 在并行 CI 的进程启动与代码页初始化可能超过 5 秒。
+        timeout_seconds=15,
     )
 
     assert result.status == "success"
