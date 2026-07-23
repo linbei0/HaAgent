@@ -153,6 +153,7 @@ def test_powershell_command_converts_cmdlet_errors_to_failed_exit() -> None:
     assert "$ErrorActionPreference = 'Stop'" in wrapped
     assert "catch" in wrapped
     assert "exit 1" in wrapped
+    assert "}; exit 0" in wrapped
 
 
 @pytest.mark.skipif(os.name != "nt" or shutil.which("powershell.exe") is None, reason="需要 Windows PowerShell 5.1")
@@ -175,7 +176,8 @@ def test_legacy_powershell_reads_bomless_utf8_file(tmp_path: Path) -> None:
         ],
         shell=False,
         cwd=tmp_path,
-        timeout_seconds=5,
+        # Windows PowerShell 5.1 在并行 CI 的进程启动与代码页初始化可能超过 5 秒。
+        timeout_seconds=15,
     )
 
     assert result.status == "success"

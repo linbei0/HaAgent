@@ -103,7 +103,11 @@ def test_input_dock_opens_one_overlay_and_preserves_prompt_value() -> None:
             dock.open_command_suggestions("he")
             await pilot.pause(0.1)
             dock.open_file_refs("read")
-            await pilot.pause(0.1)
+            # InputDock 通过 call_after_refresh 恢复焦点，不能假设一次 pause 已投递回调。
+            for _ in range(20):
+                if prompt.has_focus:
+                    break
+                await pilot.pause(0.01)
 
             assert prompt.text == "/he"
             assert len(app.query(OptionList)) == 1
