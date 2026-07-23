@@ -153,6 +153,7 @@ def test_powershell_command_converts_cmdlet_errors_to_failed_exit() -> None:
     assert "$ErrorActionPreference = 'Stop'" in wrapped
     assert "catch" in wrapped
     assert "exit 1" in wrapped
+    assert "}; exit 0" in wrapped
 
 
 @pytest.mark.skipif(os.name != "nt" or shutil.which("powershell.exe") is None, reason="需要 Windows PowerShell 5.1")

@@ -178,7 +178,7 @@ def _powershell_command(command: str, *, legacy: bool = False) -> str:
         f"{command}; "
         "if ($null -ne $global:LASTEXITCODE) { exit $global:LASTEXITCODE } "
         "} catch { Write-Error $_; exit 1 } "
-        "}"
+        "}; exit 0"
     )
 
 
