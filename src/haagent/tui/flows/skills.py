@@ -37,8 +37,8 @@ def handle_skills_command(app: "HaAgentTuiApp", argument: str) -> None:
             if not query:
                 app._conversation.append_block("Command", skills_usage_text())
             else:
-                result = app.service.skills.search_marketplace(query, limit=10)
-                app._conversation.append_block("Skills marketplace", skill_marketplace_summary_text(result))
+                # marketplace 是同步网络边界，必须交给独立 worker，不能阻塞 Textual 消息线程。
+                app._start_skill_marketplace_search(query)
         elif value.startswith("install "):
             result_id = raw_value.split(" ", 1)[1].strip()
             if not result_id:
@@ -63,6 +63,25 @@ def handle_skills_command(app: "HaAgentTuiApp", argument: str) -> None:
             app._conversation.append_block("Command", skills_usage_text())
     except Exception as error:
         app._conversation.append_block("Skills warning", f"skills 操作失败：{error}")
+    app._refresh()
+
+
+def apply_skill_marketplace_search_success(
+    app: "HaAgentTuiApp",
+    generation: int,
+    result: AssistantMarketplaceSearch,
+) -> None:
+    # 取消 thread worker 不会终止同步 HTTP；迟到结果不得覆盖更新查询的 UI。
+    if generation != app._skill_marketplace_search_generation:
+        return
+    app._conversation.append_block("Skills marketplace", skill_marketplace_summary_text(result))
+    app._refresh()
+
+
+def apply_skill_marketplace_search_error(app: "HaAgentTuiApp", generation: int, error: Exception) -> None:
+    if generation != app._skill_marketplace_search_generation:
+        return
+    app._conversation.append_block("Skills warning", f"skills 操作失败：{error}")
     app._refresh()
 
 

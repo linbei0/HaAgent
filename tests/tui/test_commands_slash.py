@@ -7,6 +7,7 @@ tests/tui/test_commands_slash.py - HaAgent TUI commands 集成测试
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -263,6 +264,15 @@ def test_tui_skills_search_lists_marketplace_results(tmp_path: Path) -> None:
 
     async def run_test() -> None:
         app = HaAgentTuiApp(service)
+        ui_thread_id = threading.get_ident()
+        search_thread_ids: list[int] = []
+        original_search = service.skills.search_marketplace
+
+        def recording_search(query: str, **kwargs):
+            search_thread_ids.append(threading.get_ident())
+            return original_search(query, **kwargs)
+
+        service.skills.search_marketplace = recording_search
         async with app.run_test() as pilot:
             input_widget = app.query_one("#prompt-input", PromptInput)
             input_widget.value = "/skills search csv"
@@ -270,6 +280,7 @@ def test_tui_skills_search_lists_marketplace_results(tmp_path: Path) -> None:
 
             conversation = _text(app, "#conversation")
             assert service.searched_marketplace_queries == [("csv", None, 10)]
+            assert search_thread_ids and search_thread_ids[0] != ui_thread_id
             assert "analyze-csv" in conversation
             assert "skills_sh-1" in conversation
             assert "skills_sh" in conversation

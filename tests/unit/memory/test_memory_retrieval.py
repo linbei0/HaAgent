@@ -331,6 +331,47 @@ def test_retrieval_does_not_inject_full_store_audit_tombstone_or_trace(tmp_path:
     assert "transcript.jsonl" not in block
 
 
+def test_retrieval_reuses_parsed_sources_until_files_change(tmp_path: Path, monkeypatch) -> None:
+    _commit(
+        tmp_path,
+        scope="workspace",
+        category="facts",
+        title="Cached pytest fact",
+        body="Use pytest for the cached retrieval check.",
+        tags=["pytest"],
+    )
+    memory_root = tmp_path / "workspace" / ".haagent" / "memory"
+    original_read_text = Path.read_text
+    source_reads: list[Path] = []
+
+    def counting_read_text(path: Path, *args, **kwargs):
+        if path.parent == memory_root and path.name != "audit.jsonl":
+            source_reads.append(path)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    retriever = MemoryRetriever()
+    request = MemoryRetrievalRequest(
+        query="pytest cached retrieval",
+        workspace_root=tmp_path / "workspace",
+        user_memory_root=tmp_path / "user-memory",
+    )
+
+    first = retriever.retrieve(request)
+    reads_after_first = len(source_reads)
+    second = retriever.retrieve(request)
+
+    assert first.memories == second.memories
+    assert reads_after_first > 0
+    assert len(source_reads) == reads_after_first
+
+    facts_path = memory_root / "facts.jsonl"
+    facts_path.write_text(original_read_text(facts_path, encoding="utf-8") + "\n", encoding="utf-8")
+    retriever.retrieve(request)
+
+    assert len(source_reads) > reads_after_first
+
+
 def test_context_builder_injects_compact_memory_and_manifest_audit(tmp_path: Path) -> None:
     memory_id = _commit(
         tmp_path,

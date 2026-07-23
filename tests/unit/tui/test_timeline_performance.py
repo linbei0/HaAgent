@@ -412,14 +412,14 @@ def test_window_moves_in_bounded_steps_and_plain_text_keeps_full_history() -> No
     visible = timeline._visible_items()
 
     tail = timeline._windowed_items(visible)
-    assert [item.turn_index for item in tail] == list(range(300, 500))
+    assert [item.turn_index for item in tail] == list(range(450, 500))
 
     assert timeline._shift_window_earlier(len(visible)) is True
     earlier = timeline._windowed_items(visible)
-    assert [item.turn_index for item in earlier] == list(range(200, 400))
+    assert [item.turn_index for item in earlier] == list(range(425, 475))
 
     assert timeline._shift_window_later(len(visible)) is True
-    assert [item.turn_index for item in timeline._windowed_items(visible)] == list(range(300, 500))
+    assert [item.turn_index for item in timeline._windowed_items(visible)] == list(range(450, 500))
     assert "prompt 0" in timeline.plain_text
     assert "prompt 499" in timeline.plain_text
 
@@ -432,28 +432,41 @@ def test_long_timeline_mounts_only_the_active_window() -> None:
             await pilot.pause()
             timeline = app.query_one(ConversationTimeline)
 
-            assert len(timeline._blocks) == 200
-            assert len(timeline.query(TimelineBlock)) == 200
-            assert min(block._item.turn_index for block in timeline._blocks.values()) == 300
+            assert len(timeline._blocks) == 50
+            assert len(timeline.query(TimelineBlock)) == 50
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 450
             assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
+
+            overlapping_blocks = {
+                block._item.turn_index: block
+                for block in timeline._blocks.values()
+                if 450 <= block._item.turn_index <= 474
+            }
 
             timeline.watch_scroll_y(10, 0)
             await pilot.pause()
-            assert min(block._item.turn_index for block in timeline._blocks.values()) == 200
-            assert max(block._item.turn_index for block in timeline._blocks.values()) == 399
-            assert timeline._window_start == 200
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 425
+            assert max(block._item.turn_index for block in timeline._blocks.values()) == 474
+            assert timeline._window_start == 425
             assert timeline._window_shift_in_progress is False
+            assert all(
+                timeline._blocks[item_id] is block
+                for item_id, block in (
+                    (block._item.item_id, block)
+                    for block in overlapping_blocks.values()
+                )
+            )
 
             timeline.watch_scroll_y(0, max(timeline.max_scroll_y, 2))
             await pilot.pause()
-            assert min(block._item.turn_index for block in timeline._blocks.values()) == 300
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 450
             assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
 
             timeline.watch_scroll_y(10, 0)
             await pilot.pause()
             timeline.set_stick_to_bottom(True)
             await pilot.pause()
-            assert min(block._item.turn_index for block in timeline._blocks.values()) == 300
+            assert min(block._item.turn_index for block in timeline._blocks.values()) == 450
             assert max(block._item.turn_index for block in timeline._blocks.values()) == 499
 
     asyncio.run(run_test())

@@ -9,6 +9,7 @@ haagent/tui/application/app.py - HaAgent TUI 应用编排
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Lock
 
 from textual import events, work
 from textual.app import App, ComposeResult
@@ -109,6 +110,8 @@ class HaAgentTuiApp(App[None]):
         self.completion_flow = CompletionFlow(self)
         self._theme_choice = select_theme()
         self._file_ref_index: FileReferenceIndex | None = None
+        self._skill_marketplace_search_generation = 0
+        self._skill_marketplace_search_lock = Lock()
         # delta 热路径只调度批量 timeline 刷新，禁止每 token 全量 _refresh。
         self._streaming_refresh_scheduled = False
         self._streaming_refresh_timer: Timer | None = None
@@ -266,7 +269,7 @@ class HaAgentTuiApp(App[None]):
         current = status.current_turn_count if status.current_turn_count is not None else 0
         return current + 1
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="prompt")
     def _run_prompt(self, prompt: str, attachments: list[ImageAttachment] | None = None) -> None:
         try:
             result = self.service.sessions.run_prompt_events(
@@ -379,7 +382,7 @@ class HaAgentTuiApp(App[None]):
     def file_reference_is_open(self) -> bool:
         return self.completion_flow.file_reference_is_open()
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="file-reference-index")
     def _warm_file_reference_index(self) -> None:
         status = self.service.workspace.status()
         index = build_file_reference_index(status.workspace_root)
@@ -393,7 +396,51 @@ class HaAgentTuiApp(App[None]):
         if input_dock is not None and input_dock.is_mounted:
             input_dock.file_reference_index = index
 
+    def _start_skill_marketplace_search(self, query: str) -> None:
+        self._skill_marketplace_search_generation += 1
+        self._search_skill_marketplace_worker(query, self._skill_marketplace_search_generation)
+
+    @work(thread=True, exclusive=True, group="skills-marketplace")
+    def _search_skill_marketplace_worker(self, query: str, generation: int) -> None:
+        try:
+            # service 同时更新可安装结果缓存；串行提交可保证最新查询最后写入。
+            with self._skill_marketplace_search_lock:
+                result = self.service.skills.search_marketplace(query, limit=10)
+        except Exception as error:
+            self.call_from_thread(skills.apply_skill_marketplace_search_error, self, generation, error)
+            return
+        self.call_from_thread(skills.apply_skill_marketplace_search_success, self, generation, result)
+
     # ── 会话切换后台 worker（磁盘/MCP 不得阻塞 UI 线程）──────────────────
+    @work(thread=True, exclusive=True, group="session-ops")
+    def _run_initial_session_restore_worker(self, initial_resume: str | Path | None, initial_continue: bool) -> None:
+        try:
+            if initial_resume is not None:
+                status = self.service.sessions.resume(initial_resume)
+                prefix = "已恢复 session"
+            elif initial_continue:
+                status = self.service.sessions.continue_latest()
+                prefix = "已继续最新 session"
+            else:
+                return
+        except Exception as error:
+            self.call_from_thread(self.session_flow.apply_session_error, f"恢复会话失败：{error}")
+            return
+        history, history_error = self._session_history_for_worker()
+        self.call_from_thread(
+            self.session_flow.apply_initial_restore_success,
+            status,
+            prefix,
+            history,
+            history_error,
+        )
+
+    def _session_history_for_worker(self):
+        try:
+            return list(self.service.sessions.history()), None
+        except Exception as error:
+            return None, error
+
     @work(thread=True, exclusive=True, group="session-ops")
     def _load_session_list_worker(self) -> None:
         try:
@@ -425,7 +472,8 @@ class HaAgentTuiApp(App[None]):
                 f"继续最新会话失败：{error}",
             )
             return
-        self.call_from_thread(self.session_flow.apply_continue_success, status)
+        history, history_error = self._session_history_for_worker()
+        self.call_from_thread(self.session_flow.apply_continue_success, status, history, history_error)
 
     @work(thread=True, exclusive=True, group="session-ops")
     def _run_session_overlay_worker(self, result: SessionOverlayResult) -> None:
@@ -442,27 +490,31 @@ class HaAgentTuiApp(App[None]):
                 f"会话操作失败：{error}",
             )
             return
-        self.call_from_thread(self.session_flow.apply_overlay_success, result, status)
+        history = None
+        history_error = None
+        if result.action != "new":
+            history, history_error = self._session_history_for_worker()
+        self.call_from_thread(self.session_flow.apply_overlay_success, result, status, history, history_error)
 
     # ── 模型目录后台 worker（薄 @work 包装，逻辑在 ModelFlow）──────────────
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="model-ops")
     def _refresh_model_catalog_and_open_connection_setup(self) -> None:
         self.model_flow.refresh_catalog_and_open_setup()
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="model-ops")
     def _load_model_switch_catalog(self) -> None:
         self.model_flow.load_switch_catalog()
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="model-ops")
     def _scan_local_model_runtimes(self) -> None:
         # 本地 HTTP 探测必须留在 worker 线程，避免阻塞 Textual UI 事件循环。
         self.model_flow.scan_local_runtimes()
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="model-ops")
     def _refresh_model_catalog_only(self) -> None:
         self.model_flow.refresh_catalog_only()
 
-    @work(thread=True, exclusive=True)
+    @work(thread=True, exclusive=True, group="model-connection-test")
     def _run_model_connection_test(self, connection_id: str, model: str | None = None) -> None:
         self.model_flow.run_connection_test(connection_id, model)
 
@@ -482,6 +534,33 @@ class HaAgentTuiApp(App[None]):
         self.channel_flow.run_connection_test(instance_id)
 
     # ── 记忆动作（薄分发到 MemoryFlow）───────────────────────────────────
+    @work(thread=True, exclusive=True, group="memory-ops")
+    def _run_memory_action_worker(self, action: str, candidate_id: str) -> None:
+        action_error = None
+        try:
+            if action == "confirm":
+                self.service.memory.confirm_candidate(candidate_id)
+            elif action == "reject":
+                self.service.memory.reject_candidate(candidate_id, "rejected from TUI")
+            else:
+                raise ValueError(f"unsupported memory action: {action}")
+        except Exception as error:
+            action_error = error
+        try:
+            candidates = self.service.memory.list_candidates(status="pending")
+            load_error = None
+        except Exception as error:
+            candidates = []
+            load_error = error
+        self.call_from_thread(
+            self.memory_flow.apply_action_result,
+            action,
+            candidate_id,
+            action_error,
+            candidates,
+            load_error,
+        )
+
     def action_toggle_memory(self) -> None:
         self.memory_flow.toggle()
 

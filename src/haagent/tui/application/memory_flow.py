@@ -24,6 +24,7 @@ class MemoryFlow:
         self.selected = 0
         self.error: str | None = None
         self.notice: str | None = None
+        self._busy = False
 
     def toggle(self) -> None:
         self.mode = not self.mode
@@ -59,35 +60,45 @@ class MemoryFlow:
             self._app._refresh()
 
     def confirm(self) -> None:
-        if not self.mode or not self.candidates:
+        if not self.mode or not self.candidates or self._busy:
             return
         candidate = self._selected_candidate()
-        try:
-            self._app.service.memory.confirm_candidate(candidate.candidate_id)
-        except Exception as error:
-            self.notice = f"Memory confirm failed: {error}"
-            self._app._conversation.append_block("Memory warning", f"Memory confirm failed: {error}")
-        else:
-            self.notice = f"已确认记忆候选：{candidate.candidate_id}"
-            self._app._conversation.append_line(f"记忆已确认：{candidate.candidate_id}")
-        self.detail_mode = False
-        self.load_candidates()
-        self._app._refresh()
+        self._busy = True
+        self._app._run_memory_action_worker("confirm", candidate.candidate_id)
 
     def reject(self) -> None:
-        if not self.mode or not self.candidates:
+        if not self.mode or not self.candidates or self._busy:
             return
         candidate = self._selected_candidate()
-        try:
-            self._app.service.memory.reject_candidate(candidate.candidate_id, "rejected from TUI")
-        except Exception as error:
-            self.notice = f"Memory reject failed: {error}"
-            self._app._conversation.append_block("Memory warning", f"Memory reject failed: {error}")
+        self._busy = True
+        self._app._run_memory_action_worker("reject", candidate.candidate_id)
+
+    def apply_action_result(
+        self,
+        action: str,
+        candidate_id: str,
+        action_error: Exception | None,
+        candidates: list[MemoryCandidate],
+        load_error: Exception | None,
+    ) -> None:
+        self._busy = False
+        if action_error is not None:
+            label = "confirm" if action == "confirm" else "reject"
+            self.notice = f"Memory {label} failed: {action_error}"
+            self._app._conversation.append_block("Memory warning", self.notice)
+        elif action == "confirm":
+            self.notice = f"已确认记忆候选：{candidate_id}"
+            self._app._conversation.append_line(f"记忆已确认：{candidate_id}")
         else:
-            self.notice = f"已拒绝记忆候选：{candidate.candidate_id}"
-            self._app._conversation.append_line(f"记忆已拒绝：{candidate.candidate_id}")
+            self.notice = f"已拒绝记忆候选：{candidate_id}"
+            self._app._conversation.append_line(f"记忆已拒绝：{candidate_id}")
         self.detail_mode = False
-        self.load_candidates()
+        self.candidates = candidates
+        self.error = str(load_error) if load_error is not None else None
+        if load_error is not None:
+            self._app._conversation.append_block("Memory warning", f"Memory candidates unavailable: {load_error}")
+        if self.selected >= len(self.candidates):
+            self.selected = max(0, len(self.candidates) - 1)
         self._app._refresh()
 
     def cancel(self) -> bool:

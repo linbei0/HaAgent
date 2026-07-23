@@ -7,6 +7,7 @@ tests/tui/test_memory.py - HaAgent TUI memory 集成测试
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 from haagent.runtime.events import MemoryNoticeEvent
@@ -353,12 +354,22 @@ def test_tui_memory_mode_is_readable_in_conversation(tmp_path: Path) -> None:
 def test_tui_memory_confirm_uses_service_and_removes_pending_candidate(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, memory_candidates=[_memory_candidate()])
+        ui_thread_id = threading.get_ident()
+        confirm_thread_ids: list[int] = []
+        original_confirm = service.memory.confirm_candidate
+
+        def recording_confirm(candidate_id: str):
+            confirm_thread_ids.append(threading.get_ident())
+            return original_confirm(candidate_id)
+
+        service.memory.confirm_candidate = recording_confirm
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             await _open_memory_panel(app, pilot)
             await pilot.press("a")
             await pilot.pause(0.1)
             assert service.confirmed_candidate_ids == ["cand_abc123"]
+            assert confirm_thread_ids and confirm_thread_ids[0] != ui_thread_id
             assert "已确认记忆候选：cand_abc123" in _text(app, "#conversation")
             assert "暂无待确认候选" in _text(app, "#conversation")
 

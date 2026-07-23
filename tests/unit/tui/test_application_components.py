@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -24,6 +25,7 @@ from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch
 from haagent.tui.widgets import PromptInput, ProgressStatusLine
 from haagent.tui.widgets.input_dock import InputDock
+from tests.tui.support import FakeAssistantService
 
 
 def test_default_screen_ignores_detached_cached_text_selection_target(monkeypatch) -> None:
@@ -155,6 +157,35 @@ def test_file_reference_index_callback_ignores_unmounted_input_dock(tmp_path: Pa
     HaAgentTuiApp._set_file_reference_index(app, index)
 
     assert app._file_ref_index is index
+
+
+def test_app_exclusive_workers_use_independent_responsibility_groups(tmp_path: Path) -> None:
+    app = HaAgentTuiApp(FakeAssistantService(workspace_root=tmp_path))
+    groups: list[str] = []
+
+    def capture_worker(_callback, **kwargs):
+        groups.append(kwargs["group"])
+        return SimpleNamespace()
+
+    app.run_worker = capture_worker  # type: ignore[method-assign]
+
+    app._run_prompt("test")
+    app._warm_file_reference_index()
+    app._search_skill_marketplace_worker("textual", 1)
+    app._run_initial_session_restore_worker(None, True)
+    app._refresh_model_catalog_only()
+    app._run_model_connection_test("connection")
+    app._run_memory_action_worker("confirm", "candidate")
+
+    assert groups == [
+        "prompt",
+        "file-reference-index",
+        "skills-marketplace",
+        "session-ops",
+        "model-ops",
+        "model-connection-test",
+        "memory-ops",
+    ]
 
 
 class _DispatchConversation:

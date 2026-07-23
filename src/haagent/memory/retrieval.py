@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from haagent.memory.schema import (
@@ -145,18 +147,49 @@ class _IndexItem:
     status: str
 
 
+@dataclass(frozen=True)
+class _ScopeSources:
+    items: tuple[_IndexItem, ...]
+    deleted_ids: frozenset[str]
+    records: dict[str, MemoryRecord]
+    weights_by_token: dict[str, dict[str, float]]
+    normalized_bodies: dict[str, str]
+    timestamps: dict[str, float]
+    diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _MemoryTokens:
+    title: frozenset[str]
+    tags: frozenset[str]
+    category: frozenset[str]
+    summary: frozenset[str]
+    body: frozenset[str]
+
+
+_ScoredMemory = tuple[_IndexItem, MemoryRecord, float, str, float]
+
+
+_SOURCE_CACHE_LIMIT = 8
+_SOURCE_CACHE_LOCK = RLock()
+_SOURCE_CACHE: OrderedDict[
+    tuple[str, Path],
+    tuple[tuple[tuple[str, int, int] | tuple[str, None, None], ...], _ScopeSources],
+] = OrderedDict()
+
+
 class MemoryRetriever:
     def retrieve(self, request: MemoryRetrievalRequest) -> MemoryRetrievalResult:
         tokens = _tokenize(f"{request.query}\n{request.task_context}")
         diagnostics = _empty_diagnostics()
-        candidates: list[RetrievedMemory] = []
+        candidates: list[_ScoredMemory] = []
         for scope, root in [
             (WORKSPACE_SCOPE, request.workspace_root.resolve() / ".haagent" / "memory"),
             (USER_SCOPE, (request.user_memory_root or user_config_dir() / "memory").resolve()),
         ]:
             candidates.extend(self._read_scope(scope, root, tokens, request.budget, diagnostics))
 
-        selected = _apply_budget(_sort_memories(candidates, request.budget), request.budget, diagnostics)
+        selected = _apply_budget(_sort_scored_memories(candidates, request.budget), request.budget, diagnostics)
         return MemoryRetrievalResult(memories=selected, budget=request.budget, diagnostics=diagnostics)
 
     def _read_scope(
@@ -166,23 +199,26 @@ class MemoryRetriever:
         tokens: set[str],
         budget: MemoryRetrievalBudget,
         diagnostics: dict[str, Any],
-    ) -> list[RetrievedMemory]:
+    ) -> list[_ScoredMemory]:
         index_path = root / "index.json"
         if not index_path.exists():
             diagnostics[f"{scope}_index_missing"] += 1
             return []
-        items = _load_index_items(index_path, scope, diagnostics)
-        deleted_ids = _deleted_ids(root, diagnostics)
-        records = _load_records_by_id(root, scope, diagnostics)
-        memories: list[RetrievedMemory] = []
-        for item in items:
+        sources = _cached_scope_sources(root, scope)
+        _merge_diagnostics(diagnostics, sources.diagnostics)
+        scores: dict[str, float] = {}
+        for token in tokens:
+            for memory_id, weight in sources.weights_by_token.get(token, {}).items():
+                scores[memory_id] = scores.get(memory_id, 0.0) + weight
+        memories: list[_ScoredMemory] = []
+        for item in sources.items:
             if item.status != "active":
                 diagnostics["skipped_deleted" if item.status == "deleted" else "skipped_inactive"] += 1
                 continue
-            if item.memory_id in deleted_ids:
+            if item.memory_id in sources.deleted_ids:
                 diagnostics["skipped_deleted"] += 1
                 continue
-            record = records.get(item.memory_id)
+            record = sources.records.get(item.memory_id)
             if record is None:
                 diagnostics["skipped_missing"] += 1
                 _remember_skip(diagnostics, "missing_ids", item.memory_id)
@@ -190,24 +226,102 @@ class MemoryRetriever:
             if record.status != "active":
                 diagnostics["skipped_deleted" if record.status == "deleted" else "skipped_inactive"] += 1
                 continue
-            score = _score(item, record, tokens)
+            score = scores.get(item.memory_id, 0.0)
             if score <= 0:
                 continue
-            body = _bounded(record.body, budget.max_item_chars)
-            memories.append(
-                RetrievedMemory(
-                    memory_id=record.memory_id,
-                    scope=record.scope,
-                    category=record.category,
-                    title=record.title,
-                    body=body,
-                    tags=list(record.tags),
-                    updated_at=record.updated_at,
-                    score=score,
-                    char_count=len(body),
-                ),
-            )
+            if item.scope == WORKSPACE_SCOPE:
+                score += 0.6
+            body = sources.normalized_bodies[item.memory_id][: budget.max_item_chars]
+            memories.append((item, record, score, body, sources.timestamps[item.memory_id]))
         return memories
+
+
+def _cached_scope_sources(root: Path, scope: str) -> _ScopeSources:
+    fingerprint = _scope_fingerprint(root, scope)
+    cache_key = (scope, root)
+    with _SOURCE_CACHE_LOCK:
+        cached = _SOURCE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == fingerprint:
+            _SOURCE_CACHE.move_to_end(cache_key)
+            return cached[1]
+
+        # 缓存只复用解析结果；文件指纹变化后仍完整 hydrate 正文、墓碑和诊断。
+        source_diagnostics = _empty_diagnostics()
+        items = tuple(_load_index_items(root / "index.json", scope, source_diagnostics))
+        records = _load_records_by_id(root, scope, source_diagnostics)
+        weights_by_token = _build_search_index(items, records)
+        sources = _ScopeSources(
+            items=items,
+            deleted_ids=frozenset(_deleted_ids(root, source_diagnostics)),
+            records=records,
+            weights_by_token=weights_by_token,
+            normalized_bodies={memory_id: " ".join(record.body.split()) for memory_id, record in records.items()},
+            timestamps={memory_id: _timestamp(record.updated_at) for memory_id, record in records.items()},
+            diagnostics=source_diagnostics,
+        )
+        _SOURCE_CACHE[cache_key] = (fingerprint, sources)
+        _SOURCE_CACHE.move_to_end(cache_key)
+        while len(_SOURCE_CACHE) > _SOURCE_CACHE_LIMIT:
+            _SOURCE_CACHE.popitem(last=False)
+        return sources
+
+
+def _scope_fingerprint(
+    root: Path,
+    scope: str,
+) -> tuple[tuple[str, int, int] | tuple[str, None, None], ...]:
+    paths = [
+        root / "index.json",
+        root / "tombstones.jsonl",
+        *(root / file_name for file_name in FILE_BY_SCOPE_CATEGORY[scope].values()),
+    ]
+    signatures: list[tuple[str, int, int] | tuple[str, None, None]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            signatures.append((str(path), None, None))
+        else:
+            signatures.append((str(path), stat.st_mtime_ns, stat.st_size))
+    return tuple(signatures)
+
+
+def _merge_diagnostics(target: dict[str, Any], cached: dict[str, Any]) -> None:
+    for field, value in cached.items():
+        if isinstance(value, int):
+            target[field] = int(target.get(field, 0)) + value
+        elif isinstance(value, list):
+            for item in value:
+                _remember_skip(target, field, str(item))
+
+
+def _build_search_index(
+    items: tuple[_IndexItem, ...],
+    records: dict[str, MemoryRecord],
+) -> dict[str, dict[str, float]]:
+    weights_by_token: dict[str, dict[str, float]] = {}
+    for item in items:
+        record = records.get(item.memory_id)
+        if record is None:
+            continue
+        field_tokens = _MemoryTokens(
+            title=frozenset(_tokenize(item.title)),
+            tags=frozenset(set().union(*(_tokenize(tag) for tag in item.tags)) if item.tags else set()),
+            category=frozenset(_tokenize(item.category)),
+            summary=frozenset(_tokenize(item.summary)),
+            body=frozenset(_tokenize(record.body)),
+        )
+        for field_tokens_set, weight in (
+            (field_tokens.title, 4.0),
+            (field_tokens.tags, 3.0),
+            (field_tokens.category, 3.0),
+            (field_tokens.summary, 2.0),
+            (field_tokens.body, 1.0),
+        ):
+            for token in field_tokens_set:
+                token_weights = weights_by_token.setdefault(token, {})
+                token_weights[item.memory_id] = token_weights.get(item.memory_id, 0.0) + weight
+    return weights_by_token
 
 
 def _load_index_items(path: Path, scope: str, diagnostics: dict[str, Any]) -> list[_IndexItem]:
@@ -286,30 +400,8 @@ def _deleted_ids(root: Path, diagnostics: dict[str, Any]) -> set[str]:
     return deleted
 
 
-def _score(item: _IndexItem, record: MemoryRecord, tokens: set[str]) -> float:
-    if not tokens:
-        return 0.0
-    title = _tokenize(item.title)
-    tags = set().union(*(_tokenize(tag) for tag in item.tags)) if item.tags else set()
-    category = _tokenize(item.category)
-    summary = _tokenize(item.summary)
-    body = _tokenize(record.body)
-    score = (
-        len(tokens & title) * 4.0
-        + len(tokens & tags) * 3.0
-        + len(tokens & category) * 3.0
-        + len(tokens & summary) * 2.0
-        + len(tokens & body)
-    )
-    if score <= 0:
-        return 0.0
-    if item.scope == WORKSPACE_SCOPE:
-        score += 0.6
-    return score
-
-
 def _apply_budget(
-    memories: list[RetrievedMemory],
+    memories: list[_ScoredMemory],
     budget: MemoryRetrievalBudget,
     diagnostics: dict[str, Any],
 ) -> list[RetrievedMemory]:
@@ -318,14 +410,27 @@ def _apply_budget(
     chars = {WORKSPACE_SCOPE: 0, USER_SCOPE: 0}
     max_items = {WORKSPACE_SCOPE: budget.max_workspace_items, USER_SCOPE: budget.max_user_items}
     max_chars = {WORKSPACE_SCOPE: budget.max_workspace_chars, USER_SCOPE: budget.max_user_chars}
-    for memory in memories:
-        scope = memory.scope
-        if counts[scope] >= max_items[scope] or chars[scope] + memory.char_count > max_chars[scope]:
+    for item, record, score, body, _timestamp_value in memories:
+        scope = item.scope
+        char_count = len(body)
+        if counts[scope] >= max_items[scope] or chars[scope] + char_count > max_chars[scope]:
             diagnostics["skipped_over_budget"] += 1
             continue
-        selected.append(memory)
+        selected.append(
+            RetrievedMemory(
+                memory_id=record.memory_id,
+                scope=record.scope,
+                category=record.category,
+                title=record.title,
+                body=body,
+                tags=list(record.tags),
+                updated_at=record.updated_at,
+                score=score,
+                char_count=char_count,
+            ),
+        )
         counts[scope] += 1
-        chars[scope] += memory.char_count
+        chars[scope] += char_count
     diagnostics["included_workspace"] = counts[WORKSPACE_SCOPE]
     diagnostics["included_user"] = counts[USER_SCOPE]
     diagnostics["included_workspace_chars"] = chars[WORKSPACE_SCOPE]
@@ -333,15 +438,15 @@ def _apply_budget(
     return selected
 
 
-def _sort_memories(memories: list[RetrievedMemory], budget: MemoryRetrievalBudget) -> list[RetrievedMemory]:
+def _sort_scored_memories(memories: list[_ScoredMemory], budget: MemoryRetrievalBudget) -> list[_ScoredMemory]:
     return sorted(
         memories,
         key=lambda memory: (
-            -memory.score,
-            0 if memory.scope == WORKSPACE_SCOPE else 1,
-            -_timestamp(memory.updated_at),
-            budget.priority_for(memory.category),
-            memory.memory_id,
+            -memory[2],
+            0 if memory[0].scope == WORKSPACE_SCOPE else 1,
+            -memory[4],
+            budget.priority_for(memory[0].category),
+            memory[0].memory_id,
         ),
     )
 
@@ -357,13 +462,6 @@ def _timestamp(value: str) -> float:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
-
-
-def _bounded(value: str, limit: int) -> str:
-    normalized = " ".join(value.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[:limit]
 
 
 def _required_str(raw: dict[str, Any], name: str) -> str:

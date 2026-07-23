@@ -47,8 +47,8 @@ from haagent.tui.widgets.tool_activity import (
 )
 
 
-TIMELINE_WINDOW_SIZE = 200
-TIMELINE_WINDOW_STEP = 100
+TIMELINE_WINDOW_SIZE = 50
+TIMELINE_WINDOW_STEP = 25
 ELAPSED_REFRESH_INTERVAL_SECONDS = 1.0
 
 
@@ -907,31 +907,31 @@ class ConversationTimeline(VerticalScroll):
 
     def _sync_blocks(self) -> None:
         self._remove_singletons()
-        seen: set[int] = set()
-        anchor: Any = None
         visible_items = self._visible_items()
-        for item in self._windowed_items(visible_items):
+        window_items = self._windowed_items(visible_items)
+        desired_ids = {item.item_id for item in window_items}
+        for item_id in list(self._blocks):
+            if item_id not in desired_ids:
+                self._blocks.pop(item_id).remove()
+
+        pending_mounts: list[TimelineBlock] = []
+        for item in window_items:
             block = self._blocks.get(item.item_id)
             if block is None:
                 block = TimelineBlock(item, show_tool_details=self._show_tool_details(item))
                 self._blocks[item.item_id] = block
-                if anchor is None:
-                    self.mount(block)
-                else:
-                    self.mount(block, after=anchor)
             else:
                 block.update_item(item, show_tool_details=self._show_tool_details(item))
-                if block.parent is None:
-                    if anchor is None:
-                        self.mount(block)
-                    else:
-                        self.mount(block, after=anchor)
-            seen.add(item.item_id)
-            anchor = block
-        for item_id in list(self._blocks):
-            if item_id not in seen:
-                block = self._blocks.pop(item_id)
-                block.remove()
+            if block.parent is None:
+                pending_mounts.append(block)
+                continue
+            if pending_mounts:
+                # 窗口始终是同一全局投影的连续切片；重叠 block 的相对顺序不变，
+                # 只需把新连续段批量插到下一个复用 block 前，无需卸载 Markdown widget。
+                self.mount(*pending_mounts, before=block)
+                pending_mounts.clear()
+        if pending_mounts:
+            self.mount(*pending_mounts)
         self.set_class(bool(self._items), "timeline-ready")
         if self._stick_to_bottom:
             self.call_after_refresh(self.scroll_end_if_sticky)
@@ -1012,10 +1012,7 @@ class ConversationTimeline(VerticalScroll):
         return True
 
     def _replace_window_blocks(self) -> None:
-        # 翻窗发生频率远低于流式更新；边界切换时重建有界窗口可保证 DOM 顺序稳定。
-        for block in list(self._blocks.values()):
-            block.remove()
-        self._blocks.clear()
+        # 相邻窗口复用重叠 block，只卸载离窗项并批量挂载新项。
         self._sync_blocks()
 
     def _restore_window_anchor(self, item_id: int) -> None:

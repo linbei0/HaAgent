@@ -29,22 +29,12 @@ class SessionFlow:
     def restore_initial_session(self) -> None:
         """启动时按 --resume / --continue 参数恢复会话。"""
         initial_resume = self._app.service.sessions.initial_resume
-        if initial_resume is not None:
-            try:
-                status = self._app.service.sessions.resume(initial_resume)
-            except Exception as error:
-                self._app._conversation.append_block("Session warning", f"恢复会话失败：{error}")
-            else:
-                self.show_session_history(status, prefix="已恢复 session")
+        initial_continue = self._app.service.sessions.initial_continue
+        if initial_resume is None and not initial_continue:
             return
-        if not self._app.service.sessions.initial_continue:
-            return
-        try:
-            status = self._app.service.sessions.continue_latest()
-        except Exception as error:
-            self._app._conversation.append_block("Session warning", f"继续最新 session 失败：{error}")
-        else:
-            self.show_session_history(status, prefix="已继续最新 session")
+        self._busy = True
+        # session package、MCP 启动和历史读取都在 worker 中完成，UI 线程只挂载结果。
+        self._app._run_initial_session_restore_worker(initial_resume, bool(initial_continue))
 
     def open_sessions(self) -> None:
         if self._app._prompt_has_pending_text():
@@ -94,21 +84,44 @@ class SessionFlow:
         self._app._refresh()
         self._app._defer_prompt_focus()
 
-    def apply_continue_success(self, status: AssistantSessionStatus) -> None:
+    def apply_initial_restore_success(
+        self,
+        status: AssistantSessionStatus,
+        prefix: str,
+        history: list[AssistantSessionTurn] | None,
+        history_error: Exception | None,
+    ) -> None:
+        self._busy = False
+        self.show_session_history(status, prefix=prefix, history=history, history_error=history_error)
+        self._app._refresh()
+        self._app._defer_prompt_focus()
+
+    def apply_continue_success(
+        self,
+        status: AssistantSessionStatus,
+        history: list[AssistantSessionTurn] | None = None,
+        history_error: Exception | None = None,
+    ) -> None:
         self._busy = False
         self._app._reset_image_input_state()
-        self.show_session_history(status, prefix="已恢复会话")
+        self.show_session_history(status, prefix="已恢复会话", history=history, history_error=history_error)
         self._app._conversation.append_line(f"已恢复会话：{status.session_id}")
         self._app._refresh()
         self._app._defer_prompt_focus()
 
-    def apply_overlay_success(self, result: SessionOverlayResult, status: AssistantSessionStatus) -> None:
+    def apply_overlay_success(
+        self,
+        result: SessionOverlayResult,
+        status: AssistantSessionStatus,
+        history: list[AssistantSessionTurn] | None = None,
+        history_error: Exception | None = None,
+    ) -> None:
         self._busy = False
         self._app._reset_image_input_state()
         if result.action == "new":
             self.clear_conversation_for_new_session()
         else:
-            self.show_session_history(status, prefix="当前会话")
+            self.show_session_history(status, prefix="当前会话", history=history, history_error=history_error)
         self._app._refresh()
         self._app._defer_prompt_focus()
 
@@ -118,15 +131,29 @@ class SessionFlow:
         self._app._refresh()
         self._app._defer_prompt_focus()
 
-    def show_session_history(self, status: AssistantSessionStatus, *, prefix: str) -> None:
+    def show_session_history(
+        self,
+        status: AssistantSessionStatus,
+        *,
+        prefix: str,
+        history: list[AssistantSessionTurn] | None = None,
+        history_error: Exception | None = None,
+    ) -> None:
         self._app.clear_context_usage()
         conversation = self._timeline()
-        try:
-            history = list(self._app.service.sessions.history())
-        except Exception as error:
+        if history_error is not None:
             conversation.clear_timeline()
-            conversation.add_system("会话", f"{prefix}历史读取失败：{error}")
+            conversation.add_system("会话", f"{prefix}历史读取失败：{history_error}")
             history = []
+        elif history is None:
+            try:
+                history = list(self._app.service.sessions.history())
+            except Exception as error:
+                conversation.clear_timeline()
+                conversation.add_system("会话", f"{prefix}历史读取失败：{error}")
+                history = []
+            else:
+                conversation.load_session_history(history)
         else:
             # 批量装载只同步一次 DOM，避免 N 轮 2N 次全量渲染。
             conversation.load_session_history(history)

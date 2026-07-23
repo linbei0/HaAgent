@@ -67,6 +67,22 @@ def test_tui_file_reference_index_uses_fast_file_walker(tmp_path: Path, monkeypa
     assert [item.display_path for item in index.matches("plan")] == ["docs/Project Plan.md"]
     assert [item.display_path for item in index.matches("main")] == ["src/main.py"]
 
+
+def test_tui_file_reference_matches_keep_exact_global_ranking_with_large_index(tmp_path: Path) -> None:
+    files = tuple(
+        FileReferenceMatch(
+            path=tmp_path / f"folder-{item_index % 97}" / f"match-{item_index:06}.txt",
+            display_path=f"folder-{item_index % 97}/match-{item_index:06}.txt",
+        )
+        for item_index in range(10_000, -1, -1)
+    )
+    index = FileReferenceIndex(root=tmp_path.resolve(), files=files)
+
+    matches = index.matches("match", limit=20)
+    expected = sorted(files, key=lambda item: (len(item.display_path), item.display_path.casefold()))[:20]
+
+    assert matches == expected
+
 def test_tui_file_reference_overlay_scrolls_selected_match_into_view(tmp_path: Path) -> None:
     from haagent.tui.files.overlay import FileReferenceOverlay
 

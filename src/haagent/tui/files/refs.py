@@ -6,7 +6,7 @@ haagent/tui/files/refs.py - workspace 内文件引用检索
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,16 +22,27 @@ class FileReferenceMatch:
 class FileReferenceIndex:
     root: Path
     files: tuple[FileReferenceMatch, ...]
+    _ranked_files: tuple[FileReferenceMatch, ...] = field(init=False, repr=False, compare=False)
+    _ranked_folded_paths: tuple[str, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # 排序成本只在后台索引构建时支付一次；逐键查询按全局排名扫描并在 limit 处停止。
+        ranked = tuple(sorted(self.files, key=lambda item: (len(item.display_path), item.display_path.casefold())))
+        object.__setattr__(self, "_ranked_files", ranked)
+        object.__setattr__(self, "_ranked_folded_paths", tuple(item.display_path.casefold() for item in ranked))
 
     def matches(self, query: str, *, limit: int = 20) -> list[FileReferenceMatch]:
         needle = query.strip().casefold()
-        matches = [
-            item
-            for item in self.files
-            if not needle or _fuzzy_contains(item.display_path.casefold(), needle)
-        ]
-        matches.sort(key=lambda item: (len(item.display_path), item.display_path.casefold()))
-        return matches[:limit]
+        if limit <= 0:
+            return []
+        matches: list[FileReferenceMatch] = []
+        for item, folded_path in zip(self._ranked_files, self._ranked_folded_paths, strict=True):
+            if needle and not _fuzzy_contains(folded_path, needle):
+                continue
+            matches.append(item)
+            if len(matches) >= limit:
+                break
+        return matches
 
 
 def build_file_reference_index(workspace_root: Path) -> FileReferenceIndex:

@@ -7,6 +7,7 @@ tests/tui/test_sessions.py - HaAgent TUI sessions 集成测试
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 from haagent.app.assistant_types import AssistantSessionTurn
@@ -359,10 +360,20 @@ def test_tui_restores_initial_resume_session_on_mount(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path)
         service.initial_resume = "session-from-cli"
+        ui_thread_id = threading.get_ident()
+        resume_thread_ids: list[int] = []
+        original_resume = service.sessions.resume
+
+        def recording_resume(session_path):
+            resume_thread_ids.append(threading.get_ident())
+            return original_resume(session_path)
+
+        service.sessions.resume = recording_resume
         app = HaAgentTuiApp(service)
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.1)
             assert service.resumed_sessions == ["session-from-cli"]
+            assert resume_thread_ids and resume_thread_ids[0] != ui_thread_id
             assert service.current_session_id == "session-from-cli"
             assert "sid:" not in _text(app, "#status-bar")
 

@@ -154,3 +154,85 @@ def test_confirm_uses_user_edited_candidate_content(tmp_path: Path) -> None:
     assert record.body == "Edited body is final."
     assert record.tags == ["edited"]
     assert _jsonl(tmp_path / ".haagent" / "memory" / "facts.jsonl")[0]["body"] == "Edited body is final."
+
+
+def test_confirm_updates_existing_index_without_rescanning_all_categories(tmp_path: Path, monkeypatch) -> None:
+    queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
+    store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
+    first = _submit(
+        store,
+        queue,
+        scope="workspace",
+        category="facts",
+        title="First fact",
+        body="First indexed fact.",
+        source="user_explicit",
+    )
+    store.confirm_candidate(queue, first.candidate_id)
+    second = _submit(
+        store,
+        queue,
+        scope="workspace",
+        category="facts",
+        title="Second fact",
+        body="Second indexed fact.",
+        source="user_explicit",
+    )
+    original_list_records = store.list_records
+    scanned_categories: list[str] = []
+
+    def recording_list_records(*, scope: str, category: str):
+        scanned_categories.append(category)
+        return original_list_records(scope=scope, category=category)
+
+    monkeypatch.setattr(store, "list_records", recording_list_records)
+
+    store.confirm_candidate(queue, second.candidate_id)
+
+    assert scanned_categories == ["facts"]
+    index = json.loads((tmp_path / ".haagent" / "memory" / "index.json").read_text(encoding="utf-8"))
+    assert [item["title"] for item in index["items"]] == ["First fact", "Second fact"]
+
+
+def test_confirm_rebuilds_when_existing_index_missed_a_prior_record(tmp_path: Path) -> None:
+    queue = CandidateQueue(tmp_path / ".runs" / "sessions" / "session-test")
+    store = MemoryStore(workspace_root=tmp_path, user_memory_root=tmp_path / "user-memory")
+    index_path = tmp_path / ".haagent" / "memory" / "index.json"
+
+    first = _submit(
+        store,
+        queue,
+        scope="workspace",
+        category="facts",
+        title="First fact",
+        body="First indexed fact.",
+        source="user_explicit",
+    )
+    store.confirm_candidate(queue, first.candidate_id)
+    stale_index = index_path.read_text(encoding="utf-8")
+
+    second = _submit(
+        store,
+        queue,
+        scope="workspace",
+        category="facts",
+        title="Second fact",
+        body="Second indexed fact.",
+        source="user_explicit",
+    )
+    store.confirm_candidate(queue, second.candidate_id)
+    index_path.write_text(stale_index, encoding="utf-8")
+
+    third = _submit(
+        store,
+        queue,
+        scope="workspace",
+        category="facts",
+        title="Third fact",
+        body="Third indexed fact.",
+        source="user_explicit",
+    )
+    store.confirm_candidate(queue, third.candidate_id)
+
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert [item["title"] for item in index["items"]] == ["First fact", "Second fact", "Third fact"]

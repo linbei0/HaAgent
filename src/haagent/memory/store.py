@@ -7,6 +7,7 @@ haagent/memory/store.py - 长期记忆确定性存储服务
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -172,7 +173,8 @@ class MemoryStore:
             updated_at=now,
             tags=tags,
         )
-        check_duplicate_and_conflict(record, self.list_records(scope=candidate.scope, category=candidate.category))
+        existing_records = self.list_records(scope=candidate.scope, category=candidate.category)
+        check_duplicate_and_conflict(record, existing_records)
         self._append_record(record)
         queue.mark_confirmed(candidate_id, record.memory_id)
         audit = self._audit(candidate.scope)
@@ -197,7 +199,7 @@ class MemoryStore:
             actor=actor,
             summary=record.title,
         )
-        self.rebuild_index(candidate.scope, actor=actor)
+        self._upsert_index_record(record, existing_records=existing_records, actor=actor)
         return record
 
     def soft_delete(
@@ -222,6 +224,7 @@ class MemoryStore:
             deleted_at=_now_iso(),
             actor=actor,
         )
+        existing_deleted_ids = self._deleted_ids(scope)
         self._append_jsonl(self._root(scope) / "tombstones.jsonl", tombstone.to_dict())
         self._audit(scope).append(
             event_type="memory_soft_deleted",
@@ -234,7 +237,7 @@ class MemoryStore:
             actor=actor,
             summary=memory_id,
         )
-        self.rebuild_index(scope, actor=actor)
+        self._mark_index_deleted(scope, memory_id, existing_deleted_ids=existing_deleted_ids, actor=actor)
         return tombstone
 
     def list_records(self, *, scope: str, category: str) -> list[MemoryRecord]:
@@ -271,6 +274,107 @@ class MemoryStore:
                         status=status,
                     ),
                 )
+        return self._persist_index(scope, items, actor=actor)
+
+    def _upsert_index_record(
+        self,
+        record: MemoryRecord,
+        *,
+        existing_records: list[MemoryRecord],
+        actor: str,
+    ) -> MemoryIndex:
+        items = self._read_existing_index(record.scope)
+        expected_ids = {existing.memory_id for existing in existing_records}
+        indexed_ids = {item.id for item in items or [] if item.category == record.category}
+        if items is None or indexed_ids != expected_ids or self._other_sources_newer_than_index(
+            record.scope,
+            ignored_category=record.category,
+        ):
+            # 缺失索引可能对应已有事实源，必须全量重建，不能静默丢失旧记忆。
+            return self.rebuild_index(record.scope, actor=actor)
+        replacement = MemoryIndexItem(
+            id=record.memory_id,
+            category=record.category,
+            title=record.title,
+            summary=_summary(record.body),
+            tags=list(record.tags),
+            updated_at=record.updated_at,
+            status="active",
+        )
+        items = [item for item in items if item.id != record.memory_id]
+        items.append(replacement)
+        # stable sort 保持同分类 JSONL 写入顺序，与全量 rebuild 的结果一致。
+        items.sort(key=lambda item: item.category)
+        return self._persist_index(record.scope, items, actor=actor)
+
+    def _mark_index_deleted(
+        self,
+        scope: str,
+        memory_id: str,
+        *,
+        existing_deleted_ids: set[str],
+        actor: str,
+    ) -> MemoryIndex:
+        items = self._read_existing_index(scope)
+        indexed_deleted_ids = {item.id for item in items or [] if item.status == "deleted"}
+        if (
+            items is None
+            or not any(item.id == memory_id for item in items)
+            or indexed_deleted_ids != existing_deleted_ids
+            or self._other_sources_newer_than_index(scope, ignore_tombstones=True)
+        ):
+            return self.rebuild_index(scope, actor=actor)
+        updated = [replace(item, status="deleted") if item.id == memory_id else item for item in items]
+        return self._persist_index(scope, updated, actor=actor)
+
+    def _read_existing_index(self, scope: str) -> list[MemoryIndexItem] | None:
+        path = self._root(scope) / "index.json"
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(raw, dict)
+                or raw.get("version") != MEMORY_SCHEMA_VERSION
+                or raw.get("source") != scope
+                or not isinstance(raw.get("items"), list)
+            ):
+                raise ValueError("invalid index root")
+            return [_memory_index_item_from_dict(item, scope=scope) for item in raw["items"]]
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            # 索引损坏必须显式失败；自动重建会掩盖持久化错误和治理证据问题。
+            raise MemoryStoreError(f"invalid memory index: {path}") from error
+
+    def _other_sources_newer_than_index(
+        self,
+        scope: str,
+        *,
+        ignored_category: str | None = None,
+        ignore_tombstones: bool = False,
+    ) -> bool:
+        index_path = self._root(scope) / "index.json"
+        try:
+            index_mtime = index_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return True
+        for category, file_name in FILE_BY_SCOPE_CATEGORY[scope].items():
+            if category == ignored_category:
+                continue
+            path = self._root(scope) / file_name
+            try:
+                if path.stat().st_mtime_ns > index_mtime:
+                    return True
+            except FileNotFoundError:
+                continue
+        if not ignore_tombstones:
+            try:
+                if (self._root(scope) / "tombstones.jsonl").stat().st_mtime_ns > index_mtime:
+                    return True
+            except FileNotFoundError:
+                pass
+        return False
+
+    def _persist_index(self, scope: str, items: list[MemoryIndexItem], *, actor: str) -> MemoryIndex:
         index = MemoryIndex(
             version=MEMORY_SCHEMA_VERSION,
             updated_at=_now_iso(),
@@ -327,6 +431,30 @@ class MemoryStore:
 
     def _audit(self, scope: str) -> MemoryAuditLog:
         return MemoryAuditLog(self._root(scope))
+
+
+def _memory_index_item_from_dict(raw: object, *, scope: str) -> MemoryIndexItem:
+    if not isinstance(raw, dict):
+        raise ValueError("index item must be an object")
+    required = ("id", "category", "title", "summary", "updated_at", "status")
+    if any(not isinstance(raw.get(field), str) for field in required):
+        raise ValueError("index item fields must be strings")
+    tags = raw.get("tags", [])
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        raise ValueError("index item tags must be strings")
+    if raw["category"] not in MEMORY_CATEGORIES_BY_SCOPE[scope]:
+        raise ValueError("index item category does not match scope")
+    if raw["status"] not in {"active", "deleted"}:
+        raise ValueError("index item status is invalid")
+    return MemoryIndexItem(
+        id=raw["id"],
+        category=raw["category"],
+        title=raw["title"],
+        summary=raw["summary"],
+        tags=list(tags),
+        updated_at=raw["updated_at"],
+        status=raw["status"],
+    )
 
 
 def _summary(value: str) -> str:
