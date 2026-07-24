@@ -15,7 +15,6 @@ from haagent.models.types import ProviderTurnState
 from haagent.context.compression.tool_results import render_tool_result_view
 from haagent.context.instructions import AGENT_INSTRUCTIONS
 from haagent.runtime.contracts.task import TaskSpec
-from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_registry
 
 
 def generate_tool_call_id() -> str:
@@ -82,9 +81,7 @@ def build_task_message(
     memory_index_block: str | None = None,
     memory_block: str | None = None,
     interaction_state_lines: list[str] | None = None,
-    tool_registry: ToolRuntimeRegistry | None = None,
 ) -> dict[str, Any]:
-    runtime_registry = tool_registry or default_tool_runtime_registry()
     lines: list[str] = []
     lines.append("Task:")
     lines.append(f"goal: {task.goal}")
@@ -99,10 +96,6 @@ def build_task_message(
         lines.append("constraints:")
         for c in task.constraints:
             lines.append(f"- {c}")
-
-    lines.append("allowed_tools:")
-    for tool in task.allowed_tools:
-        lines.append(f"- {tool}: {runtime_registry.get(tool).description}")
 
     if task.image_attachment_history:
         lines.append("Image Attachment History:")

@@ -33,6 +33,7 @@ class ToolAccessManager:
         include_memory_tool: bool,
         image_attachment_history: bool,
         mcp_tool_names: Iterable[str],
+        include_session_history: bool = False,
     ) -> list[str]:
         names = list(catalog.chat_default_tools())
         if not include_memory_tool:
@@ -45,6 +46,8 @@ class ToolAccessManager:
             names.extend(catalog.chat_web_tools())
         if image_attachment_history and catalog.has("load_image_attachment"):
             names.append("load_image_attachment")
+        if include_session_history and catalog.has("session_history"):
+            names.append("session_history")
         mcp_names = list(mcp_tool_names)
         if mcp_names:
             names.extend(mcp_names)
@@ -63,6 +66,7 @@ class ToolAccessManager:
         mcp_runtime: Any | None,
         model_capabilities: ModelCapabilities | None,
         image_attachment_history: bool,
+        session_history_available: bool = False,
     ) -> ToolAccessSnapshot:
         allowed: list[str] = []
         denied: dict[str, str] = {}
@@ -75,6 +79,7 @@ class ToolAccessManager:
                 mcp_available=mcp_available,
                 image_attachment_history=image_attachment_history,
                 vision_supported=vision_supported,
+                session_history_available=session_history_available,
             )
             if reason is None:
                 allowed.append(name)
@@ -90,6 +95,7 @@ class ToolAccessManager:
         mcp_available: bool,
         image_attachment_history: bool,
         vision_supported: bool,
+        session_history_available: bool,
     ) -> str | None:
         if not registry.has(name):
             return "tool_not_registered"
@@ -101,6 +107,8 @@ class ToolAccessManager:
                 return "image_attachment_unavailable"
             if not vision_supported:
                 return "vision_unsupported"
+        if name == "session_history" and not session_history_available:
+            return "session_history_unavailable"
         return None
 
 

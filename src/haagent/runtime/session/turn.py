@@ -54,6 +54,7 @@ class OrchestratorFactory(Protocol):
         instruction_cache: object | None = None,
         tool_schema_cache: object | None = None,
         working_state_sink: Callable[[dict[str, object]], None] | None = None,
+        session_path: Path | None = None,
     ):
         ...
 
@@ -96,6 +97,7 @@ class ChatTurnRequest:
     instruction_cache: object | None = None
     tool_schema_cache: object | None = None
     working_state_sink: Callable[[dict[str, object]], None] | None = None
+    session_path: Path | None = None
 
 
 class ChatTurnRunner:
@@ -117,6 +119,7 @@ class ChatTurnRunner:
                 mcp_tool_names=request.mcp_tool_names,
                 prompt_pack_ids=prompt_pack_ids,
                 include_memory_tool=request.include_memory_tool,
+                include_session_history=request.session_path is not None,
                 allowed_tools_override=request.allowed_tools_override,
                 approval_allowed_tools_override=request.approval_allowed_tools_override,
                 approved_tools_override=request.approved_tools_override,
@@ -147,6 +150,7 @@ class ChatTurnRunner:
                 instruction_cache=request.instruction_cache,
                 tool_schema_cache=request.tool_schema_cache,
                 working_state_sink=request.working_state_sink,
+                session_path=request.session_path,
             )
             return orchestrator.run(task_path)
 
@@ -162,6 +166,7 @@ def write_chat_task_yaml(
     mcp_tool_names: list[str] | None = None,
     prompt_pack_ids: list[str] | None = None,
     include_memory_tool: bool = True,
+    include_session_history: bool = False,
     allowed_tools_override: list[str] | None = None,
     approval_allowed_tools_override: list[str] | None = None,
     approved_tools_override: list[str] | None = None,
@@ -181,9 +186,12 @@ def write_chat_task_yaml(
             include_memory_tool=include_memory_tool,
             image_attachment_history=bool(image_attachment_history),
             mcp_tool_names=mcp_tools,
+            include_session_history=include_session_history,
         )
     else:
         allowed_tools = list(allowed_tools_override)
+        if include_session_history and "session_history" not in allowed_tools:
+            allowed_tools.append("session_history")
         # override 只是请求集合，最终仍由 ToolAccessManager 按当前能力过滤。
         if enable_web:
             for name in catalog.chat_web_tools():

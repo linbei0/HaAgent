@@ -67,6 +67,8 @@ class ToolRouter:
         allowed_tools: list[str],
         episode_writer: EpisodeWriter,
         workspace_root: Path,
+        session_path: Path | None = None,
+        runs_root: Path | None = None,
         path_policy: PathPolicy | None = None,
         approval_allowed_tools: list[str] | None = None,
         approved_tools: list[str] | None = None,
@@ -104,6 +106,8 @@ class ToolRouter:
         self._handlers = build_static_tool_handlers(
             workspace_root=self._workspace_root,
             path_policy=self._path_policy,
+            session_path=session_path,
+            runs_root=runs_root,
             skill_settings=self._skill_settings,
             cancellation_token=self._cancellation_token,
             mcp_runtime=self._mcp_runtime,
@@ -198,6 +202,7 @@ class ToolRouter:
             result = tool_error(type(error).__name__, str(error))
 
         trace_metadata = result.pop("_trace_metadata", None)
+        trace_result = result.pop("_trace_result", None)
         result = self._prepare_model_visible_result(tool_name, result)
         self._write_trace(
             tool_name,
@@ -207,6 +212,7 @@ class ToolRouter:
             policy_decision,
             guardrail_result,
             trace_metadata=trace_metadata,
+            trace_result=trace_result,
             turn=turn,
         )
         return result
@@ -645,9 +651,12 @@ class ToolRouter:
         guardrail_result: GuardrailResult | None,
         duration_seconds: float | None = None,
         trace_metadata: dict[str, Any] | None = None,
+        trace_result: dict[str, Any] | None = None,
         turn: int | None = None,
     ) -> None:
-        trace_result = _result_for_trace(result)
+        effective_trace_result = (
+            trace_result if trace_result is not None else _result_for_trace(result)
+        )
         # 未启动调用强制 duration=0；真实 dispatch 仍用 wall-clock
         measured = (
             float(duration_seconds)
@@ -658,7 +667,7 @@ class ToolRouter:
                 "tool_name": tool_name,
                 "args": args,
                 "status": result["status"],
-                "result": trace_result if result["status"] == "success" else None,
+                "result": effective_trace_result if result["status"] == "success" else None,
                 "error": result.get("error"),
                 "policy": policy_decision.to_dict() if policy_decision else None,
                 "path_policy": {

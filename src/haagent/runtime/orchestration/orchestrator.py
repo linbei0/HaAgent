@@ -82,6 +82,7 @@ class RunOrchestrator:
         instruction_cache: object | None = None,
         tool_schema_cache: object | None = None,
         working_state_sink: Callable[[dict[str, object]], None] | None = None,
+        session_path: Path | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -106,6 +107,7 @@ class RunOrchestrator:
         self._skill_catalog = skill_catalog
         self._instruction_cache = instruction_cache
         self._tool_schema_cache = tool_schema_cache
+        self._session_path = session_path
         self._working_state_sink = working_state_sink
 
     def _emit_event(self, event: RuntimeBusEvent | dict[str, object]) -> None:
@@ -173,6 +175,7 @@ class RunOrchestrator:
                 mcp_runtime=self._mcp_runtime,
                 model_capabilities=model_capabilities,
                 image_attachment_history=bool(task.image_attachment_history),
+                session_history_available=self._session_path is not None,
             )
             allowed_set = set(access_snapshot.allowed_tools)
             task = replace(
@@ -223,6 +226,8 @@ class RunOrchestrator:
                 task.allowed_tools,
                 writer,
                 workspace_root=workspace_root,
+                session_path=self._session_path,
+                runs_root=self._runs_root,
                 path_policy=path_policy,
                 approval_allowed_tools=task.policy["approval_allowed_tools"],
                 approved_tools=task.policy["approved_tools"],

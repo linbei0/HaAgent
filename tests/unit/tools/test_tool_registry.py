@@ -23,6 +23,7 @@ def test_tool_registry_contains_mvp_tools() -> None:
     assert set(TOOL_REGISTRY) == {
         "fake_tool",
         "load_image_attachment",
+        "session_history",
         "file_list",
         "grep",
         "file_read",
@@ -58,6 +59,7 @@ def test_tool_registry_static_execution_effects() -> None:
     expected = {
         "fake_tool": "read_only",
         "load_image_attachment": "read_only",
+        "session_history": "read_only",
         "request_user_input": "interaction",
         "start_memory_update": "external_effect",
         "agent": "external_effect",

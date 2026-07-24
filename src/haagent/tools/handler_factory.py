@@ -23,6 +23,8 @@ def build_static_tool_handlers(
     *,
     workspace_root: Path,
     path_policy: PathPolicy,
+    session_path: Path | None = None,
+    runs_root: Path | None = None,
     skill_settings: SkillSettings | None,
     cancellation_token: CancellationToken | None,
     mcp_runtime: Any | None,
@@ -35,6 +37,8 @@ def build_static_tool_handlers(
     deps = ToolRuntimeDeps(
         workspace_root=workspace_root,
         path_policy=path_policy,
+        session_path=session_path,
+        runs_root=runs_root,
         skill_settings=skill_settings,
         cancellation_token=cancellation_token,
         mcp_runtime=mcp_runtime,

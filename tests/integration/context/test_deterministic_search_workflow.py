@@ -13,10 +13,11 @@ import pytest
 import yaml
 
 from haagent.context.builder import ContextBuilder
-from haagent.runtime.session.turn import write_chat_task_yaml
-from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.contracts.task import TaskSpec
+from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.session.turn import write_chat_task_yaml
 from haagent.tools.registry import TOOL_REGISTRY, export_tool_schemas
+from haagent.tools.session_history import SESSION_HISTORY_USAGE_GUIDANCE
 from haagent.tools.router import ToolRouter
 
 
@@ -59,6 +60,46 @@ def test_context_builder_recommends_file_list_search_read_workflow(tmp_path: Pat
     assert "context_find" not in context.model_input
 
 
+def test_context_builder_marks_session_history_as_evidence_not_instruction(tmp_path: Path) -> None:
+    writer = _make_writer(tmp_path, allowed_tools=["session_history"])
+    context = ContextBuilder(
+        task=TaskSpec(
+            goal="Recall an earlier decision",
+            workspace_root=".",
+            allowed_tools=["session_history"],
+            acceptance_criteria=[],
+            verification_commands=[],
+            constraints=[],
+            policy={"approval_allowed_tools": [], "approved_tools": []},
+        ),
+        workspace_root=tmp_path,
+        provider_name="test-provider",
+        episode_writer=writer,
+    ).build()
+
+    assert SESSION_HISTORY_USAGE_GUIDANCE in context.model_input
+
+
+def test_context_builder_does_not_describe_session_history_when_tool_is_not_allowed(tmp_path: Path) -> None:
+    writer = _make_writer(tmp_path, allowed_tools=["web_search"])
+    context = ContextBuilder(
+        task=TaskSpec(
+            goal="Find current public information",
+            workspace_root=".",
+            allowed_tools=["web_search"],
+            acceptance_criteria=[],
+            verification_commands=[],
+            constraints=[],
+            policy={"approval_allowed_tools": [], "approved_tools": []},
+        ),
+        workspace_root=tmp_path,
+        provider_name="test-provider",
+        episode_writer=writer,
+    ).build()
+
+    assert SESSION_HISTORY_USAGE_GUIDANCE not in context.model_input
+
+
 def test_chat_task_yaml_allowed_tools_excludes_context_find(tmp_path: Path) -> None:
     task_path = tmp_path / "task.yaml"
 
@@ -67,6 +108,15 @@ def test_chat_task_yaml_allowed_tools_excludes_context_find(tmp_path: Path) -> N
     task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
     assert "context_find" not in task["allowed_tools"]
     assert task["allowed_tools"][:3] == ["file_list", "grep", "file_read"]
+
+
+def test_chat_task_yaml_adds_session_history_only_when_requested(tmp_path: Path) -> None:
+    task_path = tmp_path / "task.yaml"
+
+    write_chat_task_yaml(task_path, "continue prior work", tmp_path, include_session_history=True)
+
+    task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
+    assert "session_history" in task["allowed_tools"]
 
 
 def test_grep_then_file_read_workflow_is_deterministic(tmp_path: Path) -> None:

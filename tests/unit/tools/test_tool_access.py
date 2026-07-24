@@ -55,3 +55,26 @@ def test_unsupported_vision_removes_attachment_tool() -> None:
 
     assert snapshot.allowed_tools == ()
     assert snapshot.denied_tools["load_image_attachment"] == "vision_unsupported"
+
+
+def test_session_history_requires_session_runtime() -> None:
+    unavailable = ToolAccessManager.resolve(
+        ["session_history"],
+        registry=default_tool_runtime_registry(),
+        mcp_runtime=None,
+        model_capabilities=ModelCapabilities(vision="supported"),
+        image_attachment_history=False,
+        session_history_available=False,
+    )
+    available = ToolAccessManager.resolve(
+        ["session_history"],
+        registry=default_tool_runtime_registry(),
+        mcp_runtime=None,
+        model_capabilities=ModelCapabilities(vision="supported"),
+        image_attachment_history=False,
+        session_history_available=True,
+    )
+
+    assert unavailable.allowed_tools == ()
+    assert unavailable.denied_tools["session_history"] == "session_history_unavailable"
+    assert available.allowed_tools == ("session_history",)

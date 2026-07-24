@@ -372,7 +372,8 @@ def append_turn_record(
         "request": summary_value(request, 300),
         "summary": summary,
         "status": status,
-        "episode_path": str(episode_path),
+        # turn 索引保存绝对引用，避免恢复会话后依赖启动 cwd 猜测 episode 位置。
+        "episode_path": str(episode_path.resolve()),
         "verification_status": verification_status,
         "assistant_display_text": assistant_display_text(final_response),
     }

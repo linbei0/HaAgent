@@ -53,6 +53,8 @@ class ToolRuntimeDeps:
 
     workspace_root: Path
     path_policy: PathPolicy
+    session_path: Path | None = None
+    runs_root: Path | None = None
     skill_settings: SkillSettings | None = None
     cancellation_token: CancellationToken | None = None
     mcp_runtime: Any | None = None

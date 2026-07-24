@@ -9,6 +9,8 @@ from typing import Any
 from haagent.memory.prompts import START_MEMORY_UPDATE_TOOL_DESCRIPTION
 from haagent.runtime.execution.retry import ReplaySafety
 from haagent.tools.catalog import ToolContribution
+from haagent.tools.base import ToolExecutionContext, ToolHandler
+from haagent.tools.session_history import SESSION_HISTORY_USAGE_GUIDANCE, session_history
 from haagent.tools.contribution_helpers import (
     compact_excerpt,
     first_present_string,
@@ -36,7 +38,50 @@ def _request_user_input_observation(
     }
 
 
+def _bind_session_history(deps) -> ToolHandler:
+    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
+        del context
+        return session_history(args, deps.session_path, runs_root=deps.runs_root)
+
+    return handler
+
+
+def _session_history_args(args: dict[str, Any]) -> dict[str, object]:
+    return {"query": str(args.get("query", ""))[:240], "limit": args.get("limit", 3)}
+
+
+def _session_history_result(result: dict[str, Any]) -> dict[str, object]:
+    items = result.get("results") if isinstance(result.get("results"), list) else []
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    return {
+        "matched_turn_count": diagnostics.get("matched_turn_count", 0),
+        "selected_turns": diagnostics.get("selected_turns", []),
+        "result_count": len(items),
+    }
+
+
 CORE_CONTRIBUTIONS: list[ToolContribution] = [
+    ToolContribution(
+        name="session_history",
+        description="Search dialogue evidence already persisted for the current session. "
+        + SESSION_HISTORY_USAGE_GUIDANCE,
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "specific words, paths, decisions, or constraints to recall"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 5, "description": "optional result count; defaults to 3"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+        execution_effect="read_only",
+        replay_safety=ReplaySafety.SAFE_TO_REPLAY,
+        bind_handler=_bind_session_history,
+        summarize_args=_session_history_args,
+        summarize_result=_session_history_result,
+        display_name_zh="检索会话历史",
+    ),
     ToolContribution(
         name="fake_tool",
         description="deterministic test tool",

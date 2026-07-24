@@ -68,6 +68,31 @@ def test_candidate_tools_uses_catalog_tags() -> None:
     assert "load_image_attachment" in candidate
 
 
+def test_candidate_tools_adds_session_history_only_for_session_runtime() -> None:
+    from haagent.tools.access import ToolAccessManager
+    from haagent.tools.catalog import default_tool_catalog
+
+    catalog = default_tool_catalog()
+    without_session = ToolAccessManager.candidate_tools(
+        catalog=catalog,
+        enable_web=False,
+        include_memory_tool=False,
+        image_attachment_history=False,
+        mcp_tool_names=[],
+    )
+    with_session = ToolAccessManager.candidate_tools(
+        catalog=catalog,
+        enable_web=False,
+        include_memory_tool=False,
+        image_attachment_history=False,
+        mcp_tool_names=[],
+        include_session_history=True,
+    )
+
+    assert "session_history" not in without_session
+    assert "session_history" in with_session
+
+
 def test_default_candidate_tool_set_preserves_agent_capabilities_and_resource_gates() -> None:
     from haagent.tools.access import ToolAccessManager
     from haagent.tools.catalog import default_tool_catalog
@@ -166,6 +191,7 @@ def test_static_tools_declare_explicit_replay_safety() -> None:
         "list_mcp_resources",
         "read_mcp_resource",
         "load_image_attachment",
+        "session_history",
         "job_status",
         "job_logs",
     }
