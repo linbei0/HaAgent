@@ -66,6 +66,22 @@ class ConversationController:
         self.streaming_key = key
         self.streaming_text += delta
 
+    def reset_assistant_attempt(self, turn_index: int, model_turn: int | None = None) -> None:
+        """撤销当前 model attempt 的 provisional 缓冲；迟到 delta 由 runtime attempt 代际丢弃。"""
+
+        # 仅接受同一逻辑 turn / 当前 streaming_key 的 reset，避免误清其他 turn。
+        if self.streaming_key is not None and self.streaming_key[0] != turn_index:
+            return
+        if (
+            self.streaming_key is not None
+            and model_turn is not None
+            and self.streaming_key not in {(turn_index, model_turn), (turn_index, None)}
+        ):
+            return
+        self._timeline().reset_assistant_attempt(turn_index)
+        self.streaming_key = (turn_index, model_turn)
+        self.streaming_text = ""
+
     def finalize_intermediate_message(
         self,
         turn_index: int,
@@ -186,9 +202,7 @@ class ConversationController:
             self._scroll_to_end()
 
     def _should_stick(self, conversation: ConversationTimeline) -> bool:
-        if not self.stick_to_bottom:
-            return False
-        return conversation.scroll_y >= conversation.max_scroll_y - 1
+        return self.stick_to_bottom and conversation.is_stuck_to_bottom
 
     def _timeline(self) -> ConversationTimeline:
         return self._app.query_one("#conversation", ConversationTimeline)

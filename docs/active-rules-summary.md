@@ -24,6 +24,9 @@
 - 所有工具调用必须经过 `ToolRouter`。
 - workspace root 是文件和命令工具的默认信任根；外部目录访问必须由工具执行器发现并在同一工具调用内获得用户授权。
 - 每条用户 prompt 仍写独立 episode；session package 只保存索引、摘要和有界工作状态，不复制 episode 证据。
+- 模型流中断恢复分层：首个 delta 前透明 retry；首个 delta 后在有界预算内 attempt reset 并重放同一 `ModelInvocation`；仅官方 OpenAI Responses + 显式 `background` 才可 retrieve 同一 Response。
+- 已经向 UI 提交模型输出后，不得切换协议或备用模型；恢复只允许同一模型、同一协议、同一逻辑 turn。
+- 只有 `network`、`timeout`、明确 retryable 的 408/409/429/5xx 与 provider 流内 transient error 可自动恢复；`auth`、`quota_exhausted`、validation、response parse、content filter、用户取消与未知非 retryable 不得自动恢复。
 
 ## 3. Profile、凭据与 Secret
 
@@ -78,6 +81,8 @@
 - `RuntimeUiEvent` 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。
 - 稳定事件类型包括 session/turn 开始结束、工具开始/完成/失败、assistant 消息、审批请求/批准/拒绝、用户补充输入请求/接收、failure 和 session finished。
 - 模型路由还记录 `model_protocol_fallback` 与 `model_fallback`，包含脱敏连接、模型、协议、原因和能力缺失；顶部状态和活动流应展示实际使用模型。
+- 模型流恢复额外发出 `assistant_attempt_reset`、`model_retry_scheduled` / `model_retry_exhausted`；reset 事件只携带 turn/attempt/category 等标识，不携带失败 attempt 全文或 provider raw payload。
+- 恢复中的 retry/retrieve 状态不是 failure；预算耗尽或不可恢复错误后才发 failure。episode 可记录 attempt/reset/retrieve 证据；session package 与 UI snapshot 不复制失败 attempt 全文。
 
 ## 7. 记忆系统
 
@@ -132,6 +137,8 @@
 - 所有功能必须键盘可达，鼠标只作为增强；颜色不能作为唯一语义，`NO_COLOR` 下仍应可读。
 - 普通用户路径统一使用简体中文；HaAgent、OpenAI、DeepSeek、模型 ID、环境变量、Slash 命令和高级诊断原始值保持原名。
 - Failure 展示必须包含 failed\_stage、failure\_category、reason 和 episode\_path；不要静默 fallback，也不要过度推断。
+- `assistant_attempt_reset` 只撤销当前逻辑 turn 的 provisional assistant 内容，不改动已固化 intermediate/process item；迟到的旧 attempt delta 必须在 runtime sink 层按代际丢弃。
+- 流恢复等待与 background retrieve 期间 `Ctrl+X` 必须可取消；取消后 TUI 回到可输入状态，不留下假运行态。
 
 ## 10. 测试与质量门禁
 

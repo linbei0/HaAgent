@@ -21,6 +21,18 @@ class AssistantDeltaEvent:
 
 
 @dataclass(frozen=True)
+class AssistantAttemptResetEvent:
+    """TUI 清空当前 provisional assistant attempt；不含 partial 全文。"""
+
+    session_id: str
+    turn_index: int
+    model_turn: int | None
+    attempt: int
+    next_attempt: int
+    category: str
+
+
+@dataclass(frozen=True)
 class AssistantMessageEvent:
     session_id: str
     turn_index: int
@@ -151,6 +163,7 @@ class SessionLifecycleEvent:
 
 RuntimeUiEvent: TypeAlias = (
     AssistantDeltaEvent
+    | AssistantAttemptResetEvent
     | AssistantIntermediateEvent
     | AssistantMessageEvent
     | ContextUsageEvent
@@ -166,6 +179,7 @@ RuntimeUiEvent: TypeAlias = (
 
 RuntimeUiEventType: TypeAlias = (
     type[AssistantDeltaEvent]
+    | type[AssistantAttemptResetEvent]
     | type[AssistantIntermediateEvent]
     | type[AssistantMessageEvent]
     | type[ContextUsageEvent]
@@ -181,6 +195,7 @@ RuntimeUiEventType: TypeAlias = (
 
 RUNTIME_UI_EVENT_TYPES: tuple[RuntimeUiEventType, ...] = (
     AssistantDeltaEvent,
+    AssistantAttemptResetEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
     ContextUsageEvent,

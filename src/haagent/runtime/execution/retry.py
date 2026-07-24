@@ -26,6 +26,24 @@ class ReplaySafety(StrEnum):
     NEVER_REPLAY = "never_replay"
 
 
+class StreamReplayMode(StrEnum):
+    """声明流已经提交增量后是否允许撤销当前 attempt 并重放。"""
+
+    FAIL_AFTER_COMMIT = "fail_after_commit"
+    DISCARD_AND_REPLAY = "discard_and_replay"
+
+
+@dataclass(frozen=True)
+class StreamResetEvent:
+    """已提交流在重放前撤销当前 attempt 时的非敏感事实。"""
+
+    operation_name: str
+    attempt: int
+    next_attempt: int
+    category: str
+    partial_character_count: int
+
+
 @dataclass(frozen=True)
 class RetryOperation:
     """供重试控制器决策的操作元数据。"""
@@ -35,6 +53,7 @@ class RetryOperation:
     streaming: bool = False
     idempotency_key: str | None = None
     idempotency_supported: bool = False
+    stream_replay_mode: StreamReplayMode = StreamReplayMode.FAIL_AFTER_COMMIT
 
 
 @dataclass
@@ -42,12 +61,22 @@ class StreamAttemptState:
     """记录当前流式 attempt 是否已向调用方提交过增量。"""
 
     committed: bool = False
+    emitted_character_count: int = 0
 
     def emit(self, delta: str, sink: Callable[[str], None]) -> None:
         """在转发首个增量前提交状态，防止后续失败被自动重放。"""
 
+        # 仅非空增量计入 partial 长度；空字符串仍可提交 committed 标记由调用方控制。
+        if delta:
+            self.emitted_character_count += len(delta)
         self.committed = True
         sink(delta)
+
+    def reset(self) -> None:
+        """仅在上层已撤销当前 attempt 展示后，开放下一次流式提交。"""
+
+        self.committed = False
+        self.emitted_character_count = 0
 
 
 @dataclass(frozen=True)
@@ -93,6 +122,9 @@ class RetryEvent:
     delay_seconds: float
     source: str
     retry_after_ignored: bool = False
+    recovery_kind: str | None = None
+    response_id: str | None = None
+    sequence_number: int | None = None
 
 
 def _delay_for(
@@ -152,12 +184,17 @@ class RetryController:
         *,
         cancellation_token: CancellationToken | None = None,
         on_event: Callable[[RetryEvent], None] | None = None,
+        on_stream_reset: Callable[[StreamResetEvent], None] | None = None,
         stream_state: StreamAttemptState | None = None,
         error_adapter: Callable[[Exception], RetryFailure | None] | None = None,
+        first_attempt: int = 1,
+        recovery_kind: str | None = None,
+        response_id: str | None = None,
+        sequence_number: int | None = None,
     ) -> ResultT:
         """执行操作；仅在结构化、可安全重放的失败后尝试下一次调用。"""
 
-        attempt = 1
+        attempt = first_attempt
         while True:
             self._raise_if_cancelled(cancellation_token)
             try:
@@ -166,33 +203,94 @@ class RetryController:
                 failure = self._adapt_failure(error, error_adapter)
                 if failure is None:
                     raise
-                if operation.streaming and _stream_is_committed(stream_state):
-                    # 已显示的流式增量不能重放，否则用户会看到重复文本。
-                    raise RetryableOperationError(
-                        replace(failure, category="stream_interrupted", retryable=False)
-                    ) from error
-                if not self._may_replay(operation, failure, attempt):
-                    raise
-
-                delay_seconds, source = _delay_for(
-                    failure,
-                    retry_index=attempt - 1,
-                    policy=self.policy,
-                    random_value=self._random_value,
-                )
-                if on_event is not None:
-                    on_event(RetryEvent(
+                committed_stream = operation.streaming and _stream_is_committed(stream_state)
+                if committed_stream:
+                    if not failure.retryable:
+                        # 非重试错误保留 provider 原始分类；partial 只影响是否允许重放。
+                        raise
+                    # 默认：已提交增量不得重放。显式 DISCARD_AND_REPLAY 且预算未耗尽时，
+                    # 必须先成功执行 on_stream_reset，再 reset 状态；callback 抛错则停止。
+                    can_discard_and_replay = (
+                        operation.stream_replay_mode is StreamReplayMode.DISCARD_AND_REPLAY
+                        and on_stream_reset is not None
+                        and self._may_replay(operation, failure, attempt)
+                    )
+                    if not can_discard_and_replay:
+                        raise RetryableOperationError(
+                            replace(
+                                failure,
+                                category="stream_interrupted",
+                                retryable=False,
+                            )
+                        ) from error
+                    if stream_state is None:
+                        raise RetryableOperationError(
+                            replace(
+                                failure,
+                                category="stream_interrupted",
+                                retryable=False,
+                            )
+                        ) from error
+                    reset_event = StreamResetEvent(
                         operation_name=operation.name,
                         attempt=attempt,
                         next_attempt=attempt + 1,
                         category=failure.category,
-                        delay_seconds=delay_seconds,
-                        source=source,
-                        retry_after_ignored=_retry_after_was_ignored(failure, self.policy),
-                    ))
-                self._raise_if_cancelled(cancellation_token)
-                self._sleep_with_cancellation(delay_seconds, cancellation_token)
+                        partial_character_count=stream_state.emitted_character_count,
+                    )
+                    assert on_stream_reset is not None
+                    on_stream_reset(reset_event)
+                    stream_state.reset()
+                elif not self._may_replay(operation, failure, attempt):
+                    raise
+
+                self.wait_before_retry(
+                    failure,
+                    operation_name=operation.name,
+                    attempt=attempt,
+                    cancellation_token=cancellation_token,
+                    on_event=on_event,
+                    recovery_kind=recovery_kind,
+                    response_id=response_id,
+                    sequence_number=sequence_number,
+                )
                 attempt += 1
+
+    def wait_before_retry(
+        self,
+        failure: RetryFailure,
+        *,
+        operation_name: str,
+        attempt: int,
+        cancellation_token: CancellationToken | None = None,
+        on_event: Callable[[RetryEvent], None] | None = None,
+        recovery_kind: str | None = None,
+        response_id: str | None = None,
+        sequence_number: int | None = None,
+    ) -> None:
+        """使用统一退避策略记录并等待下一次全局 attempt。"""
+
+        delay_seconds, source = _delay_for(
+            failure,
+            retry_index=attempt - 1,
+            policy=self.policy,
+            random_value=self._random_value,
+        )
+        if on_event is not None:
+            on_event(RetryEvent(
+                operation_name=operation_name,
+                attempt=attempt,
+                next_attempt=attempt + 1,
+                category=failure.category,
+                delay_seconds=delay_seconds,
+                source=source,
+                retry_after_ignored=_retry_after_was_ignored(failure, self.policy),
+                recovery_kind=recovery_kind,
+                response_id=response_id,
+                sequence_number=sequence_number,
+            ))
+        self._raise_if_cancelled(cancellation_token)
+        self._sleep_with_cancellation(delay_seconds, cancellation_token)
 
     def _may_replay(
         self,

@@ -13,7 +13,7 @@ from haagent.models.capabilities import ModelCapabilities
 from haagent.models.model_ref import ModelInvocation
 from haagent.models.telemetry import ModelTransportEvent
 from haagent.runtime.execution.cancellation import CancellationToken
-from haagent.runtime.execution.retry import RetryEvent, RetryFailure
+from haagent.runtime.execution.retry import RetryEvent, RetryFailure, StreamResetEvent
 
 
 ModelFailureCategory = Literal[
@@ -122,6 +122,7 @@ class ModelGateway(Protocol):
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
         telemetry_sink: Callable[[ModelTransportEvent], None] | None = None,
+        stream_reset_sink: Callable[[StreamResetEvent], None] | None = None,
     ) -> ModelResponse:
         """Generate a model response given a conversation messages list."""
 

@@ -111,6 +111,7 @@ class NegotiatingModelGateway:
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
         telemetry_sink=None,
+        stream_reset_sink=None,
     ) -> ModelResponse:
         if self._closed:
             # 关闭后拒绝新请求，避免复用已释放连接池。
@@ -137,6 +138,7 @@ class NegotiatingModelGateway:
                 retry_exhausted_sink=retry_exhausted_sink,
                 requirements=requirements,
                 telemetry_sink=telemetry_sink,
+                stream_reset_sink=stream_reset_sink,
             )
 
         emitted = False
@@ -161,6 +163,7 @@ class NegotiatingModelGateway:
                 retry_event_sink,
                 retry_exhausted_sink,
                 telemetry_sink,
+                stream_reset_sink,
             )
         except RunCancelled:
             raise
@@ -181,6 +184,7 @@ class NegotiatingModelGateway:
                         retry_event_sink,
                         retry_exhausted_sink,
                         telemetry_sink,
+                        stream_reset_sink,
                     )
                 except RunCancelled:
                     raise
@@ -199,6 +203,7 @@ class NegotiatingModelGateway:
                 retry_exhausted_sink=retry_exhausted_sink,
                 requirements=requirements,
                 telemetry_sink=telemetry_sink,
+                stream_reset_sink=stream_reset_sink,
             )
 
     def _protocol_gateway_for_capabilities(self, required: tuple[str, ...]) -> ModelGateway:
@@ -220,6 +225,7 @@ class NegotiatingModelGateway:
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
         requirements: object,
         telemetry_sink=None,
+        stream_reset_sink=None,
     ) -> ModelResponse:
         if self._fallback is None:
             if primary_missing:
@@ -262,6 +268,7 @@ class NegotiatingModelGateway:
             retry_event_sink,
             retry_exhausted_sink,
             telemetry_sink,
+            stream_reset_sink,
         )
 
     def _emit_protocol_event(self, reason: str, required: tuple[str, ...]) -> None:
@@ -294,6 +301,7 @@ class NegotiatingModelGateway:
         retry_event_sink: Callable[[RetryEvent], None] | None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None,
         telemetry_sink=None,
+        stream_reset_sink=None,
     ) -> ModelResponse:
         # 每个目标 gateway 自行绑定 settings，避免 primary options 泄漏到 chat/备用模型。
         target_settings = getattr(gateway, "model_settings", None)
@@ -309,6 +317,7 @@ class NegotiatingModelGateway:
             "retry_event_sink": retry_event_sink,
             "retry_exhausted_sink": retry_exhausted_sink,
             "telemetry_sink": telemetry_sink,
+            "stream_reset_sink": stream_reset_sink,
         }
         return gateway.generate(invocation, **kwargs)
 

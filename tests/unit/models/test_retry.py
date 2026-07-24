@@ -20,6 +20,7 @@ from haagent.runtime.execution.retry import (
     RetryOperation,
     RetryPolicy,
     StreamAttemptState,
+    StreamReplayMode,
 )
 
 
@@ -325,6 +326,104 @@ def test_committed_stream_interrupt_is_not_replayed() -> None:
     assert calls == 1
     assert deltas == ["partial"]
     assert raised.value.failure.category == "stream_interrupted"
+    assert raised.value.failure.retryable is False
+
+
+def test_committed_stream_discards_attempt_before_bounded_replay() -> None:
+    attempts = 0
+    resets: list[tuple[int, int, str]] = []
+    state = StreamAttemptState()
+
+    def operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            state.emit("partial", lambda _: None)
+            raise RetryableOperationError(RetryFailure(category="network", retryable=True))
+        return "ok"
+
+    result = RetryController(
+        RetryPolicy(max_attempts=3),
+        sleep=lambda _: None,
+        random_value=lambda: 0,
+    ).execute(
+        RetryOperation(
+            "model.generate",
+            ReplaySafety.SAFE_TO_REPLAY,
+            streaming=True,
+            stream_replay_mode=StreamReplayMode.DISCARD_AND_REPLAY,
+        ),
+        operation,
+        stream_state=state,
+        on_stream_reset=lambda event: resets.append(
+            (event.attempt, event.next_attempt, event.category)
+        ),
+    )
+
+    assert result == "ok"
+    assert attempts == 2
+    assert resets == [(1, 2, "network")]
+    assert state.committed is False
+
+
+def test_committed_stream_without_reset_contract_still_fails() -> None:
+    state = StreamAttemptState()
+    state.emit("partial", lambda _: None)
+
+    with pytest.raises(RetryableOperationError) as raised:
+        RetryController(RetryPolicy(max_attempts=3)).execute(
+            RetryOperation("model.generate", ReplaySafety.SAFE_TO_REPLAY, streaming=True),
+            lambda: (_ for _ in ()).throw(
+                RetryableOperationError(RetryFailure(category="network", retryable=True))
+            ),
+            stream_state=state,
+        )
+
+    assert raised.value.failure.category == "stream_interrupted"
+
+
+def test_committed_stream_discard_mode_requires_reset_callback() -> None:
+    state = StreamAttemptState()
+    state.emit("partial", lambda _: None)
+
+    with pytest.raises(RetryableOperationError) as raised:
+        RetryController(RetryPolicy(max_attempts=3)).execute(
+            RetryOperation(
+                "model.generate",
+                ReplaySafety.SAFE_TO_REPLAY,
+                streaming=True,
+                stream_replay_mode=StreamReplayMode.DISCARD_AND_REPLAY,
+            ),
+            lambda: (_ for _ in ()).throw(
+                RetryableOperationError(RetryFailure(category="network", retryable=True))
+            ),
+            stream_state=state,
+        )
+
+    assert raised.value.failure.category == "stream_interrupted"
+    assert state.committed is True
+
+
+def test_committed_stream_non_retryable_failure_keeps_original_category() -> None:
+    state = StreamAttemptState()
+    state.emit("partial", lambda _: None)
+
+    with pytest.raises(RetryableOperationError) as raised:
+        RetryController(RetryPolicy(max_attempts=3)).execute(
+            RetryOperation(
+                "model.generate",
+                ReplaySafety.SAFE_TO_REPLAY,
+                streaming=True,
+                stream_replay_mode=StreamReplayMode.DISCARD_AND_REPLAY,
+            ),
+            lambda: (_ for _ in ()).throw(
+                RetryableOperationError(RetryFailure(category="auth", retryable=False))
+            ),
+            stream_state=state,
+            on_stream_reset=lambda _: pytest.fail("non-retryable failures must not reset"),
+        )
+
+    assert raised.value.failure.category == "auth"
     assert raised.value.failure.retryable is False
 
 

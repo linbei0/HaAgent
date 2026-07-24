@@ -227,6 +227,44 @@ class ModelHttpTransport:
         finally:
             response.close()
 
+    def get_json(
+        self,
+        provider: str,
+        endpoint: str,
+        headers: dict[str, str],
+        *,
+        attempt: int,
+        telemetry_sink: TelemetrySink | None,
+    ) -> dict[str, object]:
+        """GET JSON；错误分类/close 语义与 request_json 共用 helper。"""
+
+        self._ensure_open()
+        started_at = time.perf_counter()
+        self._publish(
+            telemetry_sink,
+            kind="request_prepared",
+            attempt=attempt,
+            started_at=started_at,
+        )
+        try:
+            response = self._client.get(endpoint, headers=headers)
+        except httpx.TimeoutException as error:
+            raise _network_error("timeout", error) from error
+        except httpx.HTTPError as error:
+            raise _network_error("network", error) from error
+        try:
+            self._publish(
+                telemetry_sink,
+                kind="headers_received",
+                attempt=attempt,
+                started_at=started_at,
+            )
+            if response.status_code >= 400:
+                raise _http_error(provider, response)
+            return _json_object(provider, response)
+        finally:
+            response.close()
+
     def stream_json(
         self,
         provider: str,

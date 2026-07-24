@@ -245,8 +245,9 @@ def test_chat_session_auto_compacts_old_turn_summaries_without_model_summary(tmp
 
     assert "[session_memory_compacted 1 earlier turns]" in gateway.model_inputs[-1]
     assert "- user_request: turn 1" not in gateway.model_inputs[-1].splitlines()
+    # 新行为：最近轮完整问答以 `user:` 原文进入模型输入，而非截断摘要行。
     for index in range(2, 8):
-        assert f"- user_request: turn {index}" in gateway.model_inputs[-1].splitlines()
+        assert f"user: turn {index}" in gateway.model_inputs[-1].splitlines()
     assert context_manifest["session_compaction"]["decision"] == "compacted"
     assert context_manifest["session_compaction"]["compacted_turn_count"] == 1
     assert any(event.get("event") == "session_memory_compaction" for event in transcript)

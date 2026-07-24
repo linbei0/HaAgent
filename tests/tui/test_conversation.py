@@ -31,6 +31,63 @@ from tests.tui.support import (
     _wait_for_conversation_bottom,
 )
 
+
+def test_recovery_notice_and_failure_card_fit_narrow_terminal_without_overlap() -> None:
+    """80x24 下恢复提示与失败卡应可渲染，且不依赖宽终端折叠策略。"""
+
+    from haagent.tui.design.failures import failure_from_payload
+    from haagent.tui.design.keys import footer_text
+
+    recovery = "网络中断，正在恢复（2/3）"
+    failure = failure_from_payload(
+        {
+            "failed_stage": "planning",
+            "failure_category": "stream_interrupted",
+            "reason": "model stream interrupted after partial output",
+            "episode_path": "episodes/2026/07/24/session/ep-1",
+        }
+    )
+    footer = footer_text("running")
+    block = failure.block_text()
+    # 窄终端主列宽约 78 cell；恢复文案、失败卡与 footer 均应独立可完整阅读。
+    assert len(recovery) <= 78
+    assert "stream_interrupted" in block or "部分输出" in block
+    assert "Ctrl+X" in footer
+    assert "退出" in footer
+
+
+def test_reset_assistant_attempt_only_clears_current_provisional_item() -> None:
+    """无 App 挂载时直接写 content，避免 update_assistant_delta 调度 timer。"""
+
+    class _Timeline(ConversationTimeline):
+        def _schedule_assistant_delta_flush(self) -> None:
+            if self._assistant_delta_flush_scheduled:
+                return
+            self._assistant_delta_flush_scheduled = True
+
+        def _sync_block(self, item) -> None:  # type: ignore[no-untyped-def]
+            return
+
+        def _render_timeline(self) -> None:
+            return
+
+    timeline = _Timeline()
+    timeline.start_assistant_response(turn_index=4)
+    first = timeline._assistant_item(4)
+    first.content = "first attempt"
+    timeline.finalize_intermediate(4, 1, "completed process text")
+    timeline.start_assistant_response(turn_index=4)
+    second = timeline._assistant_item(4)
+    second.content = "partial second attempt"
+
+    timeline.reset_assistant_attempt(4)
+
+    assert any(item.role == "process" and item.content == "completed process text" for item in timeline._items)
+    current = timeline._assistant_item(4)
+    assert current.content == ""
+    assert current.status == "streaming"
+
+
 def test_tui_installs_unicode_line_breaking_for_assistant_markdown(tmp_path: Path) -> None:
     service = FakeAssistantService(
         workspace_root=tmp_path,

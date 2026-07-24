@@ -15,6 +15,14 @@ from haagent.context.compression.sections import (
 from haagent.context.sources import ContextSection
 from haagent.context.compression.session_memory import compact_session_memory
 from haagent.runtime.episodes.writer import EpisodeWriter
+
+
+def _session_turn(turn_index: int, request: str, response: str) -> dict:
+    return {
+        "turn_index": turn_index,
+        "request": request,
+        "assistant_display_text": response,
+    }
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.runtime.orchestration.preparation import prepare_initial_messages
 
@@ -296,6 +304,92 @@ def test_session_memory_compaction_preserves_recent_summaries_and_compacts_older
     assert "failed: 2" in result.summary_text
 
 
+def test_session_memory_keeps_recent_turn_full_text_before_budget(tmp_path: Path) -> None:
+    """回归：最近轮完整问答必须在截断/折叠之前进入模型可见 session memory。
+
+    新闻场景：第一轮完整回答包含中间条目“亚马尔”，第二轮必须仍能看到它。
+    """
+    long_response = "\n".join(
+        [
+            "今天体育新闻Top10：",
+            "1. 中国队世界杯预选赛名单公布",
+            "2. 亚马尔神预言，西班牙夺冠前他就说中了比分",
+            "3. 皇马签下新中卫",
+            "4. NBA夏季联赛赛程出炉",
+            "5. F1 匈牙利站排位赛结果",
+            "6. 温网女单半决赛回顾",
+            "7. 中国女排战胜巴西",
+            "8. 环法自行车第12赛段战报",
+            "9. 电竞世界杯八强产生",
+            "10. 泳联世锦赛跳水金牌榜",
+        ],
+    )
+    summaries = [
+        "- user_request: 旧任务\n  status: completed\n  assistant_final_response: 旧回答",
+    ]
+    recent_turns = [_session_turn(2, "搜一下今天的体育新闻", long_response)]
+
+    result = compact_session_memory(
+        summaries,
+        keep_recent=6,
+        memory_char_limit=2000,
+        recent_turns=recent_turns,
+    )
+
+    assert "亚马尔" in result.summary_text
+    assert "中国队" in result.summary_text
+    assert long_response in result.summary_text
+    assert "user: 搜一下今天的体育新闻" in result.summary_text
+    assert result.diagnostics["recent_full_turns"] == 1
+
+
+def test_session_memory_recent_turns_used_when_summaries_within_budget(tmp_path: Path) -> None:
+    """短会话（summaries 为空或少于 keep_recent）也必须输出最近轮完整原文。"""
+    long_response = "包含第2条：亚马尔神预言，以及更多细节。" * 30
+    recent_turns = [
+        _session_turn(1, "第一轮问题", long_response),
+        _session_turn(2, "第二轮问题", "第二轮完整回答"),
+    ]
+
+    result = compact_session_memory(
+        [],
+        keep_recent=6,
+        memory_char_limit=2000,
+        recent_turns=recent_turns,
+    )
+
+    assert "亚马尔" in result.summary_text
+    assert "user: 第一轮问题" in result.summary_text
+    assert "user: 第二轮问题" in result.summary_text
+    assert "第二轮完整回答" in result.summary_text
+    assert result.diagnostics["decision"] in {"kept", "compacted"}
+    assert result.diagnostics["recent_full_turns"] == 2
+
+
+def test_session_memory_drops_oldest_full_turn_when_over_budget() -> None:
+    """预算不足时按整轮丢弃最旧的完整块，保留最新轮，不把回答从中间截断。"""
+    big = "长回答内容" * 400  # ~2000 字，远超小预算
+    recent_turns = [
+        _session_turn(1, "最早问题", big),
+        _session_turn(2, "最新问题", "最新完整回答"),
+    ]
+
+    result = compact_session_memory(
+        [],
+        keep_recent=6,
+        memory_char_limit=300,
+        recent_turns=recent_turns,
+    )
+
+    # 最新轮的完整块必须存在；最旧的整块被丢弃，而不是被从中间截断。
+    assert "最新完整回答" in result.summary_text
+    assert "user: 最新问题" in result.summary_text
+    assert "user: 最早问题" not in result.summary_text
+    assert result.diagnostics["decision"] == "compacted"
+    assert result.diagnostics["recent_full_turns"] == 1
+    assert result.diagnostics["dropped_recent_full_turns"] >= 1
+
+
 def test_context_builder_returns_compaction_diagnostics_and_manifest(tmp_path: Path) -> None:
     writer = _make_writer(tmp_path)
     context = ContextBuilder(
@@ -367,7 +461,7 @@ def test_context_builder_returns_compaction_diagnostics_and_manifest(tmp_path: P
         "included": True,
         "original_chars": len("summary from previous turns"),
         "model_input_chars": len("summary from previous turns"),
-        "limit": 2000,
+        "limit": 12000,
     }
     assert manifest["source_diagnostics"]["observations"] == {
         "included_in_model_input": False,

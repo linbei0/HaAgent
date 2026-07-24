@@ -14,7 +14,12 @@ from collections.abc import Iterator
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
-from haagent.models.types import ModelCallError, ModelFailureDetails, ModelUsage
+from haagent.models.types import (
+    ModelCallError,
+    ModelFailureCategory,
+    ModelFailureDetails,
+    ModelUsage,
+)
 
 
 def _supports_transport_observability(callback: Callable[..., object]) -> bool:
@@ -338,16 +343,56 @@ def _responses_stream_transport(
     http_transport=None,
     attempt: int = 1,
     telemetry_sink=None,
+    meta_out: dict[str, object] | None = None,
 ) -> dict[str, object]:
     transport, owns = _http_transport_or_default(http_transport)
+
+    def parser(events, delta_sink: Callable[[str], None]) -> dict[str, object]:
+        return _merge_openai_responses_events(
+            _sse_event_dicts(events),
+            delta_sink,
+            meta_out=meta_out,
+        )
+
     try:
         return transport.stream_json(
             "OpenAI",
             endpoint,
             payload,
             _bearer_headers(api_key),
-            parser=_parse_openai_responses_sse,
+            parser=parser,
             on_delta=on_delta,
+            attempt=attempt,
+            telemetry_sink=telemetry_sink,
+        )
+    finally:
+        if owns:
+            transport.close()
+
+
+def _responses_retrieve_transport(
+    response_id: str,
+    api_key: str,
+    endpoint: str = DEFAULT_RESPONSES_ENDPOINT,
+    *,
+    http_transport=None,
+    attempt: int = 1,
+    telemetry_sink=None,
+) -> dict[str, object]:
+    """GET 同一 Response；仅用于 background 恢复，不得再次 create。"""
+
+    if not isinstance(response_id, str) or not response_id.strip():
+        raise ModelCallError("response_id is required for Responses retrieve")
+    # 拒绝路径穿越式 id，避免把 retrieve 打到非预期 URL。
+    if "/" in response_id or "\\" in response_id or ".." in response_id:
+        raise ModelCallError("invalid response_id for Responses retrieve")
+    retrieve_url = f"{endpoint.rstrip('/')}/{response_id.strip()}"
+    transport, owns = _http_transport_or_default(http_transport)
+    try:
+        return transport.get_json(
+            "OpenAI",
+            retrieve_url,
+            _bearer_headers(api_key),
             attempt=attempt,
             telemetry_sink=telemetry_sink,
         )
@@ -580,12 +625,37 @@ def _merge_openai_chat_events(
 def _merge_openai_responses_events(
     events: Iterator[dict[str, object]],
     on_delta: Callable[[str], None],
+    *,
+    meta_out: dict[str, object] | None = None,
 ) -> dict[str, object]:
     output_text_parts: list[str] = []
     final_response: dict[str, object] | None = None
+    response_id: str | None = None
+    last_sequence_number: int | None = None
+
+    def _publish_meta() -> None:
+        # 流中断时也要留下 response_id / sequence，供 background retrieve 使用。
+        if meta_out is None:
+            return
+        if response_id is not None:
+            meta_out["response_id"] = response_id
+        if last_sequence_number is not None:
+            meta_out["last_sequence_number"] = last_sequence_number
+
     for event in events:
+        sequence = event.get("sequence_number")
+        if isinstance(sequence, int) and not isinstance(sequence, bool):
+            last_sequence_number = sequence
+            _publish_meta()
         event_type = event.get("type")
-        if event_type == "response.output_text.delta":
+        if event_type == "response.created":
+            response_payload = event.get("response")
+            if isinstance(response_payload, dict):
+                created_id = response_payload.get("id")
+                if isinstance(created_id, str) and created_id:
+                    response_id = created_id
+                    _publish_meta()
+        elif event_type == "response.output_text.delta":
             delta = event.get("delta")
             if isinstance(delta, str) and delta:
                 output_text_parts.append(delta)
@@ -594,11 +664,73 @@ def _merge_openai_responses_events(
             response_payload = event.get("response")
             if isinstance(response_payload, dict):
                 final_response = response_payload
+                completed_id = response_payload.get("id")
+                if isinstance(completed_id, str) and completed_id:
+                    response_id = completed_id
+                    _publish_meta()
+        elif event_type == "response.incomplete":
+            response_payload = event.get("response")
+            if not isinstance(response_payload, dict):
+                raise ModelCallError(
+                    "OpenAI response.incomplete event missing response",
+                    details=ModelFailureDetails(category="response_parse", retryable=False),
+                )
+            final_response = response_payload
+        elif event_type == "response.failed":
+            response_payload = event.get("response")
+            error_payload = response_payload.get("error") if isinstance(response_payload, dict) else None
+            raise _openai_responses_stream_error(error_payload, fallback_code="response_failed")
+        elif event_type == "error":
+            raise _openai_responses_stream_error(event)
     if final_response is None:
-        final_response = {"output_text": "".join(output_text_parts), "output": []}
+        # 没有明确终态的 EOF 就是流中断，不能把 partial 伪装成成功响应。
+        raise ModelCallError(
+            "OpenAI response stream ended before a terminal event",
+            details=ModelFailureDetails(category="network", retryable=True),
+        )
     elif not isinstance(final_response.get("output_text"), str):
         final_response["output_text"] = "".join(output_text_parts)
+    # 仅保留恢复用的非敏感标识；不把完整 provider payload 塞进归并结果。
+    if response_id is not None:
+        final_response["response_id"] = response_id
+    if last_sequence_number is not None:
+        final_response["last_sequence_number"] = last_sequence_number
+    _publish_meta()
     return final_response
+
+
+def _openai_responses_stream_error(
+    payload: object,
+    *,
+    fallback_code: str = "stream_error",
+) -> ModelCallError:
+    error_payload = payload if isinstance(payload, dict) else {}
+    code = error_payload.get("code")
+    provider_code = code if isinstance(code, str) and code else fallback_code
+    category: ModelFailureCategory
+    if provider_code in {"server_error", "internal_error"}:
+        category = "server"
+        retryable = True
+    elif provider_code in {"rate_limit_exceeded", "rate_limit_error"}:
+        category = "rate_limited"
+        retryable = True
+    elif provider_code == "insufficient_quota":
+        category = "quota_exhausted"
+        retryable = False
+    elif provider_code in {"invalid_api_key", "authentication_error"}:
+        category = "auth"
+        retryable = False
+    else:
+        category = "protocol"
+        retryable = False
+    return ModelCallError(
+        f"OpenAI response stream failed with {provider_code}",
+        details=ModelFailureDetails(
+            category=category,
+            provider_code=provider_code,
+            retryable=retryable,
+        ),
+    )
 
 
 def _merge_anthropic_events(

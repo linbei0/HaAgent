@@ -45,6 +45,7 @@ class StubGateway:
         self,
         invocation: ModelInvocation,
         event_sink: Callable[[str], None] | None = None,
+        stream_reset_sink: Callable[[StreamResetEvent], None] | None = None,
         **_: object,
     ) -> ModelResponse:
         self.calls += 1

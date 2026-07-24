@@ -64,7 +64,9 @@ from haagent.tools.registry import ToolRuntimeRegistry, default_tool_runtime_reg
 
 CONTEXT_MANIFEST_VERSION = "2.0"
 PROJECT_INSTRUCTIONS_CHAR_LIMIT = 4000
-SESSION_SUMMARY_CHAR_LIMIT = 2000
+# session_summary 的截断决策已上移至 compact_session_memory（整轮丢弃），
+# builder 不再叠加更小的本地硬截断；此常量仅用于诊断展示的历史口径。
+SESSION_SUMMARY_CHAR_LIMIT = 12000
 TOOL_WORKFLOW_HINTS = [
     "Use file_list to inspect directory structure or narrow the search scope.",
     "Use grep for exact deterministic text search when you know the phrase, symbol, or filename fragment.",
@@ -415,7 +417,7 @@ class ContextBuilder:
                 project_instructions=(project_instructions or "").strip()[:PROJECT_INSTRUCTIONS_CHAR_LIMIT],
                 prompt_packs=prompt_packs_block,
                 prompt_pack_metadata=prompt_pack_metadata,
-                session_summary=(self._session_summary or "").strip()[:SESSION_SUMMARY_CHAR_LIMIT],
+                session_summary=(self._session_summary or "").strip(),
                 working_state=self._working_state_content(),
                 task_ledger=self._task_ledger_content(),
                 memory_index=self._memory_index_block(),

@@ -102,6 +102,33 @@ def test_working_state_distinguishes_user_request_from_assistant_tool_actions(tm
     assert "user viewed" not in model_text
 
 
+def test_working_state_does_not_duplicate_final_response(tmp_path) -> None:
+    """回归：assistant_message 事件与 final_response 同源时，key_findings 只保留一份。"""
+    state = empty_working_state()
+    answer = "第一轮完整回答：亚马尔神预言，西班牙夺冠。"
+    result = ChatTurnResult(
+        session_id="session-test",
+        turn_index=1,
+        status="completed",
+        episode_path=tmp_path / ".runs" / "episode",
+        provider="fake",
+        final_response=answer,
+        verification_status="not_run",
+    )
+
+    updated = update_working_state(
+        state,
+        prompt="搜新闻",
+        result=result,
+        runtime_events=[
+            {"event_type": "assistant_message", "content": answer},
+        ],
+    )
+
+    occurrences = sum(1 for item in updated.key_findings if "亚马尔" in item)
+    assert occurrences == 1, f"expected 1 copy, got {occurrences}: {updated.key_findings}"
+
+
 def test_working_state_model_text_is_bounded() -> None:
     raw = {
         "current_goal": "G" * 5000,

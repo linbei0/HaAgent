@@ -19,6 +19,30 @@ from haagent.runtime.execution.path_policy import (
 from haagent.tools.base import ToolExecutionContext, tool_error
 
 
+def _is_haagent_own_artifact(path: Path) -> bool:
+    """识别 HaAgent 自身 episode artifacts/tool-results 路径。
+
+    HaAgent 把超长工具结果落盘到 ~/.haagent/runs/episodes/**/artifacts/tool-results/，
+    并主动引导模型用 file_read 回读。该目录是 HaAgent 自己写出的内容，回读属于内部
+    可信读取，不应触发外部目录权限审批（对齐 OpenCode 对自身截断输出目录的无条件放行）。
+    """
+    resolved = path.resolve()
+    parts = resolved.parts
+    lowered = [part.casefold() for part in parts]
+    try:
+        idx = lowered.index(".haagent")
+    except ValueError:
+        return False
+    tail = [p.casefold() for p in parts[idx + 1 :]]
+    # 需要包含 runs/<...>/artifacts/tool-results 结构
+    return (
+        len(tail) >= 4
+        and tail[0] == "runs"
+        and "artifacts" in tail
+        and "tool-results" in tail
+    )
+
+
 def resolve_tool_paths(
     paths: Iterable[str | Path],
     policy: PathPolicy,
@@ -33,8 +57,10 @@ def resolve_tool_paths(
 
     pending_roots = _unique_paths(
         decision.authorization_root
-        for decision in decisions
+        for decision, path in zip(decisions, paths)
         if decision.status == "approval_required"
+        # HaAgent 自身 artifacts 目录的只读回读免审批；写入仍走正常审批。
+        and not (access == "read" and _is_haagent_own_artifact(Path(path)))
     )
     if pending_roots:
         patterns = tuple(_directory_pattern(root) for root in pending_roots)

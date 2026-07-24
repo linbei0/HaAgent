@@ -4,7 +4,14 @@ tests/unit/runtime/test_session_ui_events.py - Session UI 事件发射测试
 验证 AgentSession 使用的 UI 事件发射 helper 集中封装 runtime raw event 映射。
 """
 
-from haagent.runtime.events import AssistantMessageEvent, SessionLifecycleEvent
+from haagent.runtime.events import (
+    AssistantAttemptResetBusEvent,
+    AssistantAttemptResetEvent,
+    AssistantMessageEvent,
+    RuntimeUiEventMapper,
+    SessionLifecycleEvent,
+    bus_event_to_dict,
+)
 from haagent.runtime.session.turn_completion import count_historical_tool_compression_events as _count_historical_tool_compression_events
 from haagent.runtime.session.ui_events import emit_runtime_ui_event, emit_ui_event, session_started_event
 
@@ -41,6 +48,30 @@ def test_session_started_event_uses_typed_lifecycle_event() -> None:
         status="ready",
         details={"status": "ready"},
     )
+
+
+def test_assistant_attempt_reset_maps_without_partial_content() -> None:
+    raw = AssistantAttemptResetBusEvent(
+        turn=2,
+        attempt=1,
+        next_attempt=2,
+        category="network",
+    )
+    event = RuntimeUiEventMapper.to_ui_event(
+        bus_event_to_dict(raw),
+        session_id="session-1",
+        turn_index=7,
+    )
+
+    assert event == AssistantAttemptResetEvent(
+        session_id="session-1",
+        turn_index=7,
+        model_turn=2,
+        attempt=1,
+        next_attempt=2,
+        category="network",
+    )
+    assert "partial" not in bus_event_to_dict(raw)
 
 
 def test_session_counts_only_historical_tool_compression_diagnostics() -> None:

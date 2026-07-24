@@ -16,6 +16,7 @@ from haagent.runtime.events.registry import RAW_RUNTIME_UI_EVENT_REGISTRY, RawRu
 from haagent.runtime.events.types import (
     RUNTIME_UI_EVENT_TYPES,
     ApprovalStateEvent,
+    AssistantAttemptResetEvent,
     AssistantDeltaEvent,
     AssistantMessageEvent,
     FailureNoticeEvent,
@@ -33,6 +34,7 @@ __all__ = [
     "RAW_RUNTIME_UI_EVENT_REGISTRY",
     "RUNTIME_UI_EVENT_TYPES",
     "ApprovalStateEvent",
+    "AssistantAttemptResetEvent",
     "AssistantDeltaEvent",
     "AssistantMessageEvent",
     "FailureNoticeEvent",

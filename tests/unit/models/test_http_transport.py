@@ -85,6 +85,38 @@ def test_decoder_bad_utf8_raises_response_parse() -> None:
     assert exc_info.value.details.retryable is False
 
 
+def test_model_http_transport_get_json_publishes_telemetry_and_closes() -> None:
+    close_count = {"value": 0}
+
+    class TrackingResponse(httpx.Response):
+        def close(self) -> None:
+            close_count["value"] += 1
+            super().close()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path.endswith("/responses/resp_1")
+        return TrackingResponse(200, json={"id": "resp_1", "status": "completed"}, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = ModelHttpTransport(client=client)
+    events: list[ModelTransportEvent] = []
+    try:
+        result = transport.get_json(
+            "OpenAI",
+            "https://api.openai.com/v1/responses/resp_1",
+            {"Authorization": "Bearer secret"},
+            attempt=2,
+            telemetry_sink=events.append,
+        )
+        assert result == {"id": "resp_1", "status": "completed"}
+        assert [item.kind for item in events] == ["request_prepared", "headers_received"]
+        assert all(item.attempt == 2 for item in events)
+    finally:
+        transport.close()
+    assert close_count["value"] >= 1
+
+
 def test_model_http_transport_request_json_publishes_telemetry() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"

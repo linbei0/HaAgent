@@ -273,6 +273,7 @@ class OpenAIChatCompletionsGateway:
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
         telemetry_sink=None,
+        stream_reset_sink=None,
     ) -> ModelResponse:
         """调用 OpenAI Chat Completions 兼容 API，并归一化为 ModelResponse。"""
         messages = invocation.messages
@@ -311,6 +312,7 @@ class OpenAIChatCompletionsGateway:
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
                 telemetry_sink=telemetry_sink,
+                stream_reset_sink=stream_reset_sink,
             )
         except ModelCallError as error:
             raise ModelCallError(

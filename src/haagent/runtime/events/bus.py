@@ -19,6 +19,17 @@ class AssistantDeltaBusEvent:
 
 
 @dataclass(frozen=True)
+class AssistantAttemptResetBusEvent:
+    """撤销当前 provisional 模型 attempt 展示；不携带 partial 全文。"""
+
+    turn: int
+    attempt: int
+    next_attempt: int
+    category: str
+    event_type: str = field(default="assistant_attempt_reset", init=False)
+
+
+@dataclass(frozen=True)
 class AssistantMessageBusEvent:
     turn: int
     content: str
@@ -130,6 +141,7 @@ class LegacyRawBusEvent:
 
 RuntimeBusEvent: TypeAlias = (
     AssistantDeltaBusEvent
+    | AssistantAttemptResetBusEvent
     | AssistantIntermediateBusEvent
     | AssistantMessageBusEvent
     | ToolStartedBusEvent
@@ -150,6 +162,15 @@ def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, o
         return dict(event.payload)
     if isinstance(event, AssistantDeltaBusEvent):
         return {"event_type": "assistant_delta", "turn": event.turn, "delta": event.delta}
+    if isinstance(event, AssistantAttemptResetBusEvent):
+        # 仅 attempt 标识与分类；禁止携带失败 attempt 全文。
+        return {
+            "event_type": "assistant_attempt_reset",
+            "turn": event.turn,
+            "attempt": event.attempt,
+            "next_attempt": event.next_attempt,
+            "category": event.category,
+        }
     if isinstance(event, AssistantIntermediateBusEvent):
         return {"event_type": "assistant_intermediate_message", "turn": event.turn, "content": event.content}
     if isinstance(event, AssistantMessageBusEvent):
@@ -228,6 +249,13 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
     event_type = str(payload.get("event_type", ""))
     if event_type == "assistant_delta":
         return AssistantDeltaBusEvent(turn=int(payload.get("turn", 0) or 0), delta=str(payload.get("delta", "")))
+    if event_type == "assistant_attempt_reset":
+        return AssistantAttemptResetBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            attempt=int(payload.get("attempt", 0) or 0),
+            next_attempt=int(payload.get("next_attempt", 0) or 0),
+            category=str(payload.get("category", "")),
+        )
     if event_type == "assistant_intermediate_message":
         return AssistantIntermediateBusEvent(
             turn=int(payload.get("turn", 0) or 0),

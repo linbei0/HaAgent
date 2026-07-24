@@ -1225,6 +1225,80 @@ def test_file_read_always_reuses_external_directory_authorization(tmp_path: Path
     assert len(requests) == 1
 
 
+def test_file_read_haagent_own_artifact_skips_external_permission(tmp_path: Path) -> None:
+    """HaAgent 自身 episode artifacts/tool-results 的只读回读不触发外部目录权限。
+
+    HaAgent 主动把超长工具结果落盘到 ~/.haagent/runs/episodes/**/artifacts/tool-results/
+    并引导模型用 file_read 回读；该路径在 workspace 外但属于内部可信内容。
+    """
+    artifact_root = (
+        tmp_path
+        / ".haagent"
+        / "runs"
+        / "episodes"
+        / "2026"
+        / "07"
+        / "24"
+        / "session-x"
+        / "turn-1"
+        / "artifacts"
+        / "tool-results"
+    )
+    artifact_root.mkdir(parents=True)
+    target = artifact_root / "mcp__exa__web_search_exa-abcd1234.txt"
+    target.write_text("full web search output", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    writer = make_writer(workspace)
+    router = ToolRouter(allowed_tools=["file_read"], episode_writer=writer, workspace_root=workspace)
+    requests = []
+
+    def interaction(request):
+        requests.append(request)
+        return HumanInteractionResponse(approved=False, answer="once")
+
+    result = router.dispatch(
+        "file_read",
+        {"path": str(target)},
+        interaction_handler=interaction,
+    )
+
+    assert result["status"] == "success"
+    assert "full web search output" in result["content"]
+    assert requests == []
+
+
+def test_file_write_haagent_own_artifact_still_requires_permission(tmp_path: Path) -> None:
+    """写入 HaAgent artifacts 目录不被豁免，仍走外部目录审批。"""
+    artifact_root = (
+        tmp_path
+        / ".haagent"
+        / "runs"
+        / "episodes"
+        / "2026"
+        / "07"
+        / "24"
+        / "session-x"
+        / "turn-1"
+        / "artifacts"
+        / "tool-results"
+    )
+    artifact_root.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    writer = make_writer(workspace)
+    router = ToolRouter(allowed_tools=["file_write"], episode_writer=writer, workspace_root=workspace)
+
+    result = router.dispatch(
+        "file_write",
+        {"path": str(artifact_root / "evil.txt"), "content": "x"},
+    )
+
+    assert result["status"] == "error"
+    # 写入不被只读豁免覆盖，policy 层直接拒绝（无审批入口时不升级）。
+    assert result["error"]["type"] in {"approval_required", "policy_denied"}
+
+
 def test_external_read_root_allows_file_read_but_denies_file_write(tmp_path: Path) -> None:
     project = tmp_path / "project"
     external = tmp_path / "external"

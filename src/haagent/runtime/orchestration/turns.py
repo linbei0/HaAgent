@@ -41,6 +41,7 @@ from haagent.runtime.orchestration.loop_guidance import suggestion_for_observati
 from haagent.runtime.orchestration.recorder import RunRecorder, RunResult
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.events.bus import (
+    AssistantAttemptResetBusEvent,
     AssistantDeltaBusEvent,
     AssistantIntermediateBusEvent,
     AssistantMessageBusEvent,
@@ -187,6 +188,26 @@ def run_turn_loop(
             deps.raise_if_cancelled()
             deps.emit_event(AssistantDeltaBusEvent(turn=turn, delta=delta))
 
+        def emit_stream_reset(reset_event) -> None:
+            # UI 只拿 attempt 标识与 category；partial 全文仅可进 episode 证据。
+            bus_event = AssistantAttemptResetBusEvent(
+                turn=turn,
+                attempt=reset_event.attempt,
+                next_attempt=reset_event.next_attempt,
+                category=reset_event.category,
+            )
+            deps.emit_event(bus_event)
+            deps.writer.append_transcript(
+                {
+                    "event": "model_stream_attempt_reset",
+                    "turn": turn,
+                    "attempt": reset_event.attempt,
+                    "next_attempt": reset_event.next_attempt,
+                    "category": reset_event.category,
+                    "partial_character_count": reset_event.partial_character_count,
+                },
+            )
+
         set_route_event_sink = getattr(deps.model_gateway, "set_route_event_sink", None)
         if callable(set_route_event_sink):
             def emit_model_route_event(route_event) -> None:
@@ -216,18 +237,28 @@ def run_turn_loop(
             "invocation": invocation,
             "event_sink": emit_assistant_delta,
             "cancellation_token": deps.cancellation_token,
+            "stream_reset_sink": emit_stream_reset,
         }
 
         def emit_retry(retry_event) -> None:
             nonlocal model_attempt
-            deps.writer.append_transcript(
-                {
-                    "event": "model_attempt_failed",
-                    "turn": turn,
-                    "attempt": retry_event.attempt,
-                    "category": retry_event.category,
-                },
-            )
+            recovery_facts = {
+                key: value
+                for key, value in {
+                    "operation_name": retry_event.operation_name,
+                    "recovery_kind": retry_event.recovery_kind,
+                    "response_id": retry_event.response_id,
+                    "last_sequence_number": retry_event.sequence_number,
+                }.items()
+                if value is not None
+            }
+            deps.writer.append_transcript({
+                "event": "model_attempt_failed",
+                "turn": turn,
+                "attempt": retry_event.attempt,
+                "category": retry_event.category,
+                **recovery_facts,
+            })
             model_attempt = retry_event.next_attempt
             retry_record = {
                 "event": "model_retry_scheduled",
@@ -238,9 +269,20 @@ def run_turn_loop(
                 "delay_seconds": retry_event.delay_seconds,
                 "source": retry_event.source,
                 "retry_after_ignored": retry_event.retry_after_ignored,
+                **recovery_facts,
             }
             deps.writer.append_transcript(retry_record)
-            deps.emit_event({"event_type": "model_retry_scheduled", **{key: value for key, value in retry_record.items() if key != "event"}})
+            # Provider 恢复标识只进 episode；UI 保持现有的非敏感重试状态合同。
+            deps.emit_event({
+                "event_type": "model_retry_scheduled",
+                "turn": turn,
+                "attempt": retry_event.attempt,
+                "next_attempt": retry_event.next_attempt,
+                "category": retry_event.category,
+                "delay_seconds": retry_event.delay_seconds,
+                "source": retry_event.source,
+                "retry_after_ignored": retry_event.retry_after_ignored,
+            })
             deps.writer.append_transcript(
                 {
                     "event": "model_call",
@@ -266,8 +308,6 @@ def run_turn_loop(
                     "request_id": failure.request_id,
                 },
             )
-            if failure.category == "stream_interrupted":
-                return
             retry_record = {
                 "event": "model_retry_exhausted",
                 "turn": turn,
@@ -277,6 +317,9 @@ def run_turn_loop(
                 "request_id": failure.request_id,
             }
             deps.writer.append_transcript(retry_record)
+            if failure.category == "stream_interrupted":
+                # 最终失败卡由 turn failure 流程负责；episode 仍保留预算耗尽事实。
+                return
             deps.emit_event({"event_type": "model_retry_exhausted", **{key: value for key, value in retry_record.items() if key != "event"}})
             if deps.persist_performance is not None:
                 deps.persist_performance()

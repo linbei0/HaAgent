@@ -816,7 +816,20 @@ class AgentSession:
             summaries,
             keep_recent=keep_recent,
             memory_char_limit=SESSION_MEMORY_CHAR_LIMIT,
+            recent_turns=self._recent_full_turns(keep_recent),
         )
+
+    def _recent_full_turns(self, keep_recent: int) -> list[dict[str, object]]:
+        """从 turn_records 提取最近若干轮完整问答；resume 后由磁盘 records 回填。"""
+        records = self._turn_records[-keep_recent:] if keep_recent > 0 else []
+        recent: list[dict[str, object]] = []
+        for record in records:
+            user = str(record.get("request") or "").strip()
+            assistant = str(record.get("assistant_display_text") or "").strip()
+            if not user and not assistant:
+                continue
+            recent.append({"request": user, "assistant_display_text": assistant})
+        return recent
 
     def _effective_session_summaries(self) -> list[str]:
         if self._manual_compaction_summary is None:

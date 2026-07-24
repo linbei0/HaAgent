@@ -47,6 +47,7 @@ def test_model_retry_bus_events_round_trip_with_safe_fields() -> None:
 def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
     assert set(RAW_RUNTIME_UI_EVENT_REGISTRY) == {
         "assistant_delta",
+        "assistant_attempt_reset",
         "assistant_intermediate_message",
         "assistant_message",
         "tool_started",

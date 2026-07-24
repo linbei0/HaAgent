@@ -117,6 +117,67 @@ def test_agent_session_assistant_display_text_preserves_markdown_newlines(tmp_pa
     assert turn.assistant_display_text == markdown_table
 
 
+def test_agent_session_memory_feeds_recent_full_turn_text(tmp_path: Path) -> None:
+    """回归：最近轮完整回答（含中间条目）必须进入下一轮模型可见 session memory。"""
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+    long_response = "\n".join(
+        [
+            "今天体育新闻Top10：",
+            "1. 中国队世界杯预选赛名单公布",
+            "2. 亚马尔神预言，西班牙夺冠前他就说中了比分",
+            "3. 皇马签下新中卫",
+        ],
+    )
+    result = ChatTurnResult(
+        session_id=session.session_id,
+        turn_index=1,
+        status="completed",
+        episode_path=tmp_path / ".runs" / "episodes" / "episode-news",
+        provider="fake",
+        final_response=long_response,
+        verification_status="not_run",
+    )
+    session._record_turn("搜一下今天的体育新闻", result, "summary")
+
+    memory = session._session_memory()
+
+    assert "亚马尔" in memory.summary_text
+    assert "中国队" in memory.summary_text
+    assert "搜一下今天的体育新闻" in memory.summary_text
+    # 不是 220 字截断后的残篇
+    assert "3. 皇马签下新中卫" in memory.summary_text
+
+
+def test_agent_session_memory_resume_restores_recent_full_turns(tmp_path: Path) -> None:
+    """resume 后最近轮完整问答仍从 turns.jsonl 回填进入 session memory。"""
+    session = AgentSession(
+        workspace_root=tmp_path,
+        runs_root=tmp_path / ".runs",
+        memory_extraction_enabled=False,
+    )
+    long_response = "包含第2条：亚马尔神预言，完整回答正文。" * 20
+    result = ChatTurnResult(
+        session_id=session.session_id,
+        turn_index=1,
+        status="completed",
+        episode_path=tmp_path / ".runs" / "episodes" / "episode-resume",
+        provider="fake",
+        final_response=long_response,
+        verification_status="not_run",
+    )
+    session._record_turn("第一轮问题", result, "summary")
+
+    resumed = AgentSession.resume(session.session_path, model_gateway=None)
+    memory = resumed._session_memory()
+
+    assert "亚马尔" in memory.summary_text
+    assert "第一轮问题" in memory.summary_text
+
+
 def test_agent_session_turn_summaries_keep_legacy_records_compatible(tmp_path: Path) -> None:
     session = AgentSession(
         workspace_root=tmp_path,

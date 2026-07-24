@@ -387,7 +387,48 @@ def test_openai_chat_rejects_embedded_tool_markup_without_structured_calls() -> 
     assert raised.value.details.retryable is False
 
 
-def test_stream_delta_then_failure_is_not_retried() -> None:
+def test_stream_delta_then_transient_failure_discards_and_retries() -> None:
+    attempts = 0
+    deltas: list[str] = []
+    resets = []
+
+    def interrupted_stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            sink("partial")
+            raise ModelCallError(
+                "reset",
+                details=ModelFailureDetails(category="network", retryable=True),
+            )
+        sink("complete")
+        return {"output_text": "complete", "output": [], "status": "completed"}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=interrupted_stream_transport,
+        retry_controller=_retry_controller(),
+    )
+
+    response = gateway.generate(
+        ModelInvocation(
+            messages=[],
+            tool_schemas=[],
+            settings=ModelSettings.empty(),
+        ),
+        event_sink=deltas.append,
+        stream_reset_sink=resets.append,
+    )
+
+    assert response.content == "complete"
+    assert attempts == 2
+    # transport 事实保留 partial；TUI 通过 reset 撤销展示。
+    assert deltas == ["partial", "complete"]
+    assert [(event.attempt, event.next_attempt) for event in resets] == [(1, 2)]
+
+
+def test_stream_delta_without_reset_sink_still_fails_after_commit() -> None:
     attempts = 0
     deltas: list[str] = []
 
@@ -408,12 +449,445 @@ def test_stream_delta_then_failure_is_not_retried() -> None:
     )
 
     with pytest.raises(ModelCallError) as raised:
-        gateway.generate([], [], event_sink=deltas.append)
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=deltas.append,
+        )
 
     assert attempts == 1
     assert deltas == ["partial"]
     assert raised.value.details is not None
     assert raised.value.details.category == "stream_interrupted"
+
+
+def test_stream_replay_budget_exhaustion_stays_on_same_gateway() -> None:
+    attempts = 0
+    resets = []
+    policy = RetryPolicy(max_attempts=3)
+    controller = RetryController(policy, sleep=lambda _: None, random_value=lambda: 0.0)
+
+    def interrupted_stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        attempts += 1
+        sink(f"partial-{attempts}")
+        raise ModelCallError(
+            "reset",
+            details=ModelFailureDetails(category="network", retryable=True),
+        )
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=interrupted_stream_transport,
+        retry_controller=controller,
+    )
+
+    with pytest.raises(ModelCallError) as raised:
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=lambda _: None,
+            stream_reset_sink=resets.append,
+        )
+
+    assert raised.value.details is not None
+    assert raised.value.details.category == "stream_interrupted"
+    assert attempts == policy.max_attempts
+    assert len(resets) == policy.max_attempts - 1
+
+
+def test_stream_late_delta_from_failed_attempt_is_dropped() -> None:
+    attempts = 0
+    deltas: list[str] = []
+    late_sink: list[Callable[[str], None]] = []
+
+    def interrupted_stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            late_sink.append(sink)
+            sink("partial")
+            raise ModelCallError(
+                "reset",
+                details=ModelFailureDetails(category="network", retryable=True),
+            )
+        sink("complete")
+        return {"output_text": "complete", "output": [], "status": "completed"}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=interrupted_stream_transport,
+        retry_controller=_retry_controller(),
+    )
+    response = gateway.generate(
+        ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+        event_sink=deltas.append,
+        stream_reset_sink=lambda _event: None,
+    )
+    assert late_sink
+    late_sink[0]("stale")
+
+    assert response.content == "complete"
+    assert deltas == ["partial", "complete"]
+    assert "stale" not in deltas
+
+
+def test_responses_stream_requires_terminal_event_and_keeps_recovery_meta() -> None:
+    from haagent.models.adapters.transport import _merge_openai_responses_events
+
+    events = [
+        {"type": "response.created", "sequence_number": 0, "response": {"id": "resp_1"}},
+        {"type": "response.output_text.delta", "sequence_number": 1, "delta": "hello"},
+    ]
+    deltas: list[str] = []
+    meta: dict[str, object] = {}
+    with pytest.raises(ModelCallError) as raised:
+        _merge_openai_responses_events(iter(events), deltas.append, meta_out=meta)
+
+    assert deltas == ["hello"]
+    assert meta == {"response_id": "resp_1", "last_sequence_number": 1}
+    assert raised.value.details is not None
+    assert raised.value.details.category == "network"
+    assert raised.value.details.retryable is True
+
+
+def test_responses_stream_error_event_is_not_returned_as_partial_success() -> None:
+    from haagent.models.adapters.transport import _merge_openai_responses_events
+
+    events = [
+        {"type": "response.created", "response": {"id": "resp_1"}},
+        {"type": "response.output_text.delta", "delta": "partial"},
+        {"type": "error", "code": "server_error", "message": "failed"},
+    ]
+
+    with pytest.raises(ModelCallError) as raised:
+        _merge_openai_responses_events(iter(events), lambda _: None)
+
+    assert raised.value.details is not None
+    assert raised.value.details.category == "server"
+    assert raised.value.details.provider_code == "server_error"
+    assert raised.value.details.retryable is True
+
+
+def test_responses_incomplete_length_event_is_a_valid_terminal_response() -> None:
+    from haagent.models.adapters.transport import _merge_openai_responses_events
+
+    events = [
+        {"type": "response.output_text.delta", "delta": "partial"},
+        {
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "output": [],
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+        },
+    ]
+
+    merged = _merge_openai_responses_events(iter(events), lambda _: None)
+
+    assert merged["output_text"] == "partial"
+    assert merged["status"] == "incomplete"
+
+
+def test_background_response_retrieval_capability_requires_official_endpoint_and_opt_in() -> None:
+    default = OpenAIResponsesGateway(api_key="key", model="model")
+    assert default.capabilities().background_response_retrieval == "unknown"
+
+    official_bg = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        request_config=ModelSettings.from_options({"background": True}),
+    )
+    assert official_bg.capabilities().background_response_retrieval == "supported"
+
+    custom = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        base_url="https://proxy.example/v1/responses",
+        request_config=ModelSettings.from_options({"background": True}),
+    )
+    assert custom.capabilities().background_response_retrieval == "unknown"
+
+
+def test_background_stream_interrupt_retrieves_same_response_without_second_create() -> None:
+    create_calls = 0
+    retrieve_calls = 0
+    deltas: list[str] = []
+    resets = []
+
+    def stream_transport(payload, api_key, sink):
+        nonlocal create_calls
+        create_calls += 1
+        assert payload.get("background") is True
+        sink("hel")
+        # 模拟已拿到 response id 后的瞬时断流；adapter 应 retrieve 同一 Response。
+        raise ModelCallError(
+            "stream reset",
+            details=ModelFailureDetails(
+                category="network",
+                retryable=True,
+                provider_code="resp_1",
+            ),
+        )
+
+    def retrieve_transport(response_id: str):
+        nonlocal retrieve_calls
+        retrieve_calls += 1
+        assert response_id == "resp_1"
+        if retrieve_calls == 1:
+            return {"id": "resp_1", "status": "in_progress", "output_text": "hel", "output": []}
+        return {"id": "resp_1", "status": "completed", "output_text": "hello", "output": []}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=RetryController(
+            RetryPolicy(max_attempts=3),
+            sleep=lambda _: None,
+            random_value=lambda: 0.0,
+        ),
+        request_config=ModelSettings.from_options({"background": True}),
+        retrieve_transport=retrieve_transport,
+    )
+    response = gateway.generate(
+        ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+        event_sink=deltas.append,
+        stream_reset_sink=resets.append,
+    )
+
+    assert create_calls == 1
+    assert retrieve_calls == 2
+    assert response.content == "hello"
+    assert len(resets) == 1
+    assert resets[0].partial_character_count == 3
+    # transport delta 保留事实；reset 后 UI 才接收权威全文。
+    assert deltas == ["hel", "hello"]
+
+
+def test_background_retrieve_uses_one_shared_attempt_budget_and_preserves_final_partial() -> None:
+    create_calls = 0
+    retrieve_calls = 0
+    deltas: list[str] = []
+    resets = []
+    retries = []
+    exhausted = []
+
+    def stream_transport(payload, api_key, sink):
+        nonlocal create_calls
+        del payload, api_key
+        create_calls += 1
+        sink("partial")
+        raise ModelCallError(
+            "stream reset",
+            details=ModelFailureDetails(category="network", retryable=True, provider_code="resp_1"),
+        )
+
+    def retrieve_transport(response_id: str):
+        nonlocal retrieve_calls
+        assert response_id == "resp_1"
+        retrieve_calls += 1
+        return {"id": response_id, "status": "in_progress", "output": []}
+
+    controller = RetryController(
+        RetryPolicy(max_attempts=3),
+        sleep=lambda _: None,
+        random_value=lambda: 0.0,
+    )
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=controller,
+        request_config=ModelSettings.from_options({"background": True}),
+        retrieve_transport=retrieve_transport,
+    )
+
+    with pytest.raises(ModelCallError) as raised:
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=deltas.append,
+            stream_reset_sink=resets.append,
+            retry_event_sink=retries.append,
+            retry_exhausted_sink=lambda failure, attempt: exhausted.append((failure.category, attempt)),
+        )
+
+    assert raised.value.details is not None
+    assert raised.value.details.category == "stream_interrupted"
+    assert create_calls == 1
+    assert retrieve_calls == 2
+    assert [(event.attempt, event.next_attempt) for event in retries] == [(1, 2), (2, 3)]
+    assert all(event.recovery_kind == "background_retrieve" for event in retries)
+    assert all(event.response_id == "resp_1" for event in retries)
+    assert exhausted == [("stream_interrupted", 3)]
+    assert resets == []
+    assert deltas == ["partial"]
+
+
+def test_background_stream_without_reset_contract_does_not_retrieve() -> None:
+    retrieve_calls = 0
+    deltas: list[str] = []
+
+    def stream_transport(payload, api_key, sink):
+        del payload, api_key
+        sink("partial")
+        raise ModelCallError(
+            "stream reset",
+            details=ModelFailureDetails(category="network", retryable=True, provider_code="resp_1"),
+        )
+
+    def retrieve_transport(response_id: str):
+        nonlocal retrieve_calls
+        del response_id
+        retrieve_calls += 1
+        return {"status": "completed", "output_text": "complete", "output": []}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=RetryController(
+            RetryPolicy(max_attempts=3),
+            sleep=lambda _: None,
+            random_value=lambda: 0.0,
+        ),
+        request_config=ModelSettings.from_options({"background": True}),
+        retrieve_transport=retrieve_transport,
+    )
+
+    with pytest.raises(ModelCallError) as raised:
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=deltas.append,
+        )
+
+    assert raised.value.details is not None
+    assert raised.value.details.category == "stream_interrupted"
+    assert retrieve_calls == 0
+    assert deltas == ["partial"]
+
+
+def test_background_retrieve_type_error_is_not_called_twice() -> None:
+    retrieve_calls = 0
+
+    def stream_transport(payload, api_key, sink):
+        del payload, api_key
+        sink("partial")
+        raise ModelCallError(
+            "stream reset",
+            details=ModelFailureDetails(category="network", retryable=True, provider_code="resp_1"),
+        )
+
+    def retrieve_transport(response_id: str, *, attempt=1, telemetry_sink=None):
+        nonlocal retrieve_calls
+        del response_id, attempt, telemetry_sink
+        retrieve_calls += 1
+        raise TypeError("callback bug")
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=_retry_controller(),
+        request_config=ModelSettings.from_options({"background": True}),
+        retrieve_transport=retrieve_transport,
+    )
+
+    with pytest.raises(ModelCallError):
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=lambda _: None,
+            stream_reset_sink=lambda _: None,
+        )
+
+    assert retrieve_calls == 1
+
+
+def test_background_terminal_failure_is_not_polled_again() -> None:
+    retrieve_calls = 0
+    deltas: list[str] = []
+    resets = []
+
+    def stream_transport(payload, api_key, sink):
+        del payload, api_key
+        sink("partial")
+        raise ModelCallError(
+            "stream reset",
+            details=ModelFailureDetails(category="network", retryable=True, provider_code="resp_1"),
+        )
+
+    def retrieve_transport(response_id: str):
+        nonlocal retrieve_calls
+        retrieve_calls += 1
+        return {
+            "id": response_id,
+            "status": "failed",
+            "error": {"code": "server_error"},
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=RetryController(
+            RetryPolicy(max_attempts=3),
+            sleep=lambda _: None,
+            random_value=lambda: 0.0,
+        ),
+        request_config=ModelSettings.from_options({"background": True}),
+        retrieve_transport=retrieve_transport,
+    )
+
+    with pytest.raises(ModelCallError) as raised:
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=deltas.append,
+            stream_reset_sink=resets.append,
+        )
+
+    assert raised.value.details is not None
+    assert raised.value.details.category == "server"
+    assert raised.value.details.retryable is False
+    assert retrieve_calls == 1
+    assert deltas == ["partial"]
+    assert resets == []
+
+
+def test_background_incomplete_length_reconciles_as_length_response() -> None:
+    def stream_transport(payload, api_key, sink):
+        del payload, api_key
+        sink("part")
+        raise ModelCallError(
+            "stream reset",
+            details=ModelFailureDetails(category="network", retryable=True, provider_code="resp_1"),
+        )
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=_retry_controller(),
+        request_config=ModelSettings.from_options({"background": True}),
+        retrieve_transport=lambda response_id: {
+            "id": response_id,
+            "status": "incomplete",
+            "output_text": "partial answer",
+            "output": [],
+            "incomplete_details": {"reason": "max_output_tokens"},
+        },
+    )
+    resets = []
+
+    response = gateway.generate(
+        ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+        event_sink=lambda _: None,
+        stream_reset_sink=resets.append,
+    )
+
+    assert response.content == "partial answer"
+    assert response.termination == "length"
+    assert len(resets) == 1
 
 
 def test_stream_interruption_reports_final_attempt_for_audit() -> None:
@@ -434,9 +908,251 @@ def test_stream_interruption_reports_final_attempt_for_audit() -> None:
     )
 
     with pytest.raises(ModelCallError):
-        gateway.generate([], [], event_sink=lambda _: None, retry_exhausted_sink=lambda failure, attempt: exhausted.append((failure.category, attempt)))
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=lambda _: None,
+            retry_exhausted_sink=lambda failure, attempt: exhausted.append((failure.category, attempt)),
+        )
 
     assert exhausted == [("stream_interrupted", 1)]
+
+
+def test_stream_recovery_before_first_delta_has_no_reset_event() -> None:
+    attempts = 0
+    deltas: list[str] = []
+    resets = []
+
+    def stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        del payload, api_key
+        attempts += 1
+        if attempts == 1:
+            raise ModelCallError(
+                "preflight network",
+                details=ModelFailureDetails(category="network", retryable=True),
+            )
+        sink("ok")
+        return {"output_text": "ok", "output": [], "status": "completed"}
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=_retry_controller(),
+    )
+    response = gateway.generate(
+        ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+        event_sink=deltas.append,
+        stream_reset_sink=resets.append,
+    )
+
+    assert response.content == "ok"
+    assert attempts == 2
+    assert deltas == ["ok"]
+    assert resets == []
+
+
+def test_auth_parse_and_cancel_do_not_reset_or_replay_stream() -> None:
+    for category, retryable, message in (
+        ("auth", False, "unauthorized"),
+        ("response_parse", False, "bad json"),
+    ):
+        attempts = 0
+        resets = []
+
+        def stream_transport(payload, api_key, sink, *, _category=category, _retryable=retryable, _message=message):
+            nonlocal attempts
+            del payload, api_key
+            attempts += 1
+            sink("partial")
+            raise ModelCallError(
+                _message,
+                details=ModelFailureDetails(category=_category, retryable=_retryable),
+            )
+
+        gateway = OpenAIResponsesGateway(
+            api_key="key",
+            model="model",
+            stream_transport=stream_transport,
+            retry_controller=_retry_controller(),
+        )
+        with pytest.raises(ModelCallError) as raised:
+            gateway.generate(
+                ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+                event_sink=lambda _: None,
+                stream_reset_sink=resets.append,
+            )
+        # 已提交 partial 后的非 retryable 错误不得 reset/重放，且保留原始分类。
+        assert attempts == 1
+        assert resets == []
+        assert raised.value.details is not None
+        assert raised.value.details.category == category
+        assert raised.value.details.retryable is False
+
+    token = CancellationToken()
+    token.cancel()
+    cancel_attempts = 0
+    cancel_resets = []
+
+    def cancelled_stream(payload, api_key, sink):
+        nonlocal cancel_attempts
+        del payload, api_key, sink
+        cancel_attempts += 1
+        raise RunCancelled("user cancelled")
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=cancelled_stream,
+        retry_controller=_retry_controller(),
+    )
+    with pytest.raises(RunCancelled):
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=lambda _: None,
+            stream_reset_sink=cancel_resets.append,
+            cancellation_token=token,
+        )
+    assert cancel_attempts == 0
+    assert cancel_resets == []
+
+
+def test_incomplete_stream_tool_call_never_reaches_tool_router_until_complete() -> None:
+    attempts = 0
+    tool_router_invocations = 0
+
+    def stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        del payload, api_key
+        attempts += 1
+        if attempts == 1:
+            # 只吐出文本片段与不完整工具计划；未返回 ModelResponse 前不得执行工具。
+            sink("calling tool")
+            raise ModelCallError(
+                "stream cut mid tool plan",
+                details=ModelFailureDetails(category="network", retryable=True),
+            )
+        sink("done")
+        return {
+            "output_text": "done",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "file_read",
+                    "arguments": '{"path":"README.md"}',
+                    "call_id": "call_1",
+                }
+            ],
+        }
+
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=_retry_controller(),
+    )
+    response = gateway.generate(
+        ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+        event_sink=lambda _: None,
+        stream_reset_sink=lambda _: None,
+    )
+    # 模拟编排层：只有完整 ModelResponse 才交给 ToolRouter。
+    if response.tool_calls:
+        tool_router_invocations += len(response.tool_calls)
+
+    assert attempts == 2
+    assert tool_router_invocations == 1
+    assert [call.name for call in response.tool_calls] == ["file_read"]
+
+
+def test_partial_output_stream_interrupt_does_not_invoke_model_fallback() -> None:
+    from haagent.models.negotiating_gateway import NegotiatingModelGateway
+
+    primary_calls = 0
+    fallback_calls = 0
+
+    def primary_stream(payload, api_key, sink):
+        nonlocal primary_calls
+        del payload, api_key
+        primary_calls += 1
+        sink("partial")
+        raise ModelCallError(
+            "reset",
+            details=ModelFailureDetails(category="network", retryable=True),
+        )
+
+    def fallback_transport(payload, api_key):
+        nonlocal fallback_calls
+        del payload, api_key
+        fallback_calls += 1
+        return {"output_text": "fallback", "output": [], "status": "completed"}
+
+    primary = OpenAIResponsesGateway(
+        api_key="key",
+        model="primary",
+        stream_transport=primary_stream,
+        retry_controller=_retry_controller(),
+    )
+    fallback = OpenAIResponsesGateway(
+        api_key="key",
+        model="fallback",
+        transport=fallback_transport,
+        retry_controller=_retry_controller(),
+    )
+    gateway = NegotiatingModelGateway(
+        primary=primary,
+        fallback=fallback,
+        cloud_fallback_consent=True,
+    )
+    with pytest.raises(ModelCallError) as raised:
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=lambda _: None,
+            stream_reset_sink=lambda _: None,
+        )
+    assert raised.value.details is not None
+    assert raised.value.details.category == "stream_interrupted"
+    assert primary_calls == 2
+    assert fallback_calls == 0
+
+
+def test_recovery_wait_respects_cancellation_token() -> None:
+    attempts = 0
+    token = CancellationToken()
+
+    def stream_transport(payload, api_key, sink):
+        nonlocal attempts
+        del payload, api_key
+        attempts += 1
+        sink("partial")
+        raise ModelCallError(
+            "reset",
+            details=ModelFailureDetails(category="network", retryable=True),
+        )
+
+    def sleep_then_cancel(_delay: float) -> None:
+        token.cancel()
+
+    controller = RetryController(
+        RetryPolicy(max_attempts=3),
+        sleep=sleep_then_cancel,
+        random_value=lambda: 0.0,
+    )
+    gateway = OpenAIResponsesGateway(
+        api_key="key",
+        model="model",
+        stream_transport=stream_transport,
+        retry_controller=controller,
+    )
+    with pytest.raises(RunCancelled):
+        gateway.generate(
+            ModelInvocation(messages=[], tool_schemas=[], settings=ModelSettings.empty()),
+            event_sink=lambda _: None,
+            stream_reset_sink=lambda _: None,
+            cancellation_token=token,
+        )
+    assert attempts == 1
 
 
 def test_gateway_propagates_retry_controller_cancellation() -> None:

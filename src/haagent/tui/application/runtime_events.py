@@ -11,6 +11,7 @@ from collections.abc import Callable
 from haagent.runtime.events import (
     RUNTIME_UI_EVENT_TYPES,
     ApprovalStateEvent,
+    AssistantAttemptResetEvent,
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
@@ -44,8 +45,8 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
     if handler is None:
         raise TypeError(f"unsupported RuntimeUiEvent: {type(event).__name__}")
     handler(app, event)
-    # delta 与上下文用量都走局部刷新；全量 _refresh 会读 workspace.status / keyring。
-    if isinstance(event, AssistantDeltaEvent | ContextUsageEvent):
+    # delta / attempt reset / 上下文用量都走局部刷新；全量 _refresh 会读 workspace.status / keyring。
+    if isinstance(event, AssistantDeltaEvent | AssistantAttemptResetEvent | ContextUsageEvent):
         return
     app._refresh()
 
@@ -53,6 +54,12 @@ def handle_runtime_ui_event(app, event: RuntimeUiEvent) -> None:
 def _handle_assistant_delta(app, event: AssistantDeltaEvent) -> None:
     app._conversation.merge_assistant_delta(event.turn_index, event.model_turn, event.delta)
     # timeline 自身已有 ~33ms markdown 批同步；这里只调度轻量 stick/scroll，不触 status。
+    app._schedule_streaming_refresh()
+
+
+def _handle_assistant_attempt_reset(app, event: AssistantAttemptResetEvent) -> None:
+    # 恢复态不是 failure；只清空当前 provisional attempt 并刷新流式占位。
+    app._conversation.reset_assistant_attempt(event.turn_index, event.model_turn)
     app._schedule_streaming_refresh()
 
 
@@ -209,6 +216,7 @@ def _aggregate_tool_failure(
 
 RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {
     AssistantDeltaEvent: _handle_assistant_delta,
+    AssistantAttemptResetEvent: _handle_assistant_attempt_reset,
     AssistantIntermediateEvent: _handle_assistant_intermediate,
     AssistantMessageEvent: _handle_assistant_message,
     ContextUsageEvent: _handle_context_usage,

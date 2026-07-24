@@ -26,6 +26,8 @@ class ModelCapabilities:
     context_window_tokens: int | None = None
     input_window_tokens: int | None = None
     protocols: frozenset[ModelProtocol] = frozenset()
+    # 仅官方 Responses + 显式 background 时 supported；兼容端点不得猜测。
+    background_response_retrieval: CapabilityState = "unknown"
 
 
 @dataclass(frozen=True)

@@ -189,10 +189,13 @@ class ConversationTimeline(VerticalScroll):
 
     def _sync_history_rail(self) -> None:
         if self._history_rail is not None:
+            entries = self.request_history_entries()
             self._history_rail.set_entries(
-                self.request_history_entries(),
+                entries,
                 active_turn=self._current_request_turn,
             )
+            # 轨道隐藏时释放预留槽位，让消息与输入框保持同一内容列。
+            self.set_class(len(entries) >= 2, "history-rail-visible")
 
     def set_stick_to_bottom(self, enabled: bool) -> None:
         window_was_away_from_tail = self._window_start is not None
@@ -201,6 +204,12 @@ class ConversationTimeline(VerticalScroll):
             self._window_start = None
             if window_was_away_from_tail and self.is_attached:
                 self._replace_window_blocks()
+
+    @property
+    def is_stuck_to_bottom(self) -> bool:
+        """返回内容变化前维护的粘底意图，不从刷新后的几何位置反推。"""
+
+        return self._stick_to_bottom
 
     def scroll_end_if_sticky(self) -> None:
         if self._stick_to_bottom:
@@ -479,6 +488,19 @@ class ConversationTimeline(VerticalScroll):
         item.status = "streaming"
         item.is_final_answer = False
         self._queue_assistant_delta_sync(item)
+        self._mark_plain_text_dirty()
+
+    def reset_assistant_attempt(self, turn_index: int) -> None:
+        """只清空当前 provisional assistant 项；已固化 process/intermediate 不动。"""
+
+        self.flush_pending_assistant_delta()
+        item = self._assistant_item(turn_index)
+        # 失败 attempt 文本整体撤销，开放下一 attempt 的流式写入。
+        item.content = ""
+        item.status = "streaming"
+        item.is_final_answer = False
+        self._pending_assistant_delta_item_ids.discard(item.item_id)
+        self._sync_block(item)
         self._mark_plain_text_dirty()
 
     def finalize_assistant(self, turn_index: int, content: str) -> None:

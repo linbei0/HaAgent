@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from haagent.runtime.events import (
     ApprovalStateEvent,
+    AssistantAttemptResetEvent,
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
@@ -35,6 +36,9 @@ class _FakeConversation:
     def merge_assistant_delta(self, turn_index: int, model_turn: int | None, delta: str) -> None:
         del model_turn
         self._app.assistant_deltas.append((turn_index, delta))
+
+    def reset_assistant_attempt(self, turn_index: int, model_turn: int | None = None) -> None:
+        self._app.assistant_resets.append((turn_index, model_turn))
 
     def finalize_intermediate_message(self, turn_index: int, model_turn: int | None, content: str) -> None:
         self._app.assistant_intermediates.append((turn_index, model_turn, content))
@@ -79,6 +83,7 @@ class FakeRuntimeEventApp:
         self._active_turn_index = 0
         self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
         self.assistant_deltas: list[tuple[int, str]] = []
+        self.assistant_resets: list[tuple[int, int | None]] = []
         self.assistant_intermediates: list[tuple[int, int | None, str]] = []
         self.assistant_messages: list[tuple[int, str]] = []
         self.tool_diagnostics: list[tuple[int, str, str]] = []
@@ -220,6 +225,26 @@ def test_runtime_ui_event_handler_updates_assistant_stream() -> None:
     # delta 热路径禁止全量 _refresh（会打 status/keyring）；只调度批量 timeline 刷新。
     assert app.refreshes == 1
     assert app.streaming_refresh_schedules == 2
+
+
+def test_runtime_ui_event_handler_resets_assistant_attempt() -> None:
+    app = FakeRuntimeEventApp()
+
+    handle_runtime_ui_event(
+        app,
+        AssistantAttemptResetEvent(
+            session_id="session-1",
+            turn_index=2,
+            model_turn=3,
+            attempt=1,
+            next_attempt=2,
+            category="network",
+        ),
+    )
+
+    assert app.assistant_resets == [(2, 3)]
+    assert app.refreshes == 0
+    assert app.streaming_refresh_schedules == 1
 
 
 def test_assistant_delta_does_not_trigger_full_refresh() -> None:

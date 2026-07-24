@@ -1436,8 +1436,16 @@ verification_commands: []
             retry_event_sink=None,
             retry_exhausted_sink=None,
             telemetry_sink=None,
+            stream_reset_sink=None,
         ):
-            del invocation, event_sink, cancellation_token, retry_event_sink, retry_exhausted_sink
+            del (
+                invocation,
+                event_sink,
+                cancellation_token,
+                retry_event_sink,
+                retry_exhausted_sink,
+                stream_reset_sink,
+            )
             self.calls += 1
             if telemetry_sink is not None:
                 telemetry_sink(
@@ -1462,13 +1470,13 @@ verification_commands: []
                 )
             return ModelResponse("done", [], usage=ModelUsage(input_tokens=80, output_tokens=2, total_tokens=82, raw_source="test"))
 
-            def metadata(self):
-                return ModelGatewayMetadata(
-                    provider="performance-tool",
-                    model="m",
-                    endpoint=None,
-                    request_config=None,
-                )
+        def metadata(self):
+            return ModelGatewayMetadata(
+                provider="performance-tool",
+                model="m",
+                endpoint=None,
+                request_config=None,
+            )
 
         def capabilities(self):
             from haagent.models.capabilities import ModelCapabilities
@@ -1535,6 +1543,7 @@ verification_commands: []
             retry_event_sink=None,
             retry_exhausted_sink=None,
             telemetry_sink=None,
+            stream_reset_sink=None,
         ):
             del invocation
 
@@ -1555,15 +1564,16 @@ verification_commands: []
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
                 telemetry_sink=telemetry_sink,
+                stream_reset_sink=stream_reset_sink,
             )
 
-            def metadata(self):
-                return ModelGatewayMetadata(
-                    provider=self.provider_name,
-                    model="m",
-                    endpoint=None,
-                    request_config=None,
-                )
+        def metadata(self):
+            return ModelGatewayMetadata(
+                provider=self.provider_name,
+                model="m",
+                endpoint=None,
+                request_config=None,
+            )
 
         def capabilities(self):
             from haagent.models.capabilities import ModelCapabilities

@@ -20,6 +20,7 @@ from haagent.runtime.events.formatting import (
 )
 from haagent.runtime.events.types import (
     ApprovalStateEvent,
+    AssistantAttemptResetEvent,
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
@@ -94,6 +95,21 @@ def _assistant_delta_event(event: dict[str, object], context: RawRuntimeUiEventC
         turn_index=context.turn_index,
         model_turn=context.model_turn,
         delta=str(event.get("delta", "")),
+    )
+
+
+def _assistant_attempt_reset_event(
+    event: dict[str, object],
+    context: RawRuntimeUiEventContext,
+) -> AssistantAttemptResetEvent:
+    # 不映射 partial 全文；UI 只需要 attempt 代际与失败分类。
+    return AssistantAttemptResetEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        model_turn=context.model_turn,
+        attempt=_int_value(event.get("attempt")),
+        next_attempt=_int_value(event.get("next_attempt")),
+        category=str(event.get("category", "")),
     )
 
 
@@ -462,6 +478,7 @@ def _spec(
 
 _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("assistant_delta", AssistantDeltaEvent, _assistant_delta_event),
+    _spec("assistant_attempt_reset", AssistantAttemptResetEvent, _assistant_attempt_reset_event),
     _spec("assistant_intermediate_message", AssistantIntermediateEvent, _assistant_intermediate_event),
     _spec("assistant_message", AssistantMessageEvent, _assistant_message_event),
     _spec("model_context_usage", ContextUsageEvent, _context_usage_event),

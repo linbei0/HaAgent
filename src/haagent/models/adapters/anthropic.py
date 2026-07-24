@@ -373,6 +373,7 @@ class AnthropicMessagesGateway:
         retry_event_sink: Callable[[RetryEvent], None] | None = None,
         retry_exhausted_sink: Callable[[RetryFailure, int], None] | None = None,
         telemetry_sink=None,
+        stream_reset_sink=None,
     ) -> ModelResponse:
         """调用 Anthropic Messages API，并归一化为统一 ModelResponse。"""
         messages = invocation.messages
@@ -414,6 +415,7 @@ class AnthropicMessagesGateway:
                 retry_event_sink=retry_event_sink,
                 retry_exhausted_sink=retry_exhausted_sink,
                 telemetry_sink=telemetry_sink,
+                stream_reset_sink=stream_reset_sink,
             )
         except ModelCallError:
             raise

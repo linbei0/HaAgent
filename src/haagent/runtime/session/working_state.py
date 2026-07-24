@@ -157,7 +157,8 @@ def update_working_state(
                     key_findings.append(finding)
 
     final_response = _bounded_text(str(getattr(result, "final_response", "")))
-    if final_response and final_response != "none":
+    if final_response and final_response != "none" and not _covered_by_assistant_event(final_response, key_findings):
+        # 去重：assistant_message 事件已收录同源回答时不再重复追加 final_response。
         key_findings.append(final_response)
     if not completed_actions:
         completed_actions.append(
@@ -252,6 +253,12 @@ def _bounded_text(value: str, limit: int = WORKING_STATE_TEXT_FIELD_LIMIT) -> st
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit] + "... [truncated]"
+
+
+def _covered_by_assistant_event(final_response: str, key_findings: list[str]) -> bool:
+    """final_response 是否已被 assistant_message 事件收录；截断前缀一致即视为同源。"""
+    prefix = final_response[:120]
+    return any(item.startswith(prefix) for item in key_findings)
 
 
 def _looks_like_trace(value: str) -> bool:

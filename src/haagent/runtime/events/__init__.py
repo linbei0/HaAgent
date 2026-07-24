@@ -5,6 +5,7 @@ src/haagent/runtime/events/__init__.py - Runtime 事件协议包
 """
 
 from haagent.runtime.events.bus import (
+    AssistantAttemptResetBusEvent,
     AssistantDeltaBusEvent,
     AssistantIntermediateBusEvent,
     AssistantMessageBusEvent,
@@ -30,6 +31,7 @@ from haagent.runtime.events.registry import RAW_RUNTIME_UI_EVENT_REGISTRY, RawRu
 from haagent.runtime.events.types import (
     RUNTIME_UI_EVENT_TYPES,
     ApprovalStateEvent,
+    AssistantAttemptResetEvent,
     AssistantDeltaEvent,
     AssistantIntermediateEvent,
     AssistantMessageEvent,
@@ -47,6 +49,7 @@ from haagent.runtime.events.types import (
 from haagent.runtime.events.ui_mapper import RuntimeUiEventMapper
 
 __all__ = [
+    "AssistantAttemptResetBusEvent",
     "AssistantDeltaBusEvent",
     "AssistantIntermediateBusEvent",
     "AssistantMessageBusEvent",
@@ -57,6 +60,7 @@ __all__ = [
     "RAW_RUNTIME_UI_EVENT_REGISTRY",
     "RUNTIME_UI_EVENT_TYPES",
     "ApprovalStateEvent",
+    "AssistantAttemptResetEvent",
     "AssistantDeltaEvent",
     "AssistantIntermediateEvent",
     "AssistantMessageEvent",
