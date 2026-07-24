@@ -83,6 +83,12 @@ haagent --web
 uv tool install "haagent[channels-weixin] @ git+https://github.com/linbei0/HaAgent.git"
 ```
 
+### TUI 异常诊断
+
+HaAgent 会在 `~/.haagent/logs/tui-diagnostics.log` 写入轮转的 TUI 生命周期摘要。日志只包含启动/退出时间、Python 与 Textual 版本、终端标识和未处理异常类型，不记录对话、工具输出、文件内容或凭据。
+
+如果终端显示 `CloseOnCleanExit`，先检查该日志是否已有 `tui_stopped` 或 `unhandled_exception`，再按同一时间戳查看 Windows Application Event Log。若 HaAgent 已正常停止而终端仍异常退出，请分别在 Windows Terminal 和 WezTerm 复现；这通常指向 PowerShell/ConPTY 或终端环境，而不是会话数据。
+
 如果已经安装基础版本，使用同一命令加 `--force` 重装：
 
 ```powershell

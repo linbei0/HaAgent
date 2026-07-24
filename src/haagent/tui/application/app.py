@@ -31,6 +31,7 @@ from haagent.tui.application.command_handlers import ChatCommandHandlers
 from haagent.tui.application.commands import CommandDispatcher
 from haagent.tui.application.completion_flow import CompletionFlow
 from haagent.tui.application.conversation import ConversationController
+from haagent.tui.application.diagnostics import TuiDiagnostics
 from haagent.tui.application.memory_flow import MemoryFlow
 from haagent.tui.application.model_flow import ModelFlow
 from haagent.tui.application.runtime_events import handle_runtime_ui_event
@@ -120,6 +121,7 @@ class HaAgentTuiApp(App[None]):
         self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
         # 只保存当前进程最近一次真实 provider usage；不恢复、不写 session package。
         self._context_usage: ContextUsageEvent | None = None
+        self._diagnostics = TuiDiagnostics()
 
     # ── compose 与生命周期 ───────────────────────────────────────────────
     def get_default_screen(self) -> Screen:
@@ -143,6 +145,7 @@ class HaAgentTuiApp(App[None]):
         yield FooterBar(footer_text("chat"), id="footer-bar")
 
     def on_mount(self) -> None:
+        self._diagnostics.record_started()
         self._timeline_widget = self.query_one("#conversation", ConversationTimeline)
         self._timeline_widget.bind_history_rail(self.query_one("#request-history-rail", RequestHistoryRail))
         self._input_dock_widget = self.query_one("#input-panel", InputDock)
@@ -155,7 +158,7 @@ class HaAgentTuiApp(App[None]):
         self._prompt_input().focus()
         self._warm_file_reference_index()
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         # 停止 badge 轮询并停止 TUI 内嵌 coordinator host，释放租约。
         self.schedule_flow.stop_background_polling()
         # Textual 可能在 default screen 卸载后才触发 timer；必须显式取消，
@@ -164,8 +167,27 @@ class HaAgentTuiApp(App[None]):
             self._streaming_refresh_timer.stop()
             self._streaming_refresh_timer = None
         self._streaming_refresh_scheduled = False
+        self._record_tui_shutdown()
+        if self._timeline_widget is not None:
+            await self._timeline_widget.close_markdown_streams()
         self._timeline_widget = None
         self._input_dock_widget = None
+
+    def _record_tui_shutdown(self) -> None:
+        timeline = self._timeline_widget
+        if timeline is None:
+            active_writers, pending_fragments = 0, 0
+        else:
+            active_writers, pending_fragments = timeline.markdown_stream_diagnostics()
+        self._diagnostics.record_stopped(
+            active_markdown_writers=active_writers,
+            pending_markdown_fragments=pending_fragments,
+        )
+
+    def record_unhandled_exception(self, error: BaseException) -> None:
+        """由 run_tui 的顶层边界调用；记录后仍让原异常按原语义传播。"""
+
+        self._diagnostics.record_unhandled_exception(error)
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_responsive_layout(width=event.size.width, height=event.size.height)
@@ -914,7 +936,12 @@ class HaAgentTuiApp(App[None]):
 
 
 def run_tui(service: AssistantService) -> int:
-    HaAgentTuiApp(service).run()
+    app = HaAgentTuiApp(service)
+    try:
+        app.run()
+    except BaseException as error:
+        app.record_unhandled_exception(error)
+        raise
     return 0
 
 

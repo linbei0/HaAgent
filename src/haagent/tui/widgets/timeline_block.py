@@ -7,6 +7,7 @@ src/haagent/tui/widgets/timeline_block.py - 对话时间线条目渲染块
 
 from __future__ import annotations
 
+import asyncio
 from functools import partial
 from typing import Any
 
@@ -16,6 +17,7 @@ from textual.await_complete import AwaitComplete
 from textual.containers import Horizontal, Vertical
 from textual.strip import Strip
 from textual.timer import Timer
+from textual.worker import Worker, WorkerCancelled, WorkerFailed
 from textual.widgets import Button, Label, Log, Markdown, Static
 from textual.widgets.markdown import MarkdownBlock, MarkdownFence
 
@@ -179,7 +181,12 @@ class TimelineBlock(Vertical):
         self._answer_copy_button: CopyButton | None = None
         self._markdown_stream: Any | None = None
         self._markdown_stream_content = ""
+        # 一个回答块只保留一个 writer；MarkdownStream 自己会合并来不及绘制的片段。
+        self._markdown_stream_queue: asyncio.Queue[str | None] | None = None
+        self._markdown_stream_writer: Worker[None] | None = None
+        self._markdown_stream_writer_starts = 0
         self._markdown_update_version = 0
+        self._render_signature: tuple[object, ...] | None = None
         self._streaming_indicator_timer: Timer | None = None
         self._streaming_indicator_index = 0
         super().__init__(classes=_timeline_item_classes(item))
@@ -211,11 +218,7 @@ class TimelineBlock(Vertical):
 
     async def on_unmount(self) -> None:
         self._stop_streaming_indicator()
-        stream = self._markdown_stream
-        self._markdown_stream = None
-        self._markdown_stream_content = ""
-        if stream is not None:
-            await stream.stop()
+        await self._close_markdown_stream()
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         # WezTerm/Windows 下 MouseDown/MouseUp 可到达但 Click 不一定被合成；
@@ -240,6 +243,9 @@ class TimelineBlock(Vertical):
     def update_item(self, item: TimelineItem, *, show_tool_details: bool) -> None:
         self._item = item
         self._show_tool_details = show_tool_details
+        signature = self._item_render_signature(item, show_tool_details)
+        if signature == self._render_signature:
+            return
         header = self._header_widget
         body = self._body_widget
         active = self._active_widget
@@ -286,6 +292,31 @@ class TimelineBlock(Vertical):
         self.set_class(item.role == "notice", "timeline-notice")
         self.set_class(item.role == "effect", "timeline-effect")
         self.set_class(item.role == "process", "timeline-process")
+        self._render_signature = signature
+
+    def needs_update(self, item: TimelineItem, *, show_tool_details: bool) -> bool:
+        """只在条目的可见渲染状态变化时触碰复用的历史 block。"""
+
+        return self._item_render_signature(item, show_tool_details) != self._render_signature
+
+    @staticmethod
+    def _item_render_signature(item: TimelineItem, show_tool_details: bool) -> tuple[object, ...]:
+        tools = tuple(
+            (tool.tool_name, tool.status, tool.summary, tuple(tool.diagnostics))
+            for tool in item.tools
+        )
+        return (
+            item.role,
+            item.content,
+            item.status,
+            item.title,
+            tools,
+            item.expanded,
+            item.requires_attention,
+            item.is_final_answer,
+            item.elapsed_seconds,
+            show_tool_details,
+        )
 
     def _update_markdown_body(self, body: Markdown, item: TimelineItem) -> None:
         content = item.content or ""
@@ -293,33 +324,64 @@ class TimelineBlock(Vertical):
             if self._markdown_stream is None or not content.startswith(self._markdown_stream_content):
                 self._stop_markdown_stream()
                 self._queue_markdown_update(body, "")
-                self._markdown_stream = Markdown.get_stream(body)
-                self._markdown_stream_content = ""
+                self._start_markdown_stream(body)
             delta = content[len(self._markdown_stream_content) :]
             if delta:
-                # write 不可 exclusive：否则新 delta 会取消未完成 write，中间字丢失。
-                stream = self._markdown_stream
-                assert stream is not None
-                self.run_worker(
-                    partial(stream.write, delta),
-                    group="markdown-stream",
-                    exit_on_error=False,
-                )
+                queue = self._markdown_stream_queue
+                assert queue is not None
+                queue.put_nowait(delta)
                 self._markdown_stream_content = content
-                self.call_after_refresh(self._scroll_timeline_to_end)
             return
-        # finalize exclusive：取消未完成 write，await stop 后再 update 权威全文，避免「。。」。
+        # finalize 在同一 writer 消费完队列后再 stop，随后用权威全文覆盖尾刷结果。
         stream = self._markdown_stream
+        queue = self._markdown_stream_queue
+        writer = self._markdown_stream_writer
         self._markdown_stream = None
+        self._markdown_stream_queue = None
+        self._markdown_stream_writer = None
         self._markdown_stream_content = ""
         self._markdown_update_version += 1
         version = self._markdown_update_version
         self.run_worker(
-            partial(self._finalize_markdown_content, body, content, version, stream),
+            partial(self._finalize_markdown_content, body, content, version, stream, queue, writer),
+            group="markdown-finalize",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _start_markdown_stream(self, body: Markdown) -> None:
+        stream = Markdown.get_stream(body)
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._markdown_stream = stream
+        self._markdown_stream_queue = queue
+        self._markdown_stream_writer = self.run_worker(
+            partial(self._drain_markdown_stream, stream, queue),
             group="markdown-stream",
             exclusive=True,
             exit_on_error=False,
         )
+        self._markdown_stream_writer_starts += 1
+        self._markdown_stream_content = ""
+
+    async def _drain_markdown_stream(self, stream: Any, queue: asyncio.Queue[str | None]) -> None:
+        try:
+            while True:
+                fragment = await queue.get()
+                try:
+                    if fragment is None:
+                        return
+                    await stream.write(fragment)
+                finally:
+                    queue.task_done()
+        finally:
+            # stream.write 失败时不能遗留 unfinished_tasks，否则退出时 queue.join 会永久等待。
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    queue.task_done()
 
     def _queue_markdown_update(self, body: Markdown, content: str) -> None:
         self._markdown_update_version += 1
@@ -344,26 +406,88 @@ class TimelineBlock(Vertical):
         content: str,
         version: int,
         stream: Any | None,
+        queue: asyncio.Queue[str | None] | None,
+        writer: Worker[None] | None,
     ) -> None:
         # Textual MarkdownStream.stop 取消时仍会 append 未刷完的 pending；
         # 必须先等 stop 完成，再用 update 覆盖成权威全文，否则末尾会重复一字。
-        if stream is not None:
-            await stream.stop()
+        await self._finish_markdown_stream(stream, queue, writer)
         if version != self._markdown_update_version:
             return
         # 即使 source 看似相同也 update：stop 尾刷可能刚叠出重复尾字。
         await body.update(content)
-        self._scroll_timeline_to_end()
         self.call_after_refresh(self._scroll_timeline_to_end)
-        self.call_after_refresh(lambda: self.call_after_refresh(self._scroll_timeline_to_end))
 
     def _stop_markdown_stream(self) -> None:
-        if self._markdown_stream is None:
-            return
         stream = self._markdown_stream
+        queue = self._markdown_stream_queue
+        writer = self._markdown_stream_writer
         self._markdown_stream = None
+        self._markdown_stream_queue = None
+        self._markdown_stream_writer = None
         self._markdown_stream_content = ""
-        self.run_worker(partial(stream.stop), group="markdown-stream", exit_on_error=False)
+        if stream is None:
+            return
+        # 重试/reset 的旧文本不能继续落入新正文；这条路径丢弃未消费 fragment。
+        if writer is not None and not writer.is_finished:
+            writer.cancel()
+        self.run_worker(
+            partial(self._cancel_markdown_stream, stream, queue, writer),
+            group="markdown-stop",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _close_markdown_stream(self) -> None:
+        stream = self._markdown_stream
+        queue = self._markdown_stream_queue
+        writer = self._markdown_stream_writer
+        self._markdown_stream = None
+        self._markdown_stream_queue = None
+        self._markdown_stream_writer = None
+        self._markdown_stream_content = ""
+        await self._finish_markdown_stream(stream, queue, writer)
+
+    async def _finish_markdown_stream(
+        self,
+        stream: Any | None,
+        queue: asyncio.Queue[str | None] | None,
+        writer: Worker[None] | None,
+    ) -> None:
+        if queue is not None:
+            await queue.join()
+            queue.put_nowait(None)
+        if writer is not None:
+            try:
+                await writer.wait()
+            except (WorkerCancelled, WorkerFailed):
+                pass
+        if stream is not None:
+            await stream.stop()
+
+    async def _cancel_markdown_stream(
+        self,
+        stream: Any | None,
+        queue: asyncio.Queue[str | None] | None,
+        writer: Worker[None] | None,
+    ) -> None:
+        """取消过期 attempt，绝不等待旧队列写回已经清空的新正文。"""
+
+        if writer is not None:
+            try:
+                await writer.wait()
+            except (WorkerCancelled, WorkerFailed):
+                pass
+        if queue is not None:
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                else:
+                    queue.task_done()
+        if stream is not None:
+            await stream.stop()
 
     def _start_streaming_indicator(self) -> None:
         if self._streaming_indicator_timer is not None:

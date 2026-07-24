@@ -82,6 +82,44 @@ class LongTimelineApp(App[None]):
         timeline._sync_blocks()
 
 
+def test_sync_blocks_does_not_update_unchanged_history_block(monkeypatch) -> None:
+    """再次同步窗口时，未变化的完成 Markdown 不得被重新解析。"""
+
+    timeline = ConversationTimeline()
+    item = TimelineItem(
+        item_id=1,
+        role="assistant",
+        turn_index=1,
+        content="已完成的历史回答",
+        status="done",
+    )
+
+    class _Block:
+        parent = object()
+
+        def __init__(self) -> None:
+            self.update_calls = 0
+
+        def update_item(self, updated: TimelineItem, *, show_tool_details: bool) -> None:
+            del updated, show_tool_details
+            self.update_calls += 1
+
+        def needs_update(self, updated: TimelineItem, *, show_tool_details: bool) -> bool:
+            del updated, show_tool_details
+            return False
+
+    block = _Block()
+    timeline._items = [item]
+    timeline._items_by_id[item.item_id] = item
+    timeline._blocks[item.item_id] = block  # type: ignore[assignment]
+    timeline._visible_items_cache = [item]
+    monkeypatch.setattr(ConversationTimeline, "is_attached", property(lambda self: True))
+
+    timeline._sync_blocks()
+
+    assert block.update_calls == 0
+
+
 def test_tool_activity_marks_plain_text_dirty_without_eager_full_rebuild() -> None:
     timeline = InstrumentedTimeline()
     timeline._assistant_item(1)

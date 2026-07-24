@@ -215,6 +215,26 @@ class ConversationTimeline(VerticalScroll):
         if self._stick_to_bottom:
             self.scroll_end(animate=False)
 
+    def markdown_stream_diagnostics(self) -> tuple[int, int]:
+        """返回退出诊断所需计数，不暴露任何对话或工具文本。"""
+
+        active_writers = 0
+        pending_fragments = 0
+        for block in self._blocks.values():
+            writer = block._markdown_stream_writer
+            if writer is not None and not writer.is_finished:
+                active_writers += 1
+            queue = block._markdown_stream_queue
+            if queue is not None:
+                pending_fragments += queue.qsize()
+        return active_writers, pending_fragments
+
+    async def close_markdown_streams(self) -> None:
+        """等待当前窗口 block 完成流式资源清理，避免终端退出时遗留后台任务。"""
+
+        for block in tuple(self._blocks.values()):
+            await block._close_markdown_stream()
+
     def scroll_to(self, x: float | None = None, y: float | None = None, **kwargs: Any) -> None:
         if y is not None:
             self._stick_to_bottom = self._window_start is None and y >= self.max_scroll_y - 1
@@ -942,7 +962,7 @@ class ConversationTimeline(VerticalScroll):
             if block is None:
                 block = TimelineBlock(item, show_tool_details=self._show_tool_details(item))
                 self._blocks[item.item_id] = block
-            else:
+            elif block.needs_update(item, show_tool_details=self._show_tool_details(item)):
                 block.update_item(item, show_tool_details=self._show_tool_details(item))
             if block.parent is None:
                 pending_mounts.append(block)

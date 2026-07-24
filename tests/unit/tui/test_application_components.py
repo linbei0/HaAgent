@@ -15,8 +15,10 @@ from textual.containers import Vertical
 from textual.geometry import Offset
 from textual.screen import Screen
 from textual.widgets import OptionList, Static
+import pytest
 
 from haagent.tui.application.app import HaAgentScreen, HaAgentTuiApp
+from haagent.tui.application import app as app_module
 from haagent.tui.application.commands import CommandDispatcher
 from haagent.tui.application.conversation import ConversationController
 from haagent.tui.commands import SlashCommand, SlashCommandResult
@@ -39,6 +41,42 @@ def test_default_screen_ignores_detached_cached_text_selection_target(monkeypatc
     screen = HaAgentScreen()
 
     assert screen.get_widget_and_offset_at(10, 5) == (None, None)
+
+
+def test_app_shutdown_diagnostic_uses_only_timeline_counts(tmp_path: Path) -> None:
+    app = HaAgentTuiApp(FakeAssistantService(workspace_root=tmp_path))
+    calls: list[tuple[int, int]] = []
+    app._timeline_widget = SimpleNamespace(markdown_stream_diagnostics=lambda: (2, 3))
+    app._diagnostics = SimpleNamespace(
+        record_stopped=lambda *, active_markdown_writers, pending_markdown_fragments: calls.append(
+            (active_markdown_writers, pending_markdown_fragments),
+        ),
+    )
+
+    app._record_tui_shutdown()
+
+    assert calls == [(2, 3)]
+
+
+def test_run_tui_records_exception_then_reraises(monkeypatch) -> None:
+    events: list[str] = []
+
+    class _FailingApp:
+        def __init__(self, service) -> None:
+            del service
+
+        def run(self) -> None:
+            raise RuntimeError("prompt and secret must not escape here")
+
+        def record_unhandled_exception(self, error: BaseException) -> None:
+            events.append(type(error).__name__)
+
+    monkeypatch.setattr(app_module, "HaAgentTuiApp", _FailingApp)
+
+    with pytest.raises(RuntimeError, match="prompt and secret"):
+        app_module.run_tui(object())
+
+    assert events == ["RuntimeError"]
 
 
 def test_command_dispatcher_routes_registered_action_and_refreshes_errors() -> None:
