@@ -156,6 +156,10 @@ class ChannelManager:
             await self._handle_answer(message, text)
             self._commit_receipt_only(instance_id, message.message_id)
             return "control"
+        if text.startswith("/dismiss"):
+            await self._handle_dismiss(message, text)
+            self._commit_receipt_only(instance_id, message.message_id)
+            return "control"
         if text == "/stop":
             await self._handle_stop(message)
             self._commit_receipt_only(instance_id, message.message_id)
@@ -437,6 +441,22 @@ class ChannelManager:
             await self._reply(message, f"补充输入失败：{error}")
             return
         await self._reply(message, "已提交补充输入")
+
+    async def _handle_dismiss(self, message: InboundChannelMessage, text: str) -> None:
+        match = re.match(r"^/dismiss\s+(\S+)\s*$", text, flags=re.IGNORECASE)
+        if match is None:
+            await self._reply(message, "用法：/dismiss <nonce>")
+            return
+        try:
+            self._broker.dismiss(
+                match.group(1),
+                sender_id=message.sender_id,
+                binding_key=message.address.binding_key(),
+            )
+        except InteractionError as error:
+            await self._reply(message, f"关闭补充输入失败：{error}")
+            return
+        await self._reply(message, "已关闭补充输入")
 
     async def _handle_stop(self, message: InboundChannelMessage) -> None:
         actor = self._actors.get(message.address.binding_key())

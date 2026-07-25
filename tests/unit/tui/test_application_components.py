@@ -25,8 +25,10 @@ from haagent.tui.commands import SlashCommand, SlashCommandResult
 from haagent.tui.commands.suggestions import CommandSuggestionOverlay
 from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex, FileReferenceMatch
+from haagent.runtime.execution.human_interaction import UserQuestion, UserQuestionOption
 from haagent.tui.widgets import PromptInput, ProgressStatusLine
 from haagent.tui.widgets.input_dock import InputDock
+from haagent.tui.widgets.question_prompt import QuestionPrompt
 from tests.tui.support import FakeAssistantService
 
 
@@ -150,6 +152,51 @@ def test_input_dock_opens_one_overlay_and_preserves_prompt_value() -> None:
             assert prompt.text == "/he"
             assert len(app.query(OptionList)) == 1
             assert app.query_one(PromptInput).has_focus
+
+    asyncio.run(run())
+
+
+def test_input_dock_mounts_question_prompt_once_and_restores_prompt() -> None:
+    async def run() -> None:
+        app = _InputDockApp()
+        question = UserQuestion(
+            id="storage",
+            header="存储方式",
+            question="请选择存储方式。",
+            options=(
+                UserQuestionOption(label="SQLite（推荐）", description="零配置。"),
+                UserQuestionOption(label="JSON 文件", description="容易查看。"),
+            ),
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            dock = app.query_one(InputDock)
+            prompt = app.query_one(PromptInput)
+            details = UserQuestion(id="details", header="补充说明", question="请补充说明。")
+            first = dock.open_question_prompt((question, details))
+            second = dock.open_question_prompt((question, details))
+            await pilot.pause(0.1)
+
+            assert first is second
+            assert len(list(dock.query(QuestionPrompt))) == 1
+            assert prompt.display is False
+            assert first.has_focus
+
+            compact = str(first.render())
+            first.state.move_option(2)
+            first.state.append_text("draft")
+            await pilot.resize_terminal(120, 40)
+            await pilot.pause(0.1)
+            wide = str(first.render())
+            assert "JSON 文件 — 容易查看。" not in compact
+            assert "JSON 文件 — 容易查看。" in wide
+            assert "补充说明" in wide
+            assert first.state.current_draft == "draft"
+
+            dock.close_question_prompt()
+            await pilot.pause(0.1)
+            assert len(list(dock.query(QuestionPrompt))) == 0
+            assert prompt.display is True
+            assert prompt.has_focus
 
     asyncio.run(run())
 

@@ -2552,28 +2552,167 @@ def test_request_user_input_tool_uses_interaction_handler_and_writes_trace(tmp_p
 
     def interaction_handler(request):
         requests.append(request)
-        return HumanInteractionResponse(approved=True, answer="Use src/app.py")
+        return HumanInteractionResponse(
+            approved=True,
+            outcome="answered",
+            answers={"target": ("Use src/app.py",)},
+        )
 
     result = router.dispatch(
         "request_user_input",
-        {"question": "Which file should I edit?", "reason": "Need target"},
+        {
+            "questions": [
+                {
+                    "id": "target",
+                    "header": "Target",
+                    "question": "Which file should I edit?",
+                },
+            ],
+            "reason": "Need target",
+        },
         interaction_handler=interaction_handler,
     )
 
     assert result == {
         "status": "success",
-        "question": "Which file should I edit?",
-        "answer": "Use src/app.py",
+        "outcome": "answered",
+        "answers": {"target": ["Use src/app.py"]},
+        "question_count": 1,
+        "answered_count": 1,
         "answer_chars": len("Use src/app.py"),
     }
     assert len(requests) == 1
     assert requests[0].interaction_type == "user_input"
     assert requests[0].tool_name == "request_user_input"
-    assert requests[0].question == "Which file should I edit?"
+    assert requests[0].questions[0].id == "target"
+    assert requests[0].questions[0].question == "Which file should I edit?"
     record = _read_single_tool_call(writer)
     assert record["tool_name"] == "request_user_input"
     assert record["status"] == "success"
     assert record["policy"]["action"] == "allow"
+
+
+def test_request_user_input_rejects_incomplete_answered_response(tmp_path: Path) -> None:
+    router = ToolRouter(
+        allowed_tools=["request_user_input"],
+        episode_writer=make_writer(tmp_path),
+        workspace_root=tmp_path,
+    )
+
+    result = router.dispatch(
+        "request_user_input",
+        {
+            "questions": [
+                {"id": "first", "header": "一", "question": "第一题。"},
+                {"id": "second", "header": "二", "question": "第二题。"},
+            ],
+            "reason": "需要完整答案",
+        },
+        interaction_handler=lambda _request: HumanInteractionResponse(
+            approved=True,
+            outcome="answered",
+            answers={"first": ("only one",)},
+        ),
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "invalid_interaction_response"
+    assert "second" in result["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "questions",
+    [
+        [],
+        [
+            {"id": f"q{index}", "header": str(index), "question": "?"}
+            for index in range(4)
+        ],
+        [
+            {
+                "id": "choice",
+                "header": "选项",
+                "question": "请选择。",
+                "options": [{"label": "only", "description": "too few"}],
+            }
+        ],
+        [
+            {
+                "id": "choice",
+                "header": "选项",
+                "question": "请选择。",
+                "options": [
+                    {"label": str(index), "description": "too many"}
+                    for index in range(5)
+                ],
+            }
+        ],
+        [
+            {"id": "same", "header": "一", "question": "第一题。"},
+            {"id": "same", "header": "二", "question": "第二题。"},
+        ],
+        [{"id": "q", "header": "标题", "question": "问题", "unknown": True}],
+    ],
+)
+def test_request_user_input_rejects_invalid_question_contract(tmp_path: Path, questions: list[dict]) -> None:
+    router = ToolRouter(
+        allowed_tools=["request_user_input"],
+        episode_writer=make_writer(tmp_path),
+        workspace_root=tmp_path,
+    )
+
+    result = router.dispatch(
+        "request_user_input",
+        {"questions": questions, "reason": "需要确认"},
+        interaction_handler=lambda _request: HumanInteractionResponse(approved=False, outcome="dismissed"),
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "tool_argument_invalid"
+
+
+def test_request_user_input_non_answer_outcomes_are_success(tmp_path: Path) -> None:
+    router = ToolRouter(
+        allowed_tools=["request_user_input"],
+        episode_writer=make_writer(tmp_path),
+        workspace_root=tmp_path,
+    )
+    args = {
+        "questions": [{"id": "target", "header": "目标", "question": "请选择目标。"}],
+        "reason": "需要确认",
+    }
+
+    for outcome in ("dismissed", "timed_out"):
+        result = router.dispatch(
+            "request_user_input",
+            args,
+            interaction_handler=lambda _request, outcome=outcome: HumanInteractionResponse(
+                approved=False,
+                outcome=outcome,
+            ),
+        )
+        assert result["status"] == "success"
+        assert result["outcome"] == outcome
+        assert result["answered_count"] == 0
+
+
+def test_request_user_input_without_handler_returns_explicit_error(tmp_path: Path) -> None:
+    router = ToolRouter(
+        allowed_tools=["request_user_input"],
+        episode_writer=make_writer(tmp_path),
+        workspace_root=tmp_path,
+    )
+
+    result = router.dispatch(
+        "request_user_input",
+        {
+            "questions": [{"id": "target", "header": "目标", "question": "请选择目标。"}],
+            "reason": "需要确认",
+        },
+    )
+
+    assert result["status"] == "error"
+    assert result["error"]["type"] == "user_input_unavailable"
 
 
 def test_router_dispatches_file_write_through_bound_handler(tmp_path: Path) -> None:
@@ -2632,19 +2771,19 @@ def test_router_dispatches_request_user_input_through_bound_handler(tmp_path: Pa
         calls.append((args, context.interaction_handler))
         return {
             "status": "success",
-            "question": args["question"],
-            "answer": "bound",
+            "outcome": "answered",
+            "answers": {"target": ["bound"]},
             "answer_chars": 5,
         }
 
     router._handlers["request_user_input"] = handler
     result = router.dispatch(
         "request_user_input",
-        {"question": "Which file?"},
+        {"questions": [{"id": "target", "header": "Target", "question": "Which file?"}]},
         interaction_handler=interaction,  # type: ignore[arg-type]
     )
 
-    assert result["answer"] == "bound"
+    assert result["answers"] == {"target": ["bound"]}
     assert len(calls) == 1
     assert calls[0][1] is interaction
 

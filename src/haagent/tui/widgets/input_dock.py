@@ -11,11 +11,13 @@ from pathlib import Path
 from textual.widget import Widget
 from textual.containers import Vertical
 
+from haagent.runtime.execution.human_interaction import UserQuestion
 from haagent.tui.commands import command_registry
 from haagent.tui.commands.suggestions import CommandSuggestionOverlay
 from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex
 from haagent.tui.widgets.prompt_input import PromptInput
+from haagent.tui.widgets.question_prompt import QuestionPrompt
 
 
 class InputDock(Vertical):
@@ -36,6 +38,30 @@ class InputDock(Vertical):
         self.file_reference_index = file_reference_index
         self.command_overlay: CommandSuggestionOverlay | None = None
         self.file_ref_overlay: FileReferenceOverlay | None = None
+        self.question_prompt: QuestionPrompt | None = None
+
+    def open_question_prompt(self, questions: tuple[UserQuestion, ...]) -> QuestionPrompt:
+        self.close_command_suggestions()
+        self.close_file_refs()
+        prompt = self._prompt()
+        # 交互期间彻底隔离普通 prompt 的 slash、附件、文件引用和历史输入事件。
+        prompt.display = False
+        if self.question_prompt is None:
+            self.question_prompt = QuestionPrompt(questions, id="question-prompt")
+            self.mount(self.question_prompt, before=prompt)
+        self.styles.height = self.EXPANDED_HEIGHT
+        # mount 完成后再恢复焦点，避免 Textual 将按键投递给已隐藏的 PromptInput。
+        self.call_after_refresh(self.question_prompt.focus)
+        return self.question_prompt
+
+    def close_question_prompt(self) -> None:
+        question_prompt = self.question_prompt
+        self.question_prompt = None
+        if question_prompt is not None and question_prompt.is_mounted:
+            question_prompt.remove()
+        prompt = self._prompt()
+        prompt.display = True
+        self._collapse_if_idle()
 
     def open_command_suggestions(self, query: str) -> CommandSuggestionOverlay:
         self.close_file_refs()
@@ -81,7 +107,7 @@ class InputDock(Vertical):
         return self.query_one("#prompt-input", PromptInput)
 
     def _collapse_if_idle(self) -> None:
-        if self.command_overlay is None and self.file_ref_overlay is None:
+        if self.command_overlay is None and self.file_ref_overlay is None and self.question_prompt is None:
             self.styles.height = self.COLLAPSED_HEIGHT
             if self.is_mounted:
                 self._prompt().focus()

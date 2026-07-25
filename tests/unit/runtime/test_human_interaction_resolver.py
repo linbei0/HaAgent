@@ -5,7 +5,14 @@ tests/unit/runtime/test_human_interaction_resolver.py - 人机交互解析器测
 permission_mode 自动跳过必须可区分，且 always 不得跨类别批准 shell。
 """
 
-from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from dataclasses import replace
+
+from haagent.runtime.execution.human_interaction import (
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+    UserQuestion,
+    UserQuestionOption,
+)
 from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
 
 
@@ -15,7 +22,15 @@ def _user_input_request(question: str = "Which file?", path: str = "README.md") 
         tool_name="request_user_input",
         question=question,
         reason="Need target",
-        args_summary={"question": question, "path": path},
+        args_summary={"question_count": 1, "path": path},
+        questions=(
+            UserQuestion(
+                id="target",
+                header="Target",
+                question=question,
+                options=(UserQuestionOption(path, "Target path"), UserQuestionOption("Other", "Another path")),
+            ),
+        ),
     )
 
 
@@ -62,26 +77,57 @@ def test_resolver_reuses_answered_user_input_by_signature() -> None:
     resolver = HumanInteractionResolver()
     request = _user_input_request()
 
-    resolution = resolver.record(request, HumanInteractionResponse(approved=True, answer="README.md"), turn=1)
+    response = HumanInteractionResponse(
+        approved=True,
+        outcome="answered",
+        answers={"target": ("README.md",)},
+    )
+    resolution = resolver.record(request, response, turn=1)
     reused = resolver.resolve(_user_input_request())
 
     assert reused == resolution
     assert reused is not None
-    assert reused.to_response() == HumanInteractionResponse(approved=True, answer="README.md")
+    assert reused.to_response() == response
     assert len(resolver.state_records()) == 1
     assert resolver.state_records()[0]["status"] == "answered"
+    assert resolver.state_records()[0]["question_count"] == 1
+    assert resolver.state_records()[0]["answered_count"] == 1
+    assert resolver.state_records()[0]["answer_chars"] == len("README.md")
+    assert "README.md" not in str(resolver.state_records()[0])
 
 
-def test_resolver_reuses_declined_user_input() -> None:
+def test_resolver_signature_changes_when_question_options_change() -> None:
+    resolver = HumanInteractionResolver()
+    original = _user_input_request(path="README.md")
+    resolver.record(
+        original,
+        HumanInteractionResponse(approved=True, outcome="answered", answers={"target": ("README.md",)}),
+        turn=1,
+    )
+
+    changed_question = replace(
+        original.questions[0],
+        options=(
+            UserQuestionOption("pyproject.toml", "Target path"),
+            UserQuestionOption("Other", "Another path"),
+        ),
+    )
+    changed = replace(original, questions=(changed_question,))
+
+    assert resolver.resolve(changed) is None
+
+
+def test_resolver_reuses_dismissed_user_input_within_current_run() -> None:
     resolver = HumanInteractionResolver()
     request = _user_input_request()
 
-    resolver.record(request, HumanInteractionResponse(approved=False, answer=""), turn=1)
+    response = HumanInteractionResponse(approved=False, outcome="dismissed")
+    resolver.record(request, response, turn=1)
     reused = resolver.resolve(_user_input_request())
 
     assert reused is not None
-    assert reused.status == "declined"
-    assert reused.to_response() == HumanInteractionResponse(approved=False, answer="")
+    assert reused.status == "dismissed"
+    assert reused.to_response() == response
 
 
 def test_resolver_does_not_reuse_allow_once_or_denial() -> None:
@@ -122,7 +168,11 @@ def test_resolver_reuses_always_permission_rule_by_pattern() -> None:
 
 def test_resolver_does_not_reuse_different_args_summary() -> None:
     resolver = HumanInteractionResolver()
-    resolver.record(_user_input_request(path="README.md"), HumanInteractionResponse(approved=True, answer="README.md"), turn=1)
+    resolver.record(
+        _user_input_request(path="README.md"),
+        HumanInteractionResponse(approved=True, outcome="answered", answers={"target": ("README.md",)}),
+        turn=1,
+    )
 
     assert resolver.resolve(_user_input_request(path="docs/harness-requirements.md")) is None
 
@@ -132,7 +182,11 @@ def test_state_records_are_neutral_bounded_and_redacted() -> None:
     secret = "sk-test1234567890abcdef1234567890abcdef"
     resolver.record(
         _user_input_request(question="Token?", path=secret),
-        HumanInteractionResponse(approved=True, answer=secret + ("A" * 400)),
+        HumanInteractionResponse(
+            approved=True,
+            outcome="answered",
+            answers={"target": (secret + ("A" * 400),)},
+        ),
         turn=1,
     )
 
@@ -141,9 +195,12 @@ def test_state_records_are_neutral_bounded_and_redacted() -> None:
     assert record["type"] == "user_input"
     assert record["tool"] == "request_user_input"
     assert record["status"] == "answered"
+    assert record["question"] == "Target"
+    assert record["question_count"] == 1
+    assert record["answered_count"] == 1
+    assert record["answer_chars"] > 400
     assert secret not in str(record)
-    assert "[REDACTED_TOKEN]" in str(record)
-    assert len(str(record["answer_excerpt"])) < 280
+    assert "answer_excerpt" not in record
 
 
 def test_edit_diff_once_does_not_reuse_for_different_file() -> None:

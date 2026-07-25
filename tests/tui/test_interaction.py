@@ -11,9 +11,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from haagent.runtime.events import FailureNoticeEvent
-from haagent.runtime.execution.human_interaction import HumanInteractionResponse
+from haagent.runtime.execution.human_interaction import (
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+    UserQuestion,
+    UserQuestionOption,
+)
 from haagent.tui.application.app import HaAgentTuiApp
-from haagent.tui.widgets import ConversationTimeline
+from haagent.tui.widgets import ConversationTimeline, QuestionPrompt
 
 from tests.tui.support import (
     FakeAssistantService,
@@ -60,7 +65,7 @@ def test_tui_help_modal_is_contextual_for_pending_input(tmp_path: Path) -> None:
             await pilot.press("escape")
             await pilot.pause(0.1)
             if app._pending_interaction is not None:
-                app._complete_interaction(HumanInteractionResponse(approved=False, answer=""))
+                app._complete_interaction(HumanInteractionResponse(approved=False, outcome="dismissed"))
                 await pilot.pause(0.2)
             assert after_help == before
             assert "等待补充输入" in rendered
@@ -130,7 +135,7 @@ def test_tui_edit_diff_modal_returns_allow_and_deny_responses(tmp_path: Path) ->
     asyncio.run(allow_run())
     asyncio.run(deny_run())
 
-def test_tui_pending_input_answer_uses_enter_and_continues_same_turn(tmp_path: Path) -> None:
+def test_tui_pending_input_text_supports_multiline_and_continues_same_turn(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_user_input_request())
         app = HaAgentTuiApp(service)
@@ -139,15 +144,21 @@ def test_tui_pending_input_answer_uses_enter_and_continues_same_turn(tmp_path: P
             input_widget.value = "Inspect"
             await pilot.press("enter")
             await pilot.pause(0.2)
-            await pilot.press("up")
-            assert input_widget.value == ""
-            input_widget.value = "README.md\nand docs"
+            question_prompt = app.query_one(QuestionPrompt)
+            await pilot.press(*list("README.md"))
+            await pilot.press("ctrl+enter")
+            await pilot.press(*list("and docs"))
             await pilot.press("enter")
             await pilot.pause(0.2)
             assert service.prompts == ["Inspect"]
             assert service.interaction_responses == [
-                HumanInteractionResponse(approved=True, answer="README.md\nand docs"),
+                HumanInteractionResponse(
+                    approved=True,
+                    outcome="answered",
+                    answers={"target": ("README.md\nand docs",)},
+                ),
             ]
+            assert question_prompt.state.current_draft == "README.md\nand docs"
             assert input_widget.value == ""
             await pilot.press("up")
             assert input_widget.value == "Inspect"
@@ -306,8 +317,10 @@ def test_tui_user_input_requested_enters_answer_required_state(tmp_path: Path) -
             await pilot.pause(0.2)
             status = _text(app, "#status-bar")
             conversation = _text(app, "#conversation")
-            placeholder = input_widget.placeholder
-            input_has_focus = input_widget.has_focus
+            question_prompt = app.query_one(QuestionPrompt)
+            panel_text = str(question_prompt.render())
+            input_has_focus = question_prompt.has_focus
+            input_hidden = input_widget.display is False
             await pilot.press("escape")
             await pilot.pause(0.1)
             if app._pending_interaction is not None:
@@ -316,8 +329,10 @@ def test_tui_user_input_requested_enters_answer_required_state(tmp_path: Path) -
             assert "待补充" in status
             assert "state:" not in status
             assert "需要补充" in conversation
-            assert "Which file should I inspect?" in conversation
-            assert "回答 Agent 的问题" in placeholder
+            assert "Which file should I inspect?" not in conversation
+            assert "问题 1/1 · 目标文件" in panel_text
+            assert "Which file should I inspect?" in panel_text
+            assert input_hidden
             assert input_has_focus
 
     asyncio.run(run())
@@ -331,12 +346,16 @@ def test_tui_user_input_answer_continues_same_run_prompt_events(tmp_path: Path) 
             input_widget.value = "Inspect"
             await pilot.press("enter")
             await pilot.pause(0.2)
-            input_widget.value = "README.md"
+            await pilot.press(*list("README.md"))
             await pilot.press("enter")
             await pilot.pause(0.2)
             assert service.prompts == ["Inspect"]
             assert service.interaction_responses == [
-                HumanInteractionResponse(approved=True, answer="README.md"),
+                HumanInteractionResponse(
+                    approved=True,
+                    outcome="answered",
+                    answers={"target": ("README.md",)},
+                ),
             ]
             conversation = _text(app, "#conversation")
             assert "回答已提交：request_user_input" not in conversation
@@ -348,7 +367,7 @@ def test_tui_user_input_answer_continues_same_run_prompt_events(tmp_path: Path) 
 
     asyncio.run(run())
 
-def test_tui_user_input_cancel_returns_explicit_denial(tmp_path: Path) -> None:
+def test_tui_user_input_escape_returns_dismissed_without_failing_turn(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_user_input_request())
         app = HaAgentTuiApp(service)
@@ -359,16 +378,130 @@ def test_tui_user_input_cancel_returns_explicit_denial(tmp_path: Path) -> None:
             await pilot.pause(0.2)
             await pilot.press("escape")
             await pilot.pause(0.2)
-            assert service.interaction_responses == [HumanInteractionResponse(approved=False, answer="")]
+            assert service.interaction_responses == [HumanInteractionResponse(approved=False, outcome="dismissed")]
             conversation = _text(app, "#conversation")
-            assert "回答已取消：运行工具" in conversation
-            assert "运行工具失败" in conversation
-            assert "工具 1 项" not in conversation
-            assert "request_user_input" not in conversation
-            assert "失败" in conversation
+            assert "README.md" not in conversation
+            assert "运行工具失败" not in conversation
             status = _text(app, "#status-bar")
-            assert "失败" in status
+            assert "失败" not in status
             assert "state:" not in status
+
+    asyncio.run(run())
+
+
+def test_tui_user_input_ctrl_x_cancels_entire_task(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_user_input_request())
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Inspect"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            await pilot.press("ctrl+x")
+            await pilot.pause(0.2)
+
+            assert service.cancelled_count == 1
+            assert service.interaction_responses == [HumanInteractionResponse(approved=False, outcome="dismissed")]
+            assert app._pending_interaction is None
+            assert list(app.query(QuestionPrompt)) == []
+
+    asyncio.run(run())
+
+
+def test_tui_choice_navigation_review_and_slash_text_do_not_use_prompt_commands(tmp_path: Path) -> None:
+    async def run() -> None:
+        request = HumanInteractionRequest(
+            interaction_type="user_input",
+            tool_name="request_user_input",
+            reason="需要两个答案",
+            questions=(
+                UserQuestion(
+                    id="storage",
+                    header="存储方式",
+                    question="请选择存储方式。",
+                    options=(
+                        UserQuestionOption(label="SQLite（推荐）", description="零配置。"),
+                        UserQuestionOption(label="JSON 文件", description="容易查看。"),
+                    ),
+                    custom=False,
+                ),
+                UserQuestion(id="note", header="说明", question="补充说明。"),
+            ),
+        )
+        service = FakeAssistantService(workspace_root=tmp_path, interaction_request=request)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Inspect"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            await pilot.press("down", "enter")
+            await pilot.press(*list("/not-a-command"))
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            assert "确认回答" in str(app.query_one(QuestionPrompt).render())
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+
+            assert service.prompts == ["Inspect"]
+            assert service.interaction_responses == [
+                HumanInteractionResponse(
+                    approved=True,
+                    outcome="answered",
+                    answers={"storage": ("JSON 文件",), "note": ("/not-a-command",)},
+                )
+            ]
+
+    asyncio.run(run())
+
+
+def test_tui_question_navigation_is_local_and_does_not_refresh_timeline(tmp_path: Path) -> None:
+    async def run() -> None:
+        request = HumanInteractionRequest(
+            interaction_type="user_input",
+            tool_name="request_user_input",
+            questions=(
+                UserQuestion(
+                    id="storage",
+                    header="存储方式",
+                    question="请选择存储方式。",
+                    options=(
+                        UserQuestionOption(label="SQLite（推荐）", description="零配置。"),
+                        UserQuestionOption(label="JSON 文件", description="容易查看但查询较弱。"),
+                    ),
+                    custom=True,
+                    placeholder="输入其他方案",
+                ),
+            ),
+        )
+        service = FakeAssistantService(workspace_root=tmp_path, interaction_request=request)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(80, 24)) as pilot:
+            input_widget = app.query_one("#prompt-input")
+            input_widget.value = "Inspect"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            question_prompt = app.query_one(QuestionPrompt)
+            compact = str(question_prompt.render())
+            refresh_calls = 0
+            original_refresh = app._refresh
+
+            def counted_refresh() -> None:
+                nonlocal refresh_calls
+                refresh_calls += 1
+                original_refresh()
+
+            app._refresh = counted_refresh  # type: ignore[method-assign]
+            for _ in range(100):
+                question_prompt.state.move_option(1)
+                question_prompt.refresh()
+            assert app.query_one(QuestionPrompt) is question_prompt
+            assert refresh_calls == 0
+            assert "零配置。" in compact
+            assert "容易查看但查询较弱。" not in compact
+            await pilot.press("escape")
+            await pilot.pause(0.2)
 
     asyncio.run(run())
 

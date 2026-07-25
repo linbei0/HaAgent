@@ -272,10 +272,12 @@ def _user_input_requested_event(event: dict[str, object], context: RawRuntimeUiE
         state="requested",
         question=summary_value(str(event.get("question", "")), 240),
         reason=summary_value(str(event.get("reason", "")), 240),
+        question_count=int(event.get("question_count") or 1),
     )
 
 
 def _user_input_received_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> UserInputStateEvent:
+    outcome = str(event.get("outcome") or ("answered" if event.get("approved") else "dismissed"))
     return UserInputStateEvent(
         session_id=context.session_id,
         turn_index=context.turn_index,
@@ -283,8 +285,11 @@ def _user_input_received_event(event: dict[str, object], context: RawRuntimeUiEv
         tool_name=tool_name(event),
         state="received",
         question=summary_value(str(event.get("question", "")), 240),
+        question_count=int(event.get("question_count") or 1),
+        outcome=outcome,
+        answered_count=int(event.get("answered_count") or 0),
         answer_chars=event.get("answer_chars"),
-        approved=event.get("approved"),
+        approved=outcome == "answered",
     )
 
 

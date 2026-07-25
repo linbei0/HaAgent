@@ -9,6 +9,7 @@ from __future__ import annotations
 from haagent.runtime.execution.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
+    interaction_question_summary,
 )
 
 
@@ -34,7 +35,7 @@ class UnattendedInteractionHandler:
     def request(self, request: HumanInteractionRequest) -> HumanInteractionResponse:
         # 安全边界：无人值守禁止伪造批准/默认选项
         kind = request.interaction_type or "interaction"
-        parts = [request.question or "", request.reason or "", request.tool_name or ""]
+        parts = [interaction_question_summary(request), request.reason or "", request.tool_name or ""]
         summary = _safe_summary(" ".join(p for p in parts if p).strip() or kind)
         raise UnattendedInteractionRequired(kind=kind, summary=summary)
 

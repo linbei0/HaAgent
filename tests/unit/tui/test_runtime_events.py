@@ -89,7 +89,6 @@ class FakeRuntimeEventApp:
         self.tool_diagnostics: list[tuple[int, str, str]] = []
         self.blocks: list[tuple[str, str]] = []
         self.lines: list[str] = []
-        self.answer_questions: list[str] = []
         self.task_progress_events: list[TaskProgressEvent] = []
         self.presentation_texts: list[str] = []
         self.presentation_detail_ids: list[str | None] = []
@@ -103,9 +102,6 @@ class FakeRuntimeEventApp:
         self.context_usage_events: list[ContextUsageEvent] = []
         self._conversation = _FakeConversation(self)
         self.memory_flow = _FakeMemoryFlow(self)
-
-    def _set_answer_required(self, question: str) -> None:
-        self.answer_questions.append(question)
 
     def _refresh(self) -> None:
         self.refreshes += 1
@@ -635,7 +631,7 @@ def test_runtime_ui_event_handler_hides_loop_guidance() -> None:
     assert app.tool_diagnostics == []
 
 
-def test_runtime_ui_event_handler_tracks_user_input_state() -> None:
+def test_runtime_ui_event_handler_only_presents_user_input_summary() -> None:
     app = FakeRuntimeEventApp()
 
     handle_runtime_ui_event(
@@ -643,7 +639,6 @@ def test_runtime_ui_event_handler_tracks_user_input_state() -> None:
         UserInputStateEvent("session-1", 1, 2, "request_user_input", "requested", "你要哪个文件？"),
     )
 
-    assert app.answer_questions == ["你要哪个文件？"]
     assert app.blocks == []
     assert "需要补充信息" in app.plain_text
     assert "你要哪个文件？" in app.plain_text
@@ -684,7 +679,7 @@ def test_runtime_ui_event_handler_shows_cancelled_user_input_notice() -> None:
     )
 
     assert app.lines == []
-    assert "回答已取消：运行工具" in app.plain_text
+    assert "回答已取消：询问用户" in app.plain_text
     assert "建议：补充信息后重试或调整任务" in app.plain_text
 
 

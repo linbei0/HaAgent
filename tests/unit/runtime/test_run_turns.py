@@ -28,6 +28,7 @@ from haagent.runtime.orchestration.turns import (
     TurnLoopDependencies,
     TurnLoopState,
     _handle_no_tool_response,
+    _resolve_progress_block,
     _run_tool_calls,
     run_turn_loop,
 )
@@ -1746,12 +1747,16 @@ def test_progress_guard_block_continue_recovers() -> None:
     guard = ProgressGuard()
     blocked_states: list[object] = []
     finish_statuses: list[object] = []
-    answers = iter(["continue"])
-
     def handler(request: HumanInteractionRequest) -> HumanInteractionResponse:
         assert request.tool_name == "progress_guard"
-        assert request.args_summary.get("choices") == ["continue", "replan", "stop"]
-        return HumanInteractionResponse(approved=True, answer=next(answers))
+        assert request.questions[0].id == "progress_action"
+        assert request.questions[0].custom is False
+        assert [option.label for option in request.questions[0].options] == ["continue", "replan", "stop"]
+        return HumanInteractionResponse(
+            approved=True,
+            outcome="answered",
+            answers={"progress_action": ("continue",)},
+        )
 
     writer = _FakeWriter()
     state = TurnLoopState(messages=[], context_id="ctx")
@@ -1780,6 +1785,39 @@ def test_progress_guard_block_continue_recovers() -> None:
     assert blocked_states
     assert any(item.get("event") == "progress_guard_recovered" for item in writer.transcript)
     assert finish_statuses == []
+
+
+def test_progress_guard_rejects_legacy_string_answer() -> None:
+    from haagent.runtime.execution.human_interaction import HumanInteractionResponse
+    from haagent.runtime.execution.progress_guard import ProgressDecision, ProgressGuard
+
+    finish_statuses: list[object] = []
+    deps = _deps(
+        router=_FakeRouter({"status": "success"}),
+        writer=_FakeWriter(),
+        recorder=SimpleNamespace(
+            transition=lambda status: None,
+            finish=lambda status: finish_statuses.append(status) or SimpleNamespace(status=status),
+            state_history=[RunStatus.EXECUTING],
+        ),
+    )
+    deps = _replace_dep(deps, "progress_guard", ProgressGuard())
+    deps = _replace_dep(
+        deps,
+        "interaction_handler",
+        lambda _request: HumanInteractionResponse(approved=True, answer="continue"),
+    )
+    deps = _replace_dep(deps, "interaction_bridge_factory", lambda turn, resolver: deps.interaction_handler)
+
+    result = _resolve_progress_block(
+        turn=4,
+        decision=ProgressDecision(level="block", reason="重复", pattern="same"),
+        state=TurnLoopState(messages=[], context_id="ctx"),
+        deps=deps,
+    )
+
+    assert result is not None
+    assert finish_statuses == [RunStatus.FAILED]
 
 
 def test_progress_guard_block_without_handler_fails_loop_limit() -> None:

@@ -243,14 +243,20 @@ def test_task_tools_are_low_risk_worker_inspection_tools() -> None:
     assert TOOL_REGISTRY["task_output"].risk_level == "low"
 
 
-def test_request_user_input_schema_requires_question() -> None:
+def test_request_user_input_schema_requires_structured_questions() -> None:
     schemas = export_tool_schemas(["request_user_input"])
     schema = schemas[0]
 
     assert "tools cannot discover" in schema["description"]
     assert "file_list, grep, file_read" in schema["description"]
-    assert schema["parameters"]["required"] == ["question"]
-    assert schema["parameters"]["properties"]["question"]["type"] == "string"
+    assert schema["parameters"]["required"] == ["questions"]
+    questions = schema["parameters"]["properties"]["questions"]
+    assert questions["type"] == "array"
+    assert questions["minItems"] == 1
+    assert questions["maxItems"] == 3
+    assert questions["items"]["required"] == ["id", "header", "question"]
+    assert questions["items"]["properties"]["options"]["minItems"] == 2
+    assert questions["items"]["properties"]["options"]["maxItems"] == 4
     assert schema["parameters"]["properties"]["reason"]["type"] == "string"
 
 

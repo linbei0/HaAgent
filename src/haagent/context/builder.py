@@ -721,9 +721,10 @@ def _interaction_state_summary(record: dict) -> str:
     question = str(record.get("question") or "")
     if question:
         parts.append(f"question={json.dumps(question, ensure_ascii=False)}")
-    if "answer_excerpt" in record:
-        parts.append(f"answer_excerpt={json.dumps(str(record['answer_excerpt']), ensure_ascii=False)}")
-        parts.append(f"answer_chars={record.get('answer_chars', 0)}")
+    if record.get("type") == "user_input":
+        for key in ("outcome", "question_count", "answered_count", "answer_chars"):
+            if key in record:
+                parts.append(f"{key}={_safe_state_value(record[key], 'unknown')}")
     if "approved" in record:
         parts.append(f"approved={str(bool(record['approved'])).lower()}")
     if "turn" in record:

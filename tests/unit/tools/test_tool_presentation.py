@@ -183,8 +183,13 @@ def test_summarizes_code_run_and_shell_output_excerpts() -> None:
 def test_summarizes_request_user_input_args() -> None:
     assert summarize_tool_args(
         "request_user_input",
-        {"question": "Proceed?\nPlease confirm.", "reason": ""},
-    ) == {"question": "Proceed? Please confirm.", "reason": ""}
+        {
+            "questions": [
+                {"id": "confirm", "header": "确认", "question": "Proceed?\nPlease confirm."},
+            ],
+            "reason": "",
+        },
+    ) == {"headers": ["确认"], "question_count": 1, "reason": ""}
 
 
 def test_unknown_tool_uses_key_fallbacks() -> None:

@@ -54,6 +54,9 @@
 - 静态工具经 `ToolContribution` / `ToolCatalog` 同源登记 definition、handler binder、展示/observation 投影、guardrail 与 chat tags；新增静态工具只改一个 contribution。静态执行统一走 catalog 绑定的 handler，并经 `ToolExecutionContext` 注入逐次 `interaction_handler`；Router 不对 `file_write`/`apply_patch*`/`request_user_input` 按名旁路。动态 `mcp__*` 不进静态 binder，仍由 ToolRouter 安全 Seam 处理。
 - 高风险工具缺少允许或批准时必须被 policy 拒绝，handler 不执行，并记录 `policy_denied` 与 `approval.status=missing`。
 - 低风险和中风险工具不需要审批，仍按原规则执行，并记录 `approval.status=not_required`。
+- `request_user_input` 只接受 `questions + reason` 结构化输入：每次 1–3 题、ID 唯一；选项题 2–4 项，`multiple` 仅用于选项题，`custom` 默认允许自定义。不得保留旧顶层 `question` 双契约，也不支持 Secret、自动默认答案或跨会话复用回答。
+- 用户补充输入返回 `answered`、`dismissed` 或 `timed_out`。关闭和超时都是成功工具结果，由模型调整方案或解释阻塞；缺少交互 handler 才返回明确的 `user_input_unavailable` 工具错误。
+- 聊天频道按问题顺序逐题发送并为每题生成独立 nonce；`/answer <nonce> 1` 与多选 `1,3` 映射为选项标签，非纯数字内容仅在允许自定义时接收，`/dismiss <nonce>` 返回 `dismissed`。非法编号或禁止的自定义答案必须保留 pending，超时单独返回 `timed_out`。
 
 ## 5. 上下文与模型输入
 
@@ -79,6 +82,7 @@
 - `working_state.json` 保存当前目标、关键发现、已完成动作、下一步和最近更新 turn，字段必须有固定条目数或字符限制。
 - `RuntimeUiEvent` 是前端无关的强类型事件契约，字段只放展示和状态判断需要的摘要。
 - `RuntimeUiEvent` 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。
+- 用户补充输入的 event、transcript 和 working state 只保存短标题、问题数、outcome、回答数和字符数；完整问题正文仅停留在当前 live interaction，完整答案只返回当前模型工具结果。
 - 稳定事件类型包括 session/turn 开始结束、工具开始/完成/失败、assistant 消息、审批请求/批准/拒绝、用户补充输入请求/接收、failure 和 session finished。
 - 模型路由还记录 `model_protocol_fallback` 与 `model_fallback`，包含脱敏连接、模型、协议、原因和能力缺失；顶部状态和活动流应展示实际使用模型。
 - 模型流恢复额外发出 `assistant_attempt_reset`、`model_retry_scheduled` / `model_retry_exhausted`；reset 事件只携带 turn/attempt/category 等标识，不携带失败 attempt 全文或 provider raw payload。
@@ -130,6 +134,9 @@
 - 聊天 footer 固定为 `/ 命令 · Ctrl+F 搜索 · ? 帮助 · Ctrl+Q 退出`，不显示 `Enter 发送`；运行时用 `Ctrl+X 取消任务` 替换 `/ 命令`。其他上下文 footer 最多四组操作，完整键位进入 `?` 帮助。
 - 计划任务未读数不进入顶部状态栏；数量增加时只发一次非持久通知，完整数量留在计划任务界面。
 - 运行时请求用户补充信息时，输入区进入回答状态，提交后继续同一个 turn，不能变成新 prompt。
+- 补充输入使用 InputDock 内联结构化面板：普通 PromptInput 在交互期间隐藏，slash command、文件引用、图片附件和历史输入逻辑不得接收回答按键。Esc 只关闭本次提问并返回 `dismissed`；Ctrl+X 才取消整个任务。
+- 结构化面板支持 1–3 题、单选、多选、自由文本和 Review；方向键/数字选择、Space 切换多选、Ctrl+Enter 插入文本换行、Tab/Shift+Tab 切题。80×24 使用紧凑标题并只展示当前选项说明，120 列以上展示全部说明，resize 后保持焦点、选择和草稿。
+- 每个请求只挂载一次 QuestionPrompt；选项移动、草稿编辑、问题导航和 Review 只刷新该 Widget，不得调用应用级 `_refresh()` 或重建 timeline。打开/关闭只定向更新状态栏、footer、焦点和 InputDock。
 - 工具审批 modal 必须展示工具名、影响范围和关键参数摘要；文件修改和命令执行等高影响操作默认焦点应放在 Deny。
 - 审批 modal 是 focus trap；审批结果必须回到同一个 turn。
 - 帮助应以 modal、overlay 或上下文化帮助呈现，不应污染对话流。

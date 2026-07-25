@@ -94,7 +94,12 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
         return f"File change succeeded. Consider reading back {path} or running verification before completing."
 
     if tool_name == "request_user_input":
-        return "Use the user's answer to continue the task; do not ask the same question again."
+        outcome = str(result.get("outcome") or "")
+        if outcome == "answered":
+            return "Use the structured answers to continue the task; do not ask the same questions again."
+        if outcome == "timed_out":
+            return "User input timed out. Replan or explain the blocker; this is not a tool failure."
+        return "User dismissed the questions. Adjust the plan or explain the blocker; this is not a tool failure."
 
     return None
 

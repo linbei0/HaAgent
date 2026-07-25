@@ -11,16 +11,18 @@ from haagent.runtime.execution.retry import ReplaySafety
 from haagent.tools.catalog import ToolContribution
 from haagent.tools.base import ToolExecutionContext, ToolHandler
 from haagent.tools.session_history import SESSION_HISTORY_USAGE_GUIDANCE, session_history
-from haagent.tools.contribution_helpers import (
-    compact_excerpt,
-    first_present_string,
-    interaction_summary_value,
-)
+from haagent.tools.contribution_helpers import interaction_summary_value
 
 
 def _request_user_input_interaction(args: dict[str, Any]) -> dict[str, object]:
+    questions = args.get("questions") if isinstance(args.get("questions"), list) else []
     return {
-        "question": interaction_summary_value(str(args.get("question", "")), 240),
+        "headers": [
+            interaction_summary_value(str(question.get("header", "")), 48)
+            for question in questions
+            if isinstance(question, dict)
+        ],
+        "question_count": len(questions),
         "reason": interaction_summary_value(str(args.get("reason", "")), 240),
     }
 
@@ -29,12 +31,12 @@ def _request_user_input_observation(
     args: dict[str, Any],
     result: dict[str, Any],
 ) -> dict[str, object]:
-    answer = first_present_string(result.get("answer"), result.get("answer_excerpt"))
     return {
         "status": result.get("status", "unknown"),
-        "question": first_present_string(result.get("question"), args.get("question")),
-        "answer_excerpt": compact_excerpt(answer)[0],
-        "answer_chars": result.get("answer_chars", len(answer)),
+        "outcome": result.get("outcome", "unknown"),
+        "question_count": result.get("question_count", 0),
+        "answered_count": result.get("answered_count", 0),
+        "answer_chars": result.get("answer_chars", 0),
     }
 
 
@@ -121,24 +123,55 @@ CORE_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="request_user_input",
         description=(
-            "Ask the user only when execution requires a preference, requirement, choice, or information that "
+            "Ask one to three short structured questions only when execution requires a preference, requirement, "
+            "choice, or information that "
             "tools cannot discover. Do not ask for file paths, project facts, or runtime state that file_list, "
-            "grep, file_read, or other tools can determine. Continue with the returned answer."
+            "grep, file_read, or other tools can determine. Prefer one question. Put a recommended option first "
+            "and suffix its label with （推荐）. Do not ask for secrets. Continue with the returned answers."
         ),
         risk_level="low",
         parameters={
             "type": "object",
             "properties": {
-                "question": {
-                    "type": "string",
-                    "description": "one concrete question whose answer is required to continue",
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "description": "one to three questions; prefer one unless independent decisions block progress",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "id": {"type": "string", "description": "stable unique snake_case question id"},
+                            "header": {"type": "string", "description": "very short label shown in the UI"},
+                            "question": {"type": "string", "description": "complete question text"},
+                            "options": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": 4,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["label", "description"],
+                                },
+                            },
+                            "multiple": {"type": "boolean"},
+                            "custom": {"type": "boolean"},
+                            "placeholder": {"type": "string"},
+                        },
+                        "required": ["id", "header", "question"],
+                    },
                 },
                 "reason": {
                     "type": "string",
                     "description": "briefly explain what decision or missing requirement blocks execution",
                 },
             },
-            "required": ["question"],
+            "required": ["questions"],
             "additionalProperties": False,
         },
         execution_effect="interaction",
@@ -147,6 +180,7 @@ CORE_CONTRIBUTIONS: list[ToolContribution] = [
         router_owned=True,
         interaction_args_summary=_request_user_input_interaction,
         project_observation=_request_user_input_observation,
+        display_name_zh="询问用户",
     ),
     ToolContribution(
         name="start_memory_update",

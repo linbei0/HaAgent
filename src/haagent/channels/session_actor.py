@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from haagent.channels.event_bridge import ChannelEventBridge
-from haagent.channels.interactions import InteractionBroker
+from haagent.channels.interactions import InteractionBroker, PendingInteraction
 from haagent.channels.presenter import (
     ChannelDelivery,
     ChannelPresenter,
@@ -290,22 +290,12 @@ class ChannelSessionActor:
                     continue
                 seen.add(pending.nonce)
                 if pending.kind == "approval":
-                    text = (
-                        f"需要批准 [{pending.nonce}]\n"
-                        f"工具：{pending.tool_name}\n"
-                        f"{pending.question}\n\n"
-                        f"回复：/approve {pending.nonce} 或 /deny {pending.nonce}"
-                    )
+                    text = _format_pending_interaction(pending)
                 else:
-                    text = (
-                        f"需要补充输入 [{pending.nonce}]\n"
-                        f"{pending.question}\n\n"
-                        f"回复：/answer {pending.nonce} <内容>"
-                    )
+                    text = _format_pending_interaction(pending)
                 await self._deliver_text(text)
         except asyncio.CancelledError:
             raise
-
     async def _apply_actions(self, actions: list[ChannelDelivery]) -> None:
         for action in actions:
             if isinstance(action, SendText):
@@ -337,6 +327,33 @@ class ChannelSessionActor:
         if not result.ok:
             self.last_send_error = str(result.error or "send_failed")
         return result
+
+
+def _format_pending_interaction(pending: PendingInteraction) -> str:
+    if pending.kind == "approval":
+        return (
+            f"需要批准 [{pending.nonce}]\n"
+            f"工具：{pending.tool_name}\n"
+            f"{pending.question}\n\n"
+            f"回复：/approve {pending.nonce} 或 /deny {pending.nonce}"
+        )
+
+    question = pending.user_question
+    if question is None:
+        raise RuntimeError("user_input pending is missing its structured question")
+    lines = [f"需要补充输入 [{pending.nonce}]", f"{question.header} · {question.question}"]
+    if question.options:
+        lines.extend(
+            f"{index}. {option.label} — {option.description}"
+            for index, option in enumerate(question.options, start=1)
+        )
+        example = "1,2" if question.multiple else "1"
+        suffix = "；也可直接回复自定义内容" if question.custom else ""
+        lines.extend(("", f"回复：/answer {pending.nonce} {example}{suffix}"))
+    else:
+        lines.extend(("", f"回复：/answer {pending.nonce} <内容>"))
+    lines.append(f"关闭：/dismiss {pending.nonce}")
+    return "\n".join(lines)
 
 
 def _channel_permission_mode(value: str) -> ChannelPermissionMode:

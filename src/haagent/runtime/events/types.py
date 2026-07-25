@@ -94,6 +94,9 @@ class UserInputStateEvent:
     state: Literal["requested", "received"]
     question: str
     reason: str = ""
+    question_count: int = 1
+    outcome: str = ""
+    answered_count: int = 0
     answer_chars: object = None
     approved: object = None
 

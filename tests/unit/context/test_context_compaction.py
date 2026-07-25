@@ -557,8 +557,11 @@ def test_context_builder_diagnostics_match_real_model_input(tmp_path: Path) -> N
                 "type": "question",
                 "tool": "request_user_input",
                 "status": "answered",
-                "question": "Continue?",
-                "answer_excerpt": skipped_memory,
+                "question": "下一步",
+                "outcome": "answered",
+                "question_count": 1,
+                "answered_count": 1,
+                "answer_chars": len(skipped_memory),
             },
         ],
         compaction_budget=compact_budget,
@@ -572,6 +575,30 @@ def test_context_builder_diagnostics_match_real_model_input(tmp_path: Path) -> N
     assert "...[collapsed " in context.model_input
     assert "SESSION-KEPT" in context.model_input
     assert "task_envelope" not in {record.key for record in context.diagnostics}
+
+
+def test_interaction_state_summary_uses_counts_without_answer_excerpt() -> None:
+    from haagent.context.builder import _interaction_state_summary
+
+    summary = _interaction_state_summary(
+        {
+            "type": "user_input",
+            "tool": "request_user_input",
+            "status": "answered",
+            "question": "下一步",
+            "outcome": "answered",
+            "question_count": 2,
+            "answered_count": 2,
+            "answer_chars": 18,
+            "answer_excerpt": "不应进入上下文",
+        }
+    )
+
+    assert "outcome=answered" in summary
+    assert "question_count=2" in summary
+    assert "answered_count=2" in summary
+    assert "answer_chars=18" in summary
+    assert "不应进入上下文" not in summary
 
 
 def test_prepare_initial_messages_derives_context_budget_from_model_metadata(tmp_path: Path) -> None:

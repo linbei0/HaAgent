@@ -13,6 +13,7 @@ from haagent.runtime.events import (
     RAW_RUNTIME_UI_EVENT_REGISTRY,
     RuntimeUiEventMapper,
     ToolActivityEvent,
+    UserInputStateEvent,
     WarningNoticeEvent,
 )
 from haagent.runtime.events.bus import (
@@ -248,6 +249,38 @@ def test_runtime_ui_event_mapper_groups_approval_events() -> None:
         args_summary={"command": "pytest"},
     )
 
+
+def test_runtime_ui_event_mapper_exposes_only_user_input_counts() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "user_input_received",
+            "turn": 2,
+            "tool_name": "request_user_input",
+            "question": "请选择存储方式",
+            "question_count": 2,
+            "outcome": "answered",
+            "answered_count": 2,
+            "answer_chars": 18,
+            "answers": {"storage": ["SECRET_VALUE"]},
+        },
+        session_id="session-1",
+        turn_index=1,
+    )
+
+    assert event == UserInputStateEvent(
+        session_id="session-1",
+        turn_index=1,
+        model_turn=2,
+        tool_name="request_user_input",
+        state="received",
+        question="请选择存储方式",
+        question_count=2,
+        outcome="answered",
+        answered_count=2,
+        answer_chars=18,
+        approved=True,
+    )
+    assert "SECRET_VALUE" not in repr(event)
 
 def test_runtime_ui_event_mapper_groups_failure_notice() -> None:
     event = RuntimeUiEventMapper.to_ui_event(

@@ -111,7 +111,6 @@ def _handle_user_input_state(app, event: UserInputStateEvent) -> None:
     if event.state == "requested":
         app.clear_progress_status()
         app._state = "waiting input"
-        app._set_answer_required(event.question)
         _apply_progress_presentation(app, present_user_input_state(event))
         return
     app._state = "running"

@@ -1,7 +1,7 @@
 """
 haagent/channels/interactions.py - 远程审批与补充输入 broker
 
-将同步 HumanInteractionHandler 桥接为聊天命令 /approve /deny /answer。
+将同步 HumanInteractionHandler 桥接为聊天命令 /approve /deny /answer /dismiss。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Literal
 from haagent.runtime.execution.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
+    UserQuestion,
 )
 
 
@@ -31,6 +32,11 @@ class PendingInteraction:
     binding_key: str
     tool_name: str
     question: str
+    user_question: UserQuestion | None = None
+
+    @property
+    def question_id(self) -> str:
+        return self.user_question.id if self.user_question is not None else ""
 
     def __repr__(self) -> str:
         return (
@@ -69,12 +75,25 @@ class InteractionBroker:
         owner_sender_id: str,
         binding_key: str,
     ) -> HumanInteractionResponse:
-        return self._request(
-            kind="user_input",
-            request=request,
-            owner_sender_id=owner_sender_id,
-            binding_key=binding_key,
-        )
+        if not request.questions:
+            raise InteractionError("user_input request has no structured questions")
+        answers: dict[str, tuple[str, ...]] = {}
+        for question in request.questions:
+            response = self._request(
+                kind="user_input",
+                request=request,
+                owner_sender_id=owner_sender_id,
+                binding_key=binding_key,
+                user_question=question,
+            )
+            if response.outcome != "answered":
+                return HumanInteractionResponse(
+                    approved=False,
+                    outcome=response.outcome,
+                    answers=answers,
+                )
+            answers.update(response.answers)
+        return HumanInteractionResponse(approved=True, outcome="answered", answers=answers)
 
     def _request(
         self,
@@ -83,6 +102,7 @@ class InteractionBroker:
         request: HumanInteractionRequest,
         owner_sender_id: str,
         binding_key: str,
+        user_question: UserQuestion | None = None,
     ) -> HumanInteractionResponse:
         nonce = _generate_nonce()
         pending = PendingInteraction(
@@ -91,7 +111,8 @@ class InteractionBroker:
             owner_sender_id=owner_sender_id,
             binding_key=binding_key,
             tool_name=request.tool_name,
-            question=request.question,
+            question=user_question.question if user_question is not None else request.question,
+            user_question=user_question,
         )
         event = threading.Event()
         with self._lock:
@@ -104,7 +125,9 @@ class InteractionBroker:
             self._events.pop(nonce, None)
             result = self._results.pop(nonce, None)
         if not finished or result is None:
-            # 超时视为明确拒绝，不静默继续。
+            # 审批超时仍是拒绝；补充输入超时必须单独暴露给模型处理。
+            if kind == "user_input":
+                return HumanInteractionResponse(approved=False, outcome="timed_out")
             return HumanInteractionResponse(approved=False, answer="")
         return result
 
@@ -176,7 +199,35 @@ class InteractionBroker:
             if pending.kind != "user_input":
                 raise InteractionError("nonce is not a user_input")
             self._validate_actor(pending, sender_id=sender_id, binding_key=binding_key)
-            self._results[nonce] = HumanInteractionResponse(approved=True, answer=answer)
+            question = pending.user_question
+            if question is None:
+                raise InteractionError("user input question is missing")
+            values = _parse_answer(question, answer)
+            self._results[nonce] = HumanInteractionResponse(
+                approved=True,
+                outcome="answered",
+                answers={question.id: values},
+            )
+            event = self._events.get(nonce)
+        if event is not None:
+            event.set()
+        return True
+
+    def dismiss(
+        self,
+        nonce: str,
+        *,
+        sender_id: str,
+        binding_key: str,
+    ) -> bool:
+        with self._lock:
+            pending = self._pending.get(nonce)
+            if pending is None:
+                raise InteractionError("unknown or reused nonce")
+            if pending.kind != "user_input":
+                raise InteractionError("nonce is not a user_input")
+            self._validate_actor(pending, sender_id=sender_id, binding_key=binding_key)
+            self._results[nonce] = HumanInteractionResponse(approved=False, outcome="dismissed")
             event = self._events.get(nonce)
         if event is not None:
             event.set()
@@ -219,3 +270,25 @@ class InteractionBroker:
 def _generate_nonce(length: int = 6) -> str:
     alphabet = string.ascii_uppercase + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _parse_answer(question: UserQuestion, answer: str) -> tuple[str, ...]:
+    if not answer.strip():
+        raise InteractionError("回答不能为空")
+    if not question.options:
+        return (answer,)
+
+    parts = [part.strip() for part in answer.split(",")]
+    numeric = all(part.isdecimal() for part in parts)
+    if numeric:
+        indexes = [int(part) for part in parts]
+        if any(index < 1 or index > len(question.options) for index in indexes):
+            raise InteractionError(f"选项编号必须在 1-{len(question.options)} 之间")
+        if not question.multiple and len(indexes) != 1:
+            raise InteractionError("该问题只能选择一个编号")
+        if len(set(indexes)) != len(indexes):
+            raise InteractionError("选项编号不能重复")
+        return tuple(question.options[index - 1].label for index in indexes)
+    if not question.custom:
+        raise InteractionError("该问题不允许自定义答案，请回复选项编号")
+    return (answer,)

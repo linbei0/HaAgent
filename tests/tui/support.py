@@ -38,7 +38,11 @@ from haagent.runtime.events import (
     ToolActivityEvent,
     UserInputStateEvent,
 )
-from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.execution.human_interaction import (
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+    UserQuestion,
+)
 from haagent.tui.application.app import HaAgentTuiApp
 from textual.widgets import RichLog, TextArea
 
@@ -785,7 +789,7 @@ class FakeAssistantService:
                 )
                 self.interaction_responses.append(response)
                 event_sink(_interaction_response_event(request, response, len(self.prompts)))
-                if not response.approved:
+                if request.interaction_type != "user_input" and not response.approved:
                     event_sink(
                         ToolActivityEvent(
                             session_id="session-test",
@@ -1177,8 +1181,9 @@ def _interaction_requested_event(request: HumanInteractionRequest, turn_index: i
         model_turn=None,
         tool_name=request.tool_name,
         state="requested",
-        question=request.question,
+        question="、".join(question.header for question in request.questions),
         reason=request.reason,
+        question_count=len(request.questions),
     )
 
 
@@ -1239,9 +1244,12 @@ def _interaction_response_event(
         model_turn=None,
         tool_name=request.tool_name,
         state="received",
-        question=request.question,
-        answer_chars=len(response.answer),
-        approved=response.approved,
+        question="、".join(question.header for question in request.questions),
+        answer_chars=sum(len(value) for values in response.answers.values() for value in values),
+        approved=response.outcome == "answered",
+        question_count=len(request.questions),
+        outcome=response.outcome,
+        answered_count=len(response.answers),
     )
 
 
@@ -1260,10 +1268,17 @@ def _user_input_request() -> HumanInteractionRequest:
     return HumanInteractionRequest(
         interaction_type="user_input",
         tool_name="request_user_input",
-        question="Which file should I inspect?",
         reason="Need target file",
         risk_level="low",
-        args_summary={"question": "Which file should I inspect?", "reason": "Need target file"},
+        args_summary={"question_count": 1, "headers": ["目标文件"]},
+        questions=(
+            UserQuestion(
+                id="target",
+                header="目标文件",
+                question="Which file should I inspect?",
+                placeholder="输入文件路径",
+            ),
+        ),
     )
 
 

@@ -112,11 +112,26 @@ def test_file_write_success_suggests_read_back() -> None:
 
 def test_request_user_input_success_suggests_continue() -> None:
     suggestion = suggestion_for_observation(
-        _obs("request_user_input", {}, {"status": "success", "answer": "yes"})
+        _obs(
+            "request_user_input",
+            {},
+            {"status": "success", "outcome": "answered", "answers": {"choice": ["yes"]}},
+        )
     )
 
     assert suggestion is not None
-    assert "same question" in suggestion.message or "continue" in suggestion.message.lower()
+    assert "answers" in suggestion.message
+    assert "continue" in suggestion.message.lower()
+
+
+def test_request_user_input_dismissed_suggests_adjusting_without_tool_failure() -> None:
+    suggestion = suggestion_for_observation(
+        _obs("request_user_input", {}, {"status": "success", "outcome": "dismissed", "answers": {}})
+    )
+
+    assert suggestion is not None
+    assert "dismissed" in suggestion.message
+    assert "tool failure" in suggestion.message
 
 
 def test_file_read_success_produces_no_suggestion() -> None:

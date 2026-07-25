@@ -337,6 +337,21 @@ ConversationTimeline {
     background: $panel;
 }
 
+#question-prompt {
+    width: 1fr;
+    height: 13;
+    padding: 1 2;
+    border: none;
+    border-left: solid $panel;
+    background: $surface;
+    color: $foreground;
+}
+
+#question-prompt:focus {
+    border-left: solid $primary;
+    background: $panel;
+}
+
 #context-usage {
     width: 1fr;
     height: 1;
@@ -364,7 +379,8 @@ ConversationTimeline {
 }
 
 Screen.theme-monochrome #conversation.panel-focused,
-Screen.theme-monochrome #prompt-input.panel-focused {
+Screen.theme-monochrome #prompt-input.panel-focused,
+Screen.theme-monochrome #question-prompt:focus {
     border-left: solid $foreground;
 }
 

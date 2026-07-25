@@ -14,11 +14,15 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 from haagent.runtime.execution.command import redact_secret_like_text
-from haagent.runtime.execution.human_interaction import HumanInteractionRequest, HumanInteractionResponse
+from haagent.runtime.execution.human_interaction import (
+    HumanInteractionRequest,
+    HumanInteractionResponse,
+    UserInputOutcome,
+    interaction_question_summary,
+)
 from haagent.runtime.execution.path_policy import PermissionMode
 
 
-ANSWER_EXCERPT_LIMIT = 240
 QUESTION_EXCERPT_LIMIT = 180
 
 # 审计用合成 answer：标明跳过原因，避免被当成用户在 modal 上点了 once/always
@@ -47,9 +51,17 @@ class HumanInteractionResolution:
     answer: str
     turn: int
     args_summary: dict[str, object]
+    outcome: UserInputOutcome | None = None
+    answers: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    question_count: int = 0
 
     def to_response(self) -> HumanInteractionResponse:
-        return HumanInteractionResponse(approved=self.approved, answer=self.answer)
+        return HumanInteractionResponse(
+            approved=self.approved,
+            answer=self.answer,
+            outcome=self.outcome,
+            answers=dict(self.answers),
+        )
 
     def state_record(self) -> dict[str, object]:
         record: dict[str, object] = {
@@ -60,8 +72,10 @@ class HumanInteractionResolution:
             "turn": self.turn,
         }
         if self.interaction_type == "user_input":
-            record["answer_excerpt"] = _safe_excerpt(self.answer, ANSWER_EXCERPT_LIMIT)
-            record["answer_chars"] = len(self.answer)
+            record["outcome"] = self.outcome or self.status
+            record["question_count"] = self.question_count
+            record["answered_count"] = sum(1 for values in self.answers.values() if values)
+            record["answer_chars"] = sum(len(value) for values in self.answers.values() for value in values)
         else:
             record["approved"] = self.approved
         return record
@@ -133,12 +147,19 @@ class HumanInteractionResolver:
             signature=signature,
             interaction_type=request.interaction_type,
             tool_name=request.tool_name,
-            question=request.question,
-            status=_status_for(request.interaction_type, response.approved),
+            question=(
+                interaction_question_summary(request)
+                if request.interaction_type == "user_input"
+                else request.question
+            ),
+            status=_status_for(request.interaction_type, response),
             approved=response.approved,
             answer=response.answer,
             turn=turn,
             args_summary=dict(request.args_summary),
+            outcome=response.outcome,
+            answers=dict(response.answers),
+            question_count=len(request.questions),
         )
         if signature not in self._resolutions:
             self._ordered_signatures.append(signature)
@@ -214,15 +235,33 @@ def interaction_signature(request: HumanInteractionRequest) -> str:
         "interaction_type": _normalize_string(request.interaction_type),
         "tool_name": _normalize_string(request.tool_name),
         "question": _normalize_string(request.question),
+        "questions": [
+            {
+                "id": _normalize_string(question.id),
+                "header": _normalize_string(question.header),
+                "question": _normalize_string(question.question),
+                "options": [
+                    {
+                        "label": _normalize_string(option.label),
+                        "description": _normalize_string(option.description),
+                    }
+                    for option in question.options
+                ],
+                "multiple": question.multiple,
+                "custom": question.custom,
+                "placeholder": _normalize_string(question.placeholder),
+            }
+            for question in request.questions
+        ],
         "args_summary": _normalize_value(request.args_summary),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _status_for(interaction_type: str, approved: bool) -> str:
+def _status_for(interaction_type: str, response: HumanInteractionResponse) -> str:
     if interaction_type == "user_input":
-        return "answered" if approved else "declined"
-    return "approved" if approved else "denied"
+        return response.outcome or "dismissed"
+    return "approved" if response.approved else "denied"
 
 
 def _string_list(value: object) -> list[str]:

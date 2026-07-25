@@ -8,26 +8,57 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+
+UserInputOutcome = Literal["answered", "dismissed", "timed_out"]
+
+
+@dataclass(frozen=True)
+class UserQuestionOption:
+    label: str
+    description: str
+
+
+@dataclass(frozen=True)
+class UserQuestion:
+    id: str
+    header: str
+    question: str
+    options: tuple[UserQuestionOption, ...] = ()
+    multiple: bool = False
+    custom: bool = True
+    placeholder: str = ""
 
 
 @dataclass(frozen=True)
 class HumanInteractionRequest:
     interaction_type: str
     tool_name: str
-    question: str
+    question: str = ""
     reason: str = ""
     risk_level: str | None = None
     args_summary: dict[str, object] = field(default_factory=dict)
+    questions: tuple[UserQuestion, ...] = ()
 
 
 @dataclass(frozen=True)
 class HumanInteractionResponse:
     approved: bool
     answer: str = ""
+    outcome: UserInputOutcome | None = None
+    answers: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 HumanInteractionHandler = Callable[[HumanInteractionRequest], HumanInteractionResponse]
+
+
+def interaction_question_summary(request: HumanInteractionRequest, *, limit: int = 120) -> str:
+    """返回可写入事件和 working state 的短标题，不复制完整问题正文。"""
+
+    value = "、".join(question.header for question in request.questions) or request.question
+    normalized = " ".join(value.split())
+    return normalized if len(normalized) <= limit else normalized[: limit - 1] + "…"
 
 
 @dataclass(frozen=True)

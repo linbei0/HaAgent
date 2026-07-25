@@ -56,6 +56,8 @@ from haagent.tools.registry import (
     default_tool_runtime_registry,
     validate_tool_registry,
 )
+from haagent.tools.schema_validation import validate_json_value
+from haagent.tools.user_input import UserQuestionValidationError, parse_user_questions
 
 # turn, tool_name, duration_ms, execution_effect, status — 不进入 model-visible result。
 ToolPerformanceSink = Callable[[int, str, float, str, str], None]
@@ -460,25 +462,71 @@ class ToolRouter:
                 "user_input_unavailable",
                 "user input requested but no interaction handler is available",
             )
-        question = str(args.get("question", ""))
+        try:
+            questions = parse_user_questions(args)
+        except UserQuestionValidationError as error:
+            return tool_error("tool_argument_invalid", str(error), retryable=False)
         response = interaction_handler(
             HumanInteractionRequest(
                 interaction_type="user_input",
                 tool_name="request_user_input",
-                question=question,
+                question="、".join(question.header for question in questions),
                 reason=str(args.get("reason", "")),
                 risk_level="low",
                 args_summary=interaction_args_summary("request_user_input", args),
+                questions=questions,
             ),
         )
-        if not response.approved:
-            return tool_error("user_input_unavailable", "user input request was not answered")
-        answer = response.answer
+        if response.outcome is None:
+            return tool_error(
+                "invalid_interaction_response",
+                "user input response must include outcome",
+                retryable=False,
+            )
+        outcome = response.outcome
+        expected = {question.id: question for question in questions}
+        unknown_ids = sorted(set(response.answers) - set(expected))
+        if unknown_ids:
+            return tool_error(
+                "invalid_interaction_response",
+                f"unknown answer ids: {', '.join(unknown_ids)}",
+                retryable=False,
+            )
+        if outcome == "answered":
+            missing_ids = [
+                question.id
+                for question in questions
+                if not response.answers.get(question.id)
+                or not all(str(value).strip() for value in response.answers[question.id])
+            ]
+            if missing_ids:
+                return tool_error(
+                    "invalid_interaction_response",
+                    f"answered response is missing required answers: {', '.join(missing_ids)}",
+                    retryable=False,
+                )
+            invalid_single = [
+                question.id
+                for question in questions
+                if not question.multiple and len(response.answers[question.id]) != 1
+            ]
+            if invalid_single:
+                return tool_error(
+                    "invalid_interaction_response",
+                    f"single-answer questions returned multiple values: {', '.join(invalid_single)}",
+                    retryable=False,
+                )
+        answers = {
+            question_id: [str(value) for value in values if str(value).strip()]
+            for question_id, values in response.answers.items()
+        }
         return {
             "status": "success",
-            "question": question,
-            "answer": answer,
-            "answer_chars": len(answer),
+            "outcome": outcome,
+            "answers": answers,
+            "question_count": len(questions),
+            "answered_count": sum(1 for values in answers.values() if values),
+            "answer_chars": sum(len(value) for values in answers.values() for value in values),
         }
 
     def _handle_denied_policy(
@@ -732,89 +780,28 @@ def _validate_args(
             "tool arguments schema must be object",
             retryable=False,
         )
-
     required = schema.get("required", [])
     properties = schema.get("properties", {})
     allowed_arguments = list(properties)
-    for name in required:
-        if name not in args:
-            return _argument_error(
-                tool_name,
-                f"missing required argument: {name}",
-                args=args,
-                required=required,
-                allowed=allowed_arguments,
-                field=name,
-                expected=properties.get(name),
-            )
-
-    if schema.get("additionalProperties") is False:
-        for name in args:
-            if name not in properties:
-                suggested_args = _suggested_arguments(args, unexpected=name, allowed=allowed_arguments)
-                return _argument_error(
-                    tool_name,
-                    f"unexpected argument: {name}",
-                    args=args,
-                    required=required,
-                    allowed=allowed_arguments,
-                    field=name,
-                    suggested_args=suggested_args,
-                )
-
-    for name, value in args.items():
-        property_schema = properties.get(name)
-        if not property_schema:
-            continue
-        expected_type = property_schema.get("type")
-        if expected_type and not _matches_json_type(value, expected_type):
-            return _argument_error(
-                tool_name,
-                f"argument {name} must be {expected_type}",
-                args=args,
-                required=required,
-                allowed=allowed_arguments,
-                field=name,
-                expected=property_schema,
-                actual=type(value).__name__,
-            )
-        enum = property_schema.get("enum")
-        if isinstance(enum, list) and value not in enum:
-            return _argument_error(
-                tool_name,
-                f"argument {name} must be one of: {', '.join(map(str, enum))}",
-                args=args,
-                required=required,
-                allowed=allowed_arguments,
-                field=name,
-                expected=property_schema,
-                actual=value,
-            )
-        minimum = property_schema.get("minimum")
-        maximum = property_schema.get("maximum")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            if isinstance(minimum, (int, float)) and value < minimum:
-                return _argument_error(
-                    tool_name,
-                    f"argument {name} must be >= {minimum}",
-                    args=args,
-                    required=required,
-                    allowed=allowed_arguments,
-                    field=name,
-                    expected=property_schema,
-                    actual=value,
-                )
-            if isinstance(maximum, (int, float)) and value > maximum:
-                return _argument_error(
-                    tool_name,
-                    f"argument {name} must be <= {maximum}",
-                    args=args,
-                    required=required,
-                    allowed=allowed_arguments,
-                    field=name,
-                    expected=property_schema,
-                    actual=value,
-                )
+    issue = validate_json_value(args, schema)
+    if issue is not None:
+        unexpected = issue.path if issue.message.startswith("unexpected argument:") else ""
+        suggested_args = (
+            _suggested_arguments(args, unexpected=unexpected, allowed=allowed_arguments)
+            if unexpected and "." not in unexpected and "[" not in unexpected
+            else None
+        )
+        return _argument_error(
+            tool_name,
+            issue.message,
+            args=args,
+            required=required if isinstance(required, list) else [],
+            allowed=allowed_arguments,
+            field=issue.path,
+            expected=issue.expected,
+            actual=issue.actual,
+            suggested_args=suggested_args,
+        )
     return None
 
 
@@ -942,22 +929,6 @@ def _result_for_trace(result: dict[str, Any]) -> dict[str, Any]:
             if key != "path"
         }
     return trace_result
-
-
-def _matches_json_type(value: Any, expected_type: str) -> bool:
-    if expected_type == "string":
-        return isinstance(value, str)
-    if expected_type == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected_type == "number":
-        return (isinstance(value, int | float) and not isinstance(value, bool))
-    if expected_type == "boolean":
-        return isinstance(value, bool)
-    if expected_type == "object":
-        return isinstance(value, dict)
-    if expected_type == "array":
-        return isinstance(value, list)
-    return True
 
 
 def _agent_runtime_result(result: dict[str, Any]) -> dict[str, Any]:

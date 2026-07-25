@@ -46,7 +46,6 @@ from haagent.tui.design.theme import (
     select_theme,
     textual_themes,
 )
-from haagent.tui.design.utils import safe_summary
 from haagent.tui.files.refs import FileReferenceIndex, build_file_reference_index
 from haagent.tui.flows import permissions, skills
 from haagent.tui.overlays.modals import EditDiffModal, HelpModal, ToolApprovalModal
@@ -62,6 +61,7 @@ from haagent.tui.widgets import (
     InputDock,
     ProgressStatusLine,
     PromptInput,
+    QuestionPrompt,
     RequestHistoryPreview,
     RequestHistoryRail,
     ResizeMessage,
@@ -237,6 +237,18 @@ class HaAgentTuiApp(App[None]):
     def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         self._submit_prompt(event.input)
 
+    def on_question_prompt_submitted(self, event: QuestionPrompt.Submitted) -> None:
+        self._complete_interaction(
+            HumanInteractionResponse(
+                approved=True,
+                outcome="answered",
+                answers=event.answers,
+            )
+        )
+
+    def on_question_prompt_dismissed(self, _event: QuestionPrompt.Dismissed) -> None:
+        self._complete_interaction(HumanInteractionResponse(approved=False, outcome="dismissed"))
+
     def action_submit_prompt(self) -> None:
         self._submit_prompt(self._prompt_input())
 
@@ -250,10 +262,6 @@ class HaAgentTuiApp(App[None]):
         if command is not None:
             self._set_prompt_value(prompt_input, "")
             self._handle_slash_command(command)
-            return
-        if self._pending_interaction is not None and self._pending_interaction.request.interaction_type == "user_input":
-            self._set_prompt_value(prompt_input, "")
-            self._complete_interaction(HumanInteractionResponse(approved=True, answer=prompt))
             return
         if self._state in {"running", "cancelling", "waiting approval"}:
             return
@@ -613,7 +621,11 @@ class HaAgentTuiApp(App[None]):
         pending = PendingInteraction(request)
         self.call_from_thread(self._begin_interaction, pending)
         pending.done.wait()
-        return pending.response or HumanInteractionResponse(approved=False, answer="")
+        if pending.response is not None:
+            return pending.response
+        if request.interaction_type == "user_input":
+            return HumanInteractionResponse(approved=False, outcome="dismissed")
+        return HumanInteractionResponse(approved=False, answer="")
 
     def _begin_interaction(self, pending: PendingInteraction) -> None:
         self._pending_interaction = pending
@@ -625,9 +637,14 @@ class HaAgentTuiApp(App[None]):
             self._state = "waiting approval"
             self.push_screen(EditDiffModal(request), self._complete_edit_diff)
         else:
+            if not request.questions:
+                pending.response = HumanInteractionResponse(approved=False, outcome="dismissed")
+                pending.done.set()
+                self._pending_interaction = None
+                raise ValueError("user_input interaction requires structured questions")
             self._state = "waiting input"
-            self._set_answer_required(request.question)
-        self._refresh()
+            self._input_dock().open_question_prompt(request.questions)
+        self._refresh_interaction_chrome()
 
     def _complete_approval(self, decision: str | None) -> None:
         normalized = decision or "deny"
@@ -648,15 +665,14 @@ class HaAgentTuiApp(App[None]):
             return
         pending.response = response
         pending.done.set()
+        interaction_type = pending.request.interaction_type
         self._pending_interaction = None
-        self._restore_prompt_input()
+        if interaction_type == "user_input":
+            self._input_dock().close_question_prompt()
+        else:
+            self._restore_prompt_input()
         self._state = "running"
-        self._refresh()
-
-    def _set_answer_required(self, question: str) -> None:
-        prompt_input = self._prompt_input()
-        prompt_input.placeholder = f"回答 Agent 的问题：{safe_summary(question, 90)}"
-        prompt_input.focus()
+        self._refresh_interaction_chrome()
 
     def _restore_prompt_input(self) -> None:
         self._prompt_input().placeholder = self._default_prompt_placeholder
@@ -666,7 +682,10 @@ class HaAgentTuiApp(App[None]):
             return
         if self._pending_interaction is None:
             return
-        self._complete_interaction(HumanInteractionResponse(approved=False, answer=""))
+        if self._pending_interaction.request.interaction_type == "user_input":
+            self._complete_interaction(HumanInteractionResponse(approved=False, outcome="dismissed"))
+            return
+        self._complete_interaction(HumanInteractionResponse(approved=False, answer="deny"))
 
     def action_cancel_current_task(self) -> None:
         result = self._request_current_task_cancel()
@@ -688,9 +707,16 @@ class HaAgentTuiApp(App[None]):
             return None
         result = self.service.sessions.cancel_current_run()
         if self._pending_interaction is not None:
-            self._pending_interaction.response = HumanInteractionResponse(approved=False, answer="")
+            interaction_type = self._pending_interaction.request.interaction_type
+            self._pending_interaction.response = (
+                HumanInteractionResponse(approved=False, outcome="dismissed")
+                if interaction_type == "user_input"
+                else HumanInteractionResponse(approved=False, answer="deny")
+            )
             self._pending_interaction.done.set()
             self._pending_interaction = None
+            if interaction_type == "user_input":
+                self._input_dock().close_question_prompt()
         self._restore_prompt_input()
         return result
 
@@ -776,6 +802,11 @@ class HaAgentTuiApp(App[None]):
             )
 
     def _refresh(self) -> None:
+        self._refresh_interaction_chrome()
+        self._refresh_conversation()
+
+    def _refresh_interaction_chrome(self) -> None:
+        """交互开关只更新状态、footer 和焦点，禁止重建 timeline。"""
         status = self.service.workspace.status()
         status_bar = self.query_one("#status-bar", StatusBar)
         base = status_line(
@@ -786,7 +817,6 @@ class HaAgentTuiApp(App[None]):
             width=max(1, self.size.width - status_bar.styles.gutter.width),
         )
         status_bar.update_status(base)
-        self._refresh_conversation()
         self.query_one("#footer-bar", FooterBar).update_footer(footer_text(self._help_context()))
         self._apply_focus_classes()
 
@@ -841,7 +871,9 @@ class HaAgentTuiApp(App[None]):
         prompt = self._prompt_input()
         conversation = self.query_one("#conversation", ConversationTimeline)
         prompt.set_class(prompt.has_focus, "panel-focused")
-        conversation.set_class(not prompt.has_focus or self.memory_flow.mode, "panel-focused")
+        question_prompt = self._input_dock().question_prompt
+        input_has_focus = prompt.has_focus or bool(question_prompt and question_prompt.has_focus)
+        conversation.set_class(not input_has_focus or self.memory_flow.mode, "panel-focused")
 
     def _update_responsive_layout(self, width: int | None = None, height: int | None = None) -> None:
         terminal_width = width if width is not None else self.size.width

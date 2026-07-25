@@ -34,6 +34,8 @@ from haagent.runtime.execution.human_interaction import (
     HumanInteractionHandler,
     HumanInteractionRequest,
     HumanInteractionResponse,
+    UserQuestion,
+    UserQuestionOption,
 )
 from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
 from haagent.runtime.execution.progress_guard import ProgressDecision, ProgressFrame, ProgressGuard
@@ -822,9 +824,22 @@ def _resolve_progress_block(
     request = HumanInteractionRequest(
         interaction_type="user_input",
         tool_name="progress_guard",
-        question="检测到任务可能陷入重复。请输入 continue、replan 或 stop。",
+        question="检测到任务可能陷入重复。请选择下一步。",
         reason=decision.reason,
         args_summary={"choices": ["continue", "replan", "stop"], "pattern": decision.pattern},
+        questions=(
+            UserQuestion(
+                id="progress_action",
+                header="下一步",
+                question="检测到任务可能陷入重复。请选择下一步。",
+                options=(
+                    UserQuestionOption("continue", "清除重复检测状态并继续当前方案。"),
+                    UserQuestionOption("replan", "清除重复检测状态并要求 Agent 更换策略。"),
+                    UserQuestionOption("stop", "停止当前任务并保留失败证据。"),
+                ),
+                custom=False,
+            ),
+        ),
     )
     try:
         response = handler(request)
@@ -838,7 +853,8 @@ def _resolve_progress_block(
             deps=deps,
             evidence="progress_guard blocked: invalid interaction response",
         )
-    choice = _normalize_progress_choice(response.answer)
+    selected = response.answers.get("progress_action", ())
+    choice = _normalize_progress_choice(selected[0] if selected else "")
     if choice in {"continue", "replan"} and deps.progress_guard is not None:
         deps.progress_guard.reset()
         state.progress_warn_emitted = False

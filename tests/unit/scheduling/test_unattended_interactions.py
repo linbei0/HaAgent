@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from haagent.runtime.execution.human_interaction import HumanInteractionRequest
+from haagent.runtime.execution.human_interaction import HumanInteractionRequest, UserQuestion
 from haagent.scheduling.interactions import (
     UnattendedInteractionHandler,
     UnattendedInteractionRequired,
@@ -34,7 +34,7 @@ def test_callable_handler_also_raises() -> None:
     request = HumanInteractionRequest(
         interaction_type="user_input",
         tool_name="request_user_input",
-        question="请补充目标路径",
+        questions=(UserQuestion(id="target", header="目标路径", question="请补充目标路径"),),
     )
     with pytest.raises(UnattendedInteractionRequired) as exc:
         handler(request)

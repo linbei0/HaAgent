@@ -31,6 +31,7 @@ from haagent.runtime.execution.human_interaction import (
     HumanInteractionHandler,
     HumanInteractionRequest,
     HumanInteractionResponse,
+    interaction_question_summary,
 )
 from haagent.runtime.execution.human_interaction_resolver import (
     HumanInteractionResolution,
@@ -627,11 +628,17 @@ def _interaction_requested_event(turn: int, request: HumanInteractionRequest) ->
         event_type = "edit_diff_requested"
     else:
         event_type = "user_input_requested"
+    question = (
+        interaction_question_summary(request)
+        if request.interaction_type == "user_input"
+        else request.question
+    )
     return {
         "event_type": event_type,
         "turn": turn,
         "tool_name": request.tool_name,
-        "question": request.question,
+        "question": question,
+        "question_count": len(request.questions) if request.interaction_type == "user_input" else 1,
         "reason": request.reason,
         "risk_level": request.risk_level,
         "args_summary": request.args_summary,
@@ -640,7 +647,7 @@ def _interaction_requested_event(turn: int, request: HumanInteractionRequest) ->
 
 
 def _interaction_reused_event(turn: int, resolution: HumanInteractionResolution) -> dict[str, object]:
-    return {
+    event: dict[str, object] = {
         "event_type": "interaction_reused",
         "turn": turn,
         "interaction_type": resolution.interaction_type,
@@ -648,10 +655,21 @@ def _interaction_reused_event(turn: int, resolution: HumanInteractionResolution)
         "question": resolution.question,
         "status": resolution.status,
         "approved": resolution.approved,
-        "answer": resolution.answer,
         "resolved_turn": resolution.turn,
         "signature": resolution.signature,
     }
+    if resolution.interaction_type == "user_input":
+        event.update(
+            {
+                "outcome": resolution.outcome or resolution.status,
+                "question_count": resolution.question_count,
+                "answered_count": sum(1 for values in resolution.answers.values() if values),
+                "answer_chars": sum(len(value) for values in resolution.answers.values() for value in values),
+            }
+        )
+    else:
+        event["answer"] = resolution.answer
+    return event
 
 
 def _interaction_response_event(
@@ -683,10 +701,12 @@ def _interaction_response_event(
         "event_type": "user_input_received",
         "turn": turn,
         "tool_name": request.tool_name,
-        "question": request.question,
-        "answer": response.answer,
-        "answer_chars": len(response.answer),
-        "approved": response.approved,
+        "question": interaction_question_summary(request),
+        "question_count": len(request.questions),
+        "outcome": response.outcome or ("answered" if response.approved else "dismissed"),
+        "answered_count": sum(1 for values in response.answers.values() if values),
+        "answer_chars": sum(len(value) for values in response.answers.values() for value in values),
+        "approved": response.outcome == "answered" if response.outcome else response.approved,
     }
 
 

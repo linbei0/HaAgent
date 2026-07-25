@@ -219,7 +219,21 @@ def test_real_task_smoke_request_user_input_then_writes_requested_file(tmp_path:
         [
             ModelResponse(
                 "need filename",
-                [ToolCall("request_user_input", {"question": "Which note file?", "reason": "Need target"})],
+                [
+                    ToolCall(
+                        "request_user_input",
+                        {
+                            "questions": [
+                                {
+                                    "id": "target",
+                                    "header": "目标文件",
+                                    "question": "Which note file?",
+                                }
+                            ],
+                            "reason": "Need target",
+                        },
+                    )
+                ],
             ),
             ModelResponse(
                 "write note",
@@ -238,7 +252,7 @@ def test_real_task_smoke_request_user_input_then_writes_requested_file(tmp_path:
         workspace,
         gateway,
         "创建用户指定的笔记文件",
-        answers={"Which note file?": "notes/today.md"},
+        answers={"target": "notes/today.md"},
         approvals=True,
     )
 
@@ -720,7 +734,14 @@ def _interaction_handler(answers: dict[str, str], approvals: bool | None):
     def handle(request: HumanInteractionRequest) -> HumanInteractionResponse:
         if request.interaction_type == "approval":
             return HumanInteractionResponse(approved=bool(approvals), answer="yes" if approvals else "no")
-        return HumanInteractionResponse(approved=True, answer=answers.get(request.question, ""))
+        return HumanInteractionResponse(
+            approved=True,
+            outcome="answered",
+            answers={
+                question.id: (answers.get(question.id, ""),)
+                for question in request.questions
+            },
+        )
 
     return handle
 
