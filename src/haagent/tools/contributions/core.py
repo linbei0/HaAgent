@@ -64,6 +64,92 @@ def _session_history_result(result: dict[str, Any]) -> dict[str, object]:
 
 CORE_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
+        name="todo_update",
+        description=(
+            "Replace the complete session Todo list. Use it for multiple independent tasks, usually three or "
+            "more meaningful steps, or long-running work. Keep at most one item in_progress and update it "
+            "immediately after a milestone completes. Do not split every file read or tool call into a Todo."
+        ),
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "explanation": {"type": "string", "description": "optional short reason for this update"},
+                "items": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "id": {"type": "string", "maxLength": 80},
+                            "content": {"type": "string", "maxLength": 240},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            },
+                        },
+                        "required": ["id", "content", "status"],
+                    },
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+        execution_effect="session_state",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"chat_default", "main_only"}),
+        router_owned=True,
+        display_name_zh="更新任务清单",
+    ),
+    ToolContribution(
+        name="submit_plan",
+        description="Submit the complete structured Plan proposal for user confirmation. Only available in Plan Mode.",
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "maxLength": 240},
+                "summary": {"type": "string", "maxLength": 1200},
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "content": {"type": "string", "maxLength": 240},
+                            "completion_condition": {"type": "string", "maxLength": 240},
+                        },
+                        "required": ["content", "completion_condition"],
+                    },
+                },
+                "verification": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "required": {"type": "boolean"},
+                        "description": {"type": "string", "maxLength": 480},
+                    },
+                    "required": ["required", "description"],
+                },
+                "assumptions": {
+                    "type": "array",
+                    "maxItems": 10,
+                    "items": {"type": "string", "maxLength": 240},
+                },
+            },
+            "required": ["goal", "summary", "steps", "verification", "assumptions"],
+            "additionalProperties": False,
+        },
+        execution_effect="interaction",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=frozenset({"plan_mode", "main_only"}),
+        router_owned=True,
+        display_name_zh="提交实施方案",
+    ),
+    ToolContribution(
         name="session_history",
         description="Search dialogue evidence already persisted for the current session. "
         + SESSION_HISTORY_USAGE_GUIDANCE,

@@ -103,6 +103,16 @@ CONTEXT_SOURCE_DEFINITIONS: tuple[ContextSourceDefinition, ...] = (
         content_field="task_ledger",
     ),
     ContextSourceDefinition(
+        id="planning_state",
+        placement="task",
+        title="Planning State",
+        reason="planning_state_present",
+        selection_priority=10,
+        compaction_priority=90,
+        hard_required=True,
+        content_field="planning_state",
+    ),
+    ContextSourceDefinition(
         id="memory_index",
         placement="task",
         title="Memory/SOP Navigation Index",

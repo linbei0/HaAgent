@@ -1,68 +1,66 @@
 """
-src/haagent/runtime/session/task_ledger.py - 长任务账本状态
+src/haagent/runtime/session/task_ledger.py - session 级 Todo 事实源
 
-为 session package 保存结构化长任务进度，并向模型提供有界摘要。
+保存四态 Todo、运行时阻塞/证据元数据与检查点，并提供原子整体替换。
 """
 
 from __future__ import annotations
 
 import json
-import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
-TASK_LEDGER_SCHEMA_VERSION = 1
+from typing import Iterable
+
+
+TASK_LEDGER_SCHEMA_VERSION = 2
+TASK_LEDGER_MAX_ITEMS = 20
+TASK_LEDGER_ID_LIMIT = 80
 TASK_LEDGER_TEXT_FIELD_LIMIT = 240
-TASK_LEDGER_MODEL_CHAR_LIMIT = 2400
-TASK_LEDGER_RECENT_STEP_LIMIT = 5
+TASK_LEDGER_MODEL_CHAR_LIMIT = 6000
+TASK_LEDGER_RECENT_REF_LIMIT = 5
 
-LEDGER_STATUSES = {"planning", "running", "blocked", "failed", "completed", "cancelled"}
-STEP_STATUSES = {"pending", "running", "completed", "blocked", "failed", "skipped"}
-STEP_KINDS = {"plan", "research", "read", "edit", "verify", "summarize", "ask_user", "delegate", "recover"}
-STEP_OWNERS = {"main", "worker"}
-TERMINAL_LEDGER_STATUSES = {"completed", "failed", "cancelled"}
+TODO_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
+TERMINAL_TODO_STATUSES = {"completed", "cancelled"}
 
 
-class TaskLedgerError(Exception):
-    """task-ledger 文件损坏或结构不合法时抛出。"""
+class TaskLedgerError(RuntimeError):
+    """task-ledger 文件损坏或 Todo 更新不合法时抛出。"""
 
 
-@dataclass
-class TaskStep:
+@dataclass(frozen=True)
+class TodoItem:
     id: str
-    title: str
-    kind: str
-    owner: str
+    content: str
     status: str
-    worker_id: str | None = None
-    parent_step_id: str | None = None
+    source_plan_id: str | None = None
+    source_plan_revision: int | None = None
+    source_plan_step_id: str | None = None
+    blocker: dict[str, object] | None = None
     evidence_refs: list[str] = field(default_factory=list)
     checkpoint_ids: list[str] = field(default_factory=list)
-    blocker: dict[str, object] | None = None
-    retry_count: int = 0
     updated_turn: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "title": self.title,
-            "kind": self.kind,
-            "owner": self.owner,
-            "worker_id": self.worker_id,
-            "parent_step_id": self.parent_step_id,
+            "content": self.content,
             "status": self.status,
+            "source_plan_id": self.source_plan_id,
+            "source_plan_revision": self.source_plan_revision,
+            "source_plan_step_id": self.source_plan_step_id,
+            "blocker": dict(self.blocker) if self.blocker is not None else None,
             "evidence_refs": list(self.evidence_refs),
             "checkpoint_ids": list(self.checkpoint_ids),
-            "blocker": dict(self.blocker) if self.blocker is not None else None,
-            "retry_count": self.retry_count,
             "updated_turn": self.updated_turn,
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class TaskCheckpoint:
     id: str
-    step_id: str
+    todo_id: str
     turn_index: int
     episode_path: str
     tool_call_ids: list[str] = field(default_factory=list)
@@ -74,7 +72,7 @@ class TaskCheckpoint:
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "step_id": self.step_id,
+            "todo_id": self.todo_id,
             "turn_index": self.turn_index,
             "episode_path": self.episode_path,
             "tool_call_ids": list(self.tool_call_ids),
@@ -85,12 +83,10 @@ class TaskCheckpoint:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class TaskLedger:
     goal: str
-    status: str
-    current_step_id: str | None = None
-    steps: list[TaskStep] = field(default_factory=list)
+    todos: list[TodoItem] = field(default_factory=list)
     checkpoints: list[TaskCheckpoint] = field(default_factory=list)
     budgets: dict[str, object] = field(default_factory=dict)
     updated_turn: int = 0
@@ -100,9 +96,7 @@ class TaskLedger:
         return {
             "schema_version": self.schema_version,
             "goal": self.goal,
-            "status": self.status,
-            "current_step_id": self.current_step_id,
-            "steps": [step.to_dict() for step in self.steps],
+            "todos": [item.to_dict() for item in self.todos],
             "checkpoints": [checkpoint.to_dict() for checkpoint in self.checkpoints],
             "budgets": dict(self.budgets),
             "updated_turn": self.updated_turn,
@@ -111,42 +105,51 @@ class TaskLedger:
     def is_empty(self) -> bool:
         return (
             not self.goal
-            and self.status == "planning"
-            and self.current_step_id is None
-            and not self.steps
+            and not self.todos
             and not self.checkpoints
             and not self.budgets
             and self.updated_turn == 0
         )
 
-    def active_step(self) -> TaskStep | None:
-        if self.current_step_id is None:
-            return None
-        for step in self.steps:
-            if step.id == self.current_step_id:
-                return step
-        return None
+    def active_todo(self) -> TodoItem | None:
+        return next((item for item in self.todos if item.status == "in_progress"), None)
+
+    def has_active_todos(self) -> bool:
+        return any(item.status in {"pending", "in_progress"} for item in self.todos)
+
+    def all_terminal(self) -> bool:
+        return bool(self.todos) and all(item.status in TERMINAL_TODO_STATUSES for item in self.todos)
+
+    def has_blocker(self) -> bool:
+        active = self.active_todo()
+        return active is not None and active.blocker is not None
+
+    def status_counts(self) -> dict[str, int]:
+        return {status: sum(item.status == status for item in self.todos) for status in sorted(TODO_STATUSES)}
 
     def status_summary(self) -> dict[str, object]:
+        active = self.active_todo()
         return {
             "exists": not self.is_empty(),
             "goal": self.goal,
-            "status": self.status,
-            "current_step_id": self.current_step_id,
-            "step_count": len(self.steps),
-            "checkpoint_count": len(self.checkpoints),
+            "has_active_todos": self.has_active_todos(),
+            "all_terminal": self.all_terminal(),
+            "has_blocker": self.has_blocker(),
+            "active_todo_id": active.id if active is not None else None,
+            "todo_count": len(self.todos),
+            "counts": self.status_counts(),
             "updated_turn": self.updated_turn,
         }
 
 
 def empty_task_ledger(goal: str = "") -> TaskLedger:
-    return TaskLedger(
-        goal=_bounded_text(goal, TASK_LEDGER_TEXT_FIELD_LIMIT),
-        status="planning",
-    )
+    _validate_text(goal, "goal", TASK_LEDGER_TEXT_FIELD_LIMIT, allow_empty=True)
+    return TaskLedger(goal=goal.strip())
 
 
 def load_task_ledger(path: Path) -> TaskLedger:
+    if not path.exists():
+        raise TaskLedgerError(f"session package missing required file: {path}")
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -155,220 +158,11 @@ def load_task_ledger(path: Path) -> TaskLedger:
 
 
 def write_task_ledger(path: Path, ledger: TaskLedger) -> None:
+    validated = task_ledger_from_dict(ledger.to_dict())
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(ledger.to_dict(), ensure_ascii=False, indent=2),
+        json.dumps(validated.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
-    )
-
-
-def begin_task_ledger_turn(ledger: TaskLedger, *, prompt: str, turn_index: int) -> TaskLedger:
-    should_start_new = (
-        ledger.is_empty()
-        or ledger.status in TERMINAL_LEDGER_STATUSES
-        or (ledger.status == "planning" and not ledger.steps)
-    )
-    source = empty_task_ledger(prompt) if should_start_new else ledger
-    steps = [task_step_from_dict(step.to_dict()) for step in source.steps]
-    checkpoints = [task_checkpoint_from_dict(checkpoint.to_dict()) for checkpoint in source.checkpoints]
-    current_step_id = source.current_step_id
-    if not steps:
-        steps.append(_new_turn_step(prompt, turn_index))
-        current_step_id = "step-001"
-    elif current_step_id is None:
-        current_step_id = steps[-1].id
-    active = _find_or_default_step(steps, current_step_id)
-    if active is not None and active.status in {"pending", "blocked", "failed", "skipped"}:
-        if active.status in {"blocked", "failed", "skipped"}:
-            active.retry_count += 1
-        active.status = "running"
-        active.blocker = None
-        active.updated_turn = turn_index
-    return TaskLedger(
-        goal=source.goal or _bounded_text(prompt, TASK_LEDGER_TEXT_FIELD_LIMIT),
-        status="running",
-        current_step_id=current_step_id,
-        steps=steps,
-        checkpoints=checkpoints,
-        budgets={**source.budgets, "turns_used": turn_index},
-        updated_turn=turn_index,
-    )
-
-
-def update_task_ledger(
-    ledger: TaskLedger,
-    *,
-    prompt: str,
-    turn_index: int,
-    result_status: str,
-    episode_path: Path,
-    runtime_events: list[object],
-) -> TaskLedger:
-    from haagent.runtime.events.bus import bus_event_to_dict, coerce_bus_event
-
-    current = begin_task_ledger_turn(ledger, prompt=prompt, turn_index=turn_index)
-    steps = [task_step_from_dict(step.to_dict()) for step in current.steps]
-    checkpoints = [task_checkpoint_from_dict(checkpoint.to_dict()) for checkpoint in current.checkpoints]
-    goal = current.goal
-    status = current.status
-    current_step_id = current.current_step_id
-    checkpoint_step_ids: list[str] = []
-    model_attempts_by_turn: dict[int, int] = {}
-    model_turn_starts = 0
-    scheduled_replays = 0
-
-    for raw_event in runtime_events:
-        # ledger 仍按 dict 字段驱动；总线类型在边界 to_dict，episode schema 不变。
-        event = bus_event_to_dict(coerce_bus_event(raw_event))
-        event_type = str(event.get("event_type", ""))
-        if event_type == "task_step_progress" and event.get("category") == "model_turn_started":
-            model_turn_starts += 1
-        if event_type in {"model_retry_scheduled", "model_retry_exhausted"}:
-            model_turn = event.get("turn")
-            attempt = event.get("attempt")
-            if isinstance(model_turn, int) and isinstance(attempt, int):
-                model_attempts_by_turn[model_turn] = max(
-                    model_attempts_by_turn.get(model_turn, 0),
-                    attempt,
-                )
-            if event_type == "model_retry_scheduled":
-                scheduled_replays += 1
-        if event_type == "tool_finished":
-            step = _find_or_default_step(steps, current_step_id)
-            if step is not None:
-                step.evidence_refs = _bounded_string_list([
-                    *step.evidence_refs,
-                    _tool_evidence(event),
-                ])
-                step.updated_turn = turn_index
-        elif event_type == "task_step_finished":
-            step_id = str(event.get("step_id", current_step_id or "step-001"))
-            step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
-            step.status = "completed"
-            step.updated_turn = turn_index
-            step.evidence_refs = _bounded_string_list([
-                *step.evidence_refs,
-                f"episode={episode_path}",
-            ])
-            current_step_id = step.id
-        elif event_type == "task_checkpoint_saved":
-            step_id = str(event.get("step_id", current_step_id or "step-001"))
-            step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
-            step.updated_turn = turn_index
-            current_step_id = step.id
-            checkpoint_step_ids.append(step.id)
-        elif event_type == "task_recovery_suggested":
-            step_id = str(event.get("step_id", current_step_id or "step-001"))
-            step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
-            category = _bounded_text(str(event.get("category", "recovery_suggested")), 80)
-            suggested_action = _bounded_text(str(event.get("suggested_action", "")), 120)
-            reason_chars = int(event.get("reason_chars", 0) or 0)
-            step.status = "blocked"
-            step.blocker = {
-                "category": category,
-                "reason": f"reason_chars={reason_chars}",
-                "suggested_action": suggested_action,
-            }
-            step.updated_turn = turn_index
-            status = "blocked"
-            current_step_id = step.id
-        elif event_type == "task_step_blocked":
-            step_id = str(event.get("step_id", current_step_id or "step-001"))
-            step = _ensure_step(steps, step_id, str(event.get("title", step_id)), str(event.get("owner", "main")))
-            step.status = "blocked"
-            step.blocker = {
-                "category": str(event.get("category", "blocked")),
-                "reason": f"reason_chars={event.get('reason_chars', 0)}",
-                "suggested_action": str(event.get("suggested_action", "")),
-            }
-            step.updated_turn = turn_index
-            status = "blocked"
-            current_step_id = step.id
-        elif event_type == "worker_failed":
-            worker_id = str(event.get("agent_id", "worker"))
-            parent_step_id = str(event.get("parent_step_id", "") or "")
-            reason = _bounded_text(str(event.get("reason", event.get("summary", ""))))
-            evidence_refs = _worker_evidence_refs(event, worker_id, "worker_failed")
-            if parent_step_id:
-                parent = _ensure_step(steps, parent_step_id, str(event.get("description", parent_step_id)), "main")
-                parent.kind = "delegate"
-                parent.status = "blocked"
-                parent.blocker = {
-                    "category": "worker_failure",
-                    "reason": reason,
-                    "suggested_action": "retry_worker_or_take_over",
-                }
-                parent.evidence_refs = _bounded_string_list([*parent.evidence_refs, *evidence_refs])
-                parent.updated_turn = turn_index
-                current_step_id = parent.id
-            step = _ensure_step(steps, worker_id, f"Worker {worker_id}", "worker")
-            step.kind = "delegate"
-            step.worker_id = worker_id
-            step.status = "blocked"
-            step.blocker = {
-                "category": "worker_failure",
-                "reason": reason,
-                "suggested_action": "retry_worker_or_take_over",
-            }
-            step.evidence_refs = _bounded_string_list([*step.evidence_refs, *evidence_refs])
-            step.updated_turn = turn_index
-            status = "blocked"
-            if not parent_step_id:
-                current_step_id = step.id
-        elif event_type == "worker_completed":
-            worker_id = str(event.get("agent_id", "worker"))
-            parent_step_id = str(event.get("parent_step_id", "") or "")
-            evidence_refs = _worker_evidence_refs(event, worker_id, "worker_completed")
-            if parent_step_id:
-                parent = _ensure_step(steps, parent_step_id, str(event.get("description", parent_step_id)), "main")
-                parent.kind = "delegate"
-                parent.status = "completed"
-                parent.evidence_refs = _bounded_string_list([*parent.evidence_refs, *evidence_refs])
-                parent.updated_turn = turn_index
-                current_step_id = parent.id
-            step = _ensure_step(steps, worker_id, f"Worker {worker_id}", "worker")
-            step.kind = "delegate"
-            step.worker_id = worker_id
-            step.status = "completed"
-            step.evidence_refs = _bounded_string_list([*step.evidence_refs, *evidence_refs])
-            step.updated_turn = turn_index
-            if not parent_step_id:
-                current_step_id = step.id
-
-    _apply_result_status_to_active_step(
-        steps,
-        current_step_id=current_step_id,
-        result_status=result_status,
-        episode_path=episode_path,
-    )
-    checkpoint = _checkpoint_for_turn(checkpoints, steps, current_step_id, turn_index, episode_path)
-    checkpoints.append(checkpoint)
-    for step_id in checkpoint_step_ids or [checkpoint.step_id]:
-        step = _find_or_default_step(steps, step_id)
-        if step is not None:
-            step.checkpoint_ids = _bounded_string_list([*step.checkpoint_ids, checkpoint.id])
-            step.evidence_refs = _bounded_string_list([
-                *step.evidence_refs,
-                f"checkpoint={checkpoint.id} episode={episode_path}",
-            ])
-    if status != "blocked" and result_status in TERMINAL_LEDGER_STATUSES:
-        status = result_status
-    return TaskLedger(
-        goal=goal,
-        status=status,
-        current_step_id=current_step_id,
-        steps=steps,
-        checkpoints=checkpoints,
-        budgets={
-            **current.budgets,
-            "turns_used": turn_index,
-            "model_attempts": _model_attempt_total(current.budgets) + _current_model_attempts(
-                model_turn_starts,
-                scheduled_replays,
-                model_attempts_by_turn,
-            ),
-        },
-        updated_turn=turn_index,
     )
 
 
@@ -377,97 +171,69 @@ def task_ledger_from_dict(raw: object) -> TaskLedger:
         raise TaskLedgerError("task ledger must be an object")
     if raw.get("schema_version") != TASK_LEDGER_SCHEMA_VERSION:
         raise TaskLedgerError("unsupported task ledger schema version")
+    required = {"schema_version", "goal", "todos", "checkpoints", "budgets", "updated_turn"}
+    if set(raw) != required:
+        raise TaskLedgerError("task ledger fields do not match v2 schema")
     goal = _required_string(raw, "goal")
-    status = _required_choice(raw, "status", LEDGER_STATUSES)
-    current_step_id = _optional_string(raw.get("current_step_id"), "current_step_id")
-    steps = _required_list(raw, "steps")
-    checkpoints = _required_list(raw, "checkpoints")
+    _validate_text(goal, "goal", TASK_LEDGER_TEXT_FIELD_LIMIT, allow_empty=True)
+    todos_raw = _required_list(raw, "todos")
+    checkpoints_raw = _required_list(raw, "checkpoints")
     budgets = raw.get("budgets")
     if not isinstance(budgets, dict):
         raise TaskLedgerError("budgets must be an object")
     updated_turn = _required_int(raw, "updated_turn")
+    todos = [todo_item_from_dict(item) for item in todos_raw]
+    _validate_todo_collection(todos)
     return TaskLedger(
         schema_version=TASK_LEDGER_SCHEMA_VERSION,
-        goal=_bounded_text(goal, TASK_LEDGER_TEXT_FIELD_LIMIT),
-        status=status,
-        current_step_id=current_step_id,
-        steps=[task_step_from_dict(item) for item in steps],
-        checkpoints=[task_checkpoint_from_dict(item) for item in checkpoints],
+        goal=goal.strip(),
+        todos=todos,
+        checkpoints=[task_checkpoint_from_dict(item) for item in checkpoints_raw],
         budgets=dict(budgets),
         updated_turn=updated_turn,
     )
 
 
-def format_task_ledger_for_model(value: object) -> str:
-    ledger = _ledger_from_value(value)
-    if ledger.is_empty():
-        return ""
-    lines = [
-        f"task_goal: {_bounded_text(ledger.goal)}",
-        f"task_status: {ledger.status}",
-    ]
-    active_step = ledger.active_step()
-    if active_step is not None:
-        lines.append(
-            "active_step: "
-            f"id={active_step.id} status={active_step.status} owner={active_step.owner} "
-            f"kind={active_step.kind} title={_bounded_text(active_step.title)} "
-            f"evidence_count={len(active_step.evidence_refs)} retry_count={active_step.retry_count}",
-        )
-        if active_step.worker_id:
-            lines.append(f"active_worker: {active_step.worker_id}")
-        if active_step.blocker:
-            category = _bounded_text(str(active_step.blocker.get("category", "unknown")), 80)
-            reason = str(active_step.blocker.get("reason", ""))
-            suggested_action = _bounded_text(str(active_step.blocker.get("suggested_action", "")), 120)
-            blocker_line = f"blocker: category={category} reason_chars={len(reason)}"
-            if suggested_action:
-                blocker_line += f" suggested_action={suggested_action}"
-            lines.append(blocker_line)
-    completed = [step for step in ledger.steps if step.status == "completed"][-TASK_LEDGER_RECENT_STEP_LIMIT:]
-    if completed:
-        lines.append("completed_steps:")
-        for step in completed:
-            lines.append(
-                f"- {step.id} owner={step.owner} title={_bounded_text(step.title, 120)} "
-                f"evidence_count={len(step.evidence_refs)} checkpoints={len(step.checkpoint_ids)}",
-            )
-    warnings = _budget_warnings(ledger.budgets)
-    if warnings:
-        lines.append("budget_warnings:")
-        lines.extend(f"- {warning}" for warning in warnings)
-    text = "\n".join(lines)
-    if len(text) > TASK_LEDGER_MODEL_CHAR_LIMIT:
-        return text[: TASK_LEDGER_MODEL_CHAR_LIMIT - 1] + "…"
-    return text
-
-
-def _ledger_from_value(value: object) -> TaskLedger:
-    if isinstance(value, TaskLedger):
-        return value
-    return task_ledger_from_dict(value)
-
-
-def task_step_from_dict(raw: object) -> TaskStep:
+def todo_item_from_dict(raw: object) -> TodoItem:
     if not isinstance(raw, dict):
-        raise TaskLedgerError("task step must be an object")
-    evidence_refs = _required_string_list(raw, "evidence_refs")
-    checkpoint_ids = _required_string_list(raw, "checkpoint_ids")
+        raise TaskLedgerError("todo item must be an object")
+    required = {
+        "id",
+        "content",
+        "status",
+        "source_plan_id",
+        "source_plan_revision",
+        "source_plan_step_id",
+        "blocker",
+        "evidence_refs",
+        "checkpoint_ids",
+        "updated_turn",
+    }
+    if set(raw) != required:
+        raise TaskLedgerError("todo item fields do not match v2 schema")
+    item_id = _required_string(raw, "id")
+    content = _required_string(raw, "content")
+    _validate_text(item_id, "id", TASK_LEDGER_ID_LIMIT)
+    _validate_text(content, "content", TASK_LEDGER_TEXT_FIELD_LIMIT)
+    status = _required_string(raw, "status")
+    if status not in TODO_STATUSES:
+        raise TaskLedgerError("status is invalid")
     blocker = raw.get("blocker")
     if blocker is not None and not isinstance(blocker, dict):
         raise TaskLedgerError("blocker must be an object or null")
-    return TaskStep(
-        id=_required_string(raw, "id"),
-        title=_bounded_text(_required_string(raw, "title"), TASK_LEDGER_TEXT_FIELD_LIMIT),
-        kind=_required_choice(raw, "kind", STEP_KINDS),
-        owner=_required_choice(raw, "owner", STEP_OWNERS),
-        worker_id=_optional_string(raw.get("worker_id"), "worker_id"),
-        parent_step_id=_optional_string(raw.get("parent_step_id"), "parent_step_id"),
-        status=_required_choice(raw, "status", STEP_STATUSES),
-        evidence_refs=_bounded_string_list(evidence_refs),
-        checkpoint_ids=_bounded_string_list(checkpoint_ids),
+    source_revision = raw.get("source_plan_revision")
+    if source_revision is not None and (not isinstance(source_revision, int) or isinstance(source_revision, bool)):
+        raise TaskLedgerError("source_plan_revision must be an integer or null")
+    return TodoItem(
+        id=item_id.strip(),
+        content=content.strip(),
+        status=status,
+        source_plan_id=_optional_string(raw.get("source_plan_id"), "source_plan_id"),
+        source_plan_revision=source_revision,
+        source_plan_step_id=_optional_string(raw.get("source_plan_step_id"), "source_plan_step_id"),
         blocker=dict(blocker) if blocker is not None else None,
-        retry_count=_required_int(raw, "retry_count"),
+        evidence_refs=_bounded_refs(_required_string_list(raw, "evidence_refs")),
+        checkpoint_ids=_bounded_refs(_required_string_list(raw, "checkpoint_ids")),
         updated_turn=_required_int(raw, "updated_turn"),
     )
 
@@ -475,17 +241,276 @@ def task_step_from_dict(raw: object) -> TaskStep:
 def task_checkpoint_from_dict(raw: object) -> TaskCheckpoint:
     if not isinstance(raw, dict):
         raise TaskLedgerError("task checkpoint must be an object")
+    required = {
+        "id",
+        "todo_id",
+        "turn_index",
+        "episode_path",
+        "tool_call_ids",
+        "changed_paths",
+        "verification_refs",
+        "state_digest",
+        "created_at",
+    }
+    if set(raw) != required:
+        raise TaskLedgerError("task checkpoint fields are invalid")
     return TaskCheckpoint(
         id=_required_string(raw, "id"),
-        step_id=_required_string(raw, "step_id"),
+        todo_id=_required_string(raw, "todo_id"),
         turn_index=_required_int(raw, "turn_index"),
         episode_path=_required_string(raw, "episode_path"),
-        tool_call_ids=_bounded_string_list(_required_string_list(raw, "tool_call_ids")),
-        changed_paths=_bounded_string_list(_required_string_list(raw, "changed_paths")),
-        verification_refs=_bounded_string_list(_required_string_list(raw, "verification_refs")),
-        state_digest=_bounded_text(_required_string(raw, "state_digest"), 160),
-        created_at=_bounded_text(_required_string(raw, "created_at"), 80),
+        tool_call_ids=_bounded_refs(_required_string_list(raw, "tool_call_ids")),
+        changed_paths=_bounded_refs(_required_string_list(raw, "changed_paths")),
+        verification_refs=_bounded_refs(_required_string_list(raw, "verification_refs")),
+        state_digest=_required_string(raw, "state_digest"),
+        created_at=_required_string(raw, "created_at"),
     )
+
+
+def replace_todos(
+    ledger: TaskLedger,
+    *,
+    items: Iterable[TodoItem | dict[str, object]],
+    turn_index: int,
+    goal: str | None = None,
+) -> TaskLedger:
+    """校验完整新清单后原子替换；任一失败都不改变旧 ledger。"""
+
+    proposed = [_coerce_todo_update_item(item, turn_index=turn_index) for item in items]
+    _validate_todo_collection(proposed)
+    if not proposed and ledger.todos and not ledger.all_terminal():
+        raise TaskLedgerError("empty todo list is only allowed after all existing items are terminal")
+    proposed_ids = {item.id for item in proposed}
+    missing_active = [
+        item.id
+        for item in ledger.todos
+        if item.status in {"pending", "in_progress"} and item.id not in proposed_ids
+    ]
+    if missing_active:
+        raise TaskLedgerError(f"unfinished todo items cannot disappear: {', '.join(missing_active)}")
+    old_by_id = {item.id: item for item in ledger.todos}
+    merged: list[TodoItem] = []
+    for item in proposed:
+        previous = old_by_id.get(item.id)
+        if previous is None:
+            merged.append(item)
+            continue
+        merged.append(
+            replace(
+                item,
+                source_plan_id=previous.source_plan_id,
+                source_plan_revision=previous.source_plan_revision,
+                source_plan_step_id=previous.source_plan_step_id,
+                blocker=previous.blocker if item.status == "in_progress" else None,
+                evidence_refs=list(previous.evidence_refs),
+                checkpoint_ids=list(previous.checkpoint_ids),
+            ),
+        )
+    next_goal = ledger.goal if goal is None else goal.strip()
+    _validate_text(next_goal, "goal", TASK_LEDGER_TEXT_FIELD_LIMIT, allow_empty=True)
+    return TaskLedger(
+        goal=next_goal,
+        todos=merged,
+        checkpoints=list(ledger.checkpoints),
+        budgets=dict(ledger.budgets),
+        updated_turn=turn_index,
+    )
+
+
+def cancel_active_todos(ledger: TaskLedger, *, turn_index: int) -> TaskLedger:
+    todos = [
+        replace(item, status="cancelled", blocker=None, updated_turn=turn_index)
+        if item.status in {"pending", "in_progress"}
+        else item
+        for item in ledger.todos
+    ]
+    return replace(ledger, todos=todos, updated_turn=turn_index)
+
+
+def initialize_todos_from_plan(
+    *,
+    goal: str,
+    plan_id: str,
+    revision: int,
+    steps: Iterable[tuple[str, str]],
+    verification: str | None,
+    turn_index: int,
+) -> TaskLedger:
+    """把批准 Plan 确定性转换为 Todo；第一项立即进入执行态。"""
+
+    items: list[TodoItem] = []
+    for index, (step_id, content) in enumerate(steps):
+        items.append(
+            TodoItem(
+                id=f"todo-{index + 1:03d}",
+                content=content,
+                status="in_progress" if index == 0 else "pending",
+                source_plan_id=plan_id,
+                source_plan_revision=revision,
+                source_plan_step_id=step_id,
+                updated_turn=turn_index,
+            ),
+        )
+    if verification is not None:
+        items.append(
+            TodoItem(
+                id=f"todo-{len(items) + 1:03d}",
+                content=verification,
+                status="pending" if items else "in_progress",
+                source_plan_id=plan_id,
+                source_plan_revision=revision,
+                source_plan_step_id=None,
+                updated_turn=turn_index,
+            ),
+        )
+    _validate_todo_collection(items)
+    return TaskLedger(goal=goal.strip(), todos=items, updated_turn=turn_index)
+
+
+def update_task_ledger_runtime(
+    ledger: TaskLedger,
+    *,
+    turn_index: int,
+    episode_path: Path,
+    runtime_events: list[object],
+) -> TaskLedger:
+    """只更新 blocker/evidence/checkpoint/budget，绝不隐式改变 Todo 状态。"""
+
+    if not ledger.todos:
+        return ledger
+    from haagent.runtime.events.bus import bus_event_to_dict, coerce_bus_event
+
+    active = ledger.active_todo()
+    if active is None:
+        return replace(ledger, updated_turn=turn_index)
+    active_index = next(index for index, item in enumerate(ledger.todos) if item.id == active.id)
+    current = active
+    checkpoints = list(ledger.checkpoints)
+    budgets = dict(ledger.budgets)
+    tool_calls = int(budgets.get("tool_calls", 0) or 0)
+    model_attempts = int(budgets.get("model_attempts", 0) or 0)
+    for raw_event in runtime_events:
+        event = bus_event_to_dict(coerce_bus_event(raw_event))
+        event_type = str(event.get("event_type", ""))
+        if event_type == "tool_finished":
+            tool_calls += 1
+            tool_name = str(event.get("tool_name", "unknown"))
+            current = replace(
+                current,
+                evidence_refs=_bounded_refs([*current.evidence_refs, f"tool={tool_name} episode={episode_path}"]),
+                updated_turn=turn_index,
+            )
+        elif event_type in {"task_recovery_suggested", "task_step_blocked", "worker_failed"}:
+            # 阻塞是运行时元数据；Todo 仍保持 in_progress，便于恢复后继续。
+            current = replace(
+                current,
+                blocker={
+                    "category": str(event.get("category", event_type)),
+                    "reason": str(event.get("reason", event.get("summary", "")))[:TASK_LEDGER_TEXT_FIELD_LIMIT],
+                    "suggested_action": str(event.get("suggested_action", ""))[:TASK_LEDGER_TEXT_FIELD_LIMIT],
+                },
+                updated_turn=turn_index,
+            )
+        elif event_type == "task_checkpoint_saved":
+            checkpoint = _checkpoint_for_active(current, checkpoints, turn_index, episode_path)
+            checkpoints.append(checkpoint)
+            current = replace(
+                current,
+                checkpoint_ids=_bounded_refs([*current.checkpoint_ids, checkpoint.id]),
+                updated_turn=turn_index,
+            )
+        elif event_type == "task_step_progress" and event.get("category") == "model_turn_started":
+            model_attempts += 1
+    todos = list(ledger.todos)
+    todos[active_index] = current
+    budgets.update({"turns_used": turn_index, "tool_calls": tool_calls, "model_attempts": model_attempts})
+    return replace(
+        ledger,
+        todos=todos,
+        checkpoints=checkpoints[-TASK_LEDGER_MAX_ITEMS:],
+        budgets=budgets,
+        updated_turn=turn_index,
+    )
+
+
+def format_task_ledger_for_model(value: object) -> str:
+    ledger = value if isinstance(value, TaskLedger) else task_ledger_from_dict(value)
+    if not ledger.has_active_todos():
+        return ""
+    lines = [f"todo_goal: {ledger.goal or 'none'}", "todos:"]
+    markers = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]", "cancelled": "[-]"}
+    for item in ledger.todos:
+        lines.append(f"- {markers[item.status]} id={item.id} status={item.status} content={item.content}")
+        if item.status == "in_progress" and item.blocker is not None:
+            lines.append(
+                "  blocker: "
+                f"category={item.blocker.get('category', 'unknown')} "
+                f"suggested_action={item.blocker.get('suggested_action', '')}",
+            )
+    lines.append(
+        "规则：Todo 是完整 session 清单；开始前保持一个 in_progress，完成里程碑后立即调用 todo_update。",
+    )
+    text = "\n".join(lines)
+    return text if len(text) <= TASK_LEDGER_MODEL_CHAR_LIMIT else text[: TASK_LEDGER_MODEL_CHAR_LIMIT - 1] + "…"
+
+
+def _coerce_todo_update_item(item: TodoItem | dict[str, object], *, turn_index: int) -> TodoItem:
+    if isinstance(item, TodoItem):
+        candidate = replace(item, updated_turn=turn_index)
+    elif isinstance(item, dict):
+        allowed = {"id", "content", "status"}
+        if set(item) != allowed:
+            raise TaskLedgerError("todo_update item only accepts id, content, and status")
+        candidate = TodoItem(
+            id=_required_string(item, "id").strip(),
+            content=_required_string(item, "content").strip(),
+            status=_required_string(item, "status"),
+            updated_turn=turn_index,
+        )
+    else:
+        raise TaskLedgerError("todo_update item must be an object")
+    _validate_text(candidate.id, "id", TASK_LEDGER_ID_LIMIT)
+    _validate_text(candidate.content, "content", TASK_LEDGER_TEXT_FIELD_LIMIT)
+    if candidate.status not in TODO_STATUSES:
+        raise TaskLedgerError("status is invalid")
+    return candidate
+
+
+def _validate_todo_collection(items: list[TodoItem]) -> None:
+    if len(items) > TASK_LEDGER_MAX_ITEMS:
+        raise TaskLedgerError(f"todo list cannot exceed {TASK_LEDGER_MAX_ITEMS} items")
+    ids = [item.id for item in items]
+    if len(ids) != len(set(ids)):
+        raise TaskLedgerError("todo ids must be unique")
+    if sum(item.status == "in_progress" for item in items) > 1:
+        raise TaskLedgerError("todo list can contain at most one in_progress item")
+
+
+def _checkpoint_for_active(
+    item: TodoItem,
+    existing: list[TaskCheckpoint],
+    turn_index: int,
+    episode_path: Path,
+) -> TaskCheckpoint:
+    checkpoint_id = f"checkpoint-{len(existing) + 1:03d}"
+    digest = sha256(f"{item.id}|{turn_index}|{episode_path}".encode("utf-8")).hexdigest()[:16]
+    return TaskCheckpoint(
+        id=checkpoint_id,
+        todo_id=item.id,
+        turn_index=turn_index,
+        episode_path=str(episode_path),
+        state_digest=digest,
+        created_at=datetime.now(UTC).isoformat(),
+    )
+
+
+def _validate_text(value: str, field_name: str, limit: int, *, allow_empty: bool = False) -> None:
+    if not isinstance(value, str):
+        raise TaskLedgerError(f"{field_name} must be a string")
+    if not allow_empty and not value.strip():
+        raise TaskLedgerError(f"{field_name} must be non-empty")
+    if len(value.strip()) > limit:
+        raise TaskLedgerError(f"{field_name} cannot exceed {limit} characters")
 
 
 def _required_string(raw: dict[str, object], key: str) -> str:
@@ -503,17 +528,10 @@ def _optional_string(value: object, key: str) -> str | None:
     return value
 
 
-def _required_choice(raw: dict[str, object], key: str, choices: set[str]) -> str:
-    value = _required_string(raw, key)
-    if value not in choices:
-        raise TaskLedgerError(f"{key} is invalid")
-    return value
-
-
 def _required_int(raw: dict[str, object], key: str) -> int:
     value = raw.get(key)
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise TaskLedgerError(f"{key} must be an integer")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TaskLedgerError(f"{key} must be a non-negative integer")
     return value
 
 
@@ -531,147 +549,5 @@ def _required_string_list(raw: dict[str, object], key: str) -> list[str]:
     return list(values)
 
 
-def _bounded_string_list(items: list[str]) -> list[str]:
-    return [_bounded_text(item, TASK_LEDGER_TEXT_FIELD_LIMIT) for item in items[:TASK_LEDGER_RECENT_STEP_LIMIT]]
-
-
-def _bounded_text(value: str, limit: int = TASK_LEDGER_TEXT_FIELD_LIMIT) -> str:
-    text = value.replace("\r", " ").replace("\n", " ").strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"
-
-
-def _budget_warnings(budgets: dict[str, object]) -> list[str]:
-    warnings: list[str] = []
-    for key in ("turns_used", "tool_calls", "retry_count", "model_attempts"):
-        value = budgets.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            warnings.append(f"{key}={value}")
-    return warnings
-
-
-def _model_attempt_total(budgets: dict[str, object]) -> int:
-    value = budgets.get("model_attempts", 0)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def _current_model_attempts(
-    model_turn_starts: int,
-    scheduled_replays: int,
-    attempts_by_turn: dict[int, int],
-) -> int:
-    """优先以真实模型轮次为基数；旧事件流则回退到最终 attempt 事实。"""
-
-    if model_turn_starts:
-        return model_turn_starts + scheduled_replays
-    return sum(attempts_by_turn.values())
-
-
-def _find_or_default_step(steps: list[TaskStep], step_id: str | None) -> TaskStep | None:
-    if step_id is not None:
-        for step in steps:
-            if step.id == step_id:
-                return step
-    return steps[-1] if steps else None
-
-
-def _new_turn_step(prompt: str, turn_index: int) -> TaskStep:
-    return TaskStep(
-        id="step-001",
-        title=_bounded_text(prompt or "Process task"),
-        kind="plan",
-        owner="main",
-        status="running",
-        updated_turn=turn_index,
-    )
-
-
-def _ensure_step(steps: list[TaskStep], step_id: str, title: str, owner: str) -> TaskStep:
-    for step in steps:
-        if step.id == step_id:
-            return step
-    step = TaskStep(
-        id=_bounded_text(step_id, 80),
-        title=_bounded_text(title),
-        kind="delegate" if owner == "worker" else "plan",
-        owner=owner if owner in STEP_OWNERS else "main",
-        status="running",
-    )
-    steps.append(step)
-    return step
-
-
-def _apply_result_status_to_active_step(
-    steps: list[TaskStep],
-    *,
-    current_step_id: str | None,
-    result_status: str,
-    episode_path: Path,
-) -> None:
-    if result_status not in TERMINAL_LEDGER_STATUSES:
-        return
-    step = _find_or_default_step(steps, current_step_id)
-    if step is None or step.status == "blocked":
-        return
-    if result_status == "completed":
-        step.status = "completed"
-    elif result_status == "failed":
-        step.status = "failed"
-        step.blocker = {"category": "turn_failed", "reason": "episode failed"}
-    elif result_status == "cancelled":
-        step.status = "skipped"
-        step.blocker = {"category": "turn_cancelled", "reason": "user cancelled current run"}
-    step.evidence_refs = _bounded_string_list([
-        *step.evidence_refs,
-        f"episode={episode_path}",
-    ])
-
-
-def _tool_evidence(event: dict[str, object]) -> str:
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
-    path = result.get("path") if isinstance(result.get("path"), str) else ""
-    suffix = f" path={path}" if path else ""
-    return f"tool={event.get('tool_name', 'unknown')} status={result.get('status', 'unknown')}{suffix}"
-
-
-def _worker_evidence_refs(event: dict[str, object], worker_id: str, fallback: str) -> list[str]:
-    refs = event.get("evidence_refs")
-    evidence_refs = [str(item) for item in refs] if isinstance(refs, list | tuple) else []
-    if not evidence_refs:
-        evidence_refs = [f"{fallback}={worker_id}"]
-    episode_path = str(event.get("episode_path", "") or "")
-    if episode_path:
-        evidence_refs.append(f"episode={episode_path}")
-    task_id = str(event.get("task_id", "") or "")
-    if task_id:
-        evidence_refs.append(f"task={task_id}")
-    return _bounded_string_list(evidence_refs)
-
-
-def _checkpoint_for_turn(
-    existing: list[TaskCheckpoint],
-    steps: list[TaskStep],
-    current_step_id: str | None,
-    turn_index: int,
-    episode_path: Path,
-) -> TaskCheckpoint:
-    step_id = current_step_id or (steps[-1].id if steps else "step-001")
-    checkpoint_id = f"ckpt-{len(existing) + 1:04d}"
-    changed_paths: list[str] = []
-    for step in steps:
-        for evidence in step.evidence_refs:
-            if " path=" in evidence:
-                changed_paths.append(evidence.split(" path=", 1)[1])
-    digest_source = f"{step_id}|{turn_index}|{episode_path}|{'|'.join(changed_paths)}"
-    return TaskCheckpoint(
-        id=checkpoint_id,
-        step_id=step_id,
-        turn_index=turn_index,
-        episode_path=str(episode_path),
-        tool_call_ids=[],
-        changed_paths=_bounded_string_list(changed_paths),
-        verification_refs=[],
-        state_digest="sha256:" + hashlib.sha256(digest_source.encode("utf-8")).hexdigest(),
-        created_at=datetime.now(UTC).isoformat(),
-    )
+def _bounded_refs(items: list[str]) -> list[str]:
+    return [item[:TASK_LEDGER_TEXT_FIELD_LIMIT] for item in items[-TASK_LEDGER_RECENT_REF_LIMIT:]]

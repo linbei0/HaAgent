@@ -163,11 +163,19 @@ ConversationTimeline {
 }
 
 .timeline-header {
+    width: 1fr;
     height: 1;
     margin-bottom: 0;
     margin-left: 0;
     color: $primary;
     text-style: bold;
+}
+
+/* 可点击的标题/工具摘要行：整行是折叠热区，hover 提亮做出可交互暗示。 */
+.timeline-header.timeline-clickable:hover,
+.timeline-tools.timeline-clickable:hover {
+    color: $foreground;
+    background: $panel;
 }
 
 .timeline-user .timeline-header {
@@ -205,6 +213,13 @@ ConversationTimeline {
 .timeline-assistant Markdown.timeline-body {
     width: 1fr;
     height: auto;
+}
+
+RichLog.timeline-text {
+    height: auto;
+    overflow: hidden;
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
 }
 
 .timeline-answer {

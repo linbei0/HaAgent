@@ -46,6 +46,15 @@ class AssistantIntermediateBusEvent:
 
 
 @dataclass(frozen=True)
+class SteeringInjectedBusEvent:
+    """用户运行中引导已在安全边界注入对话上下文的事实。"""
+
+    turn: int
+    content: str
+    event_type: str = field(default="steering_injected", init=False)
+
+
+@dataclass(frozen=True)
 class ToolStartedBusEvent:
     turn: int
     tool_name: str
@@ -144,6 +153,7 @@ RuntimeBusEvent: TypeAlias = (
     | AssistantAttemptResetBusEvent
     | AssistantIntermediateBusEvent
     | AssistantMessageBusEvent
+    | SteeringInjectedBusEvent
     | ToolStartedBusEvent
     | ToolFinishedBusEvent
     | ToolFailedBusEvent
@@ -175,6 +185,8 @@ def bus_event_to_dict(event: RuntimeBusEvent | dict[str, object]) -> dict[str, o
         return {"event_type": "assistant_intermediate_message", "turn": event.turn, "content": event.content}
     if isinstance(event, AssistantMessageBusEvent):
         return {"event_type": "assistant_message", "turn": event.turn, "content": event.content}
+    if isinstance(event, SteeringInjectedBusEvent):
+        return {"event_type": "steering_injected", "turn": event.turn, "content": event.content}
     if isinstance(event, ToolStartedBusEvent):
         return {
             "event_type": "tool_started",
@@ -263,6 +275,11 @@ def bus_event_from_dict(payload: dict[str, object]) -> RuntimeBusEvent:
         )
     if event_type == "assistant_message":
         return AssistantMessageBusEvent(
+            turn=int(payload.get("turn", 0) or 0),
+            content=str(payload.get("content", "")),
+        )
+    if event_type == "steering_injected":
+        return SteeringInjectedBusEvent(
             turn=int(payload.get("turn", 0) or 0),
             content=str(payload.get("content", "")),
         )

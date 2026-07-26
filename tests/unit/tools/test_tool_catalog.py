@@ -43,8 +43,10 @@ def test_default_catalog_matches_tool_registry_and_handlers(tmp_path: Path) -> N
             "task_get": _handler,
             "task_list": _handler,
             "task_output": _handler,
-            "request_user_input": _handler,
-            "start_memory_update": _handler,
+                "request_user_input": _handler,
+                "todo_update": _handler,
+                "submit_plan": _handler,
+                "start_memory_update": _handler,
         },
     )
     assert set(handlers) == set(TOOL_REGISTRY)

@@ -10,6 +10,7 @@ from haagent.runtime.events import (
     AssistantIntermediateEvent,
     ContextUsageEvent,
     FailureNoticeEvent,
+    PlanningStateEvent,
     RAW_RUNTIME_UI_EVENT_REGISTRY,
     RuntimeUiEventMapper,
     ToolActivityEvent,
@@ -62,8 +63,11 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "edit_diff_denied",
         "user_input_requested",
         "user_input_received",
+        "plan_confirmation_requested",
+        "plan_confirmation_received",
         "guardrail_triggered",
         "compression_diagnostic",
+        "steering_injected",
         "loop_suggestion_added",
         "interaction_reused",
         "failure",
@@ -85,6 +89,51 @@ def test_runtime_ui_event_registry_lists_supported_raw_event_types() -> None:
         "model_fallback",
         "model_context_usage",
     }
+
+
+def test_plan_confirmation_received_maps_to_planning_state() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "plan_confirmation_received",
+            "turn": 2,
+            "plan_id": "plan-1",
+            "revision": 3,
+            "outcome": "approved",
+        },
+        session_id="session-1",
+        turn_index=4,
+    )
+
+    assert event == PlanningStateEvent(
+        session_id="session-1",
+        turn_index=4,
+        state="approved_pending_execution",
+        plan_id="plan-1",
+        revision=3,
+        step_count=0,
+    )
+
+
+def test_plan_confirmation_requested_maps_to_awaiting_confirmation() -> None:
+    event = RuntimeUiEventMapper.to_ui_event(
+        {
+            "event_type": "plan_confirmation_requested",
+            "turn": 2,
+            "plan_id": "plan-1",
+            "revision": 3,
+        },
+        session_id="session-1",
+        turn_index=4,
+    )
+
+    assert event == PlanningStateEvent(
+        session_id="session-1",
+        turn_index=4,
+        state="awaiting_confirmation",
+        plan_id="plan-1",
+        revision=3,
+        step_count=0,
+    )
 
 
 def test_runtime_ui_event_mapper_exposes_context_usage() -> None:

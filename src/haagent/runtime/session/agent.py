@@ -17,6 +17,7 @@ from haagent.models.config.connections import user_config_dir
 from haagent.memory.extraction import MemoryExtractionRequest, MemoryExtractor
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.steering import SteeringChannel
 from haagent.runtime.session.attachments import (
     AttachmentError,
     ImageAttachment,
@@ -56,8 +57,6 @@ from haagent.runtime.session.turn_completion import (
     build_turn_result,
     count_historical_tool_compression_events,
     memory_update_requested,
-    task_step_started_event,
-    task_turn_closed_events,
     turn_summary,
     with_in_band_verification,
 )
@@ -76,6 +75,7 @@ from haagent.runtime.session.ui_events import (
 from haagent.context.compression.full import FullCompactEligibility, maybe_full_compact_messages
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
+from haagent.runtime.events import PlanningStateEvent, TodoStateEvent
 from haagent.runtime.execution.path_policy import (
     PathAccess,
     PermissionMode,
@@ -92,9 +92,22 @@ from haagent.runtime.session.working_state import (
     write_working_state,
 )
 from haagent.runtime.session.task_ledger import (
-    begin_task_ledger_turn,
-    update_task_ledger,
+    TaskLedgerError,
+    cancel_active_todos,
+    initialize_todos_from_plan,
+    replace_todos,
+    update_task_ledger_runtime,
     write_task_ledger,
+)
+from haagent.runtime.session.planning_state import (
+    PlanningStateError,
+    approve_plan,
+    cancel_plan,
+    enter_plan_mode as create_planning_state,
+    mark_plan_execution_started,
+    request_plan_revision,
+    submit_plan_revision,
+    write_planning_state,
 )
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
@@ -150,6 +163,7 @@ _SNAPSHOT_ATTRS: dict[str, str] = {
     "_image_attachment_history": "image_attachment_history",
     "_working_state": "working_state",
     "_task_ledger": "task_ledger",
+    "_planning_state": "planning_state",
     "_created_at": "created_at",
     "_session_interaction_state": "session_interaction_state",
 }
@@ -167,6 +181,7 @@ _RESOURCES_ATTRS: dict[str, str] = {
     "_next_turn_target_paths": "next_turn_target_paths",
     "_historical_tool_compression_count": "historical_tool_compression_count",
     "_current_cancellation_token": "current_cancellation_token",
+    "_current_steering_channel": "current_steering_channel",
     "_mcp_settings": "mcp_settings",
     "_mcp_runtime": "mcp_runtime",
     "_owns_mcp_runtime": "owns_mcp_runtime",
@@ -257,6 +272,7 @@ class AgentSession:
         self._write_session_metadata()
         self._write_working_state()
         self._write_task_ledger()
+        self._write_planning_state()
 
     @classmethod
     def resume(
@@ -388,26 +404,64 @@ class AgentSession:
 
         runtime_events: list[RuntimeBusEvent] = []
         self._current_cancellation_token = CancellationToken()
+        self._current_steering_channel = SteeringChannel()
 
         def on_runtime_event(event: RuntimeBusEvent | dict[str, object]) -> None:
             bus_event = coerce_bus_event(event)
             runtime_events.append(bus_event)
             emit_runtime_ui_event(event_sink, bus_event, session_id=self.session_id, turn_index=turn_index)
 
+        def todo_state_sink(
+            items: list[dict[str, object]],
+            explanation: str,
+            tool_turn: int | None,
+        ) -> dict[str, object]:
+            result = self._apply_todo_update(
+                items,
+                explanation=explanation,
+                turn_index=tool_turn or turn_index,
+                fallback_goal=clean_prompt,
+            )
+            active = self._task_ledger.active_todo()
+            emit_ui_event(
+                event_sink,
+                TodoStateEvent(
+                    session_id=self.session_id,
+                    turn_index=turn_index,
+                    total_count=len(self._task_ledger.todos),
+                    completed_count=self._task_ledger.status_counts()["completed"],
+                    active_item_id=active.id if active is not None else None,
+                    active_item_content=active.content if active is not None else "",
+                    all_terminal=self._task_ledger.all_terminal(),
+                ),
+            )
+            return result
+
+        def planning_state_handler(
+            action: str,
+            payload: dict[str, object],
+            planning_turn: int,
+        ) -> dict[str, object]:
+            result = self._handle_planning_state_action(action, payload, planning_turn or turn_index)
+            proposal = self._planning_state.proposal
+            emit_ui_event(
+                event_sink,
+                PlanningStateEvent(
+                    session_id=self.session_id,
+                    turn_index=turn_index,
+                    state=self._planning_state.status,
+                    plan_id=self._planning_state.plan_id,
+                    revision=self._planning_state.revision,
+                    step_count=len(proposal.steps) if proposal is not None else 0,
+                ),
+            )
+            return result
+
         target_paths = list(self._next_turn_target_paths)
         self._next_turn_target_paths = []
         session_memory = self._session_memory()
         new_attachments = list(attachments or [])
         prompt_attachments = new_attachments if new_attachments else list(self._last_user_image_attachments)
-        self._task_ledger = begin_task_ledger_turn(
-            self._task_ledger,
-            prompt=clean_prompt,
-            turn_index=turn_index,
-        )
-        self._write_task_ledger()
-        started_event = task_step_started_event(self._task_ledger)
-        if started_event is not None:
-            on_runtime_event(started_event)
         try:
             # prompt 接收点建立单一 trace，覆盖 submit_to_run_start。
             from haagent.runtime.performance import PerformanceTrace
@@ -425,6 +479,7 @@ class AgentSession:
                     historical_tool_compression_count=self._historical_tool_compression_count,
                     working_state=self._working_state.to_dict() if not self._working_state.is_empty() else None,
                     task_ledger=self._task_ledger.to_dict(),
+                    planning_state=self._planning_state.to_dict(),
                     path_policy=self.path_policy,
                     enable_web=self.enable_web,
                     target_paths=target_paths,
@@ -433,6 +488,7 @@ class AgentSession:
                     event_sink=on_runtime_event,
                     interaction_handler=interaction_handler,
                     cancellation_token=self._current_cancellation_token,
+                    steering_channel=self._current_steering_channel,
                     orchestrator_factory=RunOrchestrator,
                     leader_session_id=self.session_id,
                     tool_registry=self._tool_registry,
@@ -451,14 +507,29 @@ class AgentSession:
                     instruction_cache=self._instruction_cache,
                     tool_schema_cache=self._tool_schema_cache,
                     working_state_sink=self._persist_progress_working_state,
+                    todo_state_sink=todo_state_sink,
+                    planning_state_handler=planning_state_handler,
+                    plan_execution_has_active_todos=lambda: (
+                        self._planning_state.status == "execution_started"
+                        and self._task_ledger.has_active_todos()
+                    ),
                 ),
             )
         except Exception:
             self._current_cancellation_token = None
+            self._current_steering_channel = None
             raise
 
+        # run 结束仍未消费的引导必须交回调用方（TUI 重新排队），不能静默丢弃。
+        unconsumed_steering = (
+            tuple(self._current_steering_channel.drain())
+            if self._current_steering_channel is not None
+            else ()
+        )
         turn_result = self._build_turn_result(clean_prompt, result)
         turn_result = with_in_band_verification(turn_result, runtime_events)
+        if unconsumed_steering:
+            turn_result = replace(turn_result, unconsumed_steering=unconsumed_steering)
         self.turn_count += 1
         # always 可能在本 turn 的 resolver 中被置位；落盘以便 resume 恢复
         self._write_session_metadata()
@@ -475,19 +546,19 @@ class AgentSession:
             runtime_events=runtime_events,
         )
         self._write_working_state()
-        self._task_ledger = update_task_ledger(
+        self._task_ledger = update_task_ledger_runtime(
             self._task_ledger,
-            prompt=clean_prompt,
             turn_index=turn_index,
-            result_status=turn_result.status,
             episode_path=turn_result.episode_path,
             runtime_events=runtime_events,
         )
         self._write_task_ledger()
-        for progress_event in task_turn_closed_events(self._task_ledger, turn_result):
-            on_runtime_event(progress_event)
         self._historical_tool_compression_count += count_historical_tool_compression_events(runtime_events)
-        summary = turn_summary(clean_prompt, turn_result)
+        summary = turn_summary(
+            clean_prompt,
+            turn_result,
+            steering_texts=_steering_texts_from_events(runtime_events),
+        )
         self._summaries.append(summary)
         self._record_turn(clean_prompt, turn_result, summary)
         extraction_result = None
@@ -560,13 +631,39 @@ class AgentSession:
                 ),
             )
         self._current_cancellation_token = None
+        self._current_steering_channel = None
+        if self._planning_state.status == "approved_pending_execution":
+            return self._run_approved_plan_execution(
+                event_sink=event_sink,
+                interaction_handler=interaction_handler,
+            )
         return turn_result
 
+    def steer_current_run(self, text: str) -> bool:
+        """向正在运行的任务投递引导消息；无运行中任务时返回 False。"""
+        channel = self._current_steering_channel
+        if channel is None or self._current_cancellation_token is None:
+            return False
+        normalized = text.strip()
+        if not normalized:
+            return False
+        channel.post(normalized)
+        return True
+
     def cancel_current_run(self) -> bool:
+        changed = False
+        if self._planning_state.status in {"planning", "awaiting_confirmation", "approved_pending_execution"}:
+            self._planning_state = cancel_plan(self._planning_state, updated_turn=self.turn_count)
+            self._write_planning_state()
+            changed = True
+        if self._task_ledger.has_active_todos():
+            self._task_ledger = cancel_active_todos(self._task_ledger, turn_index=self.turn_count)
+            self._write_task_ledger()
+            changed = True
         if self._current_cancellation_token is not None:
             self._current_cancellation_token.cancel()
             return True
-        return False
+        return changed
 
     def paste_clipboard_image(self, existing: list[ImageAttachment] | None = None) -> ImageAttachment:
         if self._current_cancellation_token is not None:
@@ -686,6 +783,12 @@ class AgentSession:
             "turn_count": self.turn_count,
             "working_state": self._working_state.status_summary(),
             "task_ledger": self._task_ledger.status_summary(),
+            "planning_state": {
+                "status": self._planning_state.status,
+                "plan_id": self._planning_state.plan_id,
+                "revision": self._planning_state.revision,
+                "is_plan_mode": self._planning_state.is_plan_mode,
+            },
         }
 
     def mcp_status(self) -> dict[str, object]:
@@ -712,6 +815,7 @@ class AgentSession:
         self._write_session_metadata()
         self._write_working_state()
         self._write_task_ledger()
+        self._write_planning_state()
 
     def _snapshot_state(self) -> SessionRuntimeState:
         # new() 会再构造独立 package；clone 避免共享可变 list。
@@ -730,6 +834,176 @@ class AgentSession:
 
     def _write_task_ledger(self) -> None:
         write_task_ledger(self.session_path / "task-ledger.json", self._task_ledger)
+
+    def _write_planning_state(self) -> None:
+        write_planning_state(self.session_path / "planning-state.json", self._planning_state)
+
+    def enter_plan_mode(self) -> object:
+        """显式进入 Plan Mode；运行 turn 或活动 Todo 存在时拒绝。"""
+
+        if self._current_cancellation_token is not None:
+            raise ChatSessionError("当前任务仍在运行，不能进入 Plan Mode")
+        if self._task_ledger.has_active_todos():
+            raise ChatSessionError("当前 Todo 尚未结束，请先完成或取消当前任务")
+        if self._planning_state.is_plan_mode:
+            raise ChatSessionError("当前已经处于 Plan Mode")
+        self._planning_state = create_planning_state(updated_turn=self.turn_count)
+        self._write_planning_state()
+        return self._planning_state
+
+    def approve_plan_revision(self, plan_id: str, revision: int) -> object:
+        self._handle_planning_state_action(
+            "approve",
+            {"plan_id": plan_id, "revision": revision},
+            self.turn_count,
+        )
+        return self._planning_state
+
+    def submit_plan_feedback(self, plan_id: str, revision: int, feedback: str) -> object:
+        if not feedback.strip():
+            raise ChatSessionError("Plan 修改意见不能为空")
+        self._handle_planning_state_action(
+            "feedback",
+            {"plan_id": plan_id, "revision": revision, "feedback": feedback},
+            self.turn_count,
+        )
+        return self._planning_state
+
+    def execute_pending_plan_events(
+        self,
+        *,
+        event_sink: RuntimeUiEventSink = None,
+        interaction_handler: HumanInteractionHandler | None = None,
+    ) -> ChatTurnResult:
+        if self._planning_state.status != "approved_pending_execution":
+            raise ChatSessionError("当前没有等待执行的已批准 Plan")
+        return self._run_approved_plan_execution(
+            event_sink=event_sink,
+            interaction_handler=interaction_handler,
+        )
+
+    def _apply_todo_update(
+        self,
+        items: list[dict[str, object]],
+        *,
+        explanation: str,
+        turn_index: int,
+        fallback_goal: str,
+    ) -> dict[str, object]:
+        del explanation
+        try:
+            self._task_ledger = replace_todos(
+                self._task_ledger,
+                items=items,
+                turn_index=turn_index,
+                goal=self._task_ledger.goal or fallback_goal[:240],
+            )
+        except TaskLedgerError:
+            # 原子失败边界：不写磁盘，直接把校验错误返回给模型修正。
+            raise
+        self._write_task_ledger()
+        return {
+            "items": [item.to_dict() for item in self._task_ledger.todos],
+            "counts": self._task_ledger.status_counts(),
+            "all_terminal": self._task_ledger.all_terminal(),
+        }
+
+    def _handle_planning_state_action(
+        self,
+        action: str,
+        payload: dict[str, object],
+        turn_index: int,
+    ) -> dict[str, object]:
+        try:
+            if action == "submit":
+                self._planning_state = submit_plan_revision(
+                    self._planning_state,
+                    payload,
+                    updated_turn=turn_index,
+                )
+            elif action == "feedback":
+                self._planning_state = request_plan_revision(
+                    self._planning_state,
+                    plan_id=str(payload.get("plan_id", "")),
+                    revision=int(payload.get("revision", -1)),
+                    updated_turn=turn_index,
+                )
+            elif action == "approve":
+                self._planning_state = approve_plan(
+                    self._planning_state,
+                    plan_id=str(payload.get("plan_id", "")),
+                    revision=int(payload.get("revision", -1)),
+                    updated_turn=turn_index,
+                )
+            else:
+                raise PlanningStateError(f"unknown planning action: {action}")
+        except (PlanningStateError, ValueError) as error:
+            raise ChatSessionError(str(error)) from error
+        self._write_planning_state()
+        return self._planning_state.to_dict()
+
+    def _run_approved_plan_execution(
+        self,
+        *,
+        event_sink: RuntimeUiEventSink,
+        interaction_handler: HumanInteractionHandler | None,
+    ) -> ChatTurnResult:
+        state = self._planning_state
+        proposal = state.proposal
+        if proposal is None or state.plan_id is None or state.approved_revision is None or state.execution_id is None:
+            raise ChatSessionError("批准的 Plan 状态不完整，无法启动执行")
+        initialized = any(
+            item.source_plan_id == state.plan_id and item.source_plan_revision == state.approved_revision
+            for item in self._task_ledger.todos
+        )
+        if not initialized:
+            verification = proposal.verification.description if proposal.verification.required else None
+            self._task_ledger = initialize_todos_from_plan(
+                goal=proposal.goal,
+                plan_id=state.plan_id,
+                revision=state.approved_revision,
+                steps=[(step.id, step.content) for step in proposal.steps],
+                verification=verification,
+                turn_index=self.turn_count,
+            )
+            self._write_task_ledger()
+            active = self._task_ledger.active_todo()
+            emit_ui_event(
+                event_sink,
+                TodoStateEvent(
+                    session_id=self.session_id,
+                    turn_index=self.turn_count,
+                    total_count=len(self._task_ledger.todos),
+                    completed_count=0,
+                    active_item_id=active.id if active is not None else None,
+                    active_item_content=active.content if active is not None else "",
+                    all_terminal=False,
+                ),
+            )
+        self._planning_state = mark_plan_execution_started(
+            state,
+            execution_id=state.execution_id,
+            updated_turn=self.turn_count + 1,
+        )
+        self._write_planning_state()
+        emit_ui_event(
+            event_sink,
+            PlanningStateEvent(
+                session_id=self.session_id,
+                turn_index=self.turn_count + 1,
+                state=self._planning_state.status,
+                plan_id=self._planning_state.plan_id,
+                revision=self._planning_state.revision,
+                step_count=len(proposal.steps),
+            ),
+        )
+        # 自动执行不会向 TUI 追加伪造用户消息；结构化 Plan/Todo 通过 session context 注入。
+        return self.run_prompt_events(
+            proposal.goal,
+            event_sink=event_sink,
+            include_session_events=False,
+            interaction_handler=interaction_handler,
+        )
 
     def close(self) -> None:
         # 先取消 active run，再幂等关闭 gateway/MCP，避免关闭后仍有请求占用连接。
@@ -914,3 +1188,14 @@ class AgentSession:
             summary=self._manual_compaction_summary,
             compacted_turn_count=self._manual_compaction_turn_count,
         )
+
+
+def _steering_texts_from_events(runtime_events: list[object]) -> list[str]:
+    from haagent.runtime.events.bus import SteeringInjectedBusEvent, coerce_bus_event
+
+    texts: list[str] = []
+    for raw_event in runtime_events:
+        event = coerce_bus_event(raw_event)
+        if isinstance(event, SteeringInjectedBusEvent) and event.content.strip():
+            texts.append(event.content)
+    return texts

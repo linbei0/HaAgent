@@ -16,10 +16,14 @@
     },
     "context_contains": [
       "Working State:",
-      "last_user_request:",
+      "key_findings:",
       "last_updated_turn: 1"
     ],
     "context_not_contains": [
+      "last_user_request:",
+      "current_goal:",
+      "completed_actions:",
+      "next_steps:",
       "tool-calls.jsonl",
       "transcript.jsonl",
       "\"tool_name\""

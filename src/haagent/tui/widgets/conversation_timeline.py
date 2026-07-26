@@ -449,8 +449,9 @@ class ConversationTimeline(VerticalScroll):
         if _is_process_item(item):
             if item.expanded:
                 self._expanded_process_turns.add(item.turn_index)
-            self._invalidate_visible_items()
-        self._render_or_mark_dirty()
+        # 单条详情不改变可见条目集合，只更新目标 block，避免长 timeline 的无关扫描和重绘。
+        self._sync_block_or_mark_dirty(item)
+        self._mark_plain_text_dirty()
         return True
 
     def activate_item(self, item_id: int) -> bool:

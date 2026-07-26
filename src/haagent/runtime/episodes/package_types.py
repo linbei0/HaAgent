@@ -567,6 +567,14 @@ class EpisodePackage:
             return "none"
         return str(response.get("content", ""))
 
+    def last_partial_response_text(self) -> str | None:
+        """被用户打断的流式回复残片；仅在无完整 model_response 兜底时使用。"""
+        for record in reversed(self.transcript):
+            if record.get("event") == "model_response_partial":
+                content = str(record.get("content", "")).strip()
+                return content or None
+        return None
+
     def tool_names_used(self) -> list[str]:
         return sorted({call.tool_name for call in self.tool_calls})
 

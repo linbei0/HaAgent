@@ -1,7 +1,7 @@
 """
-tests/unit/context/test_task_ledger_context.py - 长任务账本上下文测试
+tests/unit/context/test_task_ledger_context.py - Todo 上下文选择测试
 
-验证 ContextBuilder 只注入 task ledger 的有界当前状态。
+验证活动 Todo 完整注入，终态清单确定性跳过。
 """
 
 from __future__ import annotations
@@ -12,64 +12,56 @@ from pathlib import Path
 from haagent.context.builder import ContextBuilder
 from haagent.runtime.contracts.task import TaskSpec
 from haagent.runtime.episodes.writer import EpisodeWriter
-from haagent.runtime.session.task_ledger import TaskLedger, TaskStep
+from haagent.runtime.session.task_ledger import TaskLedger, TodoItem
 
 
-def test_context_builder_injects_bounded_task_ledger(tmp_path: Path) -> None:
+def test_context_builder_injects_active_todos_without_evidence(tmp_path: Path) -> None:
     secret = "SECRET_FULL_EVIDENCE_SHOULD_STAY_ON_DISK"
     writer = _make_writer(tmp_path)
     ledger = TaskLedger(
-        goal="增强长任务能力",
-        status="blocked",
-        current_step_id="step-002",
-        steps=[
-            TaskStep(
-                id="step-001",
-                title="建立任务账本",
-                kind="plan",
-                owner="main",
-                status="completed",
-                evidence_refs=[secret],
-                checkpoint_ids=["ckpt-001"],
-                updated_turn=1,
-            ),
-            TaskStep(
-                id="step-002",
-                title="恢复 worker 子任务",
-                kind="delegate",
-                owner="worker",
-                worker_id="worker-a",
-                status="blocked",
-                evidence_refs=[secret],
-                blocker={"category": "worker_failure", "reason": secret},
-                retry_count=2,
-                updated_turn=2,
-            ),
+        goal="实现 Plan Mode",
+        todos=[
+            TodoItem(id="state", content="实现状态机", status="completed", evidence_refs=[secret]),
+            TodoItem(id="tui", content="接入确认面板", status="in_progress", evidence_refs=[secret]),
         ],
-        checkpoints=[],
-        budgets={"tool_calls": 8, "warning": secret},
         updated_turn=2,
     )
 
     context = ContextBuilder(
-        task=_task("继续长任务"),
+        task=_task("继续开发"),
+        workspace_root=tmp_path,
+        provider_name="test-provider",
+        episode_writer=writer,
+        task_ledger=ledger.to_dict(),
+    ).build()
+    manifest = json.loads(
+        (writer.path / "contexts" / f"{context.context_id}-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert "todo_goal: 实现 Plan Mode" in context.model_input
+    assert "id=state status=completed content=实现状态机" in context.model_input
+    assert "id=tui status=in_progress content=接入确认面板" in context.model_input
+    assert secret not in context.model_input
+    assert any(item["source_id"] == "task_ledger" for item in manifest["selection"]["selected"])
+
+
+def test_context_builder_skips_all_terminal_todos(tmp_path: Path) -> None:
+    writer = _make_writer(tmp_path)
+    ledger = TaskLedger(
+        goal="目标",
+        todos=[TodoItem(id="done", content="完成", status="completed")],
+    )
+
+    context = ContextBuilder(
+        task=_task("新问题"),
         workspace_root=tmp_path,
         provider_name="test-provider",
         episode_writer=writer,
         task_ledger=ledger.to_dict(),
     ).build()
 
-    model_input = context.model_input
-    manifest = json.loads(
-        (writer.path / "contexts" / f"{context.context_id}-manifest.json").read_text(encoding="utf-8")
-    )
-
-    assert "task_goal: 增强长任务能力" in model_input
-    assert "active_step: id=step-002 status=blocked owner=worker" in model_input
-    assert "active_worker: worker-a" in model_input
-    assert "blocker: category=worker_failure" in model_input
-    assert "SECRET_FULL_EVIDENCE" not in model_input
-    assert any(item["source_id"] == "task_ledger" for item in manifest["selection"]["selected"])
+    assert "Todo" not in context.model_input
+    assert "todo_goal" not in context.model_input
 
 
 def _make_writer(tmp_path: Path) -> EpisodeWriter:
@@ -98,4 +90,3 @@ def _task(goal: str) -> TaskSpec:
         constraints=[],
         policy={"approval_allowed_tools": [], "approved_tools": []},
     )
-

@@ -130,7 +130,7 @@ def test_tui_keymap_help_and_footer_share_context_definitions() -> None:
         for key, _description in key_help_lines(context, footer_only=True):
             assert key in footer
     assert footer_text("chat") == "[/]命令 [Ctrl+F]搜索 [?]帮助 [Ctrl+Q]退出"
-    assert footer_text("running") == "[Ctrl+X]取消任务 [Ctrl+F]搜索 [?]帮助 [Ctrl+Q]退出"
+    assert footer_text("running") == "[Ctrl+X]取消任务 [Ctrl+G]引导 [?]帮助 [Ctrl+Q]退出"
     assert "Enter" not in footer_text("chat")
     assert "Shift+Enter" not in footer_text("chat")
     assert all(len(key_help_lines(context, footer_only=True)) <= 4 for context in (
@@ -541,7 +541,7 @@ def test_tui_text_area_blank_input_does_not_submit(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
-def test_tui_running_task_rejects_plain_submit_and_keeps_input(tmp_path: Path) -> None:
+def test_tui_running_task_queues_plain_submit_for_next_turn(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, block_until_released=True)
         app = HaAgentTuiApp(service)
@@ -556,15 +556,20 @@ def test_tui_running_task_rejects_plain_submit_and_keeps_input(tmp_path: Path) -
             await pilot.pause(0.2)
 
             try:
+                # 运行中 Enter 不打断当前 run：消息排队，本轮结束后自动发送。
                 assert service.prompts == ["Long task"]
-                assert input_widget.value == "Second task"
+                assert input_widget.value == ""
+                assert app._steering_queue == ["Second task"]
                 conversation = _text(app, "#conversation")
                 assert "当前任务仍在运行，请等待或使用 /cancel" not in conversation
-                assert "[命令]" not in conversation
-                assert "Second task" not in conversation
+                assert "You (已排队)" in conversation
             finally:
                 service.release.set()
-                await pilot.pause(0.2)
+                for _ in range(20):
+                    await pilot.pause(0.1)
+                    if len(service.prompts) >= 2:
+                        break
+                assert service.prompts == ["Long task", "Second task"]
 
     asyncio.run(run())
 

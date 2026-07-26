@@ -16,6 +16,7 @@ import yaml
 from haagent.models.types import ModelGateway
 from haagent.prompts.commands import parse_prompt_command
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.steering import SteeringChannel
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
 from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, serialize_path_policy
@@ -44,6 +45,7 @@ class OrchestratorFactory(Protocol):
         event_sink,
         interaction_handler: HumanInteractionHandler | None,
         cancellation_token: CancellationToken,
+        steering_channel: SteeringChannel | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: object | None = None,
         leader_session_id: str | None = None,
@@ -77,7 +79,9 @@ class ChatTurnRequest:
     interaction_handler: HumanInteractionHandler | None
     cancellation_token: CancellationToken
     orchestrator_factory: OrchestratorFactory
+    steering_channel: SteeringChannel | None = None
     task_ledger: dict[str, object] | None = None
+    planning_state: dict[str, object] | None = None
     leader_session_id: str | None = None
     tool_registry: ToolRuntimeRegistry | None = None
     mcp_runtime: object | None = None
@@ -97,6 +101,9 @@ class ChatTurnRequest:
     instruction_cache: object | None = None
     tool_schema_cache: object | None = None
     working_state_sink: Callable[[dict[str, object]], None] | None = None
+    todo_state_sink: Callable[[list[dict[str, object]], str, int | None], dict[str, object]] | None = None
+    planning_state_handler: Callable[[str, dict[str, object], int], dict[str, object]] | None = None
+    plan_execution_has_active_todos: Callable[[], bool] | None = None
     session_path: Path | None = None
 
 
@@ -120,6 +127,11 @@ class ChatTurnRunner:
                 prompt_pack_ids=prompt_pack_ids,
                 include_memory_tool=request.include_memory_tool,
                 include_session_history=request.session_path is not None,
+                planning_status=(
+                    str(request.planning_state.get("status", "inactive"))
+                    if isinstance(request.planning_state, dict)
+                    else "inactive"
+                ),
                 allowed_tools_override=request.allowed_tools_override,
                 approval_allowed_tools_override=request.approval_allowed_tools_override,
                 approved_tools_override=request.approved_tools_override,
@@ -137,9 +149,11 @@ class ChatTurnRunner:
                 historical_tool_compression_count=request.historical_tool_compression_count,
                 working_state=request.working_state,
                 task_ledger=request.task_ledger,
+                planning_state=request.planning_state,
                 event_sink=request.event_sink,
                 interaction_handler=request.interaction_handler,
                 cancellation_token=request.cancellation_token,
+                steering_channel=request.steering_channel,
                 tool_registry=request.tool_registry,
                 mcp_runtime=request.mcp_runtime,
                 leader_session_id=request.leader_session_id,
@@ -150,6 +164,9 @@ class ChatTurnRunner:
                 instruction_cache=request.instruction_cache,
                 tool_schema_cache=request.tool_schema_cache,
                 working_state_sink=request.working_state_sink,
+                todo_state_sink=request.todo_state_sink,
+                planning_state_handler=request.planning_state_handler,
+                plan_execution_has_active_todos=request.plan_execution_has_active_todos,
                 session_path=request.session_path,
             )
             return orchestrator.run(task_path)
@@ -174,12 +191,19 @@ def write_chat_task_yaml(
     attachments: list[ImageAttachment] | None = None,
     image_attachment_history: list[ImageAttachment] | None = None,
     skill_catalog: SkillCatalogService | None = None,
+    planning_status: str = "inactive",
 ) -> None:
     mcp_tools = list(mcp_tool_names or [])
     from haagent.tools.catalog import default_tool_catalog
 
     catalog = default_tool_catalog()
-    if allowed_tools_override is None:
+    if planning_status in {"planning", "awaiting_confirmation"}:
+        allowed_tools = catalog.plan_mode_tools(
+            enable_web=enable_web,
+            include_session_history=include_session_history,
+            include_image_attachment=bool(image_attachment_history),
+        )
+    elif allowed_tools_override is None:
         allowed_tools = ToolAccessManager.candidate_tools(
             catalog=catalog,
             enable_web=enable_web,
@@ -198,7 +222,7 @@ def write_chat_task_yaml(
                 if name not in allowed_tools:
                     allowed_tools.append(name)
     policy = path_policy or default_path_policy(workspace_root)
-    requested_approval_tools = (
+    requested_approval_tools = [] if planning_status in {"planning", "awaiting_confirmation"} else (
         list(approval_allowed_tools_override)
         if approval_allowed_tools_override is not None
         else [*catalog.chat_approval_tools(), *mcp_tools]
@@ -217,13 +241,21 @@ def write_chat_task_yaml(
         workspace_root=workspace_root,
         target_paths=list(target_paths or []),
     )
+    constraints = list(contract["constraints"])
+    if planning_status in {"planning", "awaiting_confirmation"}:
+        constraints.extend(
+            [
+                "当前是 Plan Mode：先只读调查，再按需澄清，最后调用 submit_plan 提交完整结构化方案。",
+                "禁止文件写入、命令执行、后台任务、worker、Todo、memory update 与动态 MCP。",
+            ],
+        )
     task = {
         "goal": request,
         "workspace_root": str(workspace_root.resolve()),
         "path_policy": serialize_path_policy(policy),
         "target_paths": list(target_paths or []),
         "prompt_pack_ids": list(prompt_pack_ids or []),
-        "constraints": contract["constraints"],
+        "constraints": constraints,
         "allowed_tools": allowed_tools,
         "acceptance_criteria": contract["acceptance_criteria"],
         "verification_commands": [],
@@ -281,6 +313,8 @@ def runtime_event_message(event_type: str, payload: dict[str, object]) -> str:
     if event_type == "assistant_delta":
         return summary_value(str(payload.get("delta", "")))
     if event_type == "assistant_message":
+        return summary_value(str(payload.get("content", "")))
+    if event_type == "steering_injected":
         return summary_value(str(payload.get("content", "")))
     if event_type == "guardrail_triggered":
         return summary_value(str(payload.get("message", "guardrail triggered")))
@@ -366,6 +400,11 @@ def runtime_event_payload(event_type: str, payload: dict[str, object]) -> dict[s
             "delta": str(payload.get("delta", "")),
         }
     if event_type == "assistant_message":
+        return {
+            "model_turn": payload.get("turn"),
+            "content": str(payload.get("content", "")),
+        }
+    if event_type == "steering_injected":
         return {
             "model_turn": payload.get("turn"),
             "content": str(payload.get("content", "")),

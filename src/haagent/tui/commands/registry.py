@@ -59,6 +59,7 @@ def command_registry() -> CommandRegistry:
             SlashCommand("sandbox", "查看或启用命令执行沙箱", "sandbox"),
             SlashCommand("turns", "查看或设置当前会话 turn 限制", "turns"),
             SlashCommand("permissions", "管理外部目录权限", "permissions"),
+            SlashCommand("plan", "进入只读规划模式，可附带任务描述", "plan_mode"),
             SlashCommand("cancel", "取消当前任务", "cancel_task"),
             SlashCommand("new", "新建 session", "new_session"),
             SlashCommand("resume", "继续最新 session", "resume_latest"),

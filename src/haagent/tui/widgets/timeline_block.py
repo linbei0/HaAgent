@@ -9,16 +9,15 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import Any
+from typing import Any, Callable
 
-from textual import events
 from textual.app import ComposeResult
 from textual.await_complete import AwaitComplete
 from textual.containers import Horizontal, Vertical
 from textual.strip import Strip
 from textual.timer import Timer
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
-from textual.widgets import Button, Label, Log, Markdown, Static
+from textual.widgets import Button, Label, Log, Markdown, RichLog, Static
 from textual.widgets.markdown import MarkdownBlock, MarkdownFence
 
 from haagent.tui.presentation.progress import TimelinePresentationItem
@@ -37,7 +36,10 @@ from haagent.tui.widgets.timeline_rendering import (
 
 
 class ToolActivityLog(Log):
-    """Timeline 内嵌工具详情日志，避免整段 Static 文本反复重绘。"""
+    """Timeline 内嵌工具详情日志，避免整段 Static 文本反复重绘。
+
+    摘要行（如「读取文件 ›」）同时是折叠/展开的点击热区，无独立按钮。
+    """
 
     def __init__(self, *args, **kwargs) -> None:
         kwargs.setdefault("max_lines", 32)
@@ -45,6 +47,17 @@ class ToolActivityLog(Log):
         kwargs.setdefault("highlight", False)
         super().__init__(*args, **kwargs)
         self._rendered_text = ""
+        self.toggle_callback: Callable[[], None] | None = None
+        self.toggle_enabled = False
+
+    def on_click(self, event) -> None:
+        if not self.toggle_enabled or self.toggle_callback is None:
+            return
+        # 拖拽选择文本抬手时也会派发 Click；有活动选区就不误触折叠。
+        if getattr(self.screen, "selections", None):
+            return
+        event.stop()
+        self.toggle_callback()
 
     @property
     def plain_text(self) -> str:
@@ -67,6 +80,32 @@ class ToolActivityLog(Log):
             self.write_lines(lines, scroll_end=False)
 
 
+class SelectableTextLog(RichLog):
+    """按行缓存的只读正文，保留全文并支持 Textual 原生文本选择。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("auto_scroll", False)
+        kwargs.setdefault("highlight", False)
+        kwargs.setdefault("markup", False)
+        kwargs.setdefault("wrap", True)
+        super().__init__(*args, **kwargs)
+        self._source_text = ""
+
+    def set_text(self, text: str) -> None:
+        if text == self._source_text:
+            return
+        self._source_text = text
+        self.clear()
+        if text:
+            # RichLog 在尺寸确定后一次性把正文拆成 Strip，并为可见行做缓存。
+            self.write(text, scroll_end=False)
+
+    def get_selection(self, selection) -> tuple[str, str] | None:
+        # 选择坐标基于已经软换行的显示行；不能回退到整段原文，否则换行后会复制错位。
+        text = "\n".join(strip.text.rstrip() for strip in self.lines)
+        return selection.extract(text), "\n"
+
+
 class CopyButton(Button):
     """复制操作按钮；成功反馈留在按钮内，不污染对话流。"""
 
@@ -84,6 +123,23 @@ class CopyButton(Button):
     def _restore_label(self) -> None:
         self._feedback_timer = None
         self.label = self._default_label
+
+
+class ClickToggleHeader(Static):
+    """标题行整行作为折叠/展开热区；›/⌄ 箭头即状态指示，无独立按钮。"""
+
+    def __init__(self, *args, on_toggle: Callable[[], None], **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_toggle = on_toggle
+        self.toggle_enabled = False
+
+    def on_click(self, event) -> None:
+        if not self.toggle_enabled:
+            return
+        if getattr(self.screen, "selections", None):
+            return
+        event.stop()
+        self._on_toggle()
 
 
 class CopyableMarkdownFence(MarkdownFence):
@@ -174,7 +230,7 @@ class TimelineBlock(Vertical):
         self._item = item
         self._show_tool_details = show_tool_details
         self._header_widget: Static | None = None
-        self._body_widget: Markdown | Static | None = None
+        self._body_widget: Markdown | SelectableTextLog | None = None
         self._active_widget: Static | None = None
         self._tools_widget: ToolActivityLog | None = None
         self._answer_actions_widget: Horizontal | None = None
@@ -192,7 +248,11 @@ class TimelineBlock(Vertical):
         super().__init__(classes=_timeline_item_classes(item))
 
     def compose(self) -> ComposeResult:
-        self._header_widget = Static("", classes="timeline-header")
+        self._header_widget = ClickToggleHeader(
+            "",
+            classes="timeline-header",
+            on_toggle=self._activate_detail,
+        )
         if self._item.role == "assistant":
             self._body_widget = AssistantMarkdown("", classes="timeline-body timeline-answer", open_links=False)
             self._answer_copy_button = CopyButton("复制回答", classes="answer-copy-button")
@@ -203,9 +263,10 @@ class TimelineBlock(Vertical):
             # 组件也会在不加载主 TCSS 的测试/嵌入 App 中使用，必须自行约束伸展高度。
             self._answer_actions_widget.styles.height = 1
         else:
-            self._body_widget = Static("", classes="timeline-body")
+            self._body_widget = SelectableTextLog(classes="timeline-body timeline-text", min_width=1)
         self._active_widget = Static("", classes="timeline-active")
         self._tools_widget = ToolActivityLog(classes="timeline-tools")
+        self._tools_widget.toggle_callback = self._activate_detail
         yield self._header_widget
         yield self._tools_widget
         yield self._body_widget
@@ -220,17 +281,6 @@ class TimelineBlock(Vertical):
         self._stop_streaming_indicator()
         await self._close_markdown_stream()
 
-    def on_mouse_down(self, event: events.MouseDown) -> None:
-        # WezTerm/Windows 下 MouseDown/MouseUp 可到达但 Click 不一定被合成；
-        # 在可交互摘要上直接响应左键，Shift+左键继续交给终端文本选择。
-        if event.button != 1 or event.shift or not _is_clickable_item(self._item):
-            return
-        activate = getattr(self.parent, "activate_item", None)
-        if not callable(activate):
-            return
-        event.stop()
-        activate(self._item.item_id)
-
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button is not self._answer_copy_button:
             return
@@ -239,6 +289,11 @@ class TimelineBlock(Vertical):
         event.stop()
         self.app.copy_to_clipboard(self._item.content)
         self._answer_copy_button.show_copied()
+
+    def _activate_detail(self) -> None:
+        activate = getattr(self.parent, "activate_item", None)
+        if callable(activate):
+            activate(self._item.item_id)
 
     def update_item(self, item: TimelineItem, *, show_tool_details: bool) -> None:
         self._item = item
@@ -254,14 +309,20 @@ class TimelineBlock(Vertical):
             return
         # 过程子项不显示空泛「过程」标签；仅分组头「已完成 N 项」等有标题时展示 header。
         label = _timeline_item_label(item)
-        header.update(label)
+        clickable = _is_clickable_item(item)
+        header.update(_arrowed_header_label(label, item.expanded) if clickable else label)
         header.display = bool(label)
+        # 标题与工具摘要行是折叠/展开的整行热区；正文保持纯文本选择。
+        header.toggle_enabled = clickable
+        header.set_class(clickable, "timeline-clickable")
+        tools.toggle_enabled = clickable
+        tools.set_class(clickable, "timeline-clickable")
         if isinstance(body, Markdown):
             self._update_markdown_body(body, item)
             if isinstance(body, AssistantMarkdown):
                 body.set_copy_enabled(item.status == "done" and bool(item.content))
         else:
-            body.update(_timeline_item_body(item))
+            body.set_text(_timeline_item_body(item))
         body.display = bool(_timeline_item_body(item))
         copy_answer = item.role == "assistant" and item.status == "done" and bool(item.content)
         if self._answer_actions_widget is not None:
@@ -553,6 +614,13 @@ def _is_process_item(item: TimelineItem) -> bool:
 
 def _is_clickable_item(item: TimelineItem) -> bool:
     return _is_process_group_id(item.item_id) or bool(item.detail_lines) or bool(item.tools)
+
+
+def _arrowed_header_label(label: str, expanded: bool) -> str:
+    """可点击标题末尾追加状态箭头；分组头标题自带箭头时不重复。"""
+    if not label or label.rstrip().endswith(("›", "⌄")):
+        return label
+    return f"{label} {'⌄' if expanded else '›'}"
 
 
 def _process_group_id(turn_index: int) -> int:

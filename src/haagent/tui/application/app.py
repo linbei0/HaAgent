@@ -54,6 +54,7 @@ from haagent.tui.overlays.sessions import SessionOverlayResult
 from haagent.tui.presentation.progress import ProgressStatusState
 from haagent.tui.state import MIN_HEIGHT, MIN_WIDTH, PendingInteraction, layout_for_size
 from haagent.tui.typography import install_textual_line_breaking
+from haagent.tui.widgets.plan_confirmation import format_plan_for_timeline
 from haagent.tui.widgets import (
     ConversationTimeline,
     ContextUsageLine,
@@ -62,10 +63,12 @@ from haagent.tui.widgets import (
     ProgressStatusLine,
     PromptInput,
     QuestionPrompt,
+    PlanConfirmationPanel,
     RequestHistoryPreview,
     RequestHistoryRail,
     ResizeMessage,
     StatusBar,
+    TodoPanel,
 )
 
 
@@ -96,6 +99,8 @@ class HaAgentTuiApp(App[None]):
         self._tool_details_enabled = False
         self._last_failure: FailureView | None = None
         self._pending_interaction: PendingInteraction | None = None
+        # 运行中用户 Enter 提交的消息队列；本轮结束后自动作为下一条请求发送。
+        self._steering_queue: list[str] = []
         self._default_prompt_placeholder = "输入消息；Ctrl+Enter 换行，/ 打开命令"
         self._commands = command_registry()
         # controller / flow：各自封装一类职责，App 只做连接与薄分发。
@@ -139,6 +144,7 @@ class HaAgentTuiApp(App[None]):
             yield ConversationTimeline(id="conversation", wrap=True, auto_scroll=True)
             yield RequestHistoryPreview("", id="request-history-preview")
         with InputDock(id="input-panel"):
+            yield TodoPanel(id="todo-panel")
             yield ProgressStatusLine("", id="progress-status")
             yield PromptInput(placeholder=self._default_prompt_placeholder, id="prompt-input", show_line_numbers=False)
         yield ContextUsageLine("", id="context-usage")
@@ -263,7 +269,14 @@ class HaAgentTuiApp(App[None]):
             self._set_prompt_value(prompt_input, "")
             self._handle_slash_command(command)
             return
-        if self._state in {"running", "cancelling", "waiting approval"}:
+        if self._state in {"waiting approval", "waiting plan"}:
+            return
+        if self._state in {"running", "cancelling"}:
+            # 运行中 Enter=排队到本轮结束；Ctrl+G 走 action_steer_current_task 立即引导。
+            if attachments:
+                return
+            self._set_prompt_value(prompt_input, "")
+            self._queue_prompt_during_run(prompt_text)
             return
         if attachments and not self._current_model_accepts_images():
             return
@@ -274,11 +287,40 @@ class HaAgentTuiApp(App[None]):
         self._attachments.reset()
         self._start_prompt(prompt_text, attachments=attachments, display_prompt=prompt)
 
+    def _queue_prompt_during_run(self, prompt_text: str) -> None:
+        self._steering_queue.append(prompt_text)
+        self._conversation.append_block("You (已排队)", prompt_text)
+        self.set_progress_status(
+            ProgressStatusState(
+                text=f"{len(self._steering_queue)} 条消息已排队，将在本轮结束后发送；Ctrl+G 可立即引导",
+                severity="info",
+                turn_index=self._active_turn_index or 0,
+                source="task",
+            ),
+        )
+        self._refresh()
+
+    def action_steer_current_task(self) -> None:
+        if self._state not in {"running", "cancelling"}:
+            return
+        prompt_input = self._prompt_input()
+        text = self._prompt_value(prompt_input).strip()
+        if not text:
+            return
+        self._set_prompt_value(prompt_input, "")
+        if self.service.sessions.steer_current_run(text):
+            self._conversation.append_block("You (引导)", text)
+            self._refresh()
+            return
+        # 任务恰好已结束：回落为排队，_finish_prompt 会立即投递。
+        self._queue_prompt_during_run(text)
+
     def _start_prompt(
         self,
         prompt: str,
         attachments: list[ImageAttachment] | None = None,
         display_prompt: str | None = None,
+        show_user_block: bool = True,
     ) -> None:
         self._prompt_input().append_request_history(prompt)
         self._active_turn_index = self._next_turn_index()
@@ -286,7 +328,8 @@ class HaAgentTuiApp(App[None]):
         self._conversation.stick_to_bottom = True
         timeline = self._timeline()
         timeline.set_stick_to_bottom(True)
-        self._conversation.append_block("You", display_prompt or prompt)
+        if show_user_block:
+            self._conversation.append_block("You", display_prompt or prompt)
         self._conversation.start_assistant(self._active_turn_index)
         self._state = "running"
         self._refresh()
@@ -311,15 +354,19 @@ class HaAgentTuiApp(App[None]):
         except Exception as error:
             self.call_from_thread(self._handle_prompt_error, error)
             return
-        status = result.status
-        self.call_from_thread(self._finish_prompt, status)
+        # service 层可能返回不带 unconsumed_steering 的结果对象（如测试 Fake），缺省为空。
+        unconsumed = tuple(getattr(result, "unconsumed_steering", ()) or ())
+        self.call_from_thread(self._finish_prompt, result.status, unconsumed)
 
     def _handle_chat_event(self, event: RuntimeUiEvent) -> None:
         handle_runtime_ui_event(self, event)
 
-    def _finish_prompt(self, status: str) -> None:
+    def _finish_prompt(self, status: str, unconsumed_steering: tuple[str, ...] = ()) -> None:
+        if unconsumed_steering:
+            # run 结束前未来得及注入的引导不丢弃，放到排队消息最前面重新投递。
+            self._steering_queue[:0] = list(unconsumed_steering)
         self._conversation.finalize_streaming_if_needed()
-        if status == "completed" and self._state not in {"waiting approval", "waiting input", "cancelled"}:
+        if status == "completed" and self._state not in {"waiting approval", "waiting input", "waiting plan", "cancelled"}:
             self._state = "idle"
         elif status == "cancelled":
             self._state = "cancelled"
@@ -336,6 +383,18 @@ class HaAgentTuiApp(App[None]):
                 )
                 self._conversation.append_block("Failure", self._last_failure.block_text())
         self._refresh()
+        self._dispatch_queued_prompts()
+
+    def _dispatch_queued_prompts(self) -> None:
+        if not self._steering_queue:
+            return
+        if self._state not in {"idle", "cancelled", "failed"}:
+            return
+        prompt = "\n\n".join(self._steering_queue)
+        self._steering_queue.clear()
+        self.clear_progress_status()
+        # 排队消息在入队时已渲染过 You 块，这里不再重复展示。
+        self._start_prompt(prompt, show_user_block=False)
 
     def _handle_prompt_error(self, error: Exception) -> None:
         self._state = "failed"
@@ -352,6 +411,88 @@ class HaAgentTuiApp(App[None]):
     # ── slash 命令与 overlay 分发 ────────────────────────────────────────
     def _handle_slash_command(self, result) -> None:
         self._command_dispatcher.dispatch(result)
+
+    def _enter_plan_mode(self, request: str) -> None:
+        try:
+            self.service.sessions.enter_plan_mode()
+        except Exception as error:
+            self._conversation.append_block("Plan", str(error))
+            self._refresh()
+            return
+        self._state = "planning"
+        if request.strip():
+            self._start_prompt(request.strip())
+            return
+        self._conversation.append_block("Plan", "已进入 Plan Mode。请输入需要规划的任务。")
+        self._refresh()
+
+    def _restore_persisted_plan_state(self) -> None:
+        try:
+            state = self.service.sessions.get_planning_state()
+        except Exception:
+            return
+        self._refresh_todo_panel()
+        if state.status == "planning":
+            self._state = "planning"
+            return
+        if state.status == "awaiting_confirmation" and state.plan_id and state.proposal is not None:
+            self._state = "waiting plan"
+            self._resume_plan_confirmation_worker(
+                HumanInteractionRequest(
+                    interaction_type="plan_confirmation",
+                    tool_name="submit_plan",
+                    question="确认实施方案",
+                    plan_id=state.plan_id,
+                    plan_revision=state.revision,
+                    plan_proposal=state.proposal,
+                ),
+            )
+            return
+        if state.status == "approved_pending_execution":
+            self._state = "running"
+            self._resume_approved_plan_worker()
+
+    @work(thread=True, exclusive=True, group="prompt")
+    def _resume_plan_confirmation_worker(self, request: HumanInteractionRequest) -> None:
+        response = self._handle_interaction(request)
+        try:
+            if response.plan_outcome == "approved":
+                self.service.sessions.approve_plan(request.plan_id, request.plan_revision)
+                result = self.service.sessions.execute_pending_plan_events(
+                    event_sink=lambda event: self.call_from_thread(self._handle_chat_event, event),
+                    interaction_handler=self._handle_interaction,
+                )
+            elif response.plan_outcome == "revision_requested":
+                self.service.sessions.submit_plan_feedback(
+                    request.plan_id,
+                    request.plan_revision,
+                    response.answer,
+                )
+                result = self.service.sessions.run_prompt_events(
+                    f"请根据以下用户反馈修订当前 Plan：{response.answer}",
+                    event_sink=lambda event: self.call_from_thread(self._handle_chat_event, event),
+                    interaction_handler=self._handle_interaction,
+                )
+            else:
+                self.service.sessions.cancel_plan()
+                self.call_from_thread(self._finish_prompt, "cancelled")
+                return
+        except Exception as error:
+            self.call_from_thread(self._handle_prompt_error, error)
+            return
+        self.call_from_thread(self._finish_prompt, result.status)
+
+    @work(thread=True, exclusive=True, group="prompt")
+    def _resume_approved_plan_worker(self) -> None:
+        try:
+            result = self.service.sessions.execute_pending_plan_events(
+                event_sink=lambda event: self.call_from_thread(self._handle_chat_event, event),
+                interaction_handler=self._handle_interaction,
+            )
+        except Exception as error:
+            self.call_from_thread(self._handle_prompt_error, error)
+            return
+        self.call_from_thread(self._finish_prompt, result.status)
 
     def action_help(self) -> None:
         self.push_screen(HelpModal(self._help_context()))
@@ -623,6 +764,8 @@ class HaAgentTuiApp(App[None]):
         pending.done.wait()
         if pending.response is not None:
             return pending.response
+        if request.interaction_type == "plan_confirmation":
+            return HumanInteractionResponse(approved=False, plan_outcome="cancelled")
         if request.interaction_type == "user_input":
             return HumanInteractionResponse(approved=False, outcome="dismissed")
         return HumanInteractionResponse(approved=False, answer="")
@@ -636,6 +779,18 @@ class HaAgentTuiApp(App[None]):
         elif request.interaction_type == "edit_diff":
             self._state = "waiting approval"
             self.push_screen(EditDiffModal(request), self._complete_edit_diff)
+        elif request.interaction_type == "plan_confirmation":
+            self._state = "waiting plan"
+            if request.plan_proposal is None or request.plan_revision is None:
+                pending.response = HumanInteractionResponse(approved=False, plan_outcome="cancelled")
+                pending.done.set()
+                self._pending_interaction = None
+                raise ValueError("plan_confirmation interaction requires proposal and revision")
+            self._conversation.append_block(
+                "Plan",
+                format_plan_for_timeline(request.plan_revision, request.plan_proposal),
+            )
+            self._input_dock().open_plan_confirmation(request)
         else:
             if not request.questions:
                 pending.response = HumanInteractionResponse(approved=False, outcome="dismissed")
@@ -669,6 +824,13 @@ class HaAgentTuiApp(App[None]):
         self._pending_interaction = None
         if interaction_type == "user_input":
             self._input_dock().close_question_prompt()
+        elif interaction_type == "plan_confirmation":
+            if response.plan_outcome == "revision_requested":
+                panel = self._input_dock().plan_confirmation
+                if panel is not None:
+                    panel.set_processing("正在根据修改意见生成新版 Plan…")
+            else:
+                self._input_dock().close_plan_confirmation()
         else:
             self._restore_prompt_input()
         self._state = "running"
@@ -676,6 +838,17 @@ class HaAgentTuiApp(App[None]):
 
     def _restore_prompt_input(self) -> None:
         self._prompt_input().placeholder = self._default_prompt_placeholder
+
+    def _refresh_todo_panel(self) -> None:
+        try:
+            state = self.service.sessions.get_todo_state()
+        except Exception:
+            return
+        panel = self._input_dock().todo_panel()
+        if panel is None:
+            return
+        panel.update_state(state.items)
+        self._input_dock()._collapse_if_idle()
 
     def action_cancel_interaction(self) -> None:
         if self.memory_flow.cancel():
@@ -685,9 +858,45 @@ class HaAgentTuiApp(App[None]):
         if self._pending_interaction.request.interaction_type == "user_input":
             self._complete_interaction(HumanInteractionResponse(approved=False, outcome="dismissed"))
             return
+        if self._pending_interaction.request.interaction_type == "plan_confirmation":
+            panel = self._input_dock().plan_confirmation
+            if panel is not None:
+                panel.minimize()
+            return
         self._complete_interaction(HumanInteractionResponse(approved=False, answer="deny"))
 
+    def on_plan_confirmation_panel_feedback_submitted(
+        self,
+        event: PlanConfirmationPanel.FeedbackSubmitted,
+    ) -> None:
+        panel = self._input_dock().plan_confirmation
+        if panel is None or panel.processing:
+            return
+        panel.set_processing("正在提交修改意见…")
+        self._complete_interaction(
+            HumanInteractionResponse(
+                approved=False,
+                answer=event.feedback,
+                plan_outcome="revision_requested",
+            ),
+        )
+
+    def on_plan_confirmation_panel_approved(self, event: PlanConfirmationPanel.Approved) -> None:
+        del event
+        panel = self._input_dock().plan_confirmation
+        if panel is None or panel.processing:
+            return
+        panel.set_processing("已批准，正在准备执行…")
+        self._complete_interaction(
+            HumanInteractionResponse(approved=True, answer="approve", plan_outcome="approved"),
+        )
+
+    def on_plan_confirmation_panel_minimized(self, event: PlanConfirmationPanel.Minimized) -> None:
+        del event
+        self._refresh_interaction_chrome()
+
     def action_cancel_current_task(self) -> None:
+        was_empty_plan_mode = self._state == "planning"
         result = self._request_current_task_cancel()
         if result is None:
             return
@@ -697,13 +906,18 @@ class HaAgentTuiApp(App[None]):
         elif status == "idle":
             self._state = "idle"
             self._conversation.append_block("Cancel", "当前没有仍在运行的任务。")
+        elif status == "cancelled" and was_empty_plan_mode:
+            # 空 Plan Mode 没有运行中的 worker 会再调用 _finish_prompt；取消已同步完成，
+            # 必须在当前 UI 事件内收束状态，避免永久停在“正在取消”。
+            self._finish_prompt("cancelled")
+            return
         else:
             self._state = "cancelling"
             self._conversation.append_block("Cancel", "任务正在取消，请等待当前运行态结束。")
         self._refresh()
 
     def _request_current_task_cancel(self):
-        if self._state not in {"running", "waiting approval", "waiting input", "cancelling"}:
+        if self._state not in {"running", "planning", "waiting plan", "waiting approval", "waiting input", "cancelling"}:
             return None
         result = self.service.sessions.cancel_current_run()
         if self._pending_interaction is not None:
@@ -711,12 +925,16 @@ class HaAgentTuiApp(App[None]):
             self._pending_interaction.response = (
                 HumanInteractionResponse(approved=False, outcome="dismissed")
                 if interaction_type == "user_input"
+                else HumanInteractionResponse(approved=False, plan_outcome="cancelled")
+                if interaction_type == "plan_confirmation"
                 else HumanInteractionResponse(approved=False, answer="deny")
             )
             self._pending_interaction.done.set()
             self._pending_interaction = None
             if interaction_type == "user_input":
                 self._input_dock().close_question_prompt()
+            elif interaction_type == "plan_confirmation":
+                self._input_dock().close_plan_confirmation()
         self._restore_prompt_input()
         return result
 
@@ -957,6 +1175,9 @@ class HaAgentTuiApp(App[None]):
         prompt_input.value = value
 
     def _restore_prompt_focus(self, _result: object | None = None) -> None:
+        # 旧 modal 的延迟回调不得越过新交互的焦点边界，把焦点抢回已隐藏的普通输入框。
+        if self._pending_interaction is not None:
+            return
         # 延迟回调可能在 Textual 卸载 default screen 后才执行；此时不应让焦点恢复中断退出。
         try:
             self._prompt_input().focus()

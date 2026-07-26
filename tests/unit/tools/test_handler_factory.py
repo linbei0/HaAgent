@@ -35,6 +35,8 @@ def test_static_handler_factory_has_one_handler_for_every_static_tool(tmp_path: 
             "task_list": _handler,
             "task_output": _handler,
             "request_user_input": _handler,
+            "todo_update": _handler,
+            "submit_plan": _handler,
             "start_memory_update": _handler,
         },
     )

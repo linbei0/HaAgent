@@ -174,6 +174,6 @@ def test_working_state_consumes_typed_bus_events(tmp_path) -> None:
         ],
     )
     model_text = format_working_state_for_model(updated)
-    assert "actor=assistant tool=shell status=success exit_code=0" in model_text
     assert "SECRET" not in model_text
+    assert "tool=shell" not in model_text
     assert any("Read README" in item for item in updated.key_findings)

@@ -160,6 +160,9 @@ class FakeSessions:
     def cancel_current_run(self):
         return self._owner._cancel_current_run()
 
+    def steer_current_run(self, text: str) -> bool:
+        return self._owner._steer_current_run(text)
+
 
 class FakeModels:
     def __init__(self, owner) -> None:
@@ -660,6 +663,8 @@ class FakeAssistantService:
         self.resumed_sessions: list[str] = []
         self.continued_latest_count = 0
         self.cancelled_count = 0
+        self.steered_texts: list[str] = []
+        self.steer_accepts = True
         self.sandbox_enabled_count = 0
         self.sandbox_disabled_count = 0
         self.model_connections: list[SimpleNamespace] = []
@@ -863,6 +868,12 @@ class FakeAssistantService:
     def _cancel_current_run(self):
         self.cancelled_count += 1
         return SimpleNamespace(status="cancelled", reason="user_cancelled")
+
+    def _steer_current_run(self, text: str) -> bool:
+        if not self.steer_accepts:
+            return False
+        self.steered_texts.append(text)
+        return True
 
     def _list_sessions(self) -> list[AssistantSessionSummary]:
         return list(self.session_summaries)

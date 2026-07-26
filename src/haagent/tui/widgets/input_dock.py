@@ -10,14 +10,17 @@ from pathlib import Path
 
 from textual.widget import Widget
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 
-from haagent.runtime.execution.human_interaction import UserQuestion
+from haagent.runtime.execution.human_interaction import HumanInteractionRequest, UserQuestion
 from haagent.tui.commands import command_registry
 from haagent.tui.commands.suggestions import CommandSuggestionOverlay
 from haagent.tui.files.overlay import FileReferenceOverlay
 from haagent.tui.files.refs import FileReferenceIndex
 from haagent.tui.widgets.prompt_input import PromptInput
 from haagent.tui.widgets.question_prompt import QuestionPrompt
+from haagent.tui.widgets.plan_confirmation import PlanConfirmationPanel
+from haagent.tui.widgets.todo_panel import TodoPanel
 
 
 class InputDock(Vertical):
@@ -25,6 +28,7 @@ class InputDock(Vertical):
 
     COLLAPSED_HEIGHT = 5
     EXPANDED_HEIGHT = 14
+    PLAN_HEIGHT = 10
 
     def __init__(
         self,
@@ -39,6 +43,7 @@ class InputDock(Vertical):
         self.command_overlay: CommandSuggestionOverlay | None = None
         self.file_ref_overlay: FileReferenceOverlay | None = None
         self.question_prompt: QuestionPrompt | None = None
+        self.plan_confirmation: PlanConfirmationPanel | None = None
 
     def open_question_prompt(self, questions: tuple[UserQuestion, ...]) -> QuestionPrompt:
         self.close_command_suggestions()
@@ -62,6 +67,55 @@ class InputDock(Vertical):
         prompt = self._prompt()
         prompt.display = True
         self._collapse_if_idle()
+
+    def open_plan_confirmation(self, request: HumanInteractionRequest) -> PlanConfirmationPanel:
+        if request.plan_id is None or request.plan_revision is None or request.plan_proposal is None:
+            raise ValueError("plan_confirmation requires plan id, revision, and proposal")
+        self.close_command_suggestions()
+        self.close_file_refs()
+        self.close_question_prompt()
+        prompt = self._prompt()
+        prompt.display = False
+        if self.plan_confirmation is None:
+            self.plan_confirmation = PlanConfirmationPanel(
+                request.plan_id,
+                request.plan_revision,
+                request.plan_proposal,
+                id="plan-confirmation",
+            )
+            self.mount(self.plan_confirmation, before=prompt)
+        else:
+            self.plan_confirmation.update_plan(
+                request.plan_id,
+                request.plan_revision,
+                request.plan_proposal,
+            )
+        self.styles.height = self.PLAN_HEIGHT
+        # mount 是异步消息；排到当前消息队列末尾再校正焦点，避免刷新回调早于子组件挂载。
+        self.app.call_later(self._focus_plan_feedback)
+        return self.plan_confirmation
+
+    def close_plan_confirmation(self, *, restore_prompt: bool = True) -> None:
+        panel = self.plan_confirmation
+        self.plan_confirmation = None
+        if panel is not None and panel.is_mounted:
+            panel.remove()
+        self._prompt().display = restore_prompt
+        self._collapse_if_idle()
+
+    def todo_panel(self) -> TodoPanel | None:
+        try:
+            return self.query_one("#todo-panel", TodoPanel)
+        except NoMatches:
+            return None
+
+    def on_todo_panel_expanded_changed(self, event: TodoPanel.ExpandedChanged) -> None:
+        del event
+        self._collapse_if_idle()
+
+    def _focus_plan_feedback(self) -> None:
+        if self.plan_confirmation is not None and self.plan_confirmation.is_mounted:
+            self.plan_confirmation.feedback_input.focus()
 
     def open_command_suggestions(self, query: str) -> CommandSuggestionOverlay:
         self.close_file_refs()
@@ -107,7 +161,14 @@ class InputDock(Vertical):
         return self.query_one("#prompt-input", PromptInput)
 
     def _collapse_if_idle(self) -> None:
-        if self.command_overlay is None and self.file_ref_overlay is None and self.question_prompt is None:
-            self.styles.height = self.COLLAPSED_HEIGHT
+        if (
+            self.command_overlay is None
+            and self.file_ref_overlay is None
+            and self.question_prompt is None
+            and self.plan_confirmation is None
+        ):
+            todo_panel = self.todo_panel()
+            todo_height = todo_panel.layout_height() if todo_panel is not None else 0
+            self.styles.height = self.COLLAPSED_HEIGHT + todo_height
             if self.is_mounted:
                 self._prompt().focus()

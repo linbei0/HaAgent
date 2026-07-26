@@ -148,9 +148,11 @@ def test_session_snapshot_schema_version_persisted_and_restored(tmp_path: Path) 
     assert resumed.snapshot.schema_version == SESSION_SNAPSHOT_SCHEMA_VERSION
 
 
-def test_legacy_session_without_schema_version_migrates_to_current(tmp_path: Path) -> None:
-    """旧 package 无版本字段按 v0 处理，恢复时显式迁移到当前 schema。"""
+def test_legacy_session_without_schema_version_is_rejected(tmp_path: Path) -> None:
+    """Plan/Todo 开发期 schema 不保留旧 snapshot 迁移。"""
     import json
+    import pytest
+    from haagent.runtime.session.package import ChatSessionError
 
     runs_root = tmp_path / ".runs"
     session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
@@ -163,12 +165,8 @@ def test_legacy_session_without_schema_version_migrates_to_current(tmp_path: Pat
     del raw["session_snapshot_schema_version"]
     metadata_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    resumed = AgentSession.resume(session.session_id, runs_root=runs_root, max_turns=2)
-    assert resumed.snapshot.schema_version == SESSION_SNAPSHOT_SCHEMA_VERSION
-    # 迁移后写回磁盘应落盘当前版本
-    resumed._write_session_metadata()
-    rewritten = read_session_metadata(session.session_path)
-    assert rewritten["session_snapshot_schema_version"] == SESSION_SNAPSHOT_SCHEMA_VERSION
+    with pytest.raises(ChatSessionError, match="unsupported session_snapshot_schema_version"):
+        AgentSession.resume(session.session_id, runs_root=runs_root, max_turns=2)
 
 
 def test_unknown_session_snapshot_schema_version_rejected(tmp_path: Path) -> None:

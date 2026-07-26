@@ -41,6 +41,7 @@ class CommandDispatcher:
             "web": lambda result: app._command_handlers.web(result.argument),
             "turns": lambda result: app._command_handlers.turns(result.argument),
             "permissions": lambda result: app._show_permissions(),
+            "plan_mode": lambda result: app._enter_plan_mode(result.argument),
             "cancel_task": lambda result: app.action_cancel_current_task(),
             "new_session": lambda result: app.session_flow.new_session(),
             "resume_latest": lambda result: app.session_flow.resume_latest(),

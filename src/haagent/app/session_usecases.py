@@ -18,6 +18,8 @@ from haagent.app.assistant_types import (
     AssistantSessionSummary,
     AssistantSessionTurn,
     EventSink,
+    PlanningStateView,
+    TodoStateView,
 )
 from haagent.models.model_ref import ModelRef
 from haagent.runtime.execution.human_interaction import HumanInteractionHandler
@@ -239,6 +241,59 @@ class AssistantSessions:
             return AssistantCancelResult(status="idle", reason="no_active_run")
         return AssistantCancelResult(status="cancelled", reason="user_cancelled")
 
+    def steer_current_run(self, text: str) -> bool:
+        """向运行中任务投递引导消息；无会话或无运行中任务时返回 False。"""
+        if self._context.session is None:
+            return False
+        return self._context.session.steer_current_run(text)
+
+    def enter_plan_mode(self) -> PlanningStateView:
+        session = self._ensure_session()
+        try:
+            session.enter_plan_mode()
+        except ChatSessionError as error:
+            raise AssistantServiceError(str(error)) from error
+        return planning_state_view(session)
+
+    def get_planning_state(self) -> PlanningStateView:
+        return planning_state_view(self._ensure_session())
+
+    def get_todo_state(self) -> TodoStateView:
+        return todo_state_view(self._ensure_session())
+
+    def cancel_plan(self) -> PlanningStateView:
+        session = self._ensure_session()
+        if not session.cancel_current_run():
+            raise AssistantServiceError("当前没有可取消的 Plan")
+        return planning_state_view(session)
+
+    def approve_plan(self, plan_id: str, revision: int) -> PlanningStateView:
+        session = self._ensure_session()
+        try:
+            session.approve_plan_revision(plan_id, revision)
+        except ChatSessionError as error:
+            raise AssistantServiceError(str(error)) from error
+        return planning_state_view(session)
+
+    def submit_plan_feedback(self, plan_id: str, revision: int, feedback: str) -> PlanningStateView:
+        session = self._ensure_session()
+        try:
+            session.submit_plan_feedback(plan_id, revision, feedback)
+        except ChatSessionError as error:
+            raise AssistantServiceError(str(error)) from error
+        return planning_state_view(session)
+
+    def execute_pending_plan_events(
+        self,
+        *,
+        event_sink: EventSink | None = None,
+        interaction_handler: HumanInteractionHandler | None = None,
+    ):
+        return self._ensure_session().execute_pending_plan_events(
+            event_sink=event_sink,
+            interaction_handler=interaction_handler,
+        )
+
     def _ensure_session(self) -> AgentSession:
         if self._context.session is None:
             self.create()
@@ -298,6 +353,30 @@ def session_status(session: AgentSession) -> AssistantSessionStatus:
         external_roots=_external_root_summaries(session),
         permission_mode=_session_permission_mode(session),
         sandbox_status=sandbox_status(),
+    )
+
+
+def planning_state_view(session: AgentSession) -> PlanningStateView:
+    state = session.snapshot.planning_state
+    return PlanningStateView(
+        status=state.status,
+        plan_id=state.plan_id,
+        revision=state.revision,
+        proposal=state.proposal.to_dict() if state.proposal is not None else None,
+        is_plan_mode=state.is_plan_mode,
+    )
+
+
+def todo_state_view(session: AgentSession) -> TodoStateView:
+    ledger = session.snapshot.task_ledger
+    active = ledger.active_todo()
+    return TodoStateView(
+        goal=ledger.goal,
+        items=tuple(item.to_dict() for item in ledger.todos),
+        counts=ledger.status_counts(),
+        active_item_id=active.id if active is not None else None,
+        has_active_todos=ledger.has_active_todos(),
+        all_terminal=ledger.all_terminal(),
     )
 
 

@@ -141,6 +141,25 @@ class AssistantCancelResult:
 
 
 @dataclass(frozen=True)
+class PlanningStateView:
+    status: str
+    plan_id: str | None
+    revision: int
+    proposal: dict[str, object] | None
+    is_plan_mode: bool
+
+
+@dataclass(frozen=True)
+class TodoStateView:
+    goal: str
+    items: tuple[dict[str, object], ...]
+    counts: dict[str, int]
+    active_item_id: str | None
+    has_active_todos: bool
+    all_terminal: bool
+
+
+@dataclass(frozen=True)
 class AssistantModelConnection:
     id: str
     name: str

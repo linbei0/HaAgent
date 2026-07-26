@@ -1,7 +1,7 @@
 """
-src/haagent/runtime/session/working_state.py - 短期工作状态
+src/haagent/runtime/session/working_state.py - 有界关键发现状态
 
-维护 chat 会话内的有界 working_state，不保存完整工具输出或 episode trace。
+只保存 TaskLedger 与 session summary 无法表达的短期关键发现。
 """
 
 from __future__ import annotations
@@ -14,14 +14,8 @@ from typing import Any
 
 WORKING_STATE_MODEL_CHAR_LIMIT = 1200
 WORKING_STATE_TEXT_FIELD_LIMIT = 240
-WORKING_STATE_CURRENT_GOAL_LIMIT = 200
 WORKING_STATE_MAX_ITEMS = 5
-TRACE_MARKERS = (
-    "tool-calls.jsonl",
-    "transcript.jsonl",
-    '"event":',
-    '"tool_name"',
-)
+TRACE_MARKERS = ("tool-calls.jsonl", "transcript.jsonl", '"event":', '"tool_name"')
 
 
 class WorkingStateError(RuntimeError):
@@ -30,49 +24,28 @@ class WorkingStateError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkingState:
-    current_goal: str
     key_findings: list[str]
-    completed_actions: list[str]
-    next_steps: list[str]
     last_updated_turn: int
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "current_goal": self.current_goal,
             "key_findings": list(self.key_findings),
-            "completed_actions": list(self.completed_actions),
-            "next_steps": list(self.next_steps),
             "last_updated_turn": self.last_updated_turn,
         }
 
     def is_empty(self) -> bool:
-        return (
-            not self.current_goal
-            and not self.key_findings
-            and not self.completed_actions
-            and not self.next_steps
-            and self.last_updated_turn == 0
-        )
+        return not self.key_findings and self.last_updated_turn == 0
 
     def status_summary(self) -> dict[str, object]:
         return {
             "exists": not self.is_empty(),
-            "current_goal": self.current_goal,
             "key_findings_count": len(self.key_findings),
-            "completed_actions_count": len(self.completed_actions),
-            "next_steps_count": len(self.next_steps),
             "last_updated_turn": self.last_updated_turn,
         }
 
 
 def empty_working_state() -> WorkingState:
-    return WorkingState(
-        current_goal="",
-        key_findings=[],
-        completed_actions=[],
-        next_steps=[],
-        last_updated_turn=0,
-    )
+    return WorkingState(key_findings=[], last_updated_turn=0)
 
 
 def load_working_state(path: Path) -> WorkingState:
@@ -86,33 +59,22 @@ def load_working_state(path: Path) -> WorkingState:
 
 
 def write_working_state(path: Path, state: WorkingState) -> None:
-    path.write_text(
-        json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def working_state_from_dict(raw: object) -> WorkingState:
     if not isinstance(raw, dict):
         raise WorkingStateError("invalid working_state.json: must contain an object")
-    required = ["current_goal", "key_findings", "completed_actions", "next_steps", "last_updated_turn"]
-    for field_name in required:
-        if field_name not in raw:
-            raise WorkingStateError(f"invalid working_state.json: missing {field_name}")
-    if not isinstance(raw["current_goal"], str):
-        raise WorkingStateError("invalid working_state.json: current_goal must be a string")
-    for field_name in ["key_findings", "completed_actions", "next_steps"]:
-        if not isinstance(raw[field_name], list) or not all(isinstance(item, str) for item in raw[field_name]):
-            raise WorkingStateError(f"invalid working_state.json: {field_name} must be a list of strings")
-    if not isinstance(raw["last_updated_turn"], int) or isinstance(raw["last_updated_turn"], bool):
-        raise WorkingStateError("invalid working_state.json: last_updated_turn must be an integer")
-    return WorkingState(
-        current_goal=_bounded_text(str(raw["current_goal"]), WORKING_STATE_CURRENT_GOAL_LIMIT),
-        key_findings=_bounded_items(raw["key_findings"]),
-        completed_actions=_bounded_items(raw["completed_actions"]),
-        next_steps=_bounded_items(raw["next_steps"]),
-        last_updated_turn=int(raw["last_updated_turn"]),
-    )
+    if set(raw) != {"key_findings", "last_updated_turn"}:
+        raise WorkingStateError("invalid working_state.json: fields do not match current schema")
+    findings = raw.get("key_findings")
+    if not isinstance(findings, list) or not all(isinstance(item, str) for item in findings):
+        raise WorkingStateError("invalid working_state.json: key_findings must be a list of strings")
+    updated_turn = raw.get("last_updated_turn")
+    if not isinstance(updated_turn, int) or isinstance(updated_turn, bool) or updated_turn < 0:
+        raise WorkingStateError("invalid working_state.json: last_updated_turn must be a non-negative integer")
+    return WorkingState(key_findings=_bounded_items(findings), last_updated_turn=updated_turn)
 
 
 def update_working_state(
@@ -122,150 +84,49 @@ def update_working_state(
     result: Any,
     runtime_events: list[Any],
 ) -> WorkingState:
-    from haagent.runtime.events.bus import (
-        AssistantMessageBusEvent,
-        ToolFailedBusEvent,
-        ToolFinishedBusEvent,
-        bus_event_to_dict,
-        coerce_bus_event,
-    )
+    del prompt
+    from haagent.runtime.events.bus import AssistantMessageBusEvent, bus_event_to_dict, coerce_bus_event
 
-    key_findings = list(state.key_findings)
-    completed_actions = list(state.completed_actions)
-
+    findings = list(state.key_findings)
     for raw_event in runtime_events:
         event = coerce_bus_event(raw_event)
-        if isinstance(event, ToolFinishedBusEvent):
-            completed_actions.append(_tool_action_summary(bus_event_to_dict(event)))
-        elif isinstance(event, ToolFailedBusEvent):
-            completed_actions.append(_tool_failure_summary(bus_event_to_dict(event)))
-        elif isinstance(event, AssistantMessageBusEvent):
-            finding = _bounded_text(event.content)
-            if finding and finding != "none":
-                key_findings.append(finding)
+        if isinstance(event, AssistantMessageBusEvent):
+            candidate = _bounded_text(event.content)
         else:
-            # LegacyRawBusEvent 等未切片类型：仍按 dict 字段消费。
             payload = bus_event_to_dict(event)
-            event_type = str(payload.get("event_type", ""))
-            if event_type == "tool_finished":
-                completed_actions.append(_tool_action_summary(payload))
-            elif event_type == "tool_failed":
-                completed_actions.append(_tool_failure_summary(payload))
-            elif event_type == "assistant_message":
-                finding = _bounded_text(str(payload.get("content", "")))
-                if finding and finding != "none":
-                    key_findings.append(finding)
-
+            candidate = _bounded_text(str(payload.get("content", ""))) if payload.get("event_type") == "assistant_message" else ""
+        if candidate and candidate != "none":
+            findings.append(candidate)
     final_response = _bounded_text(str(getattr(result, "final_response", "")))
-    if final_response and final_response != "none" and not _covered_by_assistant_event(final_response, key_findings):
-        # 去重：assistant_message 事件已收录同源回答时不再重复追加 final_response。
-        key_findings.append(final_response)
-    if not completed_actions:
-        completed_actions.append(
-            f"turn {getattr(result, 'turn_index', 0)} status={getattr(result, 'status', 'unknown')}",
-        )
-
+    if final_response and not any(item.startswith(final_response[:120]) for item in findings):
+        findings.append(final_response)
     return WorkingState(
-        current_goal=_bounded_text(prompt, WORKING_STATE_CURRENT_GOAL_LIMIT),
-        key_findings=_bounded_items(key_findings),
-        completed_actions=_bounded_items(completed_actions),
-        next_steps=_next_steps_from_result(result),
-        last_updated_turn=int(getattr(result, "turn_index", 0)),
+        key_findings=_bounded_items(findings),
+        last_updated_turn=max(0, int(getattr(result, "turn_index", 0))),
     )
 
 
 def format_working_state_for_model(value: object) -> str:
-    state = _state_from_value(value)
+    state = value if isinstance(value, WorkingState) else working_state_from_dict(value)
     if state.is_empty():
         return ""
-    lines = [
-        "Working State:",
-        f"last_user_request: {state.current_goal or 'none'}",
-        "assistant_findings:",
-        *_format_list(state.key_findings),
-        "assistant_actions:",
-        *_format_list(state.completed_actions),
-        "next_steps:",
-        *_format_list(state.next_steps),
-        f"last_updated_turn: {state.last_updated_turn}",
-    ]
-    text = "\n".join(lines)
-    return text[:WORKING_STATE_MODEL_CHAR_LIMIT]
+    lines = ["key_findings:", *[f"- {item}" for item in state.key_findings], f"last_updated_turn: {state.last_updated_turn}"]
+    return "\n".join(lines)[:WORKING_STATE_MODEL_CHAR_LIMIT]
 
 
 def raw_working_state_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def _state_from_value(value: object) -> WorkingState:
-    if isinstance(value, WorkingState):
-        return value
-    return working_state_from_dict(value)
-
-
-def _tool_action_summary(event: dict[str, object]) -> str:
-    tool_name = str(event.get("tool_name", "unknown"))
-    result = event.get("result") if isinstance(event.get("result"), dict) else {}
-    parts = [f"actor=assistant", f"tool={tool_name}", f"status={result.get('status', 'unknown')}"]
-    if tool_name in {"shell", "code_run"} and result.get("exit_code") is not None:
-        parts.append(f"exit_code={result.get('exit_code')}")
-    if tool_name in {"file_read", "file_write", "apply_patch"} and result.get("path"):
-        parts.append(f"path={_bounded_text(str(result.get('path')), 120)}")
-    if tool_name == "file_write" and result.get("bytes_written") is not None:
-        parts.append(f"bytes_written={result.get('bytes_written')}")
-    return _bounded_text(" ".join(parts))
-
-
-def _tool_failure_summary(event: dict[str, object]) -> str:
-    tool_name = str(event.get("tool_name", "unknown"))
-    error = event.get("error") if isinstance(event.get("error"), dict) else {}
-    error_type = str(error.get("type", "unknown"))
-    return _bounded_text(f"actor=assistant tool={tool_name} status=failed type={error_type}")
-
-
-def _next_steps_from_result(result: Any) -> list[str]:
-    status = str(getattr(result, "status", "unknown"))
-    verification_status = str(getattr(result, "verification_status", "not_run"))
-    if status == "completed":
-        if verification_status == "success":
-            return ["Use the verified result for follow-up work if the user continues."]
-        return ["Continue from this completed chat turn if the user asks a follow-up."]
-    reason = _bounded_text(str(getattr(result, "reason", "")), 180)
-    failure_category = _bounded_text(str(getattr(result, "failure_category", "unknown")), 120)
-    return [f"Address failure {failure_category}: {reason}"]
-
-
 def _bounded_items(items: list[str]) -> list[str]:
-    selected: list[str] = []
-    for item in items:
-        text = _bounded_text(item)
-        if text and text != "none" and not _looks_like_trace(text):
-            selected.append(text)
-    return selected[-WORKING_STATE_MAX_ITEMS:]
+    selected = [_bounded_text(item) for item in items]
+    return [item for item in selected if item and item != "none"][-WORKING_STATE_MAX_ITEMS:]
 
 
-def _bounded_text(value: str, limit: int = WORKING_STATE_TEXT_FIELD_LIMIT) -> str:
+def _bounded_text(value: str) -> str:
     normalized = " ".join(value.split())
-    if not normalized:
+    if not normalized or any(marker in normalized for marker in TRACE_MARKERS):
         return ""
-    if _looks_like_trace(normalized):
-        return ""
-    if len(normalized) <= limit:
+    if len(normalized) <= WORKING_STATE_TEXT_FIELD_LIMIT:
         return normalized
-    return normalized[:limit] + "... [truncated]"
-
-
-def _covered_by_assistant_event(final_response: str, key_findings: list[str]) -> bool:
-    """final_response 是否已被 assistant_message 事件收录；截断前缀一致即视为同源。"""
-    prefix = final_response[:120]
-    return any(item.startswith(prefix) for item in key_findings)
-
-
-def _looks_like_trace(value: str) -> bool:
-    return any(marker in value for marker in TRACE_MARKERS)
-
-
-def _format_list(items: list[str]) -> list[str]:
-    if not items:
-        return ["- none"]
-    return [f"- {item}" for item in items]
+    return normalized[: WORKING_STATE_TEXT_FIELD_LIMIT - 1] + "…"

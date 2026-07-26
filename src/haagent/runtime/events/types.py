@@ -152,6 +152,27 @@ class TaskProgressEvent:
 
 
 @dataclass(frozen=True)
+class PlanningStateEvent:
+    session_id: str
+    turn_index: int
+    state: str
+    plan_id: str | None
+    revision: int
+    step_count: int
+
+
+@dataclass(frozen=True)
+class TodoStateEvent:
+    session_id: str
+    turn_index: int
+    total_count: int
+    completed_count: int
+    active_item_id: str | None
+    active_item_content: str
+    all_terminal: bool
+
+
+@dataclass(frozen=True)
 class SessionLifecycleEvent:
     session_id: str
     turn_index: int
@@ -177,6 +198,8 @@ RuntimeUiEvent: TypeAlias = (
     | WarningNoticeEvent
     | FailureNoticeEvent
     | TaskProgressEvent
+    | PlanningStateEvent
+    | TodoStateEvent
     | SessionLifecycleEvent
 )
 
@@ -193,6 +216,8 @@ RuntimeUiEventType: TypeAlias = (
     | type[WarningNoticeEvent]
     | type[FailureNoticeEvent]
     | type[TaskProgressEvent]
+    | type[PlanningStateEvent]
+    | type[TodoStateEvent]
     | type[SessionLifecycleEvent]
 )
 
@@ -209,5 +234,7 @@ RUNTIME_UI_EVENT_TYPES: tuple[RuntimeUiEventType, ...] = (
     WarningNoticeEvent,
     FailureNoticeEvent,
     TaskProgressEvent,
+    PlanningStateEvent,
+    TodoStateEvent,
     SessionLifecycleEvent,
 )

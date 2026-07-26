@@ -22,12 +22,14 @@ ExecutionEffect = Literal[
     "workspace_write",
     "external_effect",
     "interaction",
+    "session_state",
 ]
 ALLOWED_EXECUTION_EFFECTS = {
     "read_only",
     "workspace_write",
     "external_effect",
     "interaction",
+    "session_state",
 }
 
 

@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 
 UserInputOutcome = Literal["answered", "dismissed", "timed_out"]
+PlanConfirmationOutcome = Literal["approved", "revision_requested", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,9 @@ class HumanInteractionRequest:
     risk_level: str | None = None
     args_summary: dict[str, object] = field(default_factory=dict)
     questions: tuple[UserQuestion, ...] = ()
+    plan_id: str | None = None
+    plan_revision: int | None = None
+    plan_proposal: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,7 @@ class HumanInteractionResponse:
     answer: str = ""
     outcome: UserInputOutcome | None = None
     answers: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    plan_outcome: PlanConfirmationOutcome | None = None
 
 
 HumanInteractionHandler = Callable[[HumanInteractionRequest], HumanInteractionResponse]

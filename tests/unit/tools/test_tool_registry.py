@@ -28,6 +28,8 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "grep",
         "file_read",
         "request_user_input",
+        "todo_update",
+        "submit_plan",
         "start_memory_update",
         "skill_list",
         "skill_read",
@@ -61,6 +63,8 @@ def test_tool_registry_static_execution_effects() -> None:
         "load_image_attachment": "read_only",
         "session_history": "read_only",
         "request_user_input": "interaction",
+        "todo_update": "session_state",
+        "submit_plan": "interaction",
         "start_memory_update": "external_effect",
         "agent": "external_effect",
         "send_message": "external_effect",
@@ -94,6 +98,7 @@ def test_tool_registry_static_execution_effects() -> None:
         "workspace_write",
         "external_effect",
         "interaction",
+        "session_state",
     }
 
 

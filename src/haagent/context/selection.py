@@ -144,6 +144,7 @@ class ContextCandidateInputs:
     session_summary: str | None = None
     working_state: str | None = None
     task_ledger: str | None = None
+    planning_state: str | None = None
     memory_index: str | None = None
     memory_index_skip_reason: str | None = None
     memory_index_metadata: dict[str, Any] = field(default_factory=dict)

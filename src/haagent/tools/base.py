@@ -26,6 +26,7 @@ class ToolExecutionContext:
     """
 
     interaction_handler: HumanInteractionHandler | None = None
+    turn: int | None = None
 
     def ask(self, request: ToolPermissionRequest) -> HumanInteractionResponse | None:
         """暂停当前工具调用等待用户决定；无交互入口时返回 None。"""

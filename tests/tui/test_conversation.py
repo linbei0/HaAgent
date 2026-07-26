@@ -326,6 +326,8 @@ def test_tui_conversation_auto_scrolls_to_latest_content(tmp_path: Path) -> None
                 app._conversation.append_block("Assistant", f"line {index}")
             app._refresh_conversation()
             await pilot.pause()
+            # 批量 block mount 会继续触发布局与粘底回调，再排空一轮后读取最终滚动位置。
+            await pilot.pause()
             assert conversation.max_scroll_y > 0
             assert conversation.scroll_y == conversation.max_scroll_y
             assert "line 29" in _text(app, "#conversation")

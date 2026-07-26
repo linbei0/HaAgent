@@ -94,6 +94,7 @@ class SessionFlow:
         self._busy = False
         self.show_session_history(status, prefix=prefix, history=history, history_error=history_error)
         self._app._refresh()
+        self._app._restore_persisted_plan_state()
         self._app._defer_prompt_focus()
 
     def apply_continue_success(
@@ -107,6 +108,7 @@ class SessionFlow:
         self.show_session_history(status, prefix="已恢复会话", history=history, history_error=history_error)
         self._app._conversation.append_line(f"已恢复会话：{status.session_id}")
         self._app._refresh()
+        self._app._restore_persisted_plan_state()
         self._app._defer_prompt_focus()
 
     def apply_overlay_success(
@@ -123,6 +125,7 @@ class SessionFlow:
         else:
             self.show_session_history(status, prefix="当前会话", history=history, history_error=history_error)
         self._app._refresh()
+        self._app._restore_persisted_plan_state()
         self._app._defer_prompt_focus()
 
     def apply_session_error(self, message: str) -> None:
@@ -163,6 +166,7 @@ class SessionFlow:
     def clear_conversation_for_new_session(self) -> None:
         self._app.clear_context_usage()
         self._app._conversation.reset_streaming_state()
+        self._app._steering_queue.clear()
         self._app._active_turn_index = None
         self._app._prompt_input().clear_request_history()
         self._timeline().clear_timeline()

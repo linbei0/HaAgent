@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from haagent.context.messages import (
     build_assistant_message,
+    build_steering_message,
     build_suggestion_message,
     build_tool_result_message,
     generate_tool_call_id,
@@ -28,6 +29,7 @@ from haagent.models.types import ModelGateway, ModelUsage, ToolCall
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.execution.cancellation import RunCancelled
 from haagent.runtime.execution.cancellation import CancellationToken
+from haagent.runtime.execution.steering import SteeringChannel
 from haagent.runtime.orchestration.failure import FailureCategory
 from haagent.runtime.execution.guardrails import check_assistant_output, guardrail_evidence
 from haagent.runtime.execution.human_interaction import (
@@ -48,6 +50,7 @@ from haagent.runtime.events.bus import (
     AssistantIntermediateBusEvent,
     AssistantMessageBusEvent,
     ModelContextUsageBusEvent,
+    SteeringInjectedBusEvent,
     RuntimeBusEvent,
     ToolFailedBusEvent,
     ToolFinishedBusEvent,
@@ -109,6 +112,7 @@ class TurnLoopDependencies:
     task_step_id: str = "step-001"
     task_step_title: str = ""
     cancellation_token: CancellationToken | None = None
+    steering_channel: SteeringChannel | None = None
     max_parallel_read_tools: int = 4
     performance_trace: PerformanceTrace | None = None
     persist_performance: Callable[[], None] | None = None
@@ -116,6 +120,7 @@ class TurnLoopDependencies:
     progress_guard: ProgressGuard | None = None
     progress_guard_mode: str = "warn"
     on_progress_blocked: Callable[[int, ProgressDecision], None] | None = None
+    plan_execution_has_active_todos: Callable[[], bool] | None = None
 
 
 def run_turn_loop(
@@ -126,6 +131,8 @@ def run_turn_loop(
     turn_numbers = count(1) if deps.max_turns is None else range(1, deps.max_turns + 1)
     for turn in turn_numbers:
         deps.raise_if_cancelled()
+        # 安全边界：上一轮工具批次已收尾、下一次模型调用尚未发出，此处注入运行中引导。
+        _drain_steering(turn=turn, state=state, deps=deps)
         if state.pending_worker_task_ids:
             notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
             deps.writer.append_transcript(
@@ -186,11 +193,17 @@ def run_turn_loop(
                 ),
             ),
         )
+        # 取消时把已流式的部分回复留进 episode，供下一轮上下文衔接。
+        partial_chunks: list[str] = []
+
         def emit_assistant_delta(delta: str) -> None:
             deps.raise_if_cancelled()
+            partial_chunks.append(delta)
             deps.emit_event(AssistantDeltaBusEvent(turn=turn, delta=delta))
 
         def emit_stream_reset(reset_event) -> None:
+            # 失败 attempt 的 partial 不属于最终事实，重置后从零累积。
+            partial_chunks.clear()
             # UI 只拿 attempt 标识与 category；partial 全文仅可进 episode 证据。
             bus_event = AssistantAttemptResetBusEvent(
                 turn=turn,
@@ -244,6 +257,8 @@ def run_turn_loop(
 
         def emit_retry(retry_event) -> None:
             nonlocal model_attempt
+            # 失败 attempt 的流式残片不进 partial 事实。
+            partial_chunks.clear()
             recovery_facts = {
                 key: value
                 for key, value in {
@@ -341,8 +356,21 @@ def run_turn_loop(
                     deps.persist_performance()
 
             generate_kwargs["telemetry_sink"] = emit_transport
-        model_response = deps.model_gateway.generate(**generate_kwargs)
-        deps.raise_if_cancelled()
+        try:
+            model_response = deps.model_gateway.generate(**generate_kwargs)
+            deps.raise_if_cancelled()
+        except RunCancelled:
+            partial_text = "".join(partial_chunks).strip()
+            if partial_text:
+                deps.writer.append_transcript(
+                    {
+                        "event": "model_response_partial",
+                        "turn": turn,
+                        "content": partial_text,
+                        "interrupted_by": "user_cancel",
+                    },
+                )
+            raise
         if deps.performance_trace is not None:
             deps.performance_trace.record_model_usage(turn, model_response.usage)
             if deps.persist_performance is not None:
@@ -458,6 +486,30 @@ def run_turn_loop(
     return None
 
 
+def _drain_steering(
+    *,
+    turn: int,
+    state: TurnLoopState,
+    deps: TurnLoopDependencies,
+) -> int:
+    """取出全部待注入引导并追加为 user 消息；返回注入条数。"""
+    channel = deps.steering_channel
+    if channel is None:
+        return 0
+    steering_texts = channel.drain()
+    for text in steering_texts:
+        state.messages.append(build_steering_message(text))
+        deps.writer.append_transcript(
+            {
+                "event": "steering_injected",
+                "turn": turn,
+                "content": text,
+            },
+        )
+        deps.emit_event(SteeringInjectedBusEvent(turn=turn, content=text))
+    return len(steering_texts)
+
+
 def _handle_no_tool_response(
     *,
     turn: int,
@@ -492,6 +544,42 @@ def _handle_no_tool_response(
             },
         )
         state.messages.append(_build_worker_notifications_message(notifications))
+        return None
+    if deps.steering_channel is not None and deps.steering_channel.has_pending():
+        # 有未消费引导时不得完成：保留本轮回答文本，注入引导后继续循环修正。
+        deps.writer.append_transcript(
+            {
+                "event": "completion_candidate_deferred",
+                "turn": turn,
+                "reason": "pending_steering",
+            },
+        )
+        deps.emit_event(AssistantIntermediateBusEvent(turn=turn, content=model_response.content))
+        state.messages.append(
+            build_assistant_message(
+                model_response.content,
+                [],
+                provider_turn_state=model_response.provider_turn_state,
+            ),
+        )
+        _drain_steering(turn=turn, state=state, deps=deps)
+        return None
+    if deps.plan_execution_has_active_todos is not None and deps.plan_execution_has_active_todos():
+        # 已批准 Plan 的 Todo 是执行完成的结构化事实，不能被模型的一段纯文本覆盖。
+        # 最近工具结果已在上下文中；只补充恢复指令，避免重复塞入原始工具输出。
+        deps.writer.append_transcript(
+            {
+                "event": "completion_candidate_deferred",
+                "turn": turn,
+                "reason": "active_plan_todos",
+            },
+        )
+        state.messages.append(
+            build_suggestion_message(
+                "The approved plan still has unfinished Todo items. Do not provide a final answer yet. "
+                "Use the latest tool result to continue the active Todo, then update Todo state."
+            ),
+        )
         return None
     deps.writer.append_transcript(
         {
@@ -701,6 +789,18 @@ def _run_tool_calls(
     for suggestion_message in pending_suggestion_messages:
         if suggestion_message:
             state.messages.append(build_suggestion_message(suggestion_message))
+
+    control_result = next(
+        (result for result in tool_results if result.get("control") == "end_turn"),
+        None,
+    )
+    if control_result is not None:
+        outcome = str(control_result.get("outcome", ""))
+        content = "方案已批准，正在开始执行。" if outcome == "approved" else "规划已取消。"
+        deps.emit_event(AssistantMessageBusEvent(turn=turn, content=content))
+        deps.recorder.transition(RunStatus.COMPLETED)
+        deps.writer.write_failure_attribution(None)
+        return deps.recorder.finish(RunStatus.COMPLETED)
 
     success_count = sum(1 for result in tool_results if result.get("status") != "error")
     if success_count:

@@ -61,6 +61,8 @@ from haagent.tools.user_input import UserQuestionValidationError, parse_user_que
 
 # turn, tool_name, duration_ms, execution_effect, status — 不进入 model-visible result。
 ToolPerformanceSink = Callable[[int, str, float, str, str], None]
+TodoStateSink = Callable[[list[dict[str, object]], str, int | None], dict[str, object]]
+PlanningStateHandler = Callable[[str, dict[str, object], int], dict[str, object]]
 
 
 class ToolRouter:
@@ -85,6 +87,10 @@ class ToolRouter:
         retry_controller: RetryController | None = None,
         performance_sink: ToolPerformanceSink | None = None,
         skill_catalog: SkillCatalogService | None = None,
+        planning_status: str = "inactive",
+        actor_role: str = "main",
+        todo_state_sink: TodoStateSink | None = None,
+        planning_state_handler: PlanningStateHandler | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -100,6 +106,10 @@ class ToolRouter:
         self._worker_permission_requester = worker_permission_requester
         self._sandbox_backend = sandbox_backend
         self._performance_sink = performance_sink
+        self._planning_status = planning_status
+        self._actor_role = actor_role
+        self._todo_state_sink = todo_state_sink
+        self._planning_state_handler = planning_state_handler
         self._image_attachment_history = {
             attachment.id: attachment
             for attachment in image_attachment_history or []
@@ -125,6 +135,8 @@ class ToolRouter:
                 "task_list": self._task_list,
                 "task_output": self._task_output,
                 "request_user_input": self._request_user_input_handler,
+                "todo_update": self._todo_update_handler,
+                "submit_plan": self._submit_plan_handler,
                 "start_memory_update": self._start_memory_update,
             },
         )
@@ -147,7 +159,9 @@ class ToolRouter:
         policy_decision: PolicyDecision | None = None
         guardrail_result: GuardrailResult | None = None
         try:
-            if tool_name not in self._allowed_tools:
+            if denial := self._mode_or_actor_denial(tool_name):
+                result = denial
+            elif tool_name not in self._allowed_tools:
                 result = tool_error("tool_not_allowed", f"tool is not allowed: {tool_name}")
             elif not self._tool_registry.has(tool_name):
                 result = tool_error("unknown_tool", f"unknown tool: {tool_name}")
@@ -186,7 +200,7 @@ class ToolRouter:
                 else:
                     result = self._execute_tool_operation(
                         tool_definition,
-                        lambda: self._run_handler(tool_name, args, interaction_handler),
+                        lambda: self._run_handler(tool_name, args, interaction_handler, turn=turn),
                     )
         except RunCancelled as error:
             result = tool_error(type(error).__name__, str(error))
@@ -452,6 +466,78 @@ class ToolRouter:
         # 与写工具相同：interaction 经执行上下文注入，不在 dispatch 按名分支。
         return self._request_user_input(args, context.interaction_handler)
 
+    def _todo_update_handler(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        if self._todo_state_sink is None:
+            return tool_error("session_state_unavailable", "Todo state sink is unavailable")
+        items = args.get("items")
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            return tool_error("tool_argument_invalid", "items must be a list of objects", retryable=False)
+        result = self._todo_state_sink(
+            [dict(item) for item in items],
+            str(args.get("explanation", "")),
+            context.turn,
+        )
+        return {"status": "success", **result}
+
+    def _submit_plan_handler(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        if self._planning_state_handler is None:
+            return tool_error("session_state_unavailable", "Planning state handler is unavailable")
+        if context.interaction_handler is None:
+            return tool_error("plan_confirmation_unavailable", "Plan confirmation requires an interaction handler")
+        state = self._planning_state_handler("submit", dict(args), context.turn or 0)
+        plan_id = str(state.get("plan_id", ""))
+        revision = state.get("revision")
+        proposal = state.get("proposal")
+        if not plan_id or not isinstance(revision, int) or not isinstance(proposal, dict):
+            return tool_error("invalid_planning_state", "Submitted Plan state is incomplete", retryable=False)
+        response = context.interaction_handler(
+            HumanInteractionRequest(
+                interaction_type="plan_confirmation",
+                tool_name="submit_plan",
+                question="确认实施方案",
+                reason="批准后将初始化 Todo 并自动开始执行",
+                risk_level="low",
+                args_summary={"plan_id": plan_id, "revision": revision, "step_count": len(proposal.get("steps", []))},
+                plan_id=plan_id,
+                plan_revision=revision,
+                plan_proposal=dict(proposal),
+            ),
+        )
+        outcome = response.plan_outcome
+        if outcome == "revision_requested":
+            feedback = response.answer.strip()
+            if not feedback:
+                return tool_error("invalid_interaction_response", "Plan feedback must be non-empty", retryable=False)
+            self._planning_state_handler(
+                "feedback",
+                {"plan_id": plan_id, "revision": revision, "feedback": feedback},
+                context.turn or 0,
+            )
+            return {"status": "success", "outcome": "revision_requested", "feedback": feedback}
+        if outcome == "approved":
+            approved = self._planning_state_handler(
+                "approve",
+                {"plan_id": plan_id, "revision": revision},
+                context.turn or 0,
+            )
+            return {
+                "status": "success",
+                "outcome": "approved",
+                "execution_id": approved.get("execution_id"),
+                "control": "end_turn",
+            }
+        if outcome == "cancelled":
+            return {"status": "success", "outcome": "cancelled", "control": "end_turn"}
+        return tool_error("invalid_interaction_response", "Plan confirmation outcome is required", retryable=False)
+
     def _request_user_input(
         self,
         args: dict[str, Any],
@@ -677,10 +763,35 @@ class ToolRouter:
         tool_name: str,
         args: dict[str, Any],
         interaction_handler: HumanInteractionHandler | None,
+        *,
+        turn: int | None = None,
     ) -> dict[str, Any]:
         # 静态工具唯一执行入口：catalog 绑定的 handler + 逐次 ToolExecutionContext。
-        context = ToolExecutionContext(interaction_handler=interaction_handler)
+        context = ToolExecutionContext(interaction_handler=interaction_handler, turn=turn)
         return self._handlers[tool_name](args, context)
+
+    def _mode_or_actor_denial(self, tool_name: str) -> dict[str, Any] | None:
+        if self._actor_role != "main" and tool_name in {"todo_update", "submit_plan"}:
+            return tool_error("tool_actor_denied", f"{tool_name} is only available to the main Agent")
+        if tool_name == "submit_plan" and self._planning_status not in {"planning", "awaiting_confirmation"}:
+            return tool_error("plan_mode_required", "submit_plan is only available in Plan Mode")
+        if self._planning_status not in {"planning", "awaiting_confirmation"}:
+            return None
+        if tool_name.startswith("mcp__"):
+            return tool_error("plan_mode_tool_denied", "dynamic MCP tools are disabled in Plan Mode")
+        from haagent.tools.catalog import default_tool_catalog
+
+        allowed = set(
+            default_tool_catalog().plan_mode_tools(
+                enable_web=True,
+                include_session_history=True,
+                include_image_attachment=True,
+            ),
+        )
+        if tool_name not in allowed:
+            # 安全边界：即使模型缓存了旧 schema，handler 也绝不执行副作用工具。
+            return tool_error("plan_mode_tool_denied", f"tool is disabled in Plan Mode: {tool_name}")
+        return None
 
     def _assert_registry_alignment(self) -> None:
         """Router 和 Registry 必须同步，否则 allowed_tools 审计会和实际执行脱节。"""

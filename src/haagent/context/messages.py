@@ -77,6 +77,7 @@ def build_task_message(
     task: TaskSpec,
     plan_steps: list[str],
     task_ledger_content: str | None = None,
+    planning_state_content: str | None = None,
     working_state_content: str | None = None,
     memory_index_block: str | None = None,
     memory_block: str | None = None,
@@ -128,6 +129,11 @@ def build_task_message(
         lines.append("")
         lines.append("Task Ledger:")
         lines.append(task_ledger_content.strip())
+
+    if planning_state_content and planning_state_content.strip():
+        lines.append("")
+        lines.append("Planning State:")
+        lines.append(planning_state_content.strip())
 
     if working_state_content and working_state_content.strip():
         lines.append("")
@@ -190,6 +196,16 @@ def build_tool_result_message(
 
 def build_suggestion_message(suggestion_text: str) -> dict[str, Any]:
     return {"role": "user", "content": f"[Suggestion] {suggestion_text}"}
+
+
+def build_steering_message(steering_text: str) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": (
+            "[用户在任务执行中插入的引导，优先按此调整后续行动] "
+            f"{steering_text}"
+        ),
+    }
 
 
 def _format_tool_result(tool_name: str, result: dict[str, Any]) -> str:

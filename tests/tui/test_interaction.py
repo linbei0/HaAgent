@@ -267,6 +267,23 @@ def test_tui_approval_allow_returns_approved_true_to_same_prompt(tmp_path: Path)
     asyncio.run(run())
 
 
+def test_tui_cancel_empty_plan_mode_completes_without_waiting_for_worker(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(workspace_root=tmp_path)
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app._state = "planning"
+            app.action_cancel_current_task()
+            await pilot.pause()
+
+            assert service.cancelled_count == 1
+            assert "已取消" in _text(app, "#status-bar")
+            assert "正在取消" not in _text(app, "#status-bar")
+            assert "任务已取消" in _text(app, "#conversation")
+
+    asyncio.run(run())
+
+
 def test_tui_approval_always_returns_session_rule_to_same_prompt(tmp_path: Path) -> None:
     async def run() -> None:
         service = FakeAssistantService(workspace_root=tmp_path, interaction_request=_approval_request())

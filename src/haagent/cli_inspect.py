@@ -114,20 +114,19 @@ def _format_task_ledger_for_episode(episode_path: Path) -> list[str]:
         ledger = task_ledger_from_dict(_read_json(ledger_path))
     except (OSError, json.JSONDecodeError, TaskLedgerError) as error:
         return [f"- invalid: {error}"]
-    active = ledger.active_step()
-    blocked = [step for step in ledger.steps if step.status == "blocked"]
-    completed = [step for step in ledger.steps if step.status == "completed"]
+    active = ledger.active_todo()
+    counts = ledger.status_counts()
     lines = [
         f"- session_ledger: {ledger_path}",
-        f"- status: {ledger.status}",
-        f"- current_step_id: {ledger.current_step_id or 'none'}",
-        f"- steps: total={len(ledger.steps)} completed={len(completed)} blocked={len(blocked)}",
+        f"- active: {ledger.has_active_todos()}",
+        f"- active_todo_id: {active.id if active is not None else 'none'}",
+        f"- todos: total={len(ledger.todos)} completed={counts['completed']} cancelled={counts['cancelled']}",
         f"- checkpoints: {len(ledger.checkpoints)}",
     ]
     if active is not None:
         lines.append(
-            f"- active_step: {active.id} evidence={len(active.evidence_refs)} "
-            f"checkpoints={len(active.checkpoint_ids)} [{active.status}/{active.owner}] {active.title}"
+            f"- active_todo: {active.id} evidence={len(active.evidence_refs)} "
+            f"checkpoints={len(active.checkpoint_ids)} [{active.status}] {active.content}"
         )
         if active.blocker:
             category = active.blocker.get("category", "blocked")

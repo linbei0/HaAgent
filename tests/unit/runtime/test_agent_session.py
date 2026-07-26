@@ -214,15 +214,17 @@ def test_agent_session_writes_and_resumes_task_ledger(tmp_path: Path) -> None:
 
     assert ledger_path.exists()
     ledger = load_task_ledger(ledger_path)
-    assert ledger.status == "planning"
+    assert ledger.schema_version == 2
+    assert ledger.todos == []
+    assert (session.session_path / "planning-state.json").exists()
 
     resumed = AgentSession.resume(
         session.session_path,
         model_gateway=None,
     )
 
-    assert resumed.status()["task_ledger"]["status"] == "planning"
-    assert resumed.status()["task_ledger"]["step_count"] == 0
+    assert resumed.status()["task_ledger"]["has_active_todos"] is False
+    assert resumed.status()["task_ledger"]["todo_count"] == 0
 
 
 def test_agent_session_passes_task_ledger_to_turn_request(
@@ -262,13 +264,12 @@ def test_agent_session_passes_task_ledger_to_turn_request(
 
     session.run_prompt_events("完成一个需要多步骤恢复的长任务")
 
-    assert captured["task_ledger"]["status"] == "running"
-    assert captured["task_ledger"]["goal"] == "完成一个需要多步骤恢复的长任务"
+    assert captured["task_ledger"]["schema_version"] == 2
+    assert captured["task_ledger"]["todos"] == []
+    assert "status" not in captured["task_ledger"]
     persisted = load_task_ledger(session.session_path / "task-ledger.json")
-    assert persisted.goal == "完成一个需要多步骤恢复的长任务"
-    assert persisted.status == "completed"
-    assert persisted.updated_turn == 1
-    assert persisted.checkpoints
+    assert persisted.goal == ""
+    assert persisted.todos == []
 
 
 def test_agent_session_records_in_band_shell_verification(
@@ -366,11 +367,7 @@ def test_agent_session_emits_task_progress_for_turn_lifecycle(
         for event in events
         if hasattr(event, "event_name")
     ]
-    assert progress_names == [
-        "task_step_started",
-        "task_checkpoint_saved",
-        "task_step_finished",
-    ]
+    assert progress_names == []
 
 
 def test_agent_session_emits_task_plan_created_from_runtime(tmp_path: Path) -> None:

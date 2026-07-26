@@ -10,6 +10,8 @@ from haagent.tui.widgets.conversation_timeline import ConversationTimeline
 from haagent.tui.widgets.input_dock import InputDock
 from haagent.tui.widgets.prompt_input import PromptInput, _end_location
 from haagent.tui.widgets.question_prompt import QuestionPrompt
+from haagent.tui.widgets.plan_confirmation import PlanConfirmationPanel
+from haagent.tui.widgets.todo_panel import TodoPanel
 from haagent.tui.widgets.request_history_rail import RequestHistoryPreview, RequestHistoryRail
 from haagent.tui.widgets.status import ContextUsageLine, FooterBar, ProgressStatusLine, ResizeMessage, StatusBar
 from haagent.tui.widgets.timeline_block import AssistantMarkdown, TimelineBlock, ToolActivityLog
@@ -25,6 +27,7 @@ __all__ = [
     "ProgressStatusLine",
     "PromptInput",
     "QuestionPrompt",
+    "PlanConfirmationPanel",
     "RequestHistoryPreview",
     "RequestHistoryRail",
     "ResizeMessage",
@@ -33,6 +36,7 @@ __all__ = [
     "ToolActivity",
     "ToolActivityLog",
     "ToolStatus",
+    "TodoPanel",
     "_end_location",
     "merge_tool_activity",
 ]

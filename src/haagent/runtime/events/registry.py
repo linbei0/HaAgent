@@ -26,6 +26,7 @@ from haagent.runtime.events.types import (
     AssistantMessageEvent,
     ContextUsageEvent,
     FailureNoticeEvent,
+    PlanningStateEvent,
     RuntimeUiEvent,
     RuntimeUiEventType,
     TaskProgressEvent,
@@ -293,6 +294,42 @@ def _user_input_received_event(event: dict[str, object], context: RawRuntimeUiEv
     )
 
 
+def _plan_confirmation_received_event(
+    event: dict[str, object],
+    context: RawRuntimeUiEventContext,
+) -> PlanningStateEvent:
+    # 交互响应本身没有用户可读正文，投影为既有规划状态，避免 UI 将它误报为未知 runtime event。
+    outcome = str(event.get("outcome", "cancelled"))
+    states = {
+        "approved": "approved_pending_execution",
+        "revision_requested": "planning",
+        "cancelled": "cancelled",
+    }
+    return PlanningStateEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        state=states.get(outcome, "cancelled"),
+        plan_id=str(event["plan_id"]) if event.get("plan_id") is not None else None,
+        revision=_int_value(event.get("revision")),
+        step_count=0,
+    )
+
+
+def _plan_confirmation_requested_event(
+    event: dict[str, object],
+    context: RawRuntimeUiEventContext,
+) -> PlanningStateEvent:
+    # 请求已由 InputDock 直接承接；只同步状态，不能再投影成 runtime warning。
+    return PlanningStateEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        state="awaiting_confirmation",
+        plan_id=str(event["plan_id"]) if event.get("plan_id") is not None else None,
+        revision=_int_value(event.get("revision")),
+        step_count=0,
+    )
+
+
 def _guardrail_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
     return WarningNoticeEvent(
         session_id=context.session_id,
@@ -411,6 +448,19 @@ def _compression_subject(event: dict[str, object]) -> str:
     return "unknown"
 
 
+def _steering_injected_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
+    # 引导块已由发送侧本地渲染；注入事实只留审计，不再投影进主时间线。
+    return WarningNoticeEvent(
+        session_id=context.session_id,
+        turn_index=context.turn_index,
+        title="引导",
+        message=summary_value(str(event.get("content", ""))),
+        notice_kind="steering_injected",
+        surface="hidden",
+        details=without_event_type(event),
+    )
+
+
 def _loop_suggestion_event(event: dict[str, object], context: RawRuntimeUiEventContext) -> WarningNoticeEvent:
     return WarningNoticeEvent(
         session_id=context.session_id,
@@ -498,12 +548,15 @@ _RAW_RUNTIME_UI_EVENT_SPECS: tuple[RawRuntimeUiEventSpec, ...] = (
     _spec("edit_diff_denied", ApprovalStateEvent, _edit_diff_approval_event),
     _spec("user_input_requested", UserInputStateEvent, _user_input_requested_event),
     _spec("user_input_received", UserInputStateEvent, _user_input_received_event),
+    _spec("plan_confirmation_requested", PlanningStateEvent, _plan_confirmation_requested_event),
+    _spec("plan_confirmation_received", PlanningStateEvent, _plan_confirmation_received_event),
     _spec("guardrail_triggered", WarningNoticeEvent, _guardrail_event),
     _spec("model_retry_scheduled", WarningNoticeEvent, _model_retry_event),
     _spec("model_retry_exhausted", WarningNoticeEvent, _model_retry_exhausted_event),
     _spec("model_protocol_fallback", WarningNoticeEvent, _model_route_fallback_event),
     _spec("model_fallback", WarningNoticeEvent, _model_route_fallback_event),
     _spec("compression_diagnostic", WarningNoticeEvent, _compression_diagnostic_event),
+    _spec("steering_injected", WarningNoticeEvent, _steering_injected_event),
     _spec("loop_suggestion_added", WarningNoticeEvent, _loop_suggestion_event),
     _spec("interaction_reused", WarningNoticeEvent, _interaction_reused_event),
     _spec("failure", FailureNoticeEvent, _failure_event),

@@ -974,6 +974,46 @@ def test_verification_failure_emits_checkpoint_recovery_and_budget_warning() -> 
     assert recovery["suggested_action"] == "repair_and_rerun_verification"
 
 
+def test_active_plan_todo_defers_no_tool_completion_after_tool_error() -> None:
+    writer = _FakeWriter()
+    transitions: list[RunStatus] = []
+    router = _FakeRouter(
+        {
+            "status": "error",
+            "error": {"type": "tool_argument_invalid", "message": "path does not exist"},
+        },
+    )
+    state = TurnLoopState(messages=[], context_id="ctx")
+    deps = _deps(
+        router=router,
+        writer=writer,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.EXECUTING],
+            transition=transitions.append,
+            finish=lambda status: SimpleNamespace(status=status),
+        ),
+    )
+    deps = _replace_dep(deps, "plan_execution_has_active_todos", lambda: True)
+
+    _run_tool_calls(
+        turn=1,
+        tool_calls_with_ids=[ToolCall(name="file_read", args={"path": "missing.md"}, id="call_error")],
+        state=state,
+        deps=deps,
+    )
+    result = _handle_no_tool_response(
+        turn=2,
+        model_response=ModelResponse(content="我继续处理", tool_calls=[]),
+        state=state,
+        deps=deps,
+    )
+
+    assert result is None
+    assert transitions == []
+    assert any(record.get("event") == "completion_candidate_deferred" for record in writer.transcript)
+    assert state.messages[-1]["content"].startswith("[Suggestion] The approved plan still has unfinished")
+
+
 def test_parallel_tool_results_keep_original_tool_call_order() -> None:
     router = _PerToolRouter(
         {
@@ -1868,7 +1908,8 @@ def test_progress_block_callback_persists_recoverable_working_state() -> None:
 
     assert persisted
     assert persisted[0]["last_updated_turn"] == 4
-    assert "progress_guard blocked" in persisted[0]["next_steps"][0]
+    assert "progress_guard:identical_pair" in persisted[0]["key_findings"][0]
+    assert set(persisted[0]) == {"key_findings", "last_updated_turn"}
 
 
 def test_progress_guard_skips_running_pending_tools() -> None:

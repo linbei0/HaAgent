@@ -102,6 +102,7 @@ _CHAT_DEFAULT_ORDER = (
     "grep",
     "file_read",
     "request_user_input",
+    "todo_update",
     "start_memory_update",
     "file_write",
     "code_run",
@@ -121,6 +122,19 @@ _CHAT_DEFAULT_ORDER = (
 )
 _CHAT_WEB_ORDER = ("web_search", "web_fetch", "skill_market_search")
 _CHAT_SKILL_ORDER = ("skill_list", "skill_read")
+_PLAN_MODE_ORDER = (
+    "file_list",
+    "grep",
+    "file_read",
+    "web_search",
+    "web_fetch",
+    "session_history",
+    "skill_list",
+    "skill_read",
+    "load_image_attachment",
+    "request_user_input",
+    "submit_plan",
+)
 _CHAT_APPROVAL_ORDER = (
     "file_write",
     "code_run",
@@ -188,6 +202,28 @@ class ToolCatalog:
 
     def chat_approval_tools(self) -> list[str]:
         return self._ordered_tagged("chat_approval", _CHAT_APPROVAL_ORDER)
+
+    def plan_mode_tools(
+        self,
+        *,
+        enable_web: bool,
+        include_session_history: bool,
+        include_image_attachment: bool,
+    ) -> list[str]:
+        """返回 Plan Mode 固定白名单；动态 MCP 永不进入静态目录。"""
+
+        selected: list[str] = []
+        for name in _PLAN_MODE_ORDER:
+            if not self.has(name):
+                continue
+            if name in {"web_search", "web_fetch"} and not enable_web:
+                continue
+            if name == "session_history" and not include_session_history:
+                continue
+            if name == "load_image_attachment" and not include_image_attachment:
+                continue
+            selected.append(name)
+        return selected
 
     def build_static_handlers(self, deps: ToolRuntimeDeps) -> dict[str, ToolHandler]:
         handlers: dict[str, ToolHandler] = {}

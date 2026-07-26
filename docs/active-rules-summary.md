@@ -57,6 +57,9 @@
 - `request_user_input` 只接受 `questions + reason` 结构化输入：每次 1–3 题、ID 唯一；选项题 2–4 项，`multiple` 仅用于选项题，`custom` 默认允许自定义。不得保留旧顶层 `question` 双契约，也不支持 Secret、自动默认答案或跨会话复用回答。
 - 用户补充输入返回 `answered`、`dismissed` 或 `timed_out`。关闭和超时都是成功工具结果，由模型调整方案或解释阻塞；缺少交互 handler 才返回明确的 `user_input_unavailable` 工具错误。
 - 聊天频道按问题顺序逐题发送并为每题生成独立 nonce；`/answer <nonce> 1` 与多选 `1,3` 映射为选项标签，非纯数字内容仅在允许自定义时接收，`/dismiss <nonce>` 返回 `dismissed`。非法编号或禁止的自定义答案必须保留 pending，超时单独返回 `timed_out`。
+- `todo_update` 与 `submit_plan` 是主 Agent 专用的静态工具：普通执行模式默认可见 `todo_update`，`submit_plan` 只在 Plan Mode 可见；Worker 不得读取或推进主任务 Todo。
+- `todo_update` 以完整列表原子替换 `TaskLedger`，最多 20 项、最多一个 `in_progress`；未完成项不得静默消失，blocker、evidence 和 checkpoint 不得隐式改变 Todo 状态。
+- `submit_plan` 只提交完整 Plan revision 并等待用户确认。反馈必须产生新 revision；批准结束规划 turn，由 session 层幂等初始化 Todo 并自动进入执行，旧 plan id 或旧 revision 必须明确拒绝。
 
 ## 5. 上下文与模型输入
 
@@ -68,18 +71,20 @@
 - `diagnostics`、selected/skipped 决策和预算报告默认只写入 episode / manifest / trace，不进入模型输入。
 - 上下文按需加载必须由结构化信号触发，不靠用户话术表或“复杂度判断”猜测。
 - 项目规则由 workspace 和入口要求触发；session summary 由历史或恢复状态触发；working state 由持续任务状态触发；长期记忆由检索命中、scope、可信来源和预算触发；工具说明由当前允许且相关的工具能力触发；文件内容由显式引用或检索命中触发；工具结果由最近且必要的压缩观察触发。
+- Plan Mode 必须注入严格的只读规划约束、当前任务和最新 Plan revision；普通执行模式只在存在活动 Todo 时注入完整 Todo 列表，全终态 Todo 不进入模型输入。
 - 工具注册可以完整，但模型可见工具集应是当前任务需要的最小集合。
 - 大文件、大表格和搜索结果不应原样进入 prompt；`shell` / `code_run` 可作为数据处理隔离层，模型只接收统计、样例、错误和必要摘录。
 - Context selection 的当前方向是本地、同步、确定性、可测试的选择层；不要引入 embedding、向量数据库、后台索引服务、复杂插件生态或普通用户可配置的上下文策略。
 
 ## 6. Session、Episode 与事件流
 
-- `AgentSession` 应维护 bounded session summary 和 bounded working state；多轮任务不得线性撑大 `model_input`。
-- 会话恢复只读取 `turns.jsonl` 摘要、turn\_count、workspace\_root 和 working\_state，不读取完整 episode transcript、tool-calls 或 verification 输出。
+- `AgentSession` 应维护 bounded session summary、只包含关键发现的 bounded working state，以及独立的 planning state 与 task ledger；多轮任务不得线性撑大 `model_input`。
+- 会话恢复读取 `session.json`、`turns.jsonl`、`working_state.json`、`task-ledger.json` 和 `planning-state.json`，不读取完整 episode transcript、tool-calls 或 verification 输出。
 - `AgentSession` 持有 `SessionSnapshot`（可序列化 package 状态）与 `SessionResources`（gateway/MCP/callback 等 live 资源）；`apply_state` 只绑定二者，不再逐字段镜像。gateway/MCP/callback 不进磁盘 schema。
-- `session.json` 必须写入 `session_snapshot_schema_version`；resume 读取并校验该版本。缺失视为 v0 并显式迁移到当前版本；未知/未来版本拒绝。
+- `session.json` 必须写入 `session_snapshot_schema_version`；当前 snapshot schema 为 v3，resume 必须严格校验，缺失、旧版本和未来版本都明确拒绝，不维护宽松兼容路径。
 - Episode 消费经 typed `EpisodePackage` / record codecs（metadata、failure、tool-call、environment、cost 等）；inspect/export/eval 只走 typed 字段，不保留裸 dict 双契约。跨文件 validator 保留；`build_episode_package` 仅在 validator 之后内部 decode，codec 自身拒绝宽松 bool 转换。
-- `working_state.json` 保存当前目标、关键发现、已完成动作、下一步和最近更新 turn，字段必须有固定条目数或字符限制。
+- `working_state.json` 只保存有界 `key_findings` 和 `last_updated_turn`；任务目标、进度和下一步的唯一事实源分别是 PlanningState 与 TaskLedger，不得恢复旧双契约。
+- `planning-state.json` 保存完整 Plan proposal、revision、runtime id 和 `planning` / `awaiting_confirmation` / `approved_pending_execution` / `execution_started` / `cancelled` 状态；`task-ledger.json` 保存 Todo 四态 `pending` / `in_progress` / `completed` / `cancelled`。
 - `RuntimeUiEvent` 是前端无关的强类型事件契约，字段只放展示和状态判断需要的摘要。
 - `RuntimeUiEvent` 不放完整工具输出、完整文件内容、完整用户答案、完整 episode trace 或 secret。
 - 用户补充输入的 event、transcript 和 working state 只保存短标题、问题数、outcome、回答数和字符数；完整问题正文仅停留在当前 live interaction，完整答案只返回当前模型工具结果。
@@ -118,6 +123,7 @@
 - 工具输出向工具结果和 context 暴露摘要、excerpt、timeout、truncated 等字段，并对 secret-like 输出做脱敏。
 - 明显泄密、workspace 绕过和高风险工具参数必须在 runtime 层显式失败或拒绝。
 - 高风险或信息不足场景应通过审批或用户补充输入机制处理，不要让模型硬猜。
+- Plan Mode 采用双层硬边界：模型只看见只读文件、只读联网、session history、skills、图片、结构化询问和 `submit_plan` 白名单；`ToolRouter` 同时拒绝写文件、shell、code、job、worker、Todo、memory 与所有动态 MCP 调用。
 
 ## 9. TUI 规则
 
@@ -128,6 +134,8 @@
 - 顶部状态栏只展示工作区、当前模型、联网开关和当前工作状态。profile、provider、API key、权限、sandbox、session、turn 和原始 state 等诊断字段不得进入常驻状态栏；异常在对应配置、审批、权限或失败界面展示。
 - 状态栏按终端 cell 宽度截断：80–119 列优先保留当前目录名，模型可以截断，联网和工作状态必须完整；只给联网与工作状态片段使用语义色，不整行随状态变色。
 - 主对话区采用非对称安静结构：用户消息使用低对比表面和细左边线，不显示角色标签；assistant 回答直接落在主背景上，不使用卡片、边框或标题；系统、命令、操作和提示使用紧凑行内通知，失败保留明确符号与错误语义。
+- 长 Plan、过程文本和工具诊断必须保留全文，性能问题不得用截断、默认折叠或减少文本掩盖。长正文使用按行缓存的只读渲染；正文区域默认支持普通鼠标拖选和复制，不能拦截左键去展开详情。展开/收起只能由独立的小型控制件触发。
+- 性能陷阱：不要把长正文放进单个 `Static` 后依赖其整块 `render_strips`；鼠标悬停、选择或局部状态变化会反复重绘全文。应使用 `RichLog` 或同等的 Line API 按行缓存，普通单条详情只同步目标 block；只有过程组展开、收起这类改变可见条目集合的操作才同步受影响的窗口，禁止重建整个 timeline。
 - 工具过程运行时显示中文动作摘要，过程标题按秒只刷新当前块的步骤数与耗时，不触发 timeline 全量重绘；最终回答完成后连同本轮工具失败、任务受阻诊断一起折叠为“已完成 N 步 · 本轮耗时 ›”并冻结耗时。没有最终回答的失败、待审批和待补充输入保持可见。普通界面使用中文工具名，详情同时显示中文名与原始标识；完整 transcript、tool output、stdout、stderr、patch 和 episode trace 仍按需打开。
 - 输入区使用多行 `TextArea`：`Enter` 提交，`Ctrl+Enter` 换行，空输入不提交，`Esc` 关闭当前 modal/overlay 或返回上层交互。焦点只使用一格细左边线、轻微背景和光标变化，不显示高亮粗边框。
 - 输入框下方、快捷键 footer 上方可显示最近一次真实模型 step 的上下文用量：120 列及以上显示绝对 token 与整数占比，80–119 列优先只显示占比，窗口未知时只显示绝对 token；没有可信 provider usage 时整行隐藏。占比使用实际执行模型的输入上限（`limit.input` 优先于 `limit.context`），Anthropic 输入量包含 cache creation/read token；不得用压缩预算的默认窗口估算。模型或会话切换时清空，恢复会话不回放旧值。
@@ -137,6 +145,8 @@
 - 补充输入使用 InputDock 内联结构化面板：普通 PromptInput 在交互期间隐藏，slash command、文件引用、图片附件和历史输入逻辑不得接收回答按键。Esc 只关闭本次提问并返回 `dismissed`；Ctrl+X 才取消整个任务。
 - 结构化面板支持 1–3 题、单选、多选、自由文本和 Review；方向键/数字选择、Space 切换多选、Ctrl+Enter 插入文本换行、Tab/Shift+Tab 切题。80×24 使用紧凑标题并只展示当前选项说明，120 列以上展示全部说明，resize 后保持焦点、选择和草稿。
 - 每个请求只挂载一次 QuestionPrompt；选项移动、草稿编辑、问题导航和 Review 只刷新该 Widget，不得调用应用级 `_refresh()` 或重建 timeline。打开/关闭只定向更新状态栏、footer、焦点和 InputDock。
+- `/plan` 或 `/plan <任务>` 进入 Plan Mode。Plan 确认面板默认焦点在反馈输入，Enter 提交反馈、Ctrl+Enter 换行；批准必须通过 Tab 后 Enter 或鼠标点击，不提供单键批准。Esc 仅最小化且不 resolve，Ctrl+X 才取消任务。
+- Todo 使用独立只读面板原位刷新，不把状态变化追加到 timeline；80×24 显示单行摘要，大屏可用 Enter 或点击展开完整四态列表。
 - 工具审批 modal 必须展示工具名、影响范围和关键参数摘要；文件修改和命令执行等高影响操作默认焦点应放在 Deny。
 - 审批 modal 是 focus trap；审批结果必须回到同一个 turn。
 - 帮助应以 modal、overlay 或上下文化帮助呈现，不应污染对话流。

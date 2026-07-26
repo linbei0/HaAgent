@@ -35,6 +35,8 @@ class ChatTurnResult:
     memory_candidates_created: int = 0
     memory_extraction_status: str = "skipped"
     memory_extraction_reason: str = ""
+    # run 结束时仍未注入的引导消息；由调用方（TUI）重新排队，避免静默丢失。
+    unconsumed_steering: tuple[str, ...] = ()
 
 def build_turn_result(
     *,
@@ -64,7 +66,7 @@ def build_turn_result(
         status=result.status.value,
         episode_path=result.episode_path,
         provider=str(package.metadata.provider or provider_name),
-        final_response=package.final_response_text(),
+        final_response=_final_response_with_partial(package, result.status.value),
         verification_status=verification_status(
             package.verification_commands,
             package.verification_reached,
@@ -75,16 +77,34 @@ def build_turn_result(
     )
 
 
-def turn_summary(prompt: str, result: ChatTurnResult) -> str:
-    return "\n".join(
-        [
-            f"- user_request: {summary_value(prompt, 160)}",
-            f"  status: {result.status}",
-            f"  episode_id: {result.episode_path.name}",
-            f"  assistant_final_response: {summary_value(result.final_response, 220)}",
-            f"  verification: {result.verification_status}",
-        ],
-    )
+def _final_response_with_partial(package: Any, status: str) -> str:
+    """取消的 run 没有完整 model_response 时，用被打断的 partial 衔接下一轮上下文。"""
+    final = package.final_response_text()
+    if status != "cancelled" or (final and final != "none"):
+        return final
+    partial = package.last_partial_response_text()
+    if partial is None:
+        return final
+    return f"{partial}\n\n[回复被用户打断，未完成]"
+
+
+def turn_summary(
+    prompt: str,
+    result: ChatTurnResult,
+    *,
+    steering_texts: list[str] | None = None,
+) -> str:
+    lines = [
+        f"- user_request: {summary_value(prompt, 160)}",
+        f"  status: {result.status}",
+        f"  episode_id: {result.episode_path.name}",
+        f"  assistant_final_response: {summary_value(result.final_response, 220)}",
+        f"  verification: {result.verification_status}",
+    ]
+    if steering_texts:
+        # 运行中引导是本轮事实的一部分；写入 summary 供后续 session memory 使用。
+        lines.append(f"  user_steering: {summary_value(' | '.join(steering_texts), 220)}")
+    return "\n".join(lines)
 
 
 def run_final_response(transcript: list[dict[str, Any]]) -> str:
@@ -119,68 +139,15 @@ def with_in_band_verification(
 
 
 def task_step_started_event(ledger) -> dict[str, object] | None:
-    step = ledger.active_step()
-    if step is None:
-        return None
-    return {
-        "event_type": "task_step_started",
-        "step_id": step.id,
-        "title": step.title,
-        "owner": step.owner,
-        "status": step.status,
-        "summary": f"started task step {step.id}: {summary_value(step.title, 120)}",
-        "evidence_count": len(step.evidence_refs),
-        "checkpoint_count": len(ledger.checkpoints),
-    }
+    del ledger
+    # Todo 状态只能由 todo_update、Plan 初始化或整任务取消改变；turn 不再伪造步骤开始事件。
+    return None
 
 
 def task_turn_closed_events(ledger, result: ChatTurnResult) -> list[dict[str, object]]:
-    step = ledger.active_step()
-    if step is None:
-        return []
-    events: list[dict[str, object]] = []
-    if result.verification_status in {"success", "failed"}:
-        events.append(
-            {
-                "event_type": "task_checkpoint_saved",
-                "step_id": step.id,
-                "title": step.title,
-                "owner": step.owner,
-                "status": result.verification_status,
-                "summary": f"verification {result.verification_status}",
-                "evidence_count": len(step.evidence_refs),
-                "checkpoint_count": len(ledger.checkpoints),
-            },
-        )
-    if ledger.status == "completed" and step.status == "completed":
-        events.append(
-            {
-                "event_type": "task_step_finished",
-                "step_id": step.id,
-                "title": step.title,
-                "owner": step.owner,
-                "status": "completed",
-                "summary": f"completed task step {step.id}: {summary_value(step.title, 120)}",
-                "evidence_count": len(step.evidence_refs),
-                "checkpoint_count": len(ledger.checkpoints),
-            },
-        )
-    elif ledger.status in {"blocked", "failed", "cancelled"}:
-        events.append(
-            {
-                "event_type": "task_step_blocked",
-                "step_id": step.id,
-                "title": step.title,
-                "owner": step.owner,
-                "status": ledger.status,
-                "category": ledger.status,
-                "summary": f"task step {step.id} ended as {ledger.status}",
-                "suggested_action": "resume_or_replan",
-                "evidence_count": len(step.evidence_refs),
-                "checkpoint_count": len(ledger.checkpoints),
-            },
-        )
-    return events
+    del ledger, result
+    # 最终回答、验证结果和 turn 完成都不得隐式推进 Todo。
+    return []
 
 
 def in_band_verification_status(runtime_events: list[object]) -> str:

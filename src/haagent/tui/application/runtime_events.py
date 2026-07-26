@@ -18,10 +18,12 @@ from haagent.runtime.events import (
     ContextUsageEvent,
     FailureNoticeEvent,
     MemoryNoticeEvent,
+    PlanningStateEvent,
     RuntimeUiEvent,
     SessionLifecycleEvent,
     TaskProgressEvent,
     ToolActivityEvent,
+    TodoStateEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
 )
@@ -81,6 +83,8 @@ def _handle_assistant_intermediate(app, event: AssistantIntermediateEvent) -> No
 
 
 def _handle_tool_activity(app, event: ToolActivityEvent) -> None:
+    if event.tool_name == "todo_update" and event.status in {"finished", "failed"}:
+        app._refresh_todo_panel()
     # 成功/失败工具都写入 timeline.tools；折叠后只见「已完成 N 项」，展开见中文工具行。
     app._conversation.record_tool_activity(
         event.turn_index,
@@ -149,6 +153,22 @@ def _handle_task_progress(app, event: TaskProgressEvent) -> None:
     _apply_progress_presentation(app, presentation)
 
 
+def _handle_planning_state(app, event: PlanningStateEvent) -> None:
+    if event.state == "planning":
+        app._state = "planning"
+    elif event.state == "awaiting_confirmation":
+        app._state = "waiting plan"
+    elif event.state in {"approved_pending_execution", "execution_started"}:
+        app._state = "running"
+    elif event.state == "cancelled":
+        app._state = "idle"
+
+
+def _handle_todo_state(app, event: TodoStateEvent) -> None:
+    del event
+    app._refresh_todo_panel()
+
+
 def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
     if event.surface == "hidden":
         return
@@ -163,6 +183,8 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
 
 
 def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:
+    if event.state in {"turn_started", "turn_finished", "session_started", "session_finished"}:
+        app._refresh_todo_panel()
     if event.state in {"turn_finished", "session_finished"}:
         app.clear_progress_status()
 
@@ -226,6 +248,8 @@ RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {
     WarningNoticeEvent: _handle_warning_notice,
     FailureNoticeEvent: _handle_failure_notice,
     TaskProgressEvent: _handle_task_progress,
+    PlanningStateEvent: _handle_planning_state,
+    TodoStateEvent: _handle_todo_state,
     SessionLifecycleEvent: _handle_session_lifecycle,
 }
 

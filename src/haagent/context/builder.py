@@ -56,6 +56,11 @@ from haagent.runtime.session.task_ledger import (
     TaskLedgerError,
     format_task_ledger_for_model,
 )
+from haagent.runtime.session.planning_state import (
+    PlanningStateError,
+    format_planning_state_for_model,
+    planning_state_from_dict,
+)
 from haagent.context.instruction_cache import InstructionCache
 from haagent.skills import discover_project_skill_dirs, is_project_root_trusted, load_skill_registry, load_skill_settings
 from haagent.skills.catalog import SkillCatalogService
@@ -124,6 +129,7 @@ class ContextBuilder:
         historical_tool_compression_count: int = 0,
         working_state: dict | None = None,
         task_ledger: dict | None = None,
+        planning_state: dict | None = None,
         interaction_state: list[dict] | None = None,
         compaction_budget: ContextBudget | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
@@ -140,6 +146,7 @@ class ContextBuilder:
         self._historical_tool_compression_count = max(0, historical_tool_compression_count)
         self._working_state = working_state
         self._task_ledger = task_ledger
+        self._planning_state = planning_state
         self._interaction_state = list(interaction_state or [])
         self._compaction_budget = compaction_budget or ContextBudget()
         self._selection_budget = selection_budget_for_initial_audit(self._compaction_budget)
@@ -179,6 +186,7 @@ class ContextBuilder:
             task=self._task,
             plan_steps=list(plan.get("planned_steps", [])),
             task_ledger_content=selected_sections.get("task_ledger") or None,
+            planning_state_content=selected_sections.get("planning_state") or None,
             working_state_content=selected_sections.get("working_state") or None,
             memory_index_block=selected_sections.get("memory_index") or None,
             memory_block=selected_sections.get("memory") or None,
@@ -346,6 +354,17 @@ class ContextBuilder:
         except TaskLedgerError as error:
             raise ContextBuildError(f"invalid task_ledger: {error}") from error
 
+    def _planning_state_content(self) -> str | None:
+        if self._planning_state is None:
+            return None
+        try:
+            state = planning_state_from_dict(self._planning_state)
+            if state.status in {"inactive", "cancelled"}:
+                return None
+            return format_planning_state_for_model(state)
+        except PlanningStateError as error:
+            raise ContextBuildError(f"invalid planning_state: {error}") from error
+
     def _memory_result(self):
         if not hasattr(self, "_cached_memory_result"):
             query_parts = [
@@ -423,6 +442,7 @@ class ContextBuilder:
                 session_summary=(self._session_summary or "").strip(),
                 working_state=self._working_state_content(),
                 task_ledger=self._task_ledger_content(),
+                planning_state=self._planning_state_content(),
                 memory_index=self._memory_index_block(),
                 memory_index_skip_reason=(
                     None

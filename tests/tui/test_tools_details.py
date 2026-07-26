@@ -221,7 +221,7 @@ def test_tui_tool_failure_adds_actionable_notice_and_keeps_answer_readable(tmp_p
             conversation = _text(app, "#conversation")
             assert "已完成 1 步" in conversation
             assert "联网搜索失败" not in conversation
-            await pilot.click(".timeline-process")
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
             assert "联网搜索失败" in conversation
@@ -256,7 +256,7 @@ def test_tui_tool_failure_notice_omits_long_read_only_summaries(tmp_path: Path) 
             conversation = _text(app, "#conversation")
             assert "已完成 1 步" in conversation
             assert "联网搜索失败" not in conversation
-            await pilot.click(".timeline-process")
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
             assert "联网搜索失败" in conversation
@@ -293,7 +293,7 @@ def test_tui_read_only_tool_events_do_not_count_calls_in_timeline(tmp_path: Path
             conversation = _text(app, "#conversation")
             assert "已完成 1 步" in conversation
             assert "读取网页失败" not in conversation
-            await pilot.click(".timeline-process")
+            app.query_one("#conversation", ConversationTimeline).toggle_process_group(1)
             await pilot.pause(0.1)
             conversation = _text(app, "#conversation")
             assert "读取网页失败" in conversation

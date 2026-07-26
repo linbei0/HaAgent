@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from textual.app import App, ComposeResult
+from textual.selection import SELECT_ALL
 
 from haagent.runtime.events.types import ApprovalStateEvent, TaskProgressEvent
 from haagent.tui.presentation.progress import (
@@ -19,6 +20,7 @@ from haagent.tui.presentation.progress import (
 )
 from haagent.tui.widgets import conversation_timeline as timeline_module
 from haagent.tui.widgets.conversation_timeline import ConversationTimeline
+from haagent.tui.widgets.timeline_block import SelectableTextLog
 from haagent.tui.widgets.timeline_models import TimelineItem, ToolActivity
 from haagent.tui.widgets.timeline_rendering import render_timeline_item
 from tests.tui.support import _text
@@ -40,6 +42,7 @@ class TimelineClickTestApp(App[None]):
     }
 
     .timeline-header {
+        width: 1fr;
         height: 1;
     }
 
@@ -78,6 +81,21 @@ class TimelineClickTestApp(App[None]):
             ExpandableDetail("detail-2", ["文件：src/example.py"]),
         )
         timeline.add_assistant_message("最终回答", turn_index=1)
+
+
+class SelectableTextLogTestApp(App[None]):
+    CSS = """
+    SelectableTextLog {
+        width: 1fr;
+        height: auto;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield SelectableTextLog(id="text")
+
+    def on_mount(self) -> None:
+        self.query_one("#text", SelectableTextLog).set_text("第一行正文\n第二行正文")
 
 
 class ToolDetailClickTestApp(App[None]):
@@ -296,13 +314,15 @@ def test_notice_details_are_collapsed_by_default_and_expand_in_place() -> None:
             await pilot.pause(0.1)
             assert "类别：verification_failed" not in timeline.plain_text
 
-            await pilot.click(".timeline-notice")
+            notice = timeline.query_one(".timeline-notice")
+            header = notice.query_one(".timeline-header")
+            assert await pilot.click(header)
             await pilot.pause(0.1)
 
             assert "详情：点击收起" in timeline.plain_text
             assert "类别：verification_failed" in timeline.plain_text
 
-            await pilot.click(".timeline-notice")
+            assert await pilot.click(header)
             await pilot.pause(0.1)
             assert "类别：verification_failed" not in timeline.plain_text
 
@@ -407,14 +427,27 @@ def test_process_group_toggle_expands_and_collapses_all_process_items() -> None:
 def test_clicking_process_group_expands_the_folded_items() -> None:
     async def run() -> None:
         app = TimelineClickTestApp()
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(120, 60)) as pilot:
             await pilot.pause(0.1)
             timeline = app.query_one("#conversation", ConversationTimeline)
             assert "已完成 2 步" in timeline.plain_text
             assert "web_fetch 失败 2 次" not in timeline.plain_text
 
             process_block = timeline.query_one(".timeline-process")
-            await pilot.click(process_block, offset=(1, 0))
+            assert process_block._item.item_id < 0
+            body = process_block.query_one(".timeline-body", SelectableTextLog)
+            assert body.allow_select is True
+            timeline.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause(0.1)
+            answer_body = timeline.query_one(".timeline-assistant .timeline-body")
+            await pilot.click(answer_body, offset=(1, 0))
+            await pilot.pause(0.1)
+
+            # 正文用于选择和复制；普通点击不得触发展开或重排整条时间线。
+            assert "web_fetch 失败 2 次" not in timeline.plain_text
+
+            # 分组头整行是热区：点击标题「已完成 2 步 ›」展开。
+            assert await pilot.click(process_block.query_one(".timeline-header"))
             await pilot.pause(0.1)
 
             assert "已完成 2 步" in timeline.plain_text
@@ -424,19 +457,36 @@ def test_clicking_process_group_expands_the_folded_items() -> None:
     asyncio.run(run())
 
 
+def test_selectable_text_log_caches_rendered_lines() -> None:
+    async def run() -> None:
+        app = SelectableTextLogTestApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause(0.1)
+            body = app.query_one("#text", SelectableTextLog)
+            assert body.allow_select is True
+            assert len(body.lines) == 2
+            assert len(body._line_cache) > 0
+            assert body.get_selection(SELECT_ALL) == ("第一行正文\n第二行正文", "\n")
+
+    asyncio.run(run())
+
+
 def test_clicking_process_tool_summary_expands_its_details() -> None:
     async def run() -> None:
         app = ToolDetailClickTestApp()
-        async with app.run_test(size=(120, 30)) as pilot:
+        async with app.run_test(size=(120, 60)) as pilot:
             await pilot.pause(0.1)
             timeline = app.query_one("#conversation", ConversationTimeline)
 
-            await pilot.click(timeline.query_one(".timeline-process"), offset=(1, 0))
+            group_header = timeline.query_one(".timeline-process .timeline-header")
+            timeline.scroll_to_widget(group_header, top=True, animate=False, immediate=True)
+            await pilot.pause(0.1)
+            assert await pilot.click(group_header)
             await pilot.pause(0.1)
             assert "运行命令 ›" in timeline.plain_text
 
-            process_blocks = list(timeline.query(".timeline-process"))
-            await pilot.click(process_blocks[-1], offset=(1, 0))
+            process_item = timeline._process_items_by_turn[1][-1]
+            assert timeline.toggle_detail(process_item.item_id) is True
             await pilot.pause(0.1)
 
             assert "运行命令（shell）成功 · 命令执行完成" in timeline.plain_text
@@ -550,10 +600,13 @@ def test_running_process_group_refreshes_elapsed_time_without_click(monkeypatch)
             timeline.start_assistant_response(turn_index=2)
             timeline.finalize_intermediate(2, 1, "正在搜索")
             await pilot.pause(0.02)
+            # 带 delay 的 Pilot.pause 只等待计时器，不会排空异步 mount 消息。
+            await pilot.pause()
 
             assert "已完成 1 步 · 0秒" in _text(app, "#conversation")
             clock[0] = 88.0
             await pilot.pause(0.03)
+            await pilot.pause()
 
             assert "已完成 1 步 · 1分18秒" in _text(app, "#conversation")
 

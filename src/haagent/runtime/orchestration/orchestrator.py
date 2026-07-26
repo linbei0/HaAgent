@@ -19,6 +19,7 @@ from haagent.models.types import ModelCallError, ModelGateway
 from haagent.models.config.connections import user_config_dir
 from haagent.multi_agent.team_store import TeamStore
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
+from haagent.runtime.execution.steering import SteeringChannel
 from haagent.runtime.execution.command import describe_shell_contract
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.runtime.orchestration.failure import FailureCategory
@@ -70,9 +71,11 @@ class RunOrchestrator:
         historical_tool_compression_count: int = 0,
         working_state: dict[str, object] | None = None,
         task_ledger: dict[str, object] | None = None,
+        planning_state: dict[str, object] | None = None,
         event_sink: Callable[[RuntimeBusEvent], None] | None = None,
         interaction_handler: HumanInteractionHandler | None = None,
         cancellation_token: CancellationToken | None = None,
+        steering_channel: SteeringChannel | None = None,
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: Any | None = None,
         leader_session_id: str | None = None,
@@ -83,6 +86,9 @@ class RunOrchestrator:
         instruction_cache: object | None = None,
         tool_schema_cache: object | None = None,
         working_state_sink: Callable[[dict[str, object]], None] | None = None,
+        todo_state_sink: Callable[[list[dict[str, object]], str, int | None], dict[str, object]] | None = None,
+        planning_state_handler: Callable[[str, dict[str, object], int], dict[str, object]] | None = None,
+        plan_execution_has_active_todos: Callable[[], bool] | None = None,
         session_path: Path | None = None,
     ) -> None:
         self._runs_root = runs_root
@@ -93,9 +99,11 @@ class RunOrchestrator:
         self._historical_tool_compression_count = max(0, historical_tool_compression_count)
         self._working_state = working_state
         self._task_ledger = task_ledger
+        self._planning_state = planning_state
         self._event_sink = event_sink
         self._interaction_handler = interaction_handler
         self._cancellation_token = cancellation_token
+        self._steering_channel = steering_channel
         self._tool_registry = tool_registry or default_tool_runtime_registry()
         self._mcp_runtime = mcp_runtime
         self._episode_session_id = leader_session_id
@@ -110,6 +118,9 @@ class RunOrchestrator:
         self._tool_schema_cache = tool_schema_cache
         self._session_path = session_path
         self._working_state_sink = working_state_sink
+        self._todo_state_sink = todo_state_sink
+        self._planning_state_handler = planning_state_handler
+        self._plan_execution_has_active_todos = plan_execution_has_active_todos
 
     def _emit_event(self, event: RuntimeBusEvent | dict[str, object]) -> None:
         # 兼容仍发 raw dict 的 multi_agent / compression / task_progress 路径。
@@ -257,6 +268,14 @@ class RunOrchestrator:
                 image_attachment_history=task.image_attachment_history,
                 performance_sink=tool_performance_sink,
                 skill_catalog=self._skill_catalog,
+                planning_status=(
+                    str(self._planning_state.get("status", "inactive"))
+                    if isinstance(self._planning_state, dict)
+                    else "inactive"
+                ),
+                actor_role="worker" if task.worker_context is not None else "main",
+                todo_state_sink=self._todo_state_sink,
+                planning_state_handler=self._planning_state_handler,
             )
             verification_engine: VerificationEngine | None = None
             progress_guard = ProgressGuard()
@@ -279,6 +298,7 @@ class RunOrchestrator:
                 historical_tool_compression_count=self._historical_tool_compression_count,
                 working_state=self._working_state,
                 task_ledger=self._task_ledger,
+                planning_state=self._planning_state,
                 interaction_resolver=interaction_resolver,
                 tool_registry=runtime_tool_registry,
                 instruction_cache=self._instruction_cache,
@@ -357,6 +377,7 @@ class RunOrchestrator:
                     task_step_id=task_step_id,
                     task_step_title=task.goal,
                     cancellation_token=self._cancellation_token,
+                    steering_channel=self._steering_channel,
                     performance_trace=performance_trace,
                     persist_performance=recorder.persist_performance,
                     tool_schema_cache=self._tool_schema_cache,
@@ -367,6 +388,7 @@ class RunOrchestrator:
                         turn=turn,
                         decision=decision,
                     ),
+                    plan_execution_has_active_todos=self._plan_execution_has_active_todos,
                 ),
             )
             if turn_result is not None:
@@ -557,18 +579,10 @@ def _record_progress_block_working_state(
     current = orchestrator._working_state
     if not isinstance(current, dict):
         current = {
-            "current_goal": "",
             "key_findings": [],
-            "completed_actions": [],
-            "next_steps": [],
             "last_updated_turn": 0,
         }
         orchestrator._working_state = current
-    next_steps = list(current.get("next_steps") or [])
-    recovery = f"progress_guard blocked ({decision.pattern}): continue/replan/stop"
-    if recovery not in next_steps:
-        next_steps.insert(0, recovery)
-    current["next_steps"] = next_steps[:5]
     current["last_updated_turn"] = int(turn)
     findings = list(current.get("key_findings") or [])
     reason = f"progress_guard:{decision.pattern}:{decision.reason}"[:240]
@@ -609,7 +623,11 @@ def _interaction_bridge(
         writer.append_interaction_event(str(requested_event["event_type"]), _transcript_event(requested_event))
         orchestrator._emit_event(requested_event)
         if orchestrator._interaction_handler is None:
-            response = HumanInteractionResponse(approved=False, answer="")
+            response = (
+                HumanInteractionResponse(approved=False, plan_outcome="cancelled")
+                if request.interaction_type == "plan_confirmation"
+                else HumanInteractionResponse(approved=False, answer="")
+            )
         else:
             response = orchestrator._interaction_handler(request)
         response_event = _interaction_response_event(turn, request, response)
@@ -626,6 +644,8 @@ def _interaction_requested_event(turn: int, request: HumanInteractionRequest) ->
         event_type = "approval_requested"
     elif request.interaction_type == "edit_diff":
         event_type = "edit_diff_requested"
+    elif request.interaction_type == "plan_confirmation":
+        event_type = "plan_confirmation_requested"
     else:
         event_type = "user_input_requested"
     question = (
@@ -643,6 +663,8 @@ def _interaction_requested_event(turn: int, request: HumanInteractionRequest) ->
         "risk_level": request.risk_level,
         "args_summary": request.args_summary,
         "approved": None,
+        "plan_id": request.plan_id if request.interaction_type == "plan_confirmation" else None,
+        "revision": request.plan_revision if request.interaction_type == "plan_confirmation" else None,
     }
 
 
@@ -697,6 +719,16 @@ def _interaction_response_event(
             "approved": response.approved,
             "args_summary": request.args_summary,
         }
+    if request.interaction_type == "plan_confirmation":
+        return {
+            "event_type": "plan_confirmation_received",
+            "turn": turn,
+            "tool_name": request.tool_name,
+            "plan_id": request.plan_id,
+            "revision": request.plan_revision,
+            "outcome": response.plan_outcome or "cancelled",
+            "feedback_chars": len(response.answer),
+        }
     return {
         "event_type": "user_input_received",
         "turn": turn,
@@ -736,8 +768,14 @@ def _tool_failure_category(error: ToolRoutingError) -> FailureCategory:
 def _current_task_step_id(task_ledger: dict[str, object] | None) -> str:
     if not isinstance(task_ledger, dict):
         return ""
-    value = task_ledger.get("current_step_id")
-    return value if isinstance(value, str) else ""
+    todos = task_ledger.get("todos")
+    if not isinstance(todos, list):
+        return ""
+    for item in todos:
+        if isinstance(item, dict) and item.get("status") == "in_progress":
+            value = item.get("id")
+            return value if isinstance(value, str) else ""
+    return ""
 
 
 def _emit_task_recovery(

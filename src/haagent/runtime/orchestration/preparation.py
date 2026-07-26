@@ -103,6 +103,7 @@ def prepare_initial_messages(
     working_state: dict[str, object] | None,
     interaction_resolver: HumanInteractionResolver,
     task_ledger: dict[str, object] | None = None,
+    planning_state: dict[str, object] | None = None,
     tool_registry: ToolRuntimeRegistry | None = None,
     instruction_cache: object | None = None,
     skill_catalog: object | None = None,
@@ -124,6 +125,7 @@ def prepare_initial_messages(
         historical_tool_compression_count=historical_tool_compression_count,
         working_state=working_state,
         task_ledger=task_ledger,
+        planning_state=planning_state,
         interaction_state=interaction_resolver.state_records(),
         compaction_budget=context_budget_from_compression_budget(
             derive_compression_budget(_gateway_metadata(model_gateway, provider_name)),

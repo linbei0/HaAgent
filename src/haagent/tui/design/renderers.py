@@ -90,6 +90,8 @@ def _compact_decimal(value: float, suffix: str) -> str:
 _WORK_STATE_LABELS = {
     "idle": "空闲",
     "running": "正在工作",
+    "planning": "规划中",
+    "waiting plan": "等待确认",
     "waiting approval": "待确认",
     "waiting input": "待补充",
     "done": "已完成",

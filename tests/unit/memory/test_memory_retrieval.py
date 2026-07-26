@@ -389,7 +389,7 @@ def test_context_builder_injects_compact_memory_and_manifest_audit(tmp_path: Pat
         workspace_root=tmp_path / "workspace",
         provider_name="fake",
         episode_writer=writer,
-        working_state={"current_goal": "context", "key_findings": [], "completed_actions": [], "next_steps": [], "last_updated_turn": 1},
+        working_state={"key_findings": [], "last_updated_turn": 1},
     ).build()
 
     assert "Relevant Memory:" in context.model_input

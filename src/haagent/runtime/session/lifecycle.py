@@ -21,6 +21,7 @@ from haagent.models.model_ref import ModelRef
 from haagent.models.config.connections import user_runs_dir
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
+from haagent.runtime.execution.steering import SteeringChannel
 from haagent.runtime.execution.path_policy import PathPolicy, default_path_policy, load_path_policy
 from haagent.runtime.session.attachments import ImageAttachment
 from haagent.runtime.session.package import (
@@ -39,6 +40,12 @@ from haagent.runtime.session.task_ledger import (
     empty_task_ledger,
     load_task_ledger,
 )
+from haagent.runtime.session.planning_state import (
+    PlanningState,
+    PlanningStateError,
+    empty_planning_state,
+    load_planning_state,
+)
 from haagent.runtime.session.working_state import (
     WorkingState,
     WorkingStateError,
@@ -48,7 +55,7 @@ from haagent.runtime.session.working_state import (
 from haagent.tools.registry import default_tool_runtime_registry
 
 # 磁盘 session package 的逻辑 schema；迁移只经 SessionSnapshot 入口。
-SESSION_SNAPSHOT_SCHEMA_VERSION = 2
+SESSION_SNAPSHOT_SCHEMA_VERSION = 3
 # 无 session_snapshot_schema_version 字段的旧 package 视为 v0。
 SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION = 0
 
@@ -75,10 +82,7 @@ def resolve_session_snapshot_schema_version(metadata: dict[str, object]) -> int:
 
 
 def migrate_session_snapshot_schema_version(disk_version: int) -> int:
-    """把 v0/v1 磁盘状态迁到包含会话权限规则的 v2。"""
-    if disk_version in {SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION, 1}:
-        # 旧 package 没有 permission_rules，按空规则迁移。
-        return SESSION_SNAPSHOT_SCHEMA_VERSION
+    """Plan/Todo 开发期 schema 不保留兼容路径。"""
     if disk_version == SESSION_SNAPSHOT_SCHEMA_VERSION:
         return disk_version
     raise ChatSessionError(
@@ -108,6 +112,7 @@ class SessionSnapshot:
     image_attachment_history: list[ImageAttachment]
     working_state: WorkingState
     task_ledger: TaskLedger
+    planning_state: PlanningState
     session_path: Path
     created_at: str
     session_interaction_state: SessionInteractionState
@@ -138,6 +143,7 @@ class SessionResources:
     next_turn_target_paths: list[str]
     historical_tool_compression_count: int
     current_cancellation_token: CancellationToken | None
+    current_steering_channel: SteeringChannel | None
     mcp_settings: Any
     mcp_runtime: Any
     owns_mcp_runtime: bool
@@ -235,6 +241,7 @@ def build_create_state(
         image_attachment_history=[],
         working_state=empty_working_state(),
         task_ledger=empty_task_ledger(),
+        planning_state=empty_planning_state(),
         session_path=(
             runs_root
             / "sessions"
@@ -262,6 +269,7 @@ def build_create_state(
         next_turn_target_paths=[],
         historical_tool_compression_count=0,
         current_cancellation_token=None,
+        current_steering_channel=None,
         mcp_settings=mcp_settings,
         mcp_runtime=runtime,
         owns_mcp_runtime=owns,
@@ -303,6 +311,10 @@ def build_resume_state(
     try:
         task_ledger = load_task_ledger(session_path / "task-ledger.json")
     except TaskLedgerError as error:
+        raise ChatSessionError(str(error)) from error
+    try:
+        planning_state = load_planning_state(session_path / "planning-state.json")
+    except PlanningStateError as error:
         raise ChatSessionError(str(error)) from error
     disk_schema_version = resolve_session_snapshot_schema_version(metadata)
     schema_version = migrate_session_snapshot_schema_version(disk_schema_version)
@@ -349,6 +361,7 @@ def build_resume_state(
         image_attachment_history=read_image_attachment_history(metadata, session_path),
         working_state=working_state,
         task_ledger=task_ledger,
+        planning_state=planning_state,
         session_path=session_path,
         created_at=str(metadata["created_at"]),
         # resume 同一 session：恢复 edit_diff 始终允许；缺失字段视为 False
@@ -369,6 +382,7 @@ def build_resume_state(
         next_turn_target_paths=[],
         historical_tool_compression_count=0,
         current_cancellation_token=None,
+        current_steering_channel=None,
         mcp_settings=settings,
         mcp_runtime=runtime,
         owns_mcp_runtime=owns,
@@ -425,6 +439,7 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         image_attachment_history=[],
         working_state=empty_working_state(),
         task_ledger=empty_task_ledger(),
+        planning_state=empty_planning_state(),
         session_path=(
             snap.runs_root
             / "sessions"
@@ -457,6 +472,7 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         next_turn_target_paths=list(res.next_turn_target_paths),
         historical_tool_compression_count=res.historical_tool_compression_count,
         current_cancellation_token=res.current_cancellation_token,
+        current_steering_channel=res.current_steering_channel,
         mcp_settings=res.mcp_settings,
         mcp_runtime=res.mcp_runtime,
         owns_mcp_runtime=res.owns_mcp_runtime,

@@ -17,6 +17,7 @@ from haagent.runtime.execution.command import redact_secret_like_text
 from haagent.runtime.execution.human_interaction import (
     HumanInteractionRequest,
     HumanInteractionResponse,
+    PlanConfirmationOutcome,
     UserInputOutcome,
     interaction_question_summary,
 )
@@ -54,6 +55,7 @@ class HumanInteractionResolution:
     outcome: UserInputOutcome | None = None
     answers: dict[str, tuple[str, ...]] = field(default_factory=dict)
     question_count: int = 0
+    plan_outcome: PlanConfirmationOutcome | None = None
 
     def to_response(self) -> HumanInteractionResponse:
         return HumanInteractionResponse(
@@ -61,6 +63,7 @@ class HumanInteractionResolution:
             answer=self.answer,
             outcome=self.outcome,
             answers=dict(self.answers),
+            plan_outcome=self.plan_outcome,
         )
 
     def state_record(self) -> dict[str, object]:
@@ -76,6 +79,8 @@ class HumanInteractionResolution:
             record["question_count"] = self.question_count
             record["answered_count"] = sum(1 for values in self.answers.values() if values)
             record["answer_chars"] = sum(len(value) for values in self.answers.values() for value in values)
+        elif self.interaction_type == "plan_confirmation":
+            record["outcome"] = self.plan_outcome or self.status
         else:
             record["approved"] = self.approved
         return record
@@ -120,6 +125,9 @@ class HumanInteractionResolver:
         # “允许一次”和拒绝只完成当前工具调用，不能被下一次同签名请求复用。
         if request.interaction_type == "approval":
             return None
+        if request.interaction_type == "plan_confirmation":
+            # Plan confirmation 只完成当前 live submit_plan，迟到结果不能跨调用复用。
+            return None
         return self._resolutions.get(interaction_signature(request))
 
     def record(
@@ -160,6 +168,7 @@ class HumanInteractionResolver:
             outcome=response.outcome,
             answers=dict(response.answers),
             question_count=len(request.questions),
+            plan_outcome=response.plan_outcome,
         )
         if signature not in self._resolutions:
             self._ordered_signatures.append(signature)
@@ -254,6 +263,8 @@ def interaction_signature(request: HumanInteractionRequest) -> str:
             for question in request.questions
         ],
         "args_summary": _normalize_value(request.args_summary),
+        "plan_id": _normalize_string(request.plan_id or ""),
+        "plan_revision": request.plan_revision,
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -261,6 +272,8 @@ def interaction_signature(request: HumanInteractionRequest) -> str:
 def _status_for(interaction_type: str, response: HumanInteractionResponse) -> str:
     if interaction_type == "user_input":
         return response.outcome or "dismissed"
+    if interaction_type == "plan_confirmation":
+        return response.plan_outcome or "cancelled"
     return "approved" if response.approved else "denied"
 
 

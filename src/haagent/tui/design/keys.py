@@ -20,6 +20,7 @@ APP_BINDINGS = [
     ("?", "help", "帮助"),
     ("escape", "cancel_interaction", "取消"),
     ("ctrl+x", "cancel_current_task", "取消任务"),
+    ("ctrl+g", "steer_current_task", "立即引导"),
     ("pageup", "conversation_page_up", "上翻"),
     ("pagedown", "conversation_page_down", "下翻"),
     ("alt+up", "previous_request", "上一条请求"),
@@ -65,7 +66,8 @@ _HELP_LINES: dict[KeyContext, list[tuple[str, str]]] = {
     ],
     "running": [
         ("Ctrl+X", "取消当前任务"),
-        ("Enter", "发送当前输入"),
+        ("Enter", "排队消息，本轮结束后发送"),
+        ("Ctrl+G", "立即引导当前任务"),
         ("Ctrl+Enter", "插入换行"),
         ("PgUp/PgDn", "滚动对话"),
         ("Alt+↑/↓", "跳到上一条/下一条用户请求"),
@@ -139,7 +141,7 @@ _HELP_TITLES: dict[KeyContext, str] = {
 
 _FOOTER_KEYS: dict[KeyContext, list[str]] = {
     "chat": ["/", "Ctrl+F", "?", "Ctrl+Q"],
-    "running": ["Ctrl+X", "Ctrl+F", "?", "Ctrl+Q"],
+    "running": ["Ctrl+X", "Ctrl+G", "?", "Ctrl+Q"],
     "memory_list": ["↑/↓", "Enter", "a/y/r", "Esc"],
     "memory_detail": ["a/y/r", "Esc", "?"],
     "pending_input": ["↑/↓", "Enter", "Esc", "Ctrl+X"],
@@ -228,6 +230,10 @@ def _footer_label(description: str) -> str:
         return "换行"
     if description.startswith("提交"):
         return "提交回答"
+    if description.startswith("立即引导"):
+        return "引导"
+    if description.startswith("排队"):
+        return "排队"
     if description.startswith("取消当前任务"):
         return "取消任务"
     if description.startswith("取消"):
