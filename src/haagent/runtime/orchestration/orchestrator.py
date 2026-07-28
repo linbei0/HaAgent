@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from haagent.context.compression.budget import derive_compression_budget
-from haagent.context.compression.messages import compress_historical_tool_messages
 from haagent.context.builder import ContextBuildError, ContextBuilder
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelCallError, ModelGateway
@@ -344,13 +343,7 @@ class RunOrchestrator:
                     max_turns=self._max_turns,
                     raise_if_cancelled=self._raise_if_cancelled,
                     emit_event=self._emit_event,
-                    compress_historical_tool_messages=lambda messages, writer, turn, emit_event: compress_historical_tool_messages(
-                        messages,
-                        _compression_budget_for_gateway(self._model_gateway),
-                        writer=writer,
-                        turn=turn,
-                        emit_event=emit_event,
-                    ),
+                    compression_budget=_compression_budget_for_gateway(self._model_gateway),
                     interaction_handler=self._interaction_handler,
                     interaction_resolver=interaction_resolver,
                     interaction_bridge_factory=lambda turn, resolver: _interaction_bridge(

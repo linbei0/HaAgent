@@ -7,10 +7,11 @@ haagent/memory/retrieval.py - 长期记忆检索
 from __future__ import annotations
 
 import json
+import math
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -44,6 +45,27 @@ DIAGNOSTIC_FIELDS = [
     "skipped_invalid",
     "skipped_over_budget",
 ]
+
+# BM25 参数（Elasticsearch/Lucene 工业默认值）
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+
+# 时间衰减：90 天半衰期，下限 0.1 防止老记忆完全消失
+_DECAY_HALF_LIFE_DAYS = 90.0
+_DECAY_FLOOR = 0.1
+
+# BM25 最低相关阈值，低于此值的候选不入选。
+# 注意：小语料库（<50 文档）中 IDF 绝对值天然较低，阈值不宜过高。
+_MIN_RELEVANCE_SCORE = 0.1
+
+# 字段乘性加权（title 命中权重最高，body 最低）
+_FIELD_BOOSTS: dict[str, float] = {
+    "title": 2.0,
+    "tags": 1.8,
+    "category": 1.8,
+    "summary": 1.4,
+    "body": 1.0,
+}
 
 
 @dataclass(frozen=True)
@@ -90,6 +112,7 @@ class RetrievedMemory:
     updated_at: str
     score: float
     char_count: int
+    hit_reasons: list[dict[str, Any]] = field(default_factory=list)
 
     def to_manifest_dict(self) -> dict[str, Any]:
         return {
@@ -100,6 +123,7 @@ class RetrievedMemory:
             "updated_at": self.updated_at,
             "score": round(self.score, 3),
             "char_count": self.char_count,
+            "hit_reasons": self.hit_reasons,
         }
 
 
@@ -148,26 +172,36 @@ class _IndexItem:
 
 
 @dataclass(frozen=True)
+class _BM25Index:
+    """BM25 倒排索引，在 _cached_scope_sources 中构建并随缓存复用。"""
+
+    # token -> {memory_id: term_frequency}
+    tf_by_token: dict[str, dict[str, int]]
+    # token -> document_frequency（包含该 token 的文档数）
+    df: dict[str, int]
+    # memory_id -> 文档总 token 数（所有字段合并）
+    doc_lengths: dict[str, int]
+    # 平均文档长度
+    avg_doc_length: float
+    # 文档总数
+    corpus_size: int
+    # token -> {memory_id: 最大字段 boost}（取该 token 在文档中命中字段的最高权重）
+    field_boosts: dict[str, dict[str, float]]
+
+
+@dataclass(frozen=True)
 class _ScopeSources:
     items: tuple[_IndexItem, ...]
     deleted_ids: frozenset[str]
     records: dict[str, MemoryRecord]
-    weights_by_token: dict[str, dict[str, float]]
+    bm25_index: _BM25Index
     normalized_bodies: dict[str, str]
     timestamps: dict[str, float]
     diagnostics: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class _MemoryTokens:
-    title: frozenset[str]
-    tags: frozenset[str]
-    category: frozenset[str]
-    summary: frozenset[str]
-    body: frozenset[str]
-
-
-_ScoredMemory = tuple[_IndexItem, MemoryRecord, float, str, float]
+# (index_item, record, final_score, body, timestamp, hit_reasons)
+_ScoredMemory = tuple[_IndexItem, MemoryRecord, float, str, float, list[dict[str, Any]]]
 
 
 _SOURCE_CACHE_LIMIT = 8
@@ -180,14 +214,14 @@ _SOURCE_CACHE: OrderedDict[
 
 class MemoryRetriever:
     def retrieve(self, request: MemoryRetrievalRequest) -> MemoryRetrievalResult:
-        tokens = _tokenize(f"{request.query}\n{request.task_context}")
+        query_tokens = _tokenize_text(f"{request.query}\n{request.task_context}")
         diagnostics = _empty_diagnostics()
         candidates: list[_ScoredMemory] = []
         for scope, root in [
             (WORKSPACE_SCOPE, request.workspace_root.resolve() / ".haagent" / "memory"),
             (USER_SCOPE, (request.user_memory_root or user_config_dir() / "memory").resolve()),
         ]:
-            candidates.extend(self._read_scope(scope, root, tokens, request.budget, diagnostics))
+            candidates.extend(self._read_scope(scope, root, query_tokens, request.budget, diagnostics))
 
         selected = _apply_budget(_sort_scored_memories(candidates, request.budget), request.budget, diagnostics)
         return MemoryRetrievalResult(memories=selected, budget=request.budget, diagnostics=diagnostics)
@@ -196,7 +230,7 @@ class MemoryRetriever:
         self,
         scope: str,
         root: Path,
-        tokens: set[str],
+        query_tokens: list[str],
         budget: MemoryRetrievalBudget,
         diagnostics: dict[str, Any],
     ) -> list[_ScoredMemory]:
@@ -206,10 +240,6 @@ class MemoryRetriever:
             return []
         sources = _cached_scope_sources(root, scope)
         _merge_diagnostics(diagnostics, sources.diagnostics)
-        scores: dict[str, float] = {}
-        for token in tokens:
-            for memory_id, weight in sources.weights_by_token.get(token, {}).items():
-                scores[memory_id] = scores.get(memory_id, 0.0) + weight
         memories: list[_ScoredMemory] = []
         for item in sources.items:
             if item.status != "active":
@@ -226,13 +256,17 @@ class MemoryRetriever:
             if record.status != "active":
                 diagnostics["skipped_deleted" if record.status == "deleted" else "skipped_inactive"] += 1
                 continue
-            score = scores.get(item.memory_id, 0.0)
-            if score <= 0:
+            # BM25 评分 + 时间衰减
+            bm25_score, hit_reasons = _score_bm25(query_tokens, sources.bm25_index, item.memory_id)
+            if bm25_score < _MIN_RELEVANCE_SCORE:
                 continue
+            decay = _time_decay_factor(item.updated_at)
+            final_score = bm25_score * decay
+            # workspace 记忆固定加成，保持当前目录上下文优先
             if item.scope == WORKSPACE_SCOPE:
-                score += 0.6
+                final_score += 0.6
             body = sources.normalized_bodies[item.memory_id][: budget.max_item_chars]
-            memories.append((item, record, score, body, sources.timestamps[item.memory_id]))
+            memories.append((item, record, final_score, body, sources.timestamps[item.memory_id], hit_reasons))
         return memories
 
 
@@ -249,12 +283,12 @@ def _cached_scope_sources(root: Path, scope: str) -> _ScopeSources:
         source_diagnostics = _empty_diagnostics()
         items = tuple(_load_index_items(root / "index.json", scope, source_diagnostics))
         records = _load_records_by_id(root, scope, source_diagnostics)
-        weights_by_token = _build_search_index(items, records)
+        bm25_index = _build_bm25_index(items, records)
         sources = _ScopeSources(
             items=items,
             deleted_ids=frozenset(_deleted_ids(root, source_diagnostics)),
             records=records,
-            weights_by_token=weights_by_token,
+            bm25_index=bm25_index,
             normalized_bodies={memory_id: " ".join(record.body.split()) for memory_id, record in records.items()},
             timestamps={memory_id: _timestamp(record.updated_at) for memory_id, record in records.items()},
             diagnostics=source_diagnostics,
@@ -295,33 +329,58 @@ def _merge_diagnostics(target: dict[str, Any], cached: dict[str, Any]) -> None:
                 _remember_skip(target, field, str(item))
 
 
-def _build_search_index(
+def _build_bm25_index(
     items: tuple[_IndexItem, ...],
     records: dict[str, MemoryRecord],
-) -> dict[str, dict[str, float]]:
-    weights_by_token: dict[str, dict[str, float]] = {}
+) -> _BM25Index:
+    """构建 BM25 倒排索引：统计 TF、DF、文档长度和字段 boost。"""
+    tf_by_token: dict[str, dict[str, int]] = {}
+    field_boosts: dict[str, dict[str, float]] = {}
+    doc_lengths: dict[str, int] = {}
+
     for item in items:
         record = records.get(item.memory_id)
         if record is None:
             continue
-        field_tokens = _MemoryTokens(
-            title=frozenset(_tokenize(item.title)),
-            tags=frozenset(set().union(*(_tokenize(tag) for tag in item.tags)) if item.tags else set()),
-            category=frozenset(_tokenize(item.category)),
-            summary=frozenset(_tokenize(item.summary)),
-            body=frozenset(_tokenize(record.body)),
-        )
-        for field_tokens_set, weight in (
-            (field_tokens.title, 4.0),
-            (field_tokens.tags, 3.0),
-            (field_tokens.category, 3.0),
-            (field_tokens.summary, 2.0),
-            (field_tokens.body, 1.0),
-        ):
-            for token in field_tokens_set:
-                token_weights = weights_by_token.setdefault(token, {})
-                token_weights[item.memory_id] = token_weights.get(item.memory_id, 0.0) + weight
-    return weights_by_token
+        # 各字段独立分词，合并为文档级 token 列表（保留 TF）
+        field_texts: list[tuple[str, str]] = [
+            ("title", item.title),
+            ("tags", " ".join(item.tags) if item.tags else ""),
+            ("category", item.category),
+            ("summary", item.summary),
+            ("body", record.body),
+        ]
+        doc_tokens: list[str] = []
+        for field_name, text in field_texts:
+            if not text:
+                continue
+            tokens = _tokenize_text(text)
+            doc_tokens.extend(tokens)
+            # 记录每个 token 在该文档中的最高字段 boost
+            boost = _FIELD_BOOSTS[field_name]
+            for token in set(tokens):
+                boosts = field_boosts.setdefault(token, {})
+                boosts[item.memory_id] = max(boosts.get(item.memory_id, 0.0), boost)
+
+        # 统计文档级 TF（所有字段合并）
+        token_counts = Counter(doc_tokens)
+        doc_lengths[item.memory_id] = len(doc_tokens)
+        for token, count in token_counts.items():
+            tf_by_token.setdefault(token, {})[item.memory_id] = count
+
+    # 计算 DF：每个 token 出现在多少文档中
+    df: dict[str, int] = {token: len(doc_ids) for token, doc_ids in tf_by_token.items()}
+    corpus_size = len(doc_lengths)
+    avg_doc_length = sum(doc_lengths.values()) / max(corpus_size, 1)
+
+    return _BM25Index(
+        tf_by_token=tf_by_token,
+        df=df,
+        doc_lengths=doc_lengths,
+        avg_doc_length=avg_doc_length,
+        corpus_size=corpus_size,
+        field_boosts=field_boosts,
+    )
 
 
 def _load_index_items(path: Path, scope: str, diagnostics: dict[str, Any]) -> list[_IndexItem]:
@@ -410,7 +469,7 @@ def _apply_budget(
     chars = {WORKSPACE_SCOPE: 0, USER_SCOPE: 0}
     max_items = {WORKSPACE_SCOPE: budget.max_workspace_items, USER_SCOPE: budget.max_user_items}
     max_chars = {WORKSPACE_SCOPE: budget.max_workspace_chars, USER_SCOPE: budget.max_user_chars}
-    for item, record, score, body, _timestamp_value in memories:
+    for item, record, score, body, _timestamp_value, hit_reasons in memories:
         scope = item.scope
         char_count = len(body)
         if counts[scope] >= max_items[scope] or chars[scope] + char_count > max_chars[scope]:
@@ -427,6 +486,7 @@ def _apply_budget(
                 updated_at=record.updated_at,
                 score=score,
                 char_count=char_count,
+                hit_reasons=hit_reasons,
             ),
         )
         counts[scope] += 1
@@ -451,10 +511,67 @@ def _sort_scored_memories(memories: list[_ScoredMemory], budget: MemoryRetrieval
     )
 
 
-def _tokenize(text: str) -> set[str]:
-    ascii_tokens = {token for token in re.findall(r"[A-Za-z0-9_]+", text.lower()) if len(token) >= 2}
-    han_chars = set(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", text))
-    return ascii_tokens | han_chars
+def _tokenize_text(text: str) -> list[str]:
+    """中文重叠 bigram + ASCII token，返回有序列表保留 TF 信息。
+
+    依据: Chen 1997 TREC 研究证明 bigram 索引在中文 IR 中优于词典分词，
+    且零依赖、确定性、可测试。
+    """
+    tokens: list[str] = []
+    # ASCII: 连续字母数字下划线，长度 >= 2
+    tokens.extend(t for t in re.findall(r"[A-Za-z0-9_]+", text.lower()) if len(t) >= 2)
+    # 中文: 提取连续汉字段，每段生成重叠 bigram；单字段保留原字
+    for segment in re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]+", text):
+        if len(segment) == 1:
+            tokens.append(segment)
+        else:
+            for i in range(len(segment) - 1):
+                tokens.append(segment[i : i + 2])
+    return tokens
+
+
+def _score_bm25(
+    query_tokens: list[str],
+    index: _BM25Index,
+    memory_id: str,
+) -> tuple[float, list[dict[str, Any]]]:
+    """BM25 评分（Lucene 非负 IDF 变体），返回 (score, hit_reasons)。"""
+    score = 0.0
+    hit_reasons: list[dict[str, Any]] = []
+    doc_len = index.doc_lengths.get(memory_id, 0)
+    if doc_len == 0 or index.corpus_size == 0:
+        return 0.0, []
+    avg_dl = max(index.avg_doc_length, 1.0)
+    # 查询 token 去重，避免同一 token 重复计分
+    for token in set(query_tokens):
+        tf = index.tf_by_token.get(token, {}).get(memory_id, 0)
+        if tf == 0:
+            continue
+        df = index.df.get(token, 0)
+        # Lucene 非负 IDF: log(1 + (N - df + 0.5) / (df + 0.5))
+        idf = math.log(1.0 + (index.corpus_size - df + 0.5) / (df + 0.5))
+        # TF 饱和 + 文档长度归一化
+        tf_saturated = (tf * (_BM25_K1 + 1.0)) / (
+            tf + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * doc_len / avg_dl)
+        )
+        field_boost = index.field_boosts.get(token, {}).get(memory_id, 1.0)
+        contribution = idf * tf_saturated * field_boost
+        score += contribution
+        hit_reasons.append({"token": token, "tf": tf, "idf": round(idf, 3), "boost": field_boost})
+    return score, hit_reasons
+
+
+def _time_decay_factor(updated_at: str) -> float:
+    """指数衰减，90 天半衰期，下限 0.1 防止老记忆完全消失。
+
+    依据: Dakera 生产系统 (half-life decay engine), ACT-R 认知架构,
+    Mem0 2026 基准报告 temporal reasoning +29.6 分。
+    """
+    ts = _timestamp(updated_at)
+    if ts <= 0:
+        return 1.0  # 无法解析时间时不惩罚
+    age_days = max(0.0, (datetime.now(timezone.utc).timestamp() - ts) / 86400.0)
+    return max(_DECAY_FLOOR, math.exp(-math.log(2) * age_days / _DECAY_HALF_LIFE_DAYS))
 
 
 def _timestamp(value: str) -> float:

@@ -12,6 +12,7 @@ import json
 import threading
 import time
 
+from haagent.context.compression.budget import derive_compression_budget
 from haagent.models.gateway_retry import execute_model_request
 from haagent.models.types import (
     ModelCallError,
@@ -1099,7 +1100,7 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
         max_turns=3,
         raise_if_cancelled=lambda: None,
         emit_event=lambda event: None,
-        compress_historical_tool_messages=lambda messages, writer, turn, emit_event: None,
+        compression_budget=derive_compression_budget(None),
         interaction_handler=None,
         interaction_resolver=SimpleNamespace(),
         interaction_bridge_factory=lambda turn, resolver: None,
@@ -1733,7 +1734,7 @@ def _deps(
         max_turns=3,
         raise_if_cancelled=lambda: None,
         emit_event=emit_event,
-        compress_historical_tool_messages=lambda messages, writer, turn, emit_event: None,
+        compression_budget=derive_compression_budget(None),
         interaction_handler=None,
         interaction_resolver=SimpleNamespace(),
         interaction_bridge_factory=lambda turn, resolver: None,

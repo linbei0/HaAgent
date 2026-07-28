@@ -14,6 +14,8 @@ from itertools import count
 from threading import Lock
 from typing import Any, Callable
 
+from haagent.context.compression.budget import CompressionBudget
+from haagent.context.compression.messages import build_compressed_model_view
 from haagent.context.messages import (
     build_assistant_message,
     build_steering_message,
@@ -97,10 +99,7 @@ class TurnLoopDependencies:
     max_turns: int | None
     raise_if_cancelled: Callable[[], None]
     emit_event: Callable[[RuntimeBusEvent], None]
-    compress_historical_tool_messages: Callable[
-        [list[dict[str, Any]], EpisodeWriter, int, Callable[[RuntimeBusEvent | dict[str, object]], None]],
-        object,
-    ]
+    compression_budget: CompressionBudget
     interaction_handler: HumanInteractionHandler | None
     interaction_resolver: HumanInteractionResolver
     interaction_bridge_factory: Callable[[int, HumanInteractionResolver], HumanInteractionHandler]
@@ -153,7 +152,6 @@ def run_turn_loop(
             cache=deps.tool_schema_cache,
             diagnostics_sink=record_schema_cache,
         )
-        deps.compress_historical_tool_messages(state.messages, deps.writer, turn, deps.emit_event)
 
         schema_bytes = len(
             json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
@@ -247,7 +245,16 @@ def run_turn_loop(
             set_route_event_sink(emit_model_route_event)
 
         settings = getattr(deps.model_gateway, "model_settings", ModelSettings.empty())
-        invocation = ModelInvocation(messages=state.messages, tool_schemas=tool_schemas, settings=settings)
+        # 构建压缩视图副本，state.messages 保持不变（原始历史供回放和调试）
+        model_view, compression_diagnostics = build_compressed_model_view(
+            state.messages, deps.compression_budget,
+        )
+        for diag_index, diagnostic in enumerate(compression_diagnostics):
+            event = diagnostic.to_dict()
+            event["turn"] = turn
+            deps.writer.append_transcript({"event": "compression_diagnostic", **event})
+            deps.emit_event({"event_type": "compression_diagnostic", **event})
+        invocation = ModelInvocation(messages=model_view, tool_schemas=tool_schemas, settings=settings)
         generate_kwargs: dict[str, object] = {
             "invocation": invocation,
             "event_sink": emit_assistant_delta,
@@ -862,6 +869,7 @@ def _apply_progress_guard(
             suggestion = (
                 f"ProgressGuard ({decision.pattern or 'unknown'}): {decision.reason} "
                 "请更换策略，避免重复相同 action/observation。"
+                "如需回顾完整 Todo 进展，file_read episode 目录下的 task-ledger.md。"
             )
             state.messages.append(build_suggestion_message(suggestion))
             state.progress_warn_emitted = True

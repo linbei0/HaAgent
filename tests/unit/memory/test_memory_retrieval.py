@@ -340,6 +340,19 @@ def test_retrieval_reuses_parsed_sources_until_files_change(tmp_path: Path, monk
         body="Use pytest for the cached retrieval check.",
         tags=["pytest"],
     )
+    # 冻结时间，避免 time_decay_factor 在两次调用间产生微小分数差异
+    from datetime import datetime, timezone
+    import haagent.memory.retrieval as retrieval_mod
+
+    frozen_now = datetime(2026, 7, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_now
+
+    monkeypatch.setattr(retrieval_mod, "datetime", _FrozenDatetime)
+
     memory_root = tmp_path / "workspace" / ".haagent" / "memory"
     original_read_text = Path.read_text
     source_reads: list[Path] = []
@@ -504,3 +517,237 @@ def _task(goal: str) -> TaskSpec:
         constraints=[],
         policy={"approval_allowed_tools": [], "approved_tools": []},
     )
+
+
+# --- BM25 升级新增测试 ---
+
+
+def test_bigram_tokenization() -> None:
+    """验证中文重叠 bigram 切分：'项目配置' -> ['项目', '目配', '配置']。"""
+    from haagent.memory.retrieval import _tokenize_text
+
+    tokens = _tokenize_text("项目配置")
+    assert "项目" in tokens
+    assert "目配" in tokens
+    assert "配置" in tokens
+    # 不应产生单字 token（段长度 > 1）
+    assert "项" not in tokens
+    assert "目" not in tokens
+
+
+def test_bigram_tokenization_single_char() -> None:
+    """单个汉字段保留原字。"""
+    from haagent.memory.retrieval import _tokenize_text
+
+    tokens = _tokenize_text("我")
+    assert "我" in tokens
+
+
+def test_bigram_tokenization_ascii() -> None:
+    """ASCII token 保持完整，长度 >= 2。"""
+    from haagent.memory.retrieval import _tokenize_text
+
+    tokens = _tokenize_text("HaAgent memory_system")
+    assert "haagent" in tokens
+    assert "memory_system" in tokens
+    # 单字符 ASCII 不入选
+    tokens2 = _tokenize_text("a b cd")
+    assert "a" not in tokens2
+    assert "b" not in tokens2
+    assert "cd" in tokens2
+
+
+def test_bm25_idf_weighting(tmp_path: Path) -> None:
+    """稀有 token 命中得分应高于高频 token。"""
+    # 创建 5 条记忆，4 条包含 "pytest"，只有 1 条包含 "kubernetes"
+    entries = [
+        ("Coverage flags", "Run pytest with coverage flags enabled.", ["pytest"]),
+        ("Slow markers", "Configure pytest markers for slow tests.", ["pytest"]),
+        ("Fixture debugging", "Debug pytest fixtures with breakpoints.", ["pytest"]),
+        ("Parallel execution", "Parallel pytest execution via xdist plugin.", ["pytest"]),
+        ("Cluster orchestration", "Deploy with kubernetes cluster orchestration.", ["kubernetes"]),
+    ]
+    for title, body, tags in entries:
+        _commit(
+            tmp_path,
+            scope="workspace",
+            category="facts",
+            title=title,
+            body=body,
+            tags=tags,
+        )
+
+    # 查询同时包含两个 token，kubernetes 的 IDF 更高
+    result = _retrieve(tmp_path, "pytest kubernetes")
+    assert len(result.memories) >= 1
+    # kubernetes 记忆应排第一（IDF 更高 + title 命中）
+    assert result.memories[0].title == "Cluster orchestration"
+
+
+def test_time_decay_recent_vs_old(tmp_path: Path, monkeypatch) -> None:
+    """相同匹配分下，近期记忆排序优先于老旧记忆。"""
+    from datetime import datetime, timezone
+    import haagent.memory.retrieval as retrieval_mod
+
+    # 冻结当前时间为 2026-07-28
+    frozen_now = datetime(2026, 7, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_now
+
+    monkeypatch.setattr(retrieval_mod, "datetime", _FrozenDatetime)
+
+    # 直接写入两条记忆，手动控制 updated_at
+    store = _store(tmp_path)
+    queue = _queue(tmp_path)
+    intake = MemoryCandidateIntake(store, queue)
+
+    # 近期记忆（1 天前）
+    draft_recent = MemoryDraft(
+        scope="workspace",
+        category="facts",
+        title="Recent deploy config",
+        body="Deploy uses docker compose.",
+        evidence=_evidence(),
+        source="user_explicit",
+        actor="user",
+        tags=["deploy"],
+    )
+    result_recent = intake.submit(draft_recent, reject_secrets=False)
+    assert result_recent.accepted and result_recent.candidate
+    store.confirm_candidate(queue, result_recent.candidate.candidate_id)
+
+    # 老旧记忆（200 天前）—— 手动修改 updated_at
+    draft_old = MemoryDraft(
+        scope="workspace",
+        category="facts",
+        title="Old deploy config",
+        body="Deploy uses docker compose legacy.",
+        evidence=_evidence(),
+        source="user_explicit",
+        actor="user",
+        tags=["deploy"],
+    )
+    result_old = intake.submit(draft_old, reject_secrets=False)
+    assert result_old.accepted and result_old.candidate
+    store.confirm_candidate(queue, result_old.candidate.candidate_id)
+
+    # 手动篡改旧记忆的 updated_at 为 200 天前
+    import json as _json
+
+    facts_path = tmp_path / "workspace" / ".haagent" / "memory" / "facts.jsonl"
+    lines = facts_path.read_text(encoding="utf-8").splitlines()
+    modified = []
+    for line in lines:
+        if not line.strip():
+            continue
+        record = _json.loads(line)
+        if record.get("title") == "Old deploy config":
+            record["updated_at"] = "2025-12-10T12:00:00+00:00"  # ~230 天前
+        modified.append(_json.dumps(record, ensure_ascii=False))
+    facts_path.write_text("\n".join(modified) + "\n", encoding="utf-8")
+
+    # 同时修改 index.json 中的 updated_at
+    index_path = tmp_path / "workspace" / ".haagent" / "memory" / "index.json"
+    index_data = _json.loads(index_path.read_text(encoding="utf-8"))
+    for item in index_data["items"]:
+        if item.get("title") == "Old deploy config":
+            item["updated_at"] = "2025-12-10T12:00:00+00:00"
+    index_path.write_text(_json.dumps(index_data, ensure_ascii=False), encoding="utf-8")
+
+    result = _retrieve(tmp_path, "deploy docker compose")
+    assert len(result.memories) == 2
+    # 近期记忆应排第一
+    assert result.memories[0].title == "Recent deploy config"
+    assert result.memories[1].title == "Old deploy config"
+    # 近期分数 > 老旧分数
+    assert result.memories[0].score > result.memories[1].score
+
+
+def test_time_decay_floor() -> None:
+    """极老记忆衰减不低于 0.1 下限。"""
+    from haagent.memory.retrieval import _time_decay_factor
+
+    # 1000 天前的记忆
+    factor = _time_decay_factor("2023-10-01T00:00:00+00:00")
+    assert factor == 0.1  # 触底
+
+
+def test_time_decay_unparseable() -> None:
+    """无法解析的时间戳不惩罚。"""
+    from haagent.memory.retrieval import _time_decay_factor
+
+    assert _time_decay_factor("invalid") == 1.0
+    assert _time_decay_factor("") == 1.0
+
+
+def test_hit_reasons_structure(tmp_path: Path) -> None:
+    """检索结果包含结构化命中原因。"""
+    _commit(
+        tmp_path,
+        scope="workspace",
+        category="facts",
+        title="Python project setup",
+        body="Use uv for Python dependency management.",
+        tags=["python", "uv"],
+    )
+    result = _retrieve(tmp_path, "python uv setup")
+    assert len(result.memories) >= 1
+    memory = result.memories[0]
+    assert len(memory.hit_reasons) > 0
+    # 每条 hit_reason 包含 token, tf, idf, boost 字段
+    for reason in memory.hit_reasons:
+        assert "token" in reason
+        assert "tf" in reason
+        assert "idf" in reason
+        assert "boost" in reason
+        assert isinstance(reason["tf"], int)
+        assert isinstance(reason["idf"], float)
+        assert isinstance(reason["boost"], float)
+    # manifest 输出也包含 hit_reasons
+    manifest = result.memories[0].to_manifest_dict()
+    assert "hit_reasons" in manifest
+
+
+def test_min_relevance_threshold(tmp_path: Path) -> None:
+    """与查询完全无关的记忆不入选。"""
+    _commit(
+        tmp_path,
+        scope="workspace",
+        category="facts",
+        title="Kubernetes networking",
+        body="Calico CNI plugin configuration for pod networking.",
+        tags=["kubernetes"],
+    )
+    # 查询与记忆完全无关
+    result = _retrieve(tmp_path, "chocolate cake recipe baking")
+    assert len(result.memories) == 0
+
+
+def test_phrase_level_match(tmp_path: Path) -> None:
+    """'记忆系统' 作为 bigram 组合命中，而非单字误匹配。"""
+    _commit(
+        tmp_path,
+        scope="workspace",
+        category="facts",
+        title="HaAgent 记忆系统架构",
+        body="记忆系统使用 BM25 检索算法。",
+        tags=["记忆", "检索"],
+    )
+    # 另一条包含 "记" 和 "忆" 但不包含 "记忆" bigram 的干扰记忆
+    _commit(
+        tmp_path,
+        scope="workspace",
+        category="facts",
+        title="日记和回忆",
+        body="记录生活点滴，忆往昔峥嵘岁月。",
+        tags=["日记"],
+    )
+
+    result = _retrieve(tmp_path, "记忆系统")
+    assert len(result.memories) >= 1
+    # "记忆系统" 的 bigram: 记忆, 忆系, 系统 —— 第一条记忆应高分命中
+    assert result.memories[0].title == "HaAgent 记忆系统架构"
+

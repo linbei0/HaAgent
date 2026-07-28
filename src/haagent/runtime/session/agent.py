@@ -98,6 +98,7 @@ from haagent.runtime.session.task_ledger import (
     replace_todos,
     update_task_ledger_runtime,
     write_task_ledger,
+    write_task_ledger_markdown,
 )
 from haagent.runtime.session.planning_state import (
     PlanningStateError,
@@ -552,7 +553,7 @@ class AgentSession:
             episode_path=turn_result.episode_path,
             runtime_events=runtime_events,
         )
-        self._write_task_ledger()
+        self._write_task_ledger(episode_path=turn_result.episode_path)
         self._historical_tool_compression_count += count_historical_tool_compression_events(runtime_events)
         summary = turn_summary(
             clean_prompt,
@@ -832,8 +833,11 @@ class AgentSession:
     def resources(self) -> SessionResources:
         return self._resources
 
-    def _write_task_ledger(self) -> None:
+    def _write_task_ledger(self, episode_path: Path | None = None) -> None:
         write_task_ledger(self.session_path / "task-ledger.json", self._task_ledger)
+        # 同步写入 markdown 到 episode 目录，供模型 file_read 回顾完整 Todo 状态。
+        if episode_path is not None:
+            write_task_ledger_markdown(Path(episode_path) / "task-ledger.md", self._task_ledger)
 
     def _write_planning_state(self) -> None:
         write_planning_state(self.session_path / "planning-state.json", self._planning_state)

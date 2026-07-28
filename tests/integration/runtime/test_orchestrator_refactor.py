@@ -11,8 +11,7 @@ from pathlib import Path
 
 from haagent.models.types import ModelResponse, ToolCall
 from haagent.context.compression.budget import derive_compression_budget
-from haagent.context.compression.messages import compress_historical_tool_messages
-from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.context.compression.messages import build_compressed_model_view
 from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 
@@ -341,19 +340,6 @@ verification_commands: []
 
 
 def test_microcompact_preserves_artifact_backed_tool_result_messages(tmp_path: Path) -> None:
-    task_path = tmp_path / "task.yaml"
-    task_path.write_text(
-        """
-goal: Preserve artifact-backed tool messages
-constraints: []
-allowed_tools:
-  - mcp__exa__web_fetch_exa
-acceptance_criteria: []
-verification_commands: []
-""".strip(),
-        encoding="utf-8",
-    )
-    writer = EpisodeWriter.create(runs_root=tmp_path / ".runs", task_path=task_path)
     tool_content = json.dumps(
         {
             "output": "head " + ("x" * 2600) + " tail",
@@ -373,16 +359,11 @@ verification_commands: []
             "content": tool_content,
         },
     ]
-    events: list[dict[str, object]] = []
 
-    diagnostics = compress_historical_tool_messages(
-        messages,
-        derive_compression_budget(None),
-        writer=writer,
-        turn=2,
-        emit_event=events.append,
-    )
+    view, diagnostics = build_compressed_model_view(messages, derive_compression_budget(None))
 
-    assert messages[0]["content"] == tool_content
-    assert events == []
+    # 单条 artifact 消息在 recent 窗口内，不压缩
+    assert view[0]["content"] == tool_content
     assert diagnostics == []
+    # 原始消息不被修改
+    assert messages[0]["content"] == tool_content

@@ -21,7 +21,9 @@ from haagent.runtime.session.task_ledger import (
     initialize_todos_from_plan,
     replace_todos,
     task_ledger_from_dict,
+    task_ledger_to_markdown,
     update_task_ledger_runtime,
+    write_task_ledger_markdown,
 )
 
 
@@ -198,3 +200,100 @@ def test_persisted_json_contains_no_duplicate_summary_fields() -> None:
     assert '"status": "in_progress"' in raw
     assert '"current_todo_id"' not in raw
     assert '"has_active_todos"' not in raw
+
+
+def test_markdown_for_empty_ledger_returns_empty() -> None:
+    assert task_ledger_to_markdown(empty_task_ledger()) == ""
+
+
+def test_markdown_includes_goal_todos_and_progress() -> None:
+    ledger = TaskLedger(
+        goal="实现功能 X",
+        todos=[
+            _item("todo-001", "completed", "分析需求"),
+            _item("todo-002", "in_progress", "编写实现"),
+            _item("todo-003", "pending", "运行测试"),
+        ],
+        updated_turn=5,
+    )
+    md = task_ledger_to_markdown(ledger)
+
+    assert "# Task Ledger" in md
+    assert "实现功能 X" in md
+    assert "Updated at turn:** 5" in md
+    assert "1 completed" in md
+    assert "1 in_progress" in md
+    assert "1 pending" in md
+    assert "[x] **todo-001**: 分析需求" in md
+    assert "[>] **todo-002**: 编写实现" in md
+    assert "[ ] **todo-003**: 运行测试" in md
+
+
+def test_markdown_includes_blocker_for_in_progress_item() -> None:
+    ledger = TaskLedger(
+        goal="目标",
+        todos=[
+            TodoItem(
+                id="todo-001",
+                content="受阻任务",
+                status="in_progress",
+                blocker={
+                    "category": "waiting_input",
+                    "reason": "需要确认",
+                    "suggested_action": "ask_user",
+                },
+            ),
+        ],
+        updated_turn=2,
+    )
+    md = task_ledger_to_markdown(ledger)
+
+    assert "blocker: waiting_input" in md
+    assert "ask_user" in md
+
+
+def test_markdown_includes_budget_when_nonzero() -> None:
+    ledger = TaskLedger(
+        goal="目标",
+        todos=[_item("a", "in_progress")],
+        budgets={"turns_used": 3, "tool_calls": 7, "model_attempts": 4},
+        updated_turn=3,
+    )
+    md = task_ledger_to_markdown(ledger)
+
+    assert "## Budget" in md
+    assert "turns_used: 3" in md
+    assert "tool_calls: 7" in md
+    assert "model_attempts: 4" in md
+
+
+def test_write_task_ledger_markdown_creates_file(tmp_path) -> None:
+    ledger = TaskLedger(
+        goal="测试目标",
+        todos=[_item("a", "in_progress")],
+        updated_turn=1,
+    )
+    md_path = tmp_path / "task-ledger.md"
+
+    write_task_ledger_markdown(md_path, ledger)
+
+    assert md_path.exists()
+    content = md_path.read_text(encoding="utf-8")
+    assert "# Task Ledger" in content
+    assert "测试目标" in content
+
+
+def test_write_task_ledger_markdown_skips_empty_ledger(tmp_path) -> None:
+    md_path = tmp_path / "task-ledger.md"
+
+    write_task_ledger_markdown(md_path, empty_task_ledger())
+
+    assert not md_path.exists()
+
+
+def test_format_for_model_includes_markdown_hint() -> None:
+    ledger = TaskLedger(goal="目标", todos=[_item("a", "in_progress")])
+    text = format_task_ledger_for_model(ledger)
+
+    assert "task-ledger.md" in text
+    assert "file_read" in text

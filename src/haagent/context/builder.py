@@ -55,6 +55,7 @@ from haagent.runtime.session.working_state import (
 from haagent.runtime.session.task_ledger import (
     TaskLedgerError,
     format_task_ledger_for_model,
+    write_task_ledger_markdown,
 )
 from haagent.runtime.session.planning_state import (
     PlanningStateError,
@@ -350,6 +351,11 @@ class ContextBuilder:
             return None
         try:
             content = format_task_ledger_for_model(self._task_ledger)
+            # 同步写入 markdown 到 episode 目录，确保首轮模型就能 file_read task-ledger.md。
+            write_task_ledger_markdown(
+                self._episode_writer.path / "task-ledger.md",
+                self._task_ledger,
+            )
             return content or None
         except TaskLedgerError as error:
             raise ContextBuildError(f"invalid task_ledger: {error}") from error

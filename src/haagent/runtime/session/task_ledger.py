@@ -166,6 +166,59 @@ def write_task_ledger(path: Path, ledger: TaskLedger) -> None:
     )
 
 
+def task_ledger_to_markdown(ledger: TaskLedger) -> str:
+    """将 TaskLedger 转换为模型可读的 markdown 文本。
+
+    模型可通过 file_read 读取此文件回顾完整 Todo 状态，
+    实现 Manus 式的 attention recitation（文件操作自然出现在上下文末尾）。
+    """
+    # 兼容 dict 输入：builder 中 task_ledger 可能以 dict 形式传递。
+    if not isinstance(ledger, TaskLedger):
+        ledger = task_ledger_from_dict(ledger)
+    if ledger.is_empty():
+        return ""
+    lines = ["# Task Ledger", ""]
+    if ledger.goal:
+        lines.append(f"**Goal:** {ledger.goal}")
+    lines.append(f"**Updated at turn:** {ledger.updated_turn}")
+    counts = ledger.status_counts()
+    parts = []
+    for status in ("pending", "in_progress", "completed", "cancelled"):
+        if counts.get(status, 0):
+            parts.append(f"{counts[status]} {status}")
+    if parts:
+        lines.append(f"**Progress:** {', '.join(parts)}")
+    lines.append("")
+    lines.append("## Todos")
+    markers = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]", "cancelled": "[-]"}
+    for item in ledger.todos:
+        lines.append(f"- {markers[item.status]} **{item.id}**: {item.content}")
+        if item.status == "in_progress" and item.blocker is not None:
+            lines.append(
+                f"  - blocker: {item.blocker.get('category', 'unknown')} — "
+                f"{item.blocker.get('suggested_action', '')}",
+            )
+    budgets = ledger.budgets
+    if budgets:
+        lines.append("")
+        lines.append("## Budget")
+        for key in ("turns_used", "tool_calls", "model_attempts"):
+            value = budgets.get(key)
+            if isinstance(value, int) and value > 0:
+                lines.append(f"- {key}: {value}")
+    text = "\n".join(lines)
+    return text if len(text) <= TASK_LEDGER_MODEL_CHAR_LIMIT else text[: TASK_LEDGER_MODEL_CHAR_LIMIT - 1] + "…"
+
+
+def write_task_ledger_markdown(path: Path, ledger: TaskLedger) -> None:
+    """将 TaskLedger 以 markdown 格式写入文件，供模型 file_read 读取。"""
+    content = task_ledger_to_markdown(ledger)
+    if not content.strip():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content + "\n", encoding="utf-8")
+
+
 def task_ledger_from_dict(raw: object) -> TaskLedger:
     if not isinstance(raw, dict):
         raise TaskLedgerError("task ledger must be an object")
@@ -449,6 +502,9 @@ def format_task_ledger_for_model(value: object) -> str:
             )
     lines.append(
         "规则：Todo 是完整 session 清单；开始前保持一个 in_progress，完成里程碑后立即调用 todo_update。",
+    )
+    lines.append(
+        "提示：Todo 状态每轮更新到 episode 目录的 task-ledger.md，长任务中可用 file_read 回顾完整进展。",
     )
     text = "\n".join(lines)
     return text if len(text) <= TASK_LEDGER_MODEL_CHAR_LIMIT else text[: TASK_LEDGER_MODEL_CHAR_LIMIT - 1] + "…"

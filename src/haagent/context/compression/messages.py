@@ -2,12 +2,17 @@
 src/haagent/context/compression/messages.py - 历史工具消息压缩
 
 按类型压缩历史 tool message，保留最近 artifact 预览，降级更早 artifact 结果。
+
+核心设计:
+- build_compressed_model_view: 纯函数，构建压缩视图副本，不修改原始消息列表。
+  state.messages 保持 append-only（原始消息不被篡改），模型每轮接收视图副本。
+  相同输入始终产生相同输出（确定性），已压缩的旧消息位置固定后内容固定。
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from typing import Any
 
 from haagent.context.compression.budget import CompressionBudget, estimate_text_tokens
 from haagent.context.compression.diagnostics import CompressionDiagnostic
@@ -18,13 +23,22 @@ class HistoricalToolCompressionPolicy:
         self.budget = budget
 
 
-def compress_historical_tool_messages(
+def build_compressed_model_view(
     messages: list[dict[str, Any]],
     budget: CompressionBudget,
-    writer: object | None = None,
-    turn: int | None = None,
-    emit_event: Callable[[dict[str, object]], None] | None = None,
-) -> list[CompressionDiagnostic]:
+) -> tuple[list[dict[str, Any]], list[CompressionDiagnostic]]:
+    """构建压缩视图，不修改原始消息。
+
+    返回 (view_messages, diagnostics)。view_messages 是新列表，
+    只有需要压缩的消息使用浅拷贝 + 替换 content，未压缩消息保持原引用。
+
+    设计要点:
+    - 纯函数，无副作用：相同输入始终产生相同输出
+    - 原始 messages 列表不被修改，保留完整历史供 transcript 回放和调试
+    - 压缩基于绝对位置（距末尾距离），确定性且可预测
+    - 每条消息一生只经历一次 full→compressed 转换（在离开 recent 窗口时）
+    """
+    view = list(messages)
     artifact_indices = [
         index
         for index, message in enumerate(messages)
@@ -39,12 +53,15 @@ def compress_historical_tool_messages(
         if not isinstance(content, str):
             continue
         payload = _tool_result_view_payload(message)
+        # 浅拷贝消息 dict，后续 helper 在副本上修改，原始消息不受影响
+        msg_copy: dict[str, Any] | None = None
         diagnostic: CompressionDiagnostic | None = None
         if payload is not None:
             if index in recent_artifact_indices:
                 continue
-            diagnostic = _summarize_artifact_payload(message, payload)
-        elif field_diagnostic := _collapse_json_tool_result_fields(message, content, budget):
+            msg_copy = dict(message)
+            diagnostic = _summarize_artifact_payload(msg_copy, payload)
+        elif field_diagnostic := _collapse_json_tool_result_fields(msg_copy := dict(message), content, budget):
             diagnostic = field_diagnostic
         elif len(content) > _historical_text_limit(budget):
             collapsed = _collapse_text_head_tail(
@@ -52,7 +69,8 @@ def compress_historical_tool_messages(
                 head_chars=budget.historical_collapse_head_chars,
                 tail_chars=budget.historical_collapse_tail_chars,
             )
-            message["content"] = collapsed
+            msg_copy = dict(message)
+            msg_copy["content"] = collapsed
             diagnostic = CompressionDiagnostic(
                 stage="historical_tool_message",
                 subject=str(message.get("name", "unknown_tool")),
@@ -65,13 +83,10 @@ def compress_historical_tool_messages(
             )
         if diagnostic is None:
             continue
+        if msg_copy is not None:
+            view[index] = msg_copy
         diagnostics.append(diagnostic)
-        event = _diagnostic_event(diagnostic, turn=turn, message_index=index)
-        if writer is not None and hasattr(writer, "append_transcript"):
-            writer.append_transcript({"event": "compression_diagnostic", **event})
-        if emit_event is not None:
-            emit_event({"event_type": "compression_diagnostic", **event})
-    return diagnostics
+    return view, diagnostics
 
 
 def _collapse_json_tool_result_fields(
@@ -185,19 +200,6 @@ def _collapse_text_head_tail(text: str, *, head_chars: int, tail_chars: int) -> 
         return text
     omitted = len(text) - head_chars - tail_chars
     return f"{text[:head_chars].rstrip()}\n...[collapsed {omitted} chars]...\n{text[-tail_chars:].lstrip()}"
-
-
-def _diagnostic_event(
-    diagnostic: CompressionDiagnostic,
-    *,
-    turn: int | None,
-    message_index: int,
-) -> dict[str, object]:
-    event = diagnostic.to_dict()
-    event["message_index"] = message_index
-    if turn is not None:
-        event["turn"] = turn
-    return event
 
 
 def _int_value(value: object) -> int:
