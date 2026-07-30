@@ -6,6 +6,7 @@ src/haagent/context/compression/tool_results.py - 工具结果模型可见压缩
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -33,6 +34,8 @@ class ToolResultView:
     content_format: str
     artifact: ToolResultArtifact | None
     truncated: bool
+    representation_version: int
+    content_digest: str
     continuation_hint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,6 +66,7 @@ def prepare_tool_result_for_model(
                 content_format=content_format,
                 artifact=None,
                 truncated=bool(result.get("truncated", False)),
+                content_digest=_content_digest(content),
                 continuation_hint=None,
             ),
         }
@@ -81,6 +85,7 @@ def prepare_tool_result_for_model(
                 preview_chars=len(preview),
             ),
             truncated=True,
+            content_digest=_content_digest(content),
             continuation_hint=f"Use file_read with path={artifact_path} to inspect the full tool output.",
         ),
         "compression_diagnostics": [
@@ -126,6 +131,7 @@ def _view_dict(
     content_format: str,
     artifact: ToolResultArtifact | None,
     truncated: bool,
+    content_digest: str,
     continuation_hint: str | None,
 ) -> dict[str, Any]:
     return ToolResultView(
@@ -136,8 +142,14 @@ def _view_dict(
         content_format=content_format,
         artifact=artifact,
         truncated=truncated,
+        representation_version=1,
+        content_digest=content_digest,
         continuation_hint=continuation_hint,
     ).to_dict()
+
+
+def _content_digest(content: str) -> str:
+    return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
 
 
 def _head_tail_preview(value: str, max_chars: int) -> str:

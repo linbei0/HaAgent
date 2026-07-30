@@ -209,7 +209,8 @@ def test_context_builder_message_contains_attachment_metadata_without_base64_sna
         tool_registry=default_tool_runtime_registry(),
     ).build()
 
-    user_message = context.messages[-1]
+    user_message = context.user_request_message
+    assert user_message is not None
     content = user_message["content"]
     assert isinstance(content, list)
     assert content[0] == {"type": "text", "text": content[0]["text"]}

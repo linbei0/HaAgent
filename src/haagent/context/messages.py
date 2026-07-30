@@ -14,11 +14,50 @@ from haagent.models.types import ProviderTurnState
 
 from haagent.context.compression.tool_results import render_tool_result_view
 from haagent.context.instructions import AGENT_INSTRUCTIONS
+from haagent.context.versioned_state import (
+    ContextStateDelta,
+    ContextStateSnapshot,
+    canonical_json,
+)
 from haagent.runtime.contracts.task import TaskSpec
 
 
 def generate_tool_call_id() -> str:
     return "call_" + os.urandom(4).hex()
+
+
+def build_context_state_snapshot_message(snapshot: ContextStateSnapshot) -> dict[str, Any]:
+    """把 runtime 的完整状态作为兼容 Chat Completions 的 user 消息发送。"""
+
+    payload = {"kind": "context_state_snapshot", **snapshot.to_dict()}
+    return {"role": "user", "content": canonical_json(payload)}
+
+
+def build_context_state_delta_message(delta: ContextStateDelta) -> dict[str, Any]:
+    """把一次顶层 section 增量作为 append-only user 消息发送。"""
+
+    return {"role": "user", "content": canonical_json(delta.to_dict())}
+
+
+def context_state_payload(message: dict[str, Any]) -> dict[str, Any] | None:
+    """解析 runtime 状态消息；普通 user 消息返回 None。"""
+
+    if message.get("role") != "user" or not isinstance(message.get("content"), str):
+        return None
+    try:
+        payload = json.loads(message["content"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") not in {
+        "context_state_snapshot",
+        "context_state_delta",
+    }:
+        return None
+    return payload
+
+
+def is_context_state_message(message: dict[str, Any]) -> bool:
+    return context_state_payload(message) is not None
 
 
 def build_system_message(

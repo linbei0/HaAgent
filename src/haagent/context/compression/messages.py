@@ -1,12 +1,12 @@
 """
 src/haagent/context/compression/messages.py - 历史工具消息压缩
 
-按类型压缩历史 tool message，保留最近 artifact 预览，降级更早 artifact 结果。
+按类型构建历史 tool message 的模型视图，不按消息年龄改写已有结果。
 
 核心设计:
 - build_compressed_model_view: 纯函数，构建压缩视图副本，不修改原始消息列表。
-  state.messages 保持 append-only（原始消息不被篡改），模型每轮接收视图副本。
-  相同输入始终产生相同输出（确定性），已压缩的旧消息位置固定后内容固定。
+  同一 context epoch 内 state.messages 保持 append-only，模型每轮接收确定性视图副本。
+  artifact capsule 原样透传；非 artifact 长文本从首次可见起使用同一折叠表示。
 """
 
 from __future__ import annotations
@@ -35,16 +35,10 @@ def build_compressed_model_view(
     设计要点:
     - 纯函数，无副作用：相同输入始终产生相同输出
     - 原始 messages 列表不被修改，保留完整历史供 transcript 回放和调试
-    - 压缩基于绝对位置（距末尾距离），确定性且可预测
-    - 每条消息一生只经历一次 full→compressed 转换（在离开 recent 窗口时）
+    - artifact-backed 消息首次进入模型后保持不可变，保证同一 epoch 内前缀稳定
+    - 非 artifact 历史长文本使用与消息年龄无关的确定性折叠
     """
     view = list(messages)
-    artifact_indices = [
-        index
-        for index, message in enumerate(messages)
-        if message.get("role") == "tool" and _tool_result_view_payload(message) is not None
-    ]
-    recent_artifact_indices = set(artifact_indices[-budget.artifact_recent_preview_count :])
     diagnostics: list[CompressionDiagnostic] = []
     for index, message in enumerate(messages):
         if message.get("role") != "tool":
@@ -57,10 +51,8 @@ def build_compressed_model_view(
         msg_copy: dict[str, Any] | None = None
         diagnostic: CompressionDiagnostic | None = None
         if payload is not None:
-            if index in recent_artifact_indices:
-                continue
-            msg_copy = dict(message)
-            diagnostic = _summarize_artifact_payload(msg_copy, payload)
+            # artifact capsule 的预览和回读指针已在工具执行边界确定，历史轮次不得改写。
+            continue
         elif field_diagnostic := _collapse_json_tool_result_fields(msg_copy := dict(message), content, budget):
             diagnostic = field_diagnostic
         elif len(content) > _historical_text_limit(budget):
@@ -126,35 +118,6 @@ def _collapse_json_tool_result_fields(
         final_chars=len(message["content"]),
         original_tokens=estimate_text_tokens(content),
         final_tokens=estimate_text_tokens(message["content"]),
-    )
-
-
-def _summarize_artifact_payload(message: dict[str, Any], payload: dict[str, Any]) -> CompressionDiagnostic | None:
-    original_content = str(message.get("content", ""))
-    artifact = payload.get("artifact")
-    if not isinstance(artifact, dict):
-        return None
-    path = str(artifact.get("path", ""))
-    if not path:
-        return None
-    original_chars = _int_value(artifact.get("original_chars"))
-    tool_name = str(payload.get("tool_name") or message.get("name") or "unknown_tool")
-    hint = str(payload.get("continuation_hint") or f"Use file_read with path={path}")
-    summary = f"{tool_name} result saved at {path} ({original_chars} chars). {hint}"
-    payload["content"] = summary
-    payload["content_format"] = "summary"
-    payload["truncated"] = True
-    message["content"] = json.dumps(payload, ensure_ascii=False)
-    return CompressionDiagnostic(
-        stage="historical_tool_message",
-        subject=tool_name,
-        decision="artifact_summary",
-        reason="older_artifact_result",
-        original_chars=len(original_content),
-        final_chars=len(message["content"]),
-        original_tokens=estimate_text_tokens(original_content),
-        final_tokens=estimate_text_tokens(message["content"]),
-        artifact_path=path,
     )
 
 

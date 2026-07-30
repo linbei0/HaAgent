@@ -20,9 +20,9 @@ class CompressionBudget:
     context_builder_max_tokens: int
     tool_output_inline_chars: int = 12_000
     tool_output_preview_chars: int = 3_000
-    artifact_recent_preview_count: int = 3
     historical_collapse_head_chars: int = 900
     historical_collapse_tail_chars: int = 500
+    checkpoint_preserve_recent_messages: int = 4
     full_compact_preserve_recent: int = 6
 
 

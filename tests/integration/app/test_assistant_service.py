@@ -66,7 +66,10 @@ class RecordingGateway:
 
     def generate(self, invocation, **kwargs):
         messages = invocation.messages
-        task_content = next((m["content"] for m in messages if m.get("role") == "user"), "")
+        task_content = next(
+            (message["content"] for message in reversed(messages) if message.get("role") == "user"),
+            "",
+        )
         self.model_inputs.append(task_content)
         return ModelResponse("done", [])
 

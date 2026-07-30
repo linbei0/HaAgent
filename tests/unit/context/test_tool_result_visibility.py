@@ -5,6 +5,7 @@ tests/unit/context/test_tool_result_visibility.py - 工具结果模型可见合�
 """
 
 import json
+import hashlib
 
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.tool_results import (
@@ -38,6 +39,8 @@ def test_long_mcp_output_becomes_tool_result_view_with_artifact() -> None:
     assert view["artifact"]["original_chars"] == len(output)
     assert view["artifact"]["preview_chars"] == len(view["content"])
     assert view["truncated"] is True
+    assert view["representation_version"] == 1
+    assert view["content_digest"] == f"sha256:{hashlib.sha256(output.encode('utf-8')).hexdigest()}"
     assert "start" in view["content"]
     assert "important tail" in view["content"]
     assert len(view["content"]) <= 3_000

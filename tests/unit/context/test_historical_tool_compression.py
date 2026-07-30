@@ -1,8 +1,8 @@
 """
 tests/unit/context/test_historical_tool_compression.py - 历史工具消息压缩测试
 
-验证 artifact-backed 工具结果按新旧分层保留或降级，长文本结果按统一策略折叠。
-新增 KV-cache 稳定性测试：验证 append-only 前缀在连续轮次间保持不变。
+验证工具结果首次进入模型后保持不可变，长文本结果按统一策略折叠。
+KV-cache 稳定性测试覆盖完整模型视图，而非只覆盖 system 前缀。
 """
 
 import json
@@ -37,39 +37,14 @@ def _artifact_tool_message(index: int) -> dict[str, object]:
     }
 
 
-def test_recent_three_artifact_backed_tool_messages_keep_previews() -> None:
+def test_artifact_backed_tool_messages_keep_immutable_previews() -> None:
     messages = [_artifact_tool_message(index) for index in range(4)]
-    original_content_0 = messages[0]["content"]
 
     view, diagnostics = build_compressed_model_view(messages, derive_compression_budget(None))
 
-    kept_payloads = [json.loads(message["content"]) for message in view[1:]]
-    assert [payload["content"] for payload in kept_payloads] == ["preview-1", "preview-2", "preview-3"]
-    assert json.loads(view[0]["content"])["content_format"] == "summary"
-    assert diagnostics[0].stage == "historical_tool_message"
-    assert diagnostics[0].decision == "artifact_summary"
-    assert diagnostics[0].reason == "older_artifact_result"
-    # 原始消息不被修改（append-only 保证）
-    assert messages[0]["content"] == original_content_0
-
-
-def test_older_artifact_backed_message_becomes_path_summary() -> None:
-    messages = [_artifact_tool_message(index) for index in range(5)]
-    original_content_0 = messages[0]["content"]
-
-    view, _ = build_compressed_model_view(messages, derive_compression_budget(None))
-
-    payload = json.loads(view[0]["content"])
-    assert payload["kind"] == "tool_result_view"
-    assert payload["content_format"] == "summary"
-    assert payload["content"] == (
-        "mcp__fixture__fetch result saved at .runs/episode/artifacts/tool-results/tool-0.txt "
-        "(13000 chars). Use file_read with path=.runs/episode/artifacts/tool-results/tool-0.txt"
-    )
-    assert payload["artifact"]["path"] == ".runs/episode/artifacts/tool-results/tool-0.txt"
-    assert "preview-0" not in view[0]["content"]
-    # 原始消息不被修改
-    assert messages[0]["content"] == original_content_0
+    assert view == messages
+    assert diagnostics == []
+    assert all(view[index] is messages[index] for index in range(len(messages)))
 
 
 def test_non_artifact_long_tool_result_collapses_with_head_and_tail() -> None:
@@ -136,12 +111,8 @@ def test_append_only_prefix_stability() -> None:
     assert messages_turn_2[3] is tool_result  # 同一对象引用
     assert messages_turn_2[3]["content"] == tool_result["content"]
 
-    # 验证: 视图中非 recent 窗口的消息在两轮间保持一致
-    # Turn 1 只有 1 个 artifact（在 recent 窗口内），不压缩
-    # Turn 2 有 4 个 artifact，第 1 个（index=3）离开 recent 窗口被压缩
-    # 但 system/user/assistant 消息（index 0-2）始终不变
-    for i in range(3):
-        assert view_1[i] == view_2[i], f"prefix mismatch at index {i}"
+    # 完整旧视图必须成为新视图的精确前缀，工具结果不能在后续轮次改写。
+    assert view_2[: len(view_1)] == view_1
 
 
 def test_original_messages_never_mutated() -> None:

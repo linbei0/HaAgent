@@ -26,9 +26,11 @@ from haagent.context.manifest import (
     ContextManifest,
 )
 from haagent.context.messages import (
+    build_context_state_snapshot_message,
     build_system_message,
     build_task_message,
 )
+from haagent.context.versioned_state import ContextStateSnapshot, content_digest
 from haagent.context.selection import (
     ContextCandidateInputs,
     ContextSelector,
@@ -71,6 +73,14 @@ from haagent.tools.session_history import SESSION_HISTORY_USAGE_GUIDANCE
 
 CONTEXT_MANIFEST_VERSION = "2.0"
 PROJECT_INSTRUCTIONS_CHAR_LIMIT = 4000
+CONTEXT_STATE_SECTION_TITLES = {
+    "working_state": "Working State",
+    "task_ledger": "Task Ledger",
+    "planning_state": "Planning State",
+    "memory_index": "Memory/SOP Navigation Index",
+    "memory": "Relevant Memory",
+    "interaction_history": "Interaction History",
+}
 # session_summary 的截断决策已上移至 compact_session_memory（整轮丢弃），
 # builder 不再叠加更小的本地硬截断；此常量仅用于诊断展示的历史口径。
 SESSION_SUMMARY_CHAR_LIMIT = 12000
@@ -101,12 +111,19 @@ class BuiltContext:
     messages: list[dict]
     manifest: ContextManifest
     diagnostics: list[ContextSelectionRecord]
+    context_state: ContextStateSnapshot | None = None
+    user_request_message: dict | None = None
 
     @property
     def model_input(self) -> str:
         """Backward-compat: return concatenated message content as a single string."""
         parts: list[str] = []
-        for msg in self.messages:
+        diagnostic_messages = list(self.messages)
+        if self.context_state is not None:
+            diagnostic_messages.append(build_context_state_snapshot_message(self.context_state))
+        if self.user_request_message is not None:
+            diagnostic_messages.append(self.user_request_message)
+        for msg in diagnostic_messages:
             content = msg.get("content")
             if isinstance(content, str) and content:
                 parts.append(content)
@@ -174,11 +191,10 @@ class ContextBuilder:
             self._compaction_budget,
         )
         selected_sections = {section.key: section.content for section in compaction.sections}
-        interaction_state_lines = selected_sections.get("interaction_history", "").splitlines()
+        # system/task 只承载本轮稳定前缀；运行态移到版本化结构化消息，避免每轮改写缓存前缀。
         system_msg = build_system_message(
             project_instructions=selected_sections.get("project_instructions") or None,
             tool_workflow_hints=self._tool_workflow_hints(),
-            session_summary=selected_sections.get("session_summary") or None,
             prompt_packs=selected_sections.get("prompt_pack") or None,
             skills_block=selected_sections.get("skills") or None,
             soul=selected_sections.get("soul") or None,
@@ -186,21 +202,49 @@ class ContextBuilder:
         task_msg = build_task_message(
             task=self._task,
             plan_steps=list(plan.get("planned_steps", [])),
-            task_ledger_content=selected_sections.get("task_ledger") or None,
-            planning_state_content=selected_sections.get("planning_state") or None,
-            working_state_content=selected_sections.get("working_state") or None,
-            memory_index_block=selected_sections.get("memory_index") or None,
-            memory_block=selected_sections.get("memory") or None,
-            interaction_state_lines=interaction_state_lines,
         )
-        messages = [system_msg, task_msg]
+        messages = [system_msg]
+
+        dynamic_keys = {
+            "session_summary",
+            "working_state",
+            "task_ledger",
+            "planning_state",
+            "memory_index",
+            "memory",
+            "interaction_history",
+        }
+        dynamic_sections = {
+            key: format_context_state_section(key, selected_sections[key])
+            for key in sorted(dynamic_keys)
+            if selected_sections.get(key)
+        }
+        context_state = ContextStateSnapshot.create(
+            epoch=0,
+            revision=1,
+            sections=dynamic_sections,
+            source_digests={
+                key: content_digest(value)
+                for key, value in dynamic_sections.items()
+            },
+        )
 
         system_chars = len(system_msg["content"])
         task_chars = len(task_msg["content"])
 
         snapshot_path = contexts_dir / f"{context_id}.json"
         snapshot_path.write_text(
-            json.dumps(_messages_for_snapshot(messages), ensure_ascii=False, indent=2),
+            json.dumps(
+                _messages_for_snapshot(
+                    [
+                        *messages,
+                        build_context_state_snapshot_message(context_state),
+                        task_msg,
+                    ],
+                ),
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
 
@@ -235,7 +279,7 @@ class ContextBuilder:
             provider=self._provider_name,
             workspace_root=str(self._workspace_root),
             generated_at=_now_iso(),
-            message_count=len(messages),
+            message_count=len(messages) + 2,
             system_chars=system_chars,
             task_chars=task_chars,
             memory=self._memory_manifest(),
@@ -263,6 +307,8 @@ class ContextBuilder:
         return BuiltContext(
             context_id=context_id,
             messages=messages,
+            context_state=context_state,
+            user_request_message=task_msg,
             manifest=manifest,
             diagnostics=compaction.diagnostics,
         )
@@ -550,6 +596,20 @@ class ContextBuilder:
         if len(items) > 20:
             lines.append(f"- ... {len(items) - 20} more skills available via skill_list")
         return "\n".join(lines)
+
+
+def format_context_state_section(key: str, content: object) -> object:
+    if not isinstance(content, str):
+        return content
+    title = CONTEXT_STATE_SECTION_TITLES.get(key)
+    if title is None or content.startswith(f"{title}:"):
+        return content
+    return f"{title}:\n{content}"
+
+
+def format_interaction_state_for_model(records: list[dict]) -> str:
+    lines = [f"- {_interaction_state_summary(record)}" for record in records[-8:]]
+    return format_context_state_section("interaction_history", "\n".join(lines))
 
 
 def _compaction_manifest(compaction: ContextCompactionResult) -> dict:

@@ -278,7 +278,8 @@ def _gate_memory_retrieval_p95(root: Path) -> LatencyGateResult:
     _write_memory_scale_data(workspace, count=10_000)
     retriever = MemoryRetriever()
     request = MemoryRetrievalRequest(
-        query="latency marker",
+        # 公共词在全部 10k 记录中出现时 BM25 IDF 接近零，无法验证有效检索路径。
+        query="latency marker 9999",
         workspace_root=workspace,
         user_memory_root=user_memory_root,
     )

@@ -273,7 +273,7 @@ def plan_full_compact_window(
     message_count = len(messages)
     requested_recent = min(max(0, preserve_recent), message_count)
     boundary = message_count - requested_recent
-    boundary = _adjust_boundary_for_tool_pairs(messages, boundary)
+    boundary = adjust_boundary_for_tool_pairs(messages, boundary)
     older_count = boundary
     preserved_count = message_count - boundary
     blocked_reason = None
@@ -282,7 +282,7 @@ def plan_full_compact_window(
     return FullCompactPlan(
         older_message_count=older_count,
         preserved_recent_count=preserved_count,
-        tool_pair_safe=_tool_pair_boundary_safe(messages, boundary),
+        tool_pair_safe=tool_pair_boundary_safe(messages, boundary),
         blocked_reason=blocked_reason,
         preserved_start_index=boundary,
     )
@@ -405,14 +405,14 @@ def _session_compaction_sufficient(session_compaction: dict[str, Any] | None, bu
     return decision == "compacted" and isinstance(saved_chars, int) and saved_chars > 0
 
 
-def _adjust_boundary_for_tool_pairs(messages: list[dict], boundary: int) -> int:
+def adjust_boundary_for_tool_pairs(messages: list[dict], boundary: int) -> int:
     adjusted = boundary
-    while adjusted > 0 and not _tool_pair_boundary_safe(messages, adjusted):
+    while adjusted > 0 and not tool_pair_boundary_safe(messages, adjusted):
         adjusted -= 1
     return adjusted
 
 
-def _tool_pair_boundary_safe(messages: list[dict], boundary: int) -> bool:
+def tool_pair_boundary_safe(messages: list[dict], boundary: int) -> bool:
     if boundary <= 0 or boundary >= len(messages):
         return True
     older_tool_call_ids = set()
@@ -422,7 +422,7 @@ def _tool_pair_boundary_safe(messages: list[dict], boundary: int) -> bool:
     for index, message in enumerate(messages):
         target_tool_calls = older_tool_call_ids if index < boundary else preserved_tool_call_ids
         target_tool_results = older_tool_result_ids if index < boundary else preserved_tool_result_ids
-        for call_id in _assistant_tool_call_ids(message):
+        for call_id in assistant_tool_call_ids(message):
             target_tool_calls.add(call_id)
         tool_call_id = message.get("tool_call_id")
         if message.get("role") == "tool" and isinstance(tool_call_id, str):
@@ -430,7 +430,7 @@ def _tool_pair_boundary_safe(messages: list[dict], boundary: int) -> bool:
     return not (older_tool_call_ids & preserved_tool_result_ids or preserved_tool_call_ids & older_tool_result_ids)
 
 
-def _assistant_tool_call_ids(message: dict) -> list[str]:
+def assistant_tool_call_ids(message: dict) -> list[str]:
     if message.get("role") != "assistant":
         return []
     tool_calls = message.get("tool_calls")

@@ -15,13 +15,23 @@ from threading import Lock
 from typing import Any, Callable
 
 from haagent.context.compression.budget import CompressionBudget
+from haagent.context.compression.checkpoint import maybe_checkpoint_messages
 from haagent.context.compression.messages import build_compressed_model_view
 from haagent.context.messages import (
     build_assistant_message,
+    build_context_state_delta_message,
+    build_context_state_snapshot_message,
     build_steering_message,
     build_suggestion_message,
     build_tool_result_message,
     generate_tool_call_id,
+    is_context_state_message,
+)
+from haagent.context.versioned_state import (
+    ContextStateSnapshot,
+    ContextStateError,
+    next_snapshot,
+    reset_epoch,
 )
 from haagent.models.capabilities import effective_input_window_tokens
 from haagent.models.telemetry import ModelTransportEvent
@@ -83,6 +93,8 @@ class TurnLoopState:
     verification_engine: VerificationEngine | None = None
     pending_worker_task_ids: list[str] = field(default_factory=list)
     progress_warn_emitted: bool = False
+    context_epoch: int = 0
+    context_snapshot: ContextStateSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,8 @@ class TurnLoopDependencies:
     progress_guard_mode: str = "warn"
     on_progress_blocked: Callable[[int, ProgressDecision], None] | None = None
     plan_execution_has_active_todos: Callable[[], bool] | None = None
+    context_state_provider: Callable[[], dict[str, object]] | None = None
+    context_state_sink: Callable[[ContextStateSnapshot], None] | None = None
 
 
 def run_turn_loop(
@@ -130,6 +144,8 @@ def run_turn_loop(
     turn_numbers = count(1) if deps.max_turns is None else range(1, deps.max_turns + 1)
     for turn in turn_numbers:
         deps.raise_if_cancelled()
+        if state.context_snapshot is not None and state.context_epoch != state.context_snapshot.epoch:
+            state.context_epoch = state.context_snapshot.epoch
         # 安全边界：上一轮工具批次已收尾、下一次模型调用尚未发出，此处注入运行中引导。
         _drain_steering(turn=turn, state=state, deps=deps)
         if state.pending_worker_task_ids:
@@ -142,6 +158,47 @@ def run_turn_loop(
                 },
             )
             state.messages.append(_build_worker_notifications_message(notifications))
+
+        _sync_context_state(turn=turn, state=state, deps=deps)
+
+        # 压缩只在模型调用边界整段切换一次；同一 epoch 内已发送消息绝不改写。
+        checkpoint = maybe_checkpoint_messages(
+            messages=state.messages,
+            budget=deps.compression_budget,
+            epoch=state.context_epoch,
+            artifact_writer=deps.writer.write_tool_artifact,
+        )
+        if checkpoint.applied:
+            state.messages = checkpoint.messages
+            state.context_epoch = checkpoint.epoch
+            if state.context_snapshot is not None:
+                state.context_snapshot = reset_epoch(state.context_snapshot, checkpoint.epoch)
+                state.messages = _insert_fresh_context_snapshot(state.messages, state.context_snapshot)
+                if deps.context_state_sink is not None:
+                    deps.context_state_sink(state.context_snapshot)
+            deps.writer.append_transcript(
+                {
+                    "event": "context_checkpoint",
+                    "turn": turn,
+                    "context_revision": (
+                        state.context_snapshot.revision
+                        if state.context_snapshot is not None
+                        else None
+                    ),
+                    "context_snapshot_id": (
+                        state.context_snapshot.snapshot_id
+                        if state.context_snapshot is not None
+                        else None
+                    ),
+                    "changed_sections": (
+                        sorted(state.context_snapshot.sections)
+                        if state.context_snapshot is not None
+                        else []
+                    ),
+                    **checkpoint.diagnostic,
+                },
+            )
+
         def record_schema_cache(value: dict[str, object]) -> None:
             if deps.performance_trace is not None:
                 deps.performance_trace.record_cache_diagnostic("tool_schema", value)
@@ -156,18 +213,6 @@ def run_turn_loop(
         schema_bytes = len(
             json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         )
-        if deps.performance_trace is not None:
-            deps.performance_trace.begin_model_turn(
-                turn=turn,
-                message_count=len(state.messages),
-                visible_tool_count=len(tool_schemas),
-                schema_bytes=schema_bytes,
-                stable_prefix_fingerprint=_stable_prefix_fingerprint(
-                    state.messages,
-                    tool_schemas,
-                ),
-            )
-
         max_attempts = _retry_max_attempts(deps.model_gateway)
         model_attempt = 1
         deps.writer.append_transcript(
@@ -179,6 +224,9 @@ def run_turn_loop(
                 "attempt": model_attempt,
                 "max_attempts": max_attempts,
                 "goal": deps.task_goal,
+                "context_epoch": state.context_epoch,
+                "context_revision": state.context_snapshot.revision if state.context_snapshot else None,
+                "context_snapshot_id": state.context_snapshot.snapshot_id if state.context_snapshot else None,
             },
         )
         deps.emit_event(
@@ -254,6 +302,14 @@ def run_turn_loop(
             event["turn"] = turn
             deps.writer.append_transcript({"event": "compression_diagnostic", **event})
             deps.emit_event({"event_type": "compression_diagnostic", **event})
+        if deps.performance_trace is not None:
+            deps.performance_trace.begin_model_turn(
+                turn=turn,
+                message_count=len(model_view),
+                visible_tool_count=len(tool_schemas),
+                schema_bytes=schema_bytes,
+                stable_prefix_fingerprint=_stable_prefix_fingerprint(model_view, tool_schemas),
+            )
         invocation = ModelInvocation(messages=model_view, tool_schemas=tool_schemas, settings=settings)
         generate_kwargs: dict[str, object] = {
             "invocation": invocation,
@@ -316,6 +372,9 @@ def run_turn_loop(
                     "attempt": model_attempt,
                     "max_attempts": max_attempts,
                     "goal": deps.task_goal,
+                    "context_epoch": state.context_epoch,
+                    "context_revision": state.context_snapshot.revision if state.context_snapshot else None,
+                    "context_snapshot_id": state.context_snapshot.snapshot_id if state.context_snapshot else None,
                 },
             )
             if deps.persist_performance is not None:
@@ -493,6 +552,73 @@ def run_turn_loop(
     return None
 
 
+def _sync_context_state(
+    *,
+    turn: int,
+    state: TurnLoopState,
+    deps: TurnLoopDependencies,
+) -> None:
+    provider = deps.context_state_provider
+    if provider is None or state.context_snapshot is None:
+        return
+    sections = provider()
+    if not isinstance(sections, dict):
+        raise ContextStateError("context_state_provider must return a dictionary")
+    updated, delta = next_snapshot(state.context_snapshot, sections)
+    if delta is None:
+        return
+    state.context_snapshot = updated
+    state.messages.append(build_context_state_delta_message(delta))
+    if deps.context_state_sink is not None:
+        deps.context_state_sink(updated)
+    deps.writer.append_transcript(
+        {
+            "event": "context_state_delta",
+            "turn": turn,
+            "epoch": updated.epoch,
+            "base_revision": delta.base_revision,
+            "revision": updated.revision,
+            "base_snapshot_id": delta.base_snapshot_id,
+            "snapshot_id": updated.snapshot_id,
+            "changed_sections": sorted(delta.changed),
+            "removed_sections": list(delta.removed),
+            "changed_chars": sum(len(str(value)) for value in delta.changed.values()),
+        },
+    )
+
+
+def _insert_fresh_context_snapshot(
+    messages: list[dict[str, Any]],
+    snapshot: ContextStateSnapshot,
+) -> list[dict[str, Any]]:
+    """epoch 切换时删除旧状态消息，并在 checkpoint 后插入唯一完整快照。"""
+
+    filtered = [
+        message
+        for message in messages
+        if not is_context_state_message(message)
+    ]
+    index = 0
+    while index < len(filtered) and filtered[index].get("role") == "system":
+        index += 1
+    if index < len(filtered) and filtered[index].get("role") == "user":
+        index += 1
+    if index < len(filtered) and _is_checkpoint_message(filtered[index]):
+        index += 1
+    filtered.insert(index, build_context_state_snapshot_message(snapshot))
+    return filtered
+
+
+def _is_checkpoint_message(message: dict[str, Any]) -> bool:
+    if message.get("role") != "user" or not isinstance(message.get("content"), str):
+        return False
+    try:
+        payload = json.loads(message["content"])
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("kind") == "context_checkpoint"
+
+
 def _drain_steering(
     *,
     turn: int,
@@ -534,6 +660,15 @@ def _handle_no_tool_response(
             deps=deps,
             evidence="model returned empty completion candidate without tool calls",
         )
+    if not model_response.tool_calls:
+        # 最终/候选回复进入 session 模型历史；下一条用户请求才能真正追加在它后面。
+        state.messages.append(
+            build_assistant_message(
+                model_response.content,
+                [],
+                provider_turn_state=model_response.provider_turn_state,
+            ),
+        )
     deps.writer.append_transcript(
         {
             "event": "completion_candidate_reviewed",
@@ -562,13 +697,6 @@ def _handle_no_tool_response(
             },
         )
         deps.emit_event(AssistantIntermediateBusEvent(turn=turn, content=model_response.content))
-        state.messages.append(
-            build_assistant_message(
-                model_response.content,
-                [],
-                provider_turn_state=model_response.provider_turn_state,
-            ),
-        )
         _drain_steering(turn=turn, state=state, deps=deps)
         return None
     if deps.plan_execution_has_active_todos is not None and deps.plan_execution_has_active_todos():

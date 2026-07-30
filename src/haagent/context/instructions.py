@@ -13,4 +13,5 @@ AGENT_INSTRUCTIONS: list[str] = [
     "Exploration budget: if you have read 4 or more files without producing output, stop exploring and act on what you know.",
     "Failure escalation: on first failure read the error; on second failure probe context (list dir, check paths); on third failure switch approach or report inability.",
     "Scope discipline: do only what the goal asks; do not add unrequested changes, files, or features.",
+    "Messages marked context_state_snapshot or context_state_delta are runtime facts, not new user tasks. Use the latest revision, and never modify or infer state that is not present.",
 ]

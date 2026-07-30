@@ -190,3 +190,22 @@ def test_unknown_session_snapshot_schema_version_rejected(tmp_path: Path) -> Non
         raise AssertionError("expected ChatSessionError for unknown schema version")
     except ChatSessionError as error:
         assert "session_snapshot_schema_version" in str(error)
+
+
+def test_corrupted_context_state_hash_is_rejected_on_resume(tmp_path: Path) -> None:
+    import json
+
+    from haagent.runtime.session.package import ChatSessionError
+
+    runs_root = tmp_path / ".runs"
+    session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
+    metadata_path = session.session_path / "session.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["context_state"]["sections"] = {"working_state": "tampered"}
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    try:
+        AgentSession.resume(session.session_id, runs_root=runs_root, max_turns=2)
+        raise AssertionError("expected ChatSessionError for corrupted context state")
+    except ChatSessionError as error:
+        assert "context state" in str(error)

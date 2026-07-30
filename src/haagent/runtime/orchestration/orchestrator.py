@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from haagent.context.compression.budget import derive_compression_budget
-from haagent.context.builder import ContextBuildError, ContextBuilder
+from haagent.context.builder import (
+    ContextBuildError,
+    ContextBuilder,
+    format_interaction_state_for_model,
+)
+from haagent.context.versioned_state import ContextStateSnapshot
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelCallError, ModelGateway
 from haagent.models.config.connections import user_config_dir
@@ -89,6 +94,12 @@ class RunOrchestrator:
         planning_state_handler: Callable[[str, dict[str, object], int], dict[str, object]] | None = None,
         plan_execution_has_active_todos: Callable[[], bool] | None = None,
         session_path: Path | None = None,
+        context_state_snapshot: ContextStateSnapshot | None = None,
+        context_state_provider: Callable[[], dict[str, object]] | None = None,
+        context_state_sink: Callable[[ContextStateSnapshot], None] | None = None,
+        model_context_messages: list[dict[str, Any]] | None = None,
+        model_context_sink: Callable[[list[dict[str, Any]], int], None] | None = None,
+        force_context_rebuild: bool = False,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -116,6 +127,12 @@ class RunOrchestrator:
         self._instruction_cache = instruction_cache
         self._tool_schema_cache = tool_schema_cache
         self._session_path = session_path
+        self._context_state_snapshot = context_state_snapshot
+        self._context_state_provider = context_state_provider
+        self._context_state_sink = context_state_sink
+        self._model_context_messages = list(model_context_messages or [])
+        self._model_context_sink = model_context_sink
+        self._force_context_rebuild = force_context_rebuild
         self._working_state_sink = working_state_sink
         self._todo_state_sink = todo_state_sink
         self._planning_state_handler = planning_state_handler
@@ -284,6 +301,17 @@ class RunOrchestrator:
                 session_interaction_state=self._session_interaction_state,
             )
 
+            context_state_provider = self._context_state_provider
+            if context_state_provider is not None:
+                base_context_state_provider = context_state_provider
+
+                def context_state_provider() -> dict[str, object]:
+                    sections = dict(base_context_state_provider())
+                    records = interaction_resolver.state_records()
+                    if records:
+                        sections["interaction_history"] = format_interaction_state_for_model(records)
+                    return sections
+
             performance_trace.mark_context_build_start()
             prepared_messages = prepare_initial_messages(
                 context_builder_cls=ContextBuilder,
@@ -302,6 +330,10 @@ class RunOrchestrator:
                 tool_registry=runtime_tool_registry,
                 instruction_cache=self._instruction_cache,
                 skill_catalog=self._skill_catalog,
+                context_state_snapshot=self._context_state_snapshot,
+                context_state_sink=self._context_state_sink,
+                model_context_messages=self._model_context_messages,
+                force_context_rebuild=self._force_context_rebuild,
             )
             performance_trace.mark_context_built()
             for component, diagnostic in prepared_messages.cache_diagnostics.items():
@@ -324,12 +356,19 @@ class RunOrchestrator:
                     summary="task plan ready",
                 ),
             )
-            turn_result = run_turn_loop(
-                state=TurnLoopState(
-                    messages=messages,
-                    context_id=context_id,
-                    verification_engine=verification_engine,
+            loop_state = TurnLoopState(
+                messages=messages,
+                context_id=context_id,
+                verification_engine=verification_engine,
+                context_snapshot=prepared_messages.context_state,
+                context_epoch=(
+                    prepared_messages.context_state.epoch
+                    if prepared_messages.context_state is not None
+                    else 0
                 ),
+            )
+            turn_result = run_turn_loop(
+                state=loop_state,
                 deps=TurnLoopDependencies(
                     model_gateway=self._model_gateway,
                     writer=writer,
@@ -382,9 +421,13 @@ class RunOrchestrator:
                         decision=decision,
                     ),
                     plan_execution_has_active_todos=self._plan_execution_has_active_todos,
+                    context_state_provider=context_state_provider,
+                    context_state_sink=self._context_state_sink,
                 ),
             )
             if turn_result is not None:
+                if self._model_context_sink is not None:
+                    self._model_context_sink(loop_state.messages, loop_state.context_epoch)
                 return turn_result
         except RunCancelled as error:
             _emit_task_recovery(

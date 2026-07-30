@@ -9,6 +9,7 @@ AgentSession 只持有二者，不再逐字段镜像。
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -29,6 +30,7 @@ from haagent.runtime.session.package import (
     new_session_id,
     read_image_attachment_history,
     read_manual_compaction_state,
+    read_model_context,
     read_session_image_attachments,
     read_session_metadata,
     read_session_turns,
@@ -52,10 +54,11 @@ from haagent.runtime.session.working_state import (
     empty_working_state,
     load_working_state,
 )
+from haagent.context.versioned_state import ContextStateSnapshot, ContextStateError
 from haagent.tools.registry import default_tool_runtime_registry
 
 # 磁盘 session package 的逻辑 schema；迁移只经 SessionSnapshot 入口。
-SESSION_SNAPSHOT_SCHEMA_VERSION = 3
+SESSION_SNAPSHOT_SCHEMA_VERSION = 5
 # 无 session_snapshot_schema_version 字段的旧 package 视为 v0。
 SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION = 0
 
@@ -116,6 +119,10 @@ class SessionSnapshot:
     session_path: Path
     created_at: str
     session_interaction_state: SessionInteractionState
+    context_state: ContextStateSnapshot
+    model_context_messages: list[dict[str, object]]
+    model_context_epoch: int
+    context_rebuild_required: bool
 
     def clone(self) -> SessionSnapshot:
         """浅拷贝容器字段，避免 new/reload 共享可变 list。"""
@@ -125,6 +132,8 @@ class SessionSnapshot:
             turn_records=list(self.turn_records),
             last_user_image_attachments=list(self.last_user_image_attachments),
             image_attachment_history=list(self.image_attachment_history),
+            context_state=ContextStateSnapshot.from_dict(self.context_state.to_dict()),
+            model_context_messages=deepcopy(self.model_context_messages),
         )
 
 
@@ -252,6 +261,10 @@ def build_create_state(
         ),
         created_at=created_at.isoformat(),
         session_interaction_state=SessionInteractionState(),
+        context_state=ContextStateSnapshot.create(),
+        model_context_messages=[],
+        model_context_epoch=0,
+        context_rebuild_required=False,
     )
     resources = SessionResources(
         model_gateway=model_gateway,
@@ -295,6 +308,8 @@ def build_resume_state(
 ) -> SessionRuntimeState:
     session_path = resolve_session_path(session, runs_root or user_runs_dir())
     metadata = read_session_metadata(session_path)
+    disk_schema_version = resolve_session_snapshot_schema_version(metadata)
+    schema_version = migrate_session_snapshot_schema_version(disk_schema_version)
     turns = read_session_turns(session_path)
     workspace_root = Path(str(metadata["workspace_root"])).resolve()
     raw_policy = metadata.get("path_policy")
@@ -316,8 +331,17 @@ def build_resume_state(
         planning_state = load_planning_state(session_path / "planning-state.json")
     except PlanningStateError as error:
         raise ChatSessionError(str(error)) from error
-    disk_schema_version = resolve_session_snapshot_schema_version(metadata)
-    schema_version = migrate_session_snapshot_schema_version(disk_schema_version)
+    try:
+        context_state = ContextStateSnapshot.from_dict(metadata.get("context_state"))
+    except ContextStateError as error:
+        raise ChatSessionError(f"invalid session context state: {error}") from error
+    model_context_messages, model_context_epoch = read_model_context(
+        session_path,
+        expected_state=context_state,
+    )
+    context_rebuild_required = metadata.get("context_rebuild_required")
+    if not isinstance(context_rebuild_required, bool):
+        raise ChatSessionError("invalid session.json: context_rebuild_required must be a boolean")
     # 有现成 MCP 时复用（会话切换热路径）；否则自建。不恢复 worker/tool override。
     if mcp_runtime is not None:
         settings = mcp_settings if mcp_settings is not None else mcp_runtime.settings
@@ -369,6 +393,10 @@ def build_resume_state(
             edit_diff_session_always=bool(metadata.get("edit_diff_session_always", False)),
             permission_rules=_load_permission_rules(metadata.get("permission_rules")),
         ),
+        context_state=context_state,
+        model_context_messages=model_context_messages,
+        model_context_epoch=model_context_epoch,
+        context_rebuild_required=context_rebuild_required,
     )
     resources = SessionResources(
         model_gateway=model_gateway,
@@ -451,6 +479,10 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         created_at=created_at.isoformat(),
         # 新 session 不继承上一会话的 edit_diff always
         session_interaction_state=SessionInteractionState(),
+        context_state=ContextStateSnapshot.create(),
+        model_context_messages=[],
+        model_context_epoch=0,
+        context_rebuild_required=False,
     )
     resources = SessionResources(
         model_gateway=res.model_gateway,

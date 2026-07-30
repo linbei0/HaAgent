@@ -7,6 +7,7 @@ tests/integration/cli/test_cli_personal_assistant.py - 个人助手启动体验�
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from haagent import cli
@@ -21,12 +22,14 @@ class RecordingGateway:
 
     def __init__(self) -> None:
         self.model_inputs: list[str] = []
+        self.message_inputs: list[list[dict[str, object]]] = []
 
     def generate(self, invocation, **kwargs):
         messages = invocation.messages
         tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
+        self.message_inputs.append(deepcopy(messages))
         return ModelResponse(f"done: {' '.join(m.get('content', '') for m in messages if m.get('role') == 'user')}", [])
 
 
@@ -36,6 +39,7 @@ class ConciseRecordingGateway(RecordingGateway):
         tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
+        self.message_inputs.append(deepcopy(messages))
         return ModelResponse("done", [])
 
 
@@ -45,6 +49,7 @@ class SmartCompactGateway(RecordingGateway):
         tool_schemas = invocation.tool_schemas
         model_input = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
         self.model_inputs.append(model_input)
+        self.message_inputs.append(deepcopy(messages))
         if "HaAgent full compact summarizer" in model_input:
             return ModelResponse(
                 json.dumps(
@@ -244,13 +249,37 @@ def test_chat_session_auto_compacts_old_turn_summaries_without_model_summary(tmp
     ]
 
     assert "[session_memory_compacted 1 earlier turns]" in gateway.model_inputs[-1]
-    assert "- user_request: turn 1" not in gateway.model_inputs[-1].splitlines()
-    # 新行为：最近轮完整问答以 `user:` 原文进入模型输入，而非截断摘要行。
+    assert "- user_request: turn 1" not in gateway.model_inputs[-1]
+    # session summary 通过结构化 context snapshot 进入模型输入。
     for index in range(2, 8):
-        assert f"user: turn {index}" in gateway.model_inputs[-1].splitlines()
+        assert f"user: turn {index}" in gateway.model_inputs[-1]
     assert context_manifest["session_compaction"]["decision"] == "compacted"
     assert context_manifest["session_compaction"]["compacted_turn_count"] == 1
     assert any(event.get("event") == "session_memory_compaction" for event in transcript)
+    assert any(
+        event.get("event") == "context_epoch_rebuilt"
+        and event.get("reason") == "session_memory_compacted"
+        for event in transcript
+    )
+
+
+def test_chat_session_appends_new_requests_without_rewriting_previous_model_input(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    gateway = ConciseRecordingGateway()
+    session = AgentSession(
+        workspace_root=workspace,
+        runs_root=workspace / ".runs",
+        model_gateway=gateway,
+    )
+
+    session.run_prompt("first request")
+    session.run_prompt("second request")
+
+    first, second = gateway.message_inputs
+    assert second[: len(first)] == first
+    assert second[-1]["role"] == "user"
+    assert "second request" in str(second[-1]["content"])
 
 
 def test_chat_session_manual_compact_uses_smart_summary_for_next_turn(tmp_path: Path) -> None:
@@ -266,16 +295,28 @@ def test_chat_session_manual_compact_uses_smart_summary_for_next_turn(tmp_path: 
         session.run_prompt(f"turn {index}")
 
     compact_result = session.compact_current_session()
-    session.run_prompt("continue after compact")
+    previous_epoch = session.snapshot.context_state.epoch
+    metadata = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
+    assert metadata["context_rebuild_required"] is True
+
+    resumed = AgentSession.resume(
+        session.session_id,
+        runs_root=workspace / ".runs",
+        model_gateway=gateway,
+    )
+    session.close()
+    resumed.run_prompt("continue after compact")
 
     assert compact_result.applied is True
     assert compact_result.reason == "applied"
     assert any("HaAgent full compact summarizer" in item for item in gateway.model_inputs)
     assert "Full Compact Summary:" in gateway.model_inputs[-1]
     assert "保留用户已确认的实现方向" in gateway.model_inputs[-1]
-    assert "- user_request: turn 1" not in gateway.model_inputs[-1].splitlines()
+    assert "- user_request: turn 1" not in gateway.model_inputs[-1]
     for index in range(3, 9):
-        assert f"- user_request: turn {index}" in gateway.model_inputs[-1].splitlines()
+        assert f"- user_request: turn {index}" in gateway.model_inputs[-1]
+    assert resumed.snapshot.context_state.epoch == previous_epoch + 1
+    assert resumed.snapshot.context_rebuild_required is False
 
 
 def test_session_metadata_records_model_profile_without_api_key(tmp_path: Path) -> None:

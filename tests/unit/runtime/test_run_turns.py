@@ -12,7 +12,7 @@ import json
 import threading
 import time
 
-from haagent.context.compression.budget import derive_compression_budget
+from haagent.context.compression.budget import CompressionBudget, derive_compression_budget
 from haagent.models.gateway_retry import execute_model_request
 from haagent.models.types import (
     ModelCallError,
@@ -119,6 +119,12 @@ class _FakeWriter:
 
     def write_failure_attribution(self, record: dict[str, Any] | None) -> None:
         self.failure_records.append(record)
+
+    def write_tool_artifact(self, tool_name: str, content: str, *, suffix: str = ".txt") -> str:
+        artifact_path = self.path / "artifacts" / "tool-results" / f"{tool_name}-{len(content)}{suffix}"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(content, encoding="utf-8")
+        return artifact_path.as_posix()
 
 
 class _PerToolRouter:
@@ -575,6 +581,99 @@ def test_turn_loop_emits_model_turn_progress_event(tmp_path: Path) -> None:
     ]
     assert progress_events[0]["category"] == "model_turn_started"
     assert progress_events[0]["step_id"] == "step-001"
+
+
+def test_turn_loop_checkpoints_model_input_and_records_context_epoch(tmp_path: Path) -> None:
+    writer = _FakeWriter(tmp_path / "episode")
+    invocations: list[list[dict[str, Any]]] = []
+
+    class _ModelGateway:
+        provider_name = "fake"
+
+        def generate(self, invocation, **kwargs):
+            del kwargs
+            invocations.append(list(invocation.messages))
+            return ModelResponse(content="done", tool_calls=[])
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": "stable instructions"},
+        {"role": "user", "content": "Task:\ngoal: inspect the project"},
+    ]
+    for index in range(4):
+        call_id = f"call-{index}"
+        content = f"result-{index}-" + ("x" * 50_000)
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": f"running tool {index}",
+                    "tool_calls": [{"id": call_id, "function": {"name": "shell", "arguments": "{}"}}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": "shell",
+                    "content": json.dumps(
+                        {
+                            "kind": "tool_result_view",
+                            "tool_name": "shell",
+                            "status": "success",
+                            "content": content,
+                            "content_format": "text",
+                            "artifact": {
+                                "path": f"artifacts/result-{index}.txt",
+                                "original_chars": len(content),
+                                "preview_chars": len(content),
+                            },
+                            "truncated": True,
+                            "representation_version": 1,
+                            "content_digest": f"sha256:test-{index}",
+                        },
+                    ),
+                },
+            ],
+        )
+
+    state = TurnLoopState(messages=messages, context_id="ctx")
+    deps = _deps(
+        router=_FakeRouter({}),
+        writer=writer,
+        recorder=SimpleNamespace(
+            state_history=[RunStatus.PLANNING],
+            transition=lambda status: None,
+            finish=lambda status: SimpleNamespace(status=status, episode_path="episode"),
+        ),
+    )
+    deps = _replace_dep(deps, "model_gateway", _ModelGateway())
+    deps = _replace_dep(
+        deps,
+        "compression_budget",
+        CompressionBudget(
+            context_window_tokens=22_000,
+            reserved_output_tokens=1_000,
+            safety_buffer_tokens=1_000,
+            available_input_tokens=20_000,
+            context_builder_max_tokens=4_000,
+        ),
+    )
+
+    result = run_turn_loop(state=state, deps=deps)
+
+    assert result is not None
+    assert state.context_epoch == 1
+    checkpoint_payloads = [
+        json.loads(message["content"])
+        for message in invocations[0]
+        if message.get("role") == "user"
+        and "context_checkpoint" in str(message.get("content"))
+    ]
+    assert checkpoint_payloads[0]["kind"] == "context_checkpoint"
+    checkpoint_events = [
+        record for record in writer.transcript if record.get("event") == "context_checkpoint"
+    ]
+    assert checkpoint_events[0]["epoch"] == 1
+    model_calls = [record for record in writer.transcript if record.get("event") == "model_call"]
+    assert model_calls[0]["context_epoch"] == 1
 
 
 def test_turn_loop_emits_context_usage_after_each_model_step(tmp_path: Path) -> None:
