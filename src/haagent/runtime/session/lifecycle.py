@@ -3,13 +3,12 @@ src/haagent/runtime/session/lifecycle.py - AgentSession 创建/恢复/重置装�
 
 SessionSnapshot：可序列化、版本化的 package 状态。
 SessionResources：gateway/MCP/callback 等不可序列化运行资源。
-AgentSession 只持有二者，不再逐字段镜像。
+AgentSession 只持有二者和独立的 ModelContextRuntime，不再逐字段镜像。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +19,8 @@ from haagent.mcp.tool_adapter import mcp_tool_alias, mcp_tool_definitions
 from haagent.models.types import ModelGateway
 from haagent.models.model_ref import ModelRef
 from haagent.models.config.connections import user_runs_dir
+from haagent.context.model_context_runtime import ModelContextError, ModelContextRuntime
+from haagent.context.projection import MutableContextFactsSource
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.human_interaction_resolver import SessionInteractionState
 from haagent.runtime.execution.steering import SteeringChannel
@@ -30,7 +31,6 @@ from haagent.runtime.session.package import (
     new_session_id,
     read_image_attachment_history,
     read_manual_compaction_state,
-    read_model_context,
     read_session_image_attachments,
     read_session_metadata,
     read_session_turns,
@@ -54,11 +54,10 @@ from haagent.runtime.session.working_state import (
     empty_working_state,
     load_working_state,
 )
-from haagent.context.versioned_state import ContextStateSnapshot, ContextStateError
 from haagent.tools.registry import default_tool_runtime_registry
 
 # 磁盘 session package 的逻辑 schema；迁移只经 SessionSnapshot 入口。
-SESSION_SNAPSHOT_SCHEMA_VERSION = 5
+SESSION_SNAPSHOT_SCHEMA_VERSION = 6
 # 无 session_snapshot_schema_version 字段的旧 package 视为 v0。
 SESSION_SNAPSHOT_LEGACY_SCHEMA_VERSION = 0
 
@@ -119,10 +118,6 @@ class SessionSnapshot:
     session_path: Path
     created_at: str
     session_interaction_state: SessionInteractionState
-    context_state: ContextStateSnapshot
-    model_context_messages: list[dict[str, object]]
-    model_context_epoch: int
-    context_rebuild_required: bool
 
     def clone(self) -> SessionSnapshot:
         """浅拷贝容器字段，避免 new/reload 共享可变 list。"""
@@ -132,8 +127,6 @@ class SessionSnapshot:
             turn_records=list(self.turn_records),
             last_user_image_attachments=list(self.last_user_image_attachments),
             image_attachment_history=list(self.image_attachment_history),
-            context_state=ContextStateSnapshot.from_dict(self.context_state.to_dict()),
-            model_context_messages=deepcopy(self.model_context_messages),
         )
 
 
@@ -185,10 +178,11 @@ class SessionResources:
 
 @dataclass
 class SessionRuntimeState:
-    """create/resume/new 装配结果：snapshot + resources。"""
+    """create/resume/new 装配结果：snapshot + resources + model context runtime。"""
 
     snapshot: SessionSnapshot
     resources: SessionResources
+    model_context_runtime: ModelContextRuntime
 
 
 def bootstrap_mcp(mcp_runtime: Any | None = None) -> tuple[Any, Any, bool, list[str], Any]:
@@ -261,10 +255,6 @@ def build_create_state(
         ),
         created_at=created_at.isoformat(),
         session_interaction_state=SessionInteractionState(),
-        context_state=ContextStateSnapshot.create(),
-        model_context_messages=[],
-        model_context_epoch=0,
-        context_rebuild_required=False,
     )
     resources = SessionResources(
         model_gateway=model_gateway,
@@ -289,7 +279,15 @@ def build_create_state(
         mcp_tool_names=mcp_tool_names,
         tool_registry=tool_registry,
     )
-    return SessionRuntimeState(snapshot=snapshot, resources=resources)
+    model_context_runtime = ModelContextRuntime.create_or_restore(
+        snapshot.session_path,
+        MutableContextFactsSource(),
+    )
+    return SessionRuntimeState(
+        snapshot=snapshot,
+        resources=resources,
+        model_context_runtime=model_context_runtime,
+    )
 
 
 def build_resume_state(
@@ -332,16 +330,17 @@ def build_resume_state(
     except PlanningStateError as error:
         raise ChatSessionError(str(error)) from error
     try:
-        context_state = ContextStateSnapshot.from_dict(metadata.get("context_state"))
-    except ContextStateError as error:
-        raise ChatSessionError(f"invalid session context state: {error}") from error
-    model_context_messages, model_context_epoch = read_model_context(
-        session_path,
-        expected_state=context_state,
-    )
-    context_rebuild_required = metadata.get("context_rebuild_required")
-    if not isinstance(context_rebuild_required, bool):
-        raise ChatSessionError("invalid session.json: context_rebuild_required must be a boolean")
+        if not (session_path / "model-context.json").is_file():
+            # v6 session 必须包含完整 v2 聚合；恢复时禁止静默创建空上下文掩盖 package 损坏。
+            raise ChatSessionError(
+                f"missing model-context.json in session package: {session_path}"
+            )
+        model_context_runtime = ModelContextRuntime.create_or_restore(
+            session_path,
+            MutableContextFactsSource(),
+        )
+    except ModelContextError as error:
+        raise ChatSessionError(str(error)) from error
     # 有现成 MCP 时复用（会话切换热路径）；否则自建。不恢复 worker/tool override。
     if mcp_runtime is not None:
         settings = mcp_settings if mcp_settings is not None else mcp_runtime.settings
@@ -393,10 +392,6 @@ def build_resume_state(
             edit_diff_session_always=bool(metadata.get("edit_diff_session_always", False)),
             permission_rules=_load_permission_rules(metadata.get("permission_rules")),
         ),
-        context_state=context_state,
-        model_context_messages=model_context_messages,
-        model_context_epoch=model_context_epoch,
-        context_rebuild_required=context_rebuild_required,
     )
     resources = SessionResources(
         model_gateway=model_gateway,
@@ -417,7 +412,11 @@ def build_resume_state(
         mcp_tool_names=names,
         tool_registry=registry,
     )
-    return SessionRuntimeState(snapshot=snapshot, resources=resources)
+    return SessionRuntimeState(
+        snapshot=snapshot,
+        resources=resources,
+        model_context_runtime=model_context_runtime,
+    )
 
 
 def _load_permission_rules(raw: object) -> list[dict[str, str]]:
@@ -479,10 +478,6 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         created_at=created_at.isoformat(),
         # 新 session 不继承上一会话的 edit_diff always
         session_interaction_state=SessionInteractionState(),
-        context_state=ContextStateSnapshot.create(),
-        model_context_messages=[],
-        model_context_epoch=0,
-        context_rebuild_required=False,
     )
     resources = SessionResources(
         model_gateway=res.model_gateway,
@@ -511,10 +506,20 @@ def build_new_package_state(state: SessionRuntimeState) -> SessionRuntimeState:
         mcp_tool_names=list(res.mcp_tool_names),
         tool_registry=res.tool_registry,
     )
-    return SessionRuntimeState(snapshot=snapshot, resources=resources)
+    model_context_runtime = ModelContextRuntime.create_or_restore(
+        snapshot.session_path,
+        MutableContextFactsSource(),
+    )
+    return SessionRuntimeState(
+        snapshot=snapshot,
+        resources=resources,
+        model_context_runtime=model_context_runtime,
+    )
 
 
 def apply_state(instance: Any, state: SessionRuntimeState) -> None:
-    """把 snapshot/resources 装入 AgentSession；不再逐字段镜像。"""
+    """把 snapshot/resources/context runtime 装入 AgentSession；不再逐字段镜像。"""
     instance._snapshot = state.snapshot
     instance._resources = state.resources
+    instance._model_context_runtime = state.model_context_runtime
+    instance._model_context_runtime._bind_facts_source(instance._model_context_facts)

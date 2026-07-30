@@ -3098,6 +3098,9 @@ verification_commands: []
             + [{"role": "user", "content": "recent-user"}, {"role": "assistant", "content": "recent-assistant"}],
             manifest=manifest,
             diagnostics=context.diagnostics,
+            context_state=context.context_state,
+            initial_projection=context.initial_projection,
+            user_request_message=context.user_request_message,
         )
 
     monkeypatch.setattr("haagent.runtime.orchestration.orchestrator.ContextBuilder.build", fake_build)
@@ -3179,6 +3182,9 @@ verification_commands: []
             messages=[{"role": "user", "content": f"original-{index}"} for index in range(5)],
             manifest=manifest,
             diagnostics=context.diagnostics,
+            context_state=context.context_state,
+            initial_projection=context.initial_projection,
+            user_request_message=context.user_request_message,
         )
 
     monkeypatch.setattr("haagent.runtime.orchestration.orchestrator.ContextBuilder.build", fake_build)
@@ -3195,7 +3201,10 @@ verification_commands: []
     ]
     failed = next(record for record in transcript if record.get("event") == "full_compact_failed")
     assert failed["reason"] == "schema_invalid"
-    assert gateway.calls[1]["messages"] == [{"role": "user", "content": f"original-{index}"} for index in range(5)]
+    assert gateway.calls[1]["messages"][:5] == [
+        {"role": "user", "content": f"original-{index}"}
+        for index in range(5)
+    ]
     context_manifest = json.loads((result.episode_path / "contexts" / "0001-manifest.json").read_text(encoding="utf-8"))
     assert context_manifest["full_compact"]["applied"] is False
     assert context_manifest["full_compact"]["reason"] == "schema_invalid"

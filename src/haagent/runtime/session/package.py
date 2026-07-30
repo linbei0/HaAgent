@@ -10,24 +10,15 @@ from __future__ import annotations
 import json
 import hashlib
 import uuid
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from haagent.runtime.session.attachments import ImageAttachment
-from haagent.context.messages import context_state_payload
-from haagent.context.versioned_state import (
-    ContextStateDelta,
-    ContextStateError,
-    ContextStateSnapshot,
-    apply_delta,
-)
 from haagent.runtime.execution.path_policy import PathPolicy, serialize_path_policy
 from haagent.models.model_ref import ModelRef
 
 ASSISTANT_DISPLAY_TEXT_CHAR_LIMIT = 4000
-MODEL_CONTEXT_SCHEMA_VERSION = 1
 
 
 class ChatSessionError(RuntimeError):
@@ -269,113 +260,6 @@ def read_manual_compaction_state(session_path: Path) -> tuple[str | None, int]:
     return summary, max(0, compacted_turn_count)
 
 
-def read_model_context(
-    session_path: Path,
-    *,
-    expected_state: ContextStateSnapshot,
-) -> tuple[list[dict[str, object]], int]:
-    path = session_path / "model-context.json"
-    if not path.exists():
-        raise ChatSessionError(f"session package missing required file: {path}")
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ChatSessionError("invalid model-context.json") from error
-    if not isinstance(raw, dict):
-        raise ChatSessionError("invalid model-context.json: must contain an object")
-    if raw.get("schema_version") != MODEL_CONTEXT_SCHEMA_VERSION:
-        raise ChatSessionError(
-            f"unsupported model context schema_version: {raw.get('schema_version')}"
-        )
-    epoch = raw.get("context_epoch")
-    messages = raw.get("messages")
-    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
-        raise ChatSessionError("invalid model-context.json: context_epoch must be a non-negative integer")
-    if not isinstance(messages, list):
-        raise ChatSessionError("invalid model-context.json: messages must be a list")
-    validated = [_validate_model_context_message(item, index) for index, item in enumerate(messages, start=1)]
-    _validate_model_context_state(validated, epoch=epoch, expected_state=expected_state)
-    return validated, epoch
-
-
-def write_model_context(
-    session_path: Path,
-    *,
-    messages: list[dict[str, object]],
-    context_epoch: int,
-    context_state: ContextStateSnapshot,
-) -> None:
-    session_path.mkdir(parents=True, exist_ok=True)
-    sanitized = [_sanitize_model_context_message(message) for message in messages]
-    _validate_model_context_state(
-        sanitized,
-        epoch=context_epoch,
-        expected_state=context_state,
-    )
-    payload = {
-        "schema_version": MODEL_CONTEXT_SCHEMA_VERSION,
-        "context_epoch": context_epoch,
-        "context_revision": context_state.revision,
-        "context_snapshot_id": context_state.snapshot_id,
-        "messages": sanitized,
-    }
-    (session_path / "model-context.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _validate_model_context_message(value: object, index: int) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise ChatSessionError(f"invalid model-context.json: messages[{index}] must be an object")
-    role = value.get("role")
-    if role not in {"system", "user", "assistant", "tool"}:
-        raise ChatSessionError(f"invalid model-context.json: messages[{index}] has invalid role")
-    content = value.get("content")
-    if not isinstance(content, (str, list)):
-        raise ChatSessionError(f"invalid model-context.json: messages[{index}] has invalid content")
-    try:
-        cloned = json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
-    except (TypeError, ValueError) as error:
-        raise ChatSessionError(f"invalid model-context.json: messages[{index}] is not JSON") from error
-    return cloned
-
-
-def _sanitize_model_context_message(message: dict[str, object]) -> dict[str, object]:
-    sanitized = deepcopy(message)
-    # Provider continuation payload可能包含不透明 reasoning；session 只保存模型可见消息。
-    sanitized.pop("provider_turn_state", None)
-    return _validate_model_context_message(sanitized, 0)
-
-
-def _validate_model_context_state(
-    messages: list[dict[str, object]],
-    *,
-    epoch: int,
-    expected_state: ContextStateSnapshot,
-) -> None:
-    current: ContextStateSnapshot | None = None
-    try:
-        for message in messages:
-            payload = context_state_payload(message)
-            if payload is None:
-                continue
-            if payload.get("kind") == "context_state_snapshot":
-                current = ContextStateSnapshot.from_dict(payload)
-            elif payload.get("kind") == "context_state_delta":
-                if current is None:
-                    raise ContextStateError("context delta appears before snapshot")
-                current = apply_delta(current, ContextStateDelta.from_dict(payload))
-    except ContextStateError as error:
-        raise ChatSessionError(f"invalid model context state: {error}") from error
-    if not messages and expected_state.revision == 0:
-        return
-    if current is None:
-        raise ChatSessionError("invalid model-context.json: context snapshot is missing")
-    if current != expected_state or epoch != expected_state.epoch:
-        raise ChatSessionError("invalid model-context.json: context state does not match session snapshot")
-
-
 def write_manual_compaction_state(
     session_path: Path,
     *,
@@ -416,8 +300,6 @@ def write_session_metadata(
     permission_rules: list[dict[str, str]] | None = None,
     first_request: str | None = None,
     session_snapshot_schema_version: int | None = None,
-    context_state: ContextStateSnapshot | None = None,
-    context_rebuild_required: bool = False,
 ) -> str:
     """写入 session.json；返回实际保留的 created_at。"""
     # 延迟导入避免 package ↔ lifecycle 循环依赖。
@@ -448,9 +330,6 @@ def write_session_metadata(
         "permission_rules": list(permission_rules or []),
         # 持久化 SessionSnapshot 逻辑版本；resume 据此迁移/拒绝未知版本。
         "session_snapshot_schema_version": schema_version,
-        "context_state": (context_state or ContextStateSnapshot.create()).to_dict(),
-        # 手动压缩可能发生在两个模型 turn 之间；该标记保证 resume 后仍切换 epoch。
-        "context_rebuild_required": bool(context_rebuild_required),
         "provider": provider,
         "model_ref": model_ref.to_dict() if model_ref is not None else None,
         "enable_web": enable_web,

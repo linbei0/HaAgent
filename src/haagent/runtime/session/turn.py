@@ -14,6 +14,7 @@ from typing import Any, Callable, Protocol
 import yaml
 
 from haagent.models.types import ModelGateway
+from haagent.context.model_context_runtime import ModelContextRuntime
 from haagent.prompts.commands import parse_prompt_command
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.execution.steering import SteeringChannel
@@ -23,7 +24,6 @@ from haagent.runtime.execution.path_policy import PathPolicy, default_path_polic
 from haagent.runtime.orchestration.recorder import RunResult
 from haagent.runtime.performance import PerformanceTrace
 from haagent.runtime.session.attachments import ImageAttachment
-from haagent.context.versioned_state import ContextStateSnapshot
 from haagent.runtime.session.chat_task_contract import build_chat_task_contract
 from haagent.skills.catalog import SkillCatalogService
 from haagent.tools.access import ToolAccessManager
@@ -58,12 +58,7 @@ class OrchestratorFactory(Protocol):
         tool_schema_cache: object | None = None,
         working_state_sink: Callable[[dict[str, object]], None] | None = None,
         session_path: Path | None = None,
-        context_state_snapshot: ContextStateSnapshot | None = None,
-        context_state_provider: Callable[[], dict[str, object]] | None = None,
-        context_state_sink: Callable[[ContextStateSnapshot], None] | None = None,
-        model_context_messages: list[dict[str, Any]] | None = None,
-        model_context_sink: Callable[[list[dict[str, Any]], int], None] | None = None,
-        force_context_rebuild: bool = False,
+        model_context_runtime: ModelContextRuntime,
     ):
         ...
 
@@ -112,12 +107,7 @@ class ChatTurnRequest:
     planning_state_handler: Callable[[str, dict[str, object], int], dict[str, object]] | None = None
     plan_execution_has_active_todos: Callable[[], bool] | None = None
     session_path: Path | None = None
-    context_state_snapshot: ContextStateSnapshot | None = None
-    context_state_provider: Callable[[], dict[str, object]] | None = None
-    context_state_sink: Callable[[ContextStateSnapshot], None] | None = None
-    model_context_messages: list[dict[str, Any]] = field(default_factory=list)
-    model_context_sink: Callable[[list[dict[str, Any]], int], None] | None = None
-    force_context_rebuild: bool = False
+    model_context_runtime: ModelContextRuntime | None = None
 
 
 class ChatTurnRunner:
@@ -181,12 +171,7 @@ class ChatTurnRunner:
                 planning_state_handler=request.planning_state_handler,
                 plan_execution_has_active_todos=request.plan_execution_has_active_todos,
                 session_path=request.session_path,
-                context_state_snapshot=request.context_state_snapshot,
-                context_state_provider=request.context_state_provider,
-                context_state_sink=request.context_state_sink,
-                model_context_messages=request.model_context_messages,
-                model_context_sink=request.model_context_sink,
-                force_context_rebuild=request.force_context_rebuild,
+                model_context_runtime=request.model_context_runtime,
             )
             return orchestrator.run(task_path)
 

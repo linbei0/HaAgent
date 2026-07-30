@@ -15,9 +15,12 @@ from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.builder import (
     ContextBuildError,
     ContextBuilder,
-    format_interaction_state_for_model,
 )
-from haagent.context.versioned_state import ContextStateSnapshot
+from haagent.context.model_context_runtime import (
+    ModelContextRuntime,
+    ModelContextTurnSeed,
+)
+from haagent.context.projection import ModelContextFacts
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelCallError, ModelGateway
 from haagent.models.config.connections import user_config_dir
@@ -94,12 +97,7 @@ class RunOrchestrator:
         planning_state_handler: Callable[[str, dict[str, object], int], dict[str, object]] | None = None,
         plan_execution_has_active_todos: Callable[[], bool] | None = None,
         session_path: Path | None = None,
-        context_state_snapshot: ContextStateSnapshot | None = None,
-        context_state_provider: Callable[[], dict[str, object]] | None = None,
-        context_state_sink: Callable[[ContextStateSnapshot], None] | None = None,
-        model_context_messages: list[dict[str, Any]] | None = None,
-        model_context_sink: Callable[[list[dict[str, Any]], int], None] | None = None,
-        force_context_rebuild: bool = False,
+        model_context_runtime: ModelContextRuntime | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
@@ -127,12 +125,14 @@ class RunOrchestrator:
         self._instruction_cache = instruction_cache
         self._tool_schema_cache = tool_schema_cache
         self._session_path = session_path
-        self._context_state_snapshot = context_state_snapshot
-        self._context_state_provider = context_state_provider
-        self._context_state_sink = context_state_sink
-        self._model_context_messages = list(model_context_messages or [])
-        self._model_context_sink = model_context_sink
-        self._force_context_rebuild = force_context_rebuild
+        self._model_context_runtime = model_context_runtime or ModelContextRuntime.create_transient(
+            lambda: ModelContextFacts(
+                session_summary=self._session_summary,
+                working_state=self._working_state,
+                task_ledger=self._task_ledger,
+                planning_state=self._planning_state,
+            ),
+        )
         self._working_state_sink = working_state_sink
         self._todo_state_sink = todo_state_sink
         self._planning_state_handler = planning_state_handler
@@ -301,17 +301,6 @@ class RunOrchestrator:
                 session_interaction_state=self._session_interaction_state,
             )
 
-            context_state_provider = self._context_state_provider
-            if context_state_provider is not None:
-                base_context_state_provider = context_state_provider
-
-                def context_state_provider() -> dict[str, object]:
-                    sections = dict(base_context_state_provider())
-                    records = interaction_resolver.state_records()
-                    if records:
-                        sections["interaction_history"] = format_interaction_state_for_model(records)
-                    return sections
-
             performance_trace.mark_context_build_start()
             prepared_messages = prepare_initial_messages(
                 context_builder_cls=ContextBuilder,
@@ -330,22 +319,23 @@ class RunOrchestrator:
                 tool_registry=runtime_tool_registry,
                 instruction_cache=self._instruction_cache,
                 skill_catalog=self._skill_catalog,
-                context_state_snapshot=self._context_state_snapshot,
-                context_state_sink=self._context_state_sink,
-                model_context_messages=self._model_context_messages,
-                force_context_rebuild=self._force_context_rebuild,
             )
             performance_trace.mark_context_built()
             for component, diagnostic in prepared_messages.cache_diagnostics.items():
                 if isinstance(diagnostic, dict):
                     performance_trace.record_cache_diagnostic(component, diagnostic)
             worker_notifications = _worker_notification_context(self._leader_session_id)
-            if worker_notifications:
-                prepared_messages.messages.append(
-                    {"role": "user", "content": worker_notifications},
-                )
             context_id = prepared_messages.context_id
-            messages = prepared_messages.messages
+            model_context_turn = self._model_context_runtime.begin_turn(
+                ModelContextTurnSeed(
+                    context_id=context_id,
+                    stable_messages=tuple(prepared_messages.messages),
+                    user_request_message=prepared_messages.user_request_message,
+                    initial_projection=prepared_messages.initial_projection,
+                    compression_budget=_compression_budget_for_gateway(self._model_gateway),
+                    episode_writer=writer,
+                ),
+            )
             task_step_id = _current_task_step_id(self._task_ledger) or "step-001"
             self._emit_event(
                 task_plan_created_event(
@@ -357,19 +347,18 @@ class RunOrchestrator:
                 ),
             )
             loop_state = TurnLoopState(
-                messages=messages,
-                context_id=context_id,
-                verification_engine=verification_engine,
-                context_snapshot=prepared_messages.context_state,
-                context_epoch=(
-                    prepared_messages.context_state.epoch
-                    if prepared_messages.context_state is not None
-                    else 0
+                model_context=model_context_turn,
+                model_step_messages=(
+                    [{"role": "user", "content": worker_notifications}]
+                    if worker_notifications
+                    else []
                 ),
+                verification_engine=verification_engine,
             )
-            turn_result = run_turn_loop(
-                state=loop_state,
-                deps=TurnLoopDependencies(
+            try:
+                turn_result = run_turn_loop(
+                    state=loop_state,
+                    deps=TurnLoopDependencies(
                     model_gateway=self._model_gateway,
                     writer=writer,
                     recorder=recorder,
@@ -420,14 +409,17 @@ class RunOrchestrator:
                         turn=turn,
                         decision=decision,
                     ),
-                    plan_execution_has_active_todos=self._plan_execution_has_active_todos,
-                    context_state_provider=context_state_provider,
-                    context_state_sink=self._context_state_sink,
-                ),
-            )
+                        plan_execution_has_active_todos=self._plan_execution_has_active_todos,
+                    ),
+                )
+            except BaseException:
+                model_context_turn.abort()
+                raise
             if turn_result is not None:
-                if self._model_context_sink is not None:
-                    self._model_context_sink(loop_state.messages, loop_state.context_epoch)
+                model_context_turn.complete_model_step(
+                    terminal=True,
+                    interaction_records=interaction_resolver.state_records(),
+                )
                 return turn_result
         except RunCancelled as error:
             _emit_task_recovery(

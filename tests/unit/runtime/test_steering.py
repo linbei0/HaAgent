@@ -15,14 +15,19 @@ from haagent.runtime.execution.cancellation import RunCancelled
 from haagent.runtime.execution.steering import SteeringChannel
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.turns import (
-    TurnLoopState,
     _handle_no_tool_response,
     run_turn_loop,
 )
 from haagent.runtime.events.bus import bus_event_to_dict
 from haagent.runtime.session.turn_completion import ChatTurnResult, turn_summary
 
-from tests.unit.runtime.test_run_turns import _deps, _FakeRouter, _FakeWriter, _replace_dep
+from tests.unit.runtime.test_run_turns import (
+    TurnLoopState,
+    _deps,
+    _FakeRouter,
+    _FakeWriter,
+    _replace_dep,
+)
 
 
 def test_steering_channel_post_drain_and_has_pending() -> None:
@@ -84,7 +89,10 @@ def test_turn_loop_injects_steering_before_next_model_call(tmp_path) -> None:
     deps = _replace_dep(deps, "workspace_root", tmp_path)
     deps = _replace_dep(deps, "steering_channel", channel)
 
-    result = run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+    result = run_turn_loop(
+        state=TurnLoopState(messages=[], context_id="ctx", writer=writer),
+        deps=deps,
+    )
 
     assert result is not None
     assert len(model_messages) == 2
@@ -119,7 +127,7 @@ def test_no_tool_response_defers_completion_when_steering_pending(tmp_path) -> N
         ),
     )
     deps = _replace_dep(deps, "steering_channel", channel)
-    state = TurnLoopState(messages=[], context_id="ctx")
+    state = TurnLoopState(messages=[], context_id="ctx", writer=writer)
 
     result = _handle_no_tool_response(
         turn=2,
@@ -137,10 +145,11 @@ def test_no_tool_response_defers_completion_when_steering_pending(tmp_path) -> N
     ]
     assert len(deferred) == 1
     # 顺序：先保留本轮回答，再注入引导。
-    assert state.messages[-2]["role"] == "assistant"
-    assert state.messages[-2]["content"] == "初步结论如下"
-    assert state.messages[-1]["role"] == "user"
-    assert "请补充性能影响分析" in state.messages[-1]["content"]
+    messages = state.model_step_messages
+    assert messages[-2]["role"] == "assistant"
+    assert messages[-2]["content"] == "初步结论如下"
+    assert messages[-1]["role"] == "user"
+    assert "请补充性能影响分析" in messages[-1]["content"]
     assert channel.has_pending() is False
 
 
@@ -161,7 +170,7 @@ def test_no_tool_response_completes_normally_without_steering(tmp_path) -> None:
     result = _handle_no_tool_response(
         turn=1,
         model_response=ModelResponse(content="完成", tool_calls=[], termination="completed"),
-        state=TurnLoopState(messages=[], context_id="ctx"),
+        state=TurnLoopState(messages=[], context_id="ctx", writer=writer),
         deps=deps,
     )
 
@@ -193,7 +202,10 @@ def test_cancelled_stream_writes_partial_transcript(tmp_path) -> None:
     deps = _replace_dep(deps, "model_gateway", _CancelledGateway())
 
     with pytest.raises(RunCancelled):
-        run_turn_loop(state=TurnLoopState(messages=[], context_id="ctx"), deps=deps)
+        run_turn_loop(
+            state=TurnLoopState(messages=[], context_id="ctx", writer=writer),
+            deps=deps,
+        )
 
     partial_records = [
         record for record in writer.transcript if record.get("event") == "model_response_partial"

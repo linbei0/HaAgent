@@ -80,8 +80,9 @@
 
 - `AgentSession` 应维护 bounded session summary、只包含关键发现的 bounded working state，以及独立的 planning state 与 task ledger；多轮任务不得线性撑大 `model_input`。
 - 会话恢复读取 `session.json`、`turns.jsonl`、`working_state.json`、`task-ledger.json` 和 `planning-state.json`，不读取完整 episode transcript、tool-calls 或 verification 输出。
-- `AgentSession` 持有 `SessionSnapshot`（可序列化 package 状态）与 `SessionResources`（gateway/MCP/callback 等 live 资源）；`apply_state` 只绑定二者，不再逐字段镜像。gateway/MCP/callback 不进磁盘 schema。
-- `session.json` 必须写入 `session_snapshot_schema_version`；当前 snapshot schema 为 v3，resume 必须严格校验，缺失、旧版本和未来版本都明确拒绝，不维护宽松兼容路径。
+- `AgentSession` 持有 `SessionSnapshot`（可序列化 package 状态）、`SessionResources`（gateway/MCP/callback 等 live 资源）和独立的 session-owned `ModelContextRuntime`；`apply_state` 只绑定三者，不再逐字段镜像。gateway/MCP/callback 不进磁盘 schema。
+- `session.json` 必须写入 `session_snapshot_schema_version`；当前 snapshot schema 为 v6，resume 必须严格校验，缺失、旧版本和未来版本都明确拒绝，不维护宽松兼容路径。
+- `ModelContextRuntime` 独占模型消息链、snapshot、epoch/revision、delta、rebuild、checkpoint、恢复校验和 diagnostics。`model-context.json` v2 以 `messages + snapshot + rebuild_required` 作为一次校验、一次原子替换的完整聚合；`session.json` 不重复保存 context 状态。
 - Episode 消费经 typed `EpisodePackage` / record codecs（metadata、failure、tool-call、environment、cost 等）；inspect/export/eval 只走 typed 字段，不保留裸 dict 双契约。跨文件 validator 保留；`build_episode_package` 仅在 validator 之后内部 decode，codec 自身拒绝宽松 bool 转换。
 - `working_state.json` 只保存有界 `key_findings` 和 `last_updated_turn`；任务目标、进度和下一步的唯一事实源分别是 PlanningState 与 TaskLedger，不得恢复旧双契约。
 - `planning-state.json` 保存完整 Plan proposal、revision、runtime id 和 `planning` / `awaiting_confirmation` / `approved_pending_execution` / `execution_started` / `cancelled` 状态；`task-ledger.json` 保存 Todo 四态 `pending` / `in_progress` / `completed` / `cancelled`。

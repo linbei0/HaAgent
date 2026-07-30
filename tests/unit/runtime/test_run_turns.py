@@ -13,6 +13,11 @@ import threading
 import time
 
 from haagent.context.compression.budget import CompressionBudget, derive_compression_budget
+from haagent.context.model_context_runtime import (
+    ModelContextRuntime,
+    ModelContextTurnSeed,
+)
+from haagent.context.projection import ModelContextFacts, ProjectedModelContext
 from haagent.models.gateway_retry import execute_model_request
 from haagent.models.types import (
     ModelCallError,
@@ -27,7 +32,7 @@ from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 from haagent.runtime.orchestration.state import RunStatus
 from haagent.runtime.orchestration.turns import (
     TurnLoopDependencies,
-    TurnLoopState,
+    TurnLoopState as RuntimeTurnLoopState,
     _handle_no_tool_response,
     _resolve_progress_block,
     _run_tool_calls,
@@ -125,6 +130,37 @@ class _FakeWriter:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text(content, encoding="utf-8")
         return artifact_path.as_posix()
+
+
+def TurnLoopState(
+    *,
+    messages: list[dict[str, Any]],
+    context_id: str,
+    writer: _FakeWriter | None = None,
+    compression_budget: CompressionBudget | None = None,
+    **kwargs,
+) -> RuntimeTurnLoopState:
+    """测试只通过真实 runtime handle 构造 TurnLoopState，不恢复生产兼容字段。"""
+
+    runtime = ModelContextRuntime.create_transient(lambda: ModelContextFacts())
+    turn = runtime.begin_turn(
+        ModelContextTurnSeed(
+            context_id=context_id,
+            stable_messages=(),
+            user_request_message={"role": "user", "content": "test request"},
+            initial_projection=ProjectedModelContext.create({}),
+            compression_budget=compression_budget or CompressionBudget(
+                context_window_tokens=1_000_000,
+                reserved_output_tokens=1_000,
+                safety_buffer_tokens=1_000,
+                available_input_tokens=998_000,
+                context_builder_max_tokens=100_000,
+            ),
+            episode_writer=writer or _FakeWriter(),
+        ),
+    )
+    turn._append_messages(messages)
+    return RuntimeTurnLoopState(model_context=turn, **kwargs)
 
 
 class _PerToolRouter:
@@ -240,8 +276,9 @@ def test_same_batch_duplicate_read_call_reuses_first_result() -> None:
 
     assert router.calls == ["file_read"]
     assert router.reused == [("file_read", {"path": "same.txt"}, 0)]
-    assert state.messages[1]["tool_call_id"] == "call_2"
-    assert "same_as_previous" in state.messages[1]["content"]
+    tool_messages = [message for message in state.model_step_messages if "tool_call_id" in message]
+    assert tool_messages[1]["tool_call_id"] == "call_2"
+    assert "same_as_previous" in tool_messages[1]["content"]
 
 
 def test_serial_barrier_between_write_and_following_read() -> None:
@@ -634,7 +671,19 @@ def test_turn_loop_checkpoints_model_input_and_records_context_epoch(tmp_path: P
             ],
         )
 
-    state = TurnLoopState(messages=messages, context_id="ctx")
+    checkpoint_budget = CompressionBudget(
+        context_window_tokens=22_000,
+        reserved_output_tokens=1_000,
+        safety_buffer_tokens=1_000,
+        available_input_tokens=20_000,
+        context_builder_max_tokens=4_000,
+    )
+    state = TurnLoopState(
+        messages=messages,
+        context_id="ctx",
+        writer=writer,
+        compression_budget=checkpoint_budget,
+    )
     deps = _deps(
         router=_FakeRouter({}),
         writer=writer,
@@ -648,19 +697,12 @@ def test_turn_loop_checkpoints_model_input_and_records_context_epoch(tmp_path: P
     deps = _replace_dep(
         deps,
         "compression_budget",
-        CompressionBudget(
-            context_window_tokens=22_000,
-            reserved_output_tokens=1_000,
-            safety_buffer_tokens=1_000,
-            available_input_tokens=20_000,
-            context_builder_max_tokens=4_000,
-        ),
+        checkpoint_budget,
     )
 
     result = run_turn_loop(state=state, deps=deps)
 
     assert result is not None
-    assert state.context_epoch == 1
     checkpoint_payloads = [
         json.loads(message["content"])
         for message in invocations[0]
@@ -954,7 +996,7 @@ def test_tool_not_allowed_does_not_abort_turn_as_terminal() -> None:
     assert router.raised == []
     assert any(
         message.get("tool_call_id") == "call_bad" and "tool_not_allowed" in message.get("content", "")
-        for message in state.messages
+        for message in state.model_step_messages
     )
 
 
@@ -986,12 +1028,14 @@ def test_parallel_tool_failure_does_not_skip_sibling_tool_result() -> None:
 
     assert sorted(router.calls) == ["file_read", "grep"]
     assert router.max_active == 2
-    assert len(state.messages) == 3
-    assert state.messages[0]["tool_call_id"] == "call_error"
-    assert state.messages[1]["tool_call_id"] == "call_success"
-    assert "tool_argument_invalid" in state.messages[0]["content"]
-    assert "grep result" in state.messages[1]["content"]
-    assert state.messages[2]["role"] == "user"
+    assert len([message for message in state.model_step_messages if "tool_call_id" in message]) == 2
+    visible_messages = list(state.model_step_messages)
+    tool_messages = [message for message in visible_messages if "tool_call_id" in message]
+    assert tool_messages[0]["tool_call_id"] == "call_error"
+    assert tool_messages[1]["tool_call_id"] == "call_success"
+    assert "tool_argument_invalid" in tool_messages[0]["content"]
+    assert "grep result" in tool_messages[1]["content"]
+    assert visible_messages[-1]["role"] == "user"
 
 
 def test_tool_failure_emits_recovery_suggestion_event() -> None:
@@ -1111,7 +1155,7 @@ def test_active_plan_todo_defers_no_tool_completion_after_tool_error() -> None:
     assert result is None
     assert transitions == []
     assert any(record.get("event") == "completion_candidate_deferred" for record in writer.transcript)
-    assert state.messages[-1]["content"].startswith("[Suggestion] The approved plan still has unfinished")
+    assert state.model_step_messages[-1]["content"].startswith("[Suggestion] The approved plan still has unfinished")
 
 
 def test_parallel_tool_results_keep_original_tool_call_order() -> None:
@@ -1135,7 +1179,7 @@ def test_parallel_tool_results_keep_original_tool_call_order() -> None:
         deps=deps,
     )
 
-    tool_result_messages = [message for message in state.messages if "tool_call_id" in message]
+    tool_result_messages = [message for message in state.model_step_messages if "tool_call_id" in message]
     assert [message["tool_call_id"] for message in tool_result_messages] == ["call_slow", "call_fast"]
 
 
@@ -1201,7 +1245,7 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
         emit_event=lambda event: None,
         compression_budget=derive_compression_budget(None),
         interaction_handler=None,
-        interaction_resolver=SimpleNamespace(),
+        interaction_resolver=SimpleNamespace(state_records=lambda: []),
         interaction_bridge_factory=lambda turn, resolver: None,
         record_guardrail=lambda violation, turn: None,
         record_suggestion=lambda turn, suggestion: None,
@@ -1222,10 +1266,11 @@ def test_same_turn_duplicate_tool_result_is_collapsed_for_model_context() -> Non
 
     assert len(writer.transcript) == 2
     assert writer.transcript[1]["result"]["duplicate_suppressed"] is True
-    assert "visible content" in state.messages[0]["content"]
-    assert "raw content" not in state.messages[0]["content"]
-    assert "same_as_previous" in state.messages[1]["content"]
-    assert "raw content" not in state.messages[1]["content"]
+    tool_messages = [message for message in state.model_step_messages if "tool_call_id" in message]
+    assert "visible content" in tool_messages[0]["content"]
+    assert "raw content" not in tool_messages[0]["content"]
+    assert "same_as_previous" in tool_messages[1]["content"]
+    assert "raw content" not in tool_messages[1]["content"]
 
 
 def test_file_write_does_not_require_readback_when_no_verification_command_is_declared(tmp_path: Path) -> None:
@@ -1364,8 +1409,8 @@ def test_no_tool_response_waits_for_pending_worker_before_finalizing() -> None:
     assert state.pending_worker_task_ids == []
     assert emitted_events == []
     assert transitions == []
-    assert "Worker notifications" in state.messages[-1]["content"]
-    assert "worker inspected the project" in state.messages[-1]["content"]
+    assert "Worker notifications" in state.model_step_messages[-1]["content"]
+    assert "worker inspected the project" in state.model_step_messages[-1]["content"]
 
 
 def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll() -> None:
@@ -1835,7 +1880,7 @@ def _deps(
         emit_event=emit_event,
         compression_budget=derive_compression_budget(None),
         interaction_handler=None,
-        interaction_resolver=SimpleNamespace(),
+        interaction_resolver=SimpleNamespace(state_records=lambda: []),
         interaction_bridge_factory=lambda turn, resolver: None,
         record_guardrail=lambda violation, turn: None,
         record_suggestion=lambda turn, suggestion: None,
@@ -1868,14 +1913,18 @@ def test_progress_guard_warn_injects_single_suggestion() -> None:
     for turn in range(1, 4):
         _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls, state=state, deps=deps)
     suggestion_msgs = [
-        message for message in state.messages if str(message.get("content", "")).startswith("[Suggestion] ProgressGuard")
+        message
+        for message in state.model_step_messages
+        if str(message.get("content", "")).startswith("[Suggestion] ProgressGuard")
     ]
     assert len(suggestion_msgs) == 1
     assert any(item.get("event") == "progress_guard_warning" for item in writer.transcript)
     # 第 4 次同模式在 warn 模式下不 block，也不重复刷屏
     _run_tool_calls(turn=4, tool_calls_with_ids=tool_calls, state=state, deps=deps)
     suggestion_msgs = [
-        message for message in state.messages if str(message.get("content", "")).startswith("[Suggestion] ProgressGuard")
+        message
+        for message in state.model_step_messages
+        if str(message.get("content", "")).startswith("[Suggestion] ProgressGuard")
     ]
     assert len(suggestion_msgs) == 1
 

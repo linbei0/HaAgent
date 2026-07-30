@@ -7,21 +7,17 @@ src/haagent/runtime/orchestration/preparation.py - Run 前置准备流程
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from haagent.context.compression.budget import derive_compression_budget
 from haagent.context.compression.sections import context_budget_from_compression_budget
+from haagent.context.projection import ProjectedModelContext
 from haagent.models.types import ModelGateway
 from haagent.runtime.episodes.writer import EpisodeWriter
 from haagent.context.compression.full import FullCompactEligibility, FullCompactResult, maybe_full_compact_messages
-from haagent.context.messages import (
-    build_context_state_delta_message,
-    build_context_state_snapshot_message,
-)
-from haagent.context.versioned_state import ContextStateSnapshot, next_snapshot
+from haagent.context.versioned_state import ContextStateSnapshot
 from haagent.runtime.execution.human_interaction_resolver import HumanInteractionResolver
 from haagent.runtime.execution.path_policy import default_path_policy, load_path_policy
 from haagent.runtime.contracts.plan import build_plan
@@ -42,7 +38,8 @@ class RunSetup:
 class PreparedMessages:
     context_id: str
     messages: list[dict[str, Any]]
-    context_state: ContextStateSnapshot | None
+    initial_projection: ProjectedModelContext
+    user_request_message: dict[str, Any]
     cache_diagnostics: dict[str, dict[str, object]]
 
 
@@ -111,10 +108,6 @@ def prepare_initial_messages(
     interaction_resolver: HumanInteractionResolver,
     task_ledger: dict[str, object] | None = None,
     planning_state: dict[str, object] | None = None,
-    context_state_snapshot: ContextStateSnapshot | None = None,
-    context_state_sink: Callable[[ContextStateSnapshot], None] | None = None,
-    model_context_messages: list[dict[str, Any]] | None = None,
-    force_context_rebuild: bool = False,
     tool_registry: ToolRuntimeRegistry | None = None,
     instruction_cache: object | None = None,
     skill_catalog: object | None = None,
@@ -154,9 +147,8 @@ def prepare_initial_messages(
         task.worker_context,
     )
     user_request_message = getattr(context, "user_request_message", None)
-    legacy_builder_contract = user_request_message is None
     messages = stable_messages
-    if legacy_builder_contract and context.manifest.full_compact_contract is not None:
+    if context.manifest.full_compact_contract is not None:
         if context.manifest.full_compact_contract.get("eligible") is True:
             writer.append_transcript(
                 {
@@ -183,152 +175,26 @@ def prepare_initial_messages(
             )
         write_full_compact_manifest_result(writer, context.context_id, full_compact_result.manifest)
         messages = full_compact_result.messages
-    built_state = getattr(context, "context_state", None)
-    has_built_state = isinstance(built_state, ContextStateSnapshot)
-    if built_state is None:
-        built_state = ContextStateSnapshot.create()
-    if not isinstance(built_state, ContextStateSnapshot):
-        raise TypeError("ContextBuilder.build() must return ContextStateSnapshot context_state")
-    current_state: ContextStateSnapshot | None
-    if legacy_builder_contract:
-        state_visible = has_built_state or context_state_snapshot is not None
-        current_state = _state_for_turn(built_state, context_state_snapshot) if state_visible else None
-        if current_state is not None:
-            messages.append(build_context_state_snapshot_message(current_state))
-    else:
-        if not isinstance(user_request_message, dict):
-            raise TypeError("ContextBuilder.build() must return a user_request_message")
-        messages, current_state = _append_session_turn(
-            stable_messages=stable_messages,
-            previous_messages=model_context_messages or [],
-            previous_state=context_state_snapshot,
-            desired_state=built_state,
-            user_request_message=user_request_message,
-            writer=writer,
-            force_rebuild=(
-                force_context_rebuild
-                or (
-                    isinstance(session_compaction, dict)
-                    and session_compaction.get("decision") == "compacted"
-                )
-            ),
+    initial_projection = getattr(context, "initial_projection", None)
+    if not isinstance(initial_projection, ProjectedModelContext):
+        built_state = getattr(context, "context_state", None)
+        if not isinstance(built_state, ContextStateSnapshot):
+            raise TypeError("ContextBuilder.build() must return an initial_projection")
+        initial_projection = ProjectedModelContext(
+            sections=built_state.sections,
+            source_digests=built_state.source_digests,
         )
-    if context_state_sink is not None and current_state is not None:
-        context_state_sink(current_state)
-    if current_state is not None and (
-        (legacy_builder_contract and (has_built_state or context_state_snapshot is not None))
-        or (not legacy_builder_contract and not model_context_messages)
-    ):
-        writer.append_transcript(
-            {
-                "event": "context_state_snapshot",
-                "epoch": current_state.epoch,
-                "revision": current_state.revision,
-                "snapshot_id": current_state.snapshot_id,
-                "sections": sorted(current_state.sections),
-                "chars": sum(len(str(value)) for value in current_state.sections.values()),
-            },
-        )
+    if not isinstance(user_request_message, dict):
+        raise TypeError("ContextBuilder.build() must return a user_request_message")
     source_diagnostics = getattr(context.manifest, "source_diagnostics", {})
     raw_cache = source_diagnostics.get("cache", {}) if isinstance(source_diagnostics, dict) else {}
     cache_diagnostics = raw_cache if isinstance(raw_cache, dict) else {}
     return PreparedMessages(
         context_id=context.context_id,
         messages=messages,
-        context_state=current_state,
+        initial_projection=initial_projection,
+        user_request_message=user_request_message,
         cache_diagnostics=cache_diagnostics,
-    )
-
-
-def _append_session_turn(
-    *,
-    stable_messages: list[dict[str, Any]],
-    previous_messages: list[dict[str, Any]],
-    previous_state: ContextStateSnapshot | None,
-    desired_state: ContextStateSnapshot,
-    user_request_message: dict[str, Any],
-    writer: EpisodeWriter,
-    force_rebuild: bool = False,
-) -> tuple[list[dict[str, Any]], ContextStateSnapshot]:
-    previous = deepcopy(previous_messages)
-    stable_matches = bool(previous) and _system_prefix(previous) == stable_messages
-    if stable_matches and previous_state is not None and not force_rebuild:
-        current_state, delta = next_snapshot(
-            previous_state,
-            desired_state.sections,
-            desired_state.source_digests,
-        )
-        messages = previous
-        if delta is not None:
-            messages.append(build_context_state_delta_message(delta))
-            writer.append_transcript(
-                {
-                    "event": "context_state_delta",
-                    "turn": 0,
-                    "epoch": current_state.epoch,
-                    "base_revision": delta.base_revision,
-                    "revision": current_state.revision,
-                    "base_snapshot_id": delta.base_snapshot_id,
-                    "snapshot_id": current_state.snapshot_id,
-                    "changed_sections": sorted(delta.changed),
-                    "removed_sections": list(delta.removed),
-                    "source": "session_turn_boundary",
-                },
-            )
-    else:
-        epoch = previous_state.epoch + 1 if previous and previous_state is not None else 0
-        if force_rebuild and previous_state is not None:
-            epoch = previous_state.epoch + 1
-        current_state = ContextStateSnapshot.create(
-            epoch=epoch,
-            revision=1,
-            sections=desired_state.sections,
-            source_digests=desired_state.source_digests,
-        )
-        messages = [*deepcopy(stable_messages), build_context_state_snapshot_message(current_state)]
-        if previous or force_rebuild:
-            writer.append_transcript(
-                {
-                    "event": "context_epoch_rebuilt",
-                    "previous_epoch": previous_state.epoch if previous_state is not None else None,
-                    "epoch": current_state.epoch,
-                    "revision": current_state.revision,
-                    "snapshot_id": current_state.snapshot_id,
-                    "sections": sorted(current_state.sections),
-                    "reason": (
-                        "session_memory_compacted"
-                        if force_rebuild
-                        else "stable_prefix_changed"
-                    ),
-                },
-            )
-    messages.append(deepcopy(user_request_message))
-    return messages, current_state
-
-
-def _system_prefix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    prefix: list[dict[str, Any]] = []
-    for message in messages:
-        if message.get("role") != "system":
-            break
-        prefix.append(message)
-    return prefix
-
-
-def _state_for_turn(
-    desired: ContextStateSnapshot,
-    previous: ContextStateSnapshot | None,
-) -> ContextStateSnapshot:
-    if previous is None:
-        return desired
-    if previous.epoch < 0 or previous.revision < 0:
-        raise ValueError("context state snapshot has invalid version")
-    revision = previous.revision if desired.sections == previous.sections and desired.source_digests == previous.source_digests else previous.revision + 1
-    return ContextStateSnapshot.create(
-        epoch=previous.epoch,
-        revision=max(1, revision),
-        sections=desired.sections,
-        source_digests=desired.source_digests,
     )
 
 

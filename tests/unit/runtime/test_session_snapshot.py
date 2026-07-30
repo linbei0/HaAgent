@@ -20,7 +20,7 @@ from haagent.runtime.session.lifecycle import (
 from haagent.runtime.session.package import read_session_metadata
 
 
-def test_apply_state_only_binds_snapshot_and_resources(tmp_path: Path) -> None:
+def test_apply_state_only_binds_snapshot_resources_and_model_context_runtime(tmp_path: Path) -> None:
     state = build_create_state(
         workspace_root=tmp_path,
         runs_root=tmp_path / ".runs",
@@ -31,7 +31,8 @@ def test_apply_state_only_binds_snapshot_and_resources(tmp_path: Path) -> None:
 
     assert session.snapshot is state.snapshot
     assert session.resources is state.resources
-    assert set(session.__dict__) == {"_snapshot", "_resources"}
+    assert session._model_context_runtime is state.model_context_runtime
+    assert set(session.__dict__) == {"_snapshot", "_resources", "_model_context_runtime"}
     assert isinstance(session.snapshot, SessionSnapshot)
     assert isinstance(session.resources, SessionResources)
     assert session.snapshot.schema_version == SESSION_SNAPSHOT_SCHEMA_VERSION
@@ -134,7 +135,7 @@ def test_reload_keeps_resources_and_refreshes_snapshot(tmp_path: Path) -> None:
 
 
 def test_session_snapshot_schema_version_persisted_and_restored(tmp_path: Path) -> None:
-    """v1 写入 session.json，resume 后仍为 v1，不得静默改写为其他版本。"""
+    """当前 schema 写入 session.json，resume 后不得静默改写为其他版本。"""
     runs_root = tmp_path / ".runs"
     session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
     session._write_session_metadata()
@@ -192,20 +193,33 @@ def test_unknown_session_snapshot_schema_version_rejected(tmp_path: Path) -> Non
         assert "session_snapshot_schema_version" in str(error)
 
 
-def test_corrupted_context_state_hash_is_rejected_on_resume(tmp_path: Path) -> None:
+def test_corrupted_model_context_snapshot_hash_is_rejected_on_resume(tmp_path: Path) -> None:
     import json
 
     from haagent.runtime.session.package import ChatSessionError
 
     runs_root = tmp_path / ".runs"
     session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
-    metadata_path = session.session_path / "session.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["context_state"]["sections"] = {"working_state": "tampered"}
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    context_path = session.session_path / "model-context.json"
+    aggregate = json.loads(context_path.read_text(encoding="utf-8"))
+    aggregate["snapshot"]["sections"] = {"working_state": "tampered"}
+    context_path.write_text(json.dumps(aggregate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     try:
         AgentSession.resume(session.session_id, runs_root=runs_root, max_turns=2)
-        raise AssertionError("expected ChatSessionError for corrupted context state")
+        raise AssertionError("expected ChatSessionError for corrupted model context")
     except ChatSessionError as error:
-        assert "context state" in str(error)
+        assert "model context snapshot" in str(error)
+
+
+def test_missing_model_context_is_rejected_on_resume(tmp_path: Path) -> None:
+    import pytest
+
+    from haagent.runtime.session.package import ChatSessionError
+
+    runs_root = tmp_path / ".runs"
+    session = AgentSession(workspace_root=tmp_path, runs_root=runs_root, max_turns=2)
+    (session.session_path / "model-context.json").unlink()
+
+    with pytest.raises(ChatSessionError, match="missing model-context.json"):
+        AgentSession.resume(session.session_id, runs_root=runs_root, max_turns=2)

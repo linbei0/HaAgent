@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from haagent.context.projection import ProjectedModelContext
 from haagent.models.types import ModelResponse
 from haagent.runtime.execution.cancellation import CancellationToken
 from haagent.runtime.performance import PerformanceTrace
@@ -284,6 +285,8 @@ def test_prepare_initial_messages_injects_worker_context_system_prompt(tmp_path:
             return SimpleNamespace(
                 context_id="context-1",
                 messages=[{"role": "user", "content": "inspect"}],
+                initial_projection=ProjectedModelContext.create({}),
+                user_request_message={"role": "user", "content": "inspect"},
                 manifest=SimpleNamespace(full_compact_contract=None),
             )
 

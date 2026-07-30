@@ -42,7 +42,6 @@ from haagent.runtime.session.package import (
     merge_image_attachment_history,
     session_turn_summary,
     write_manual_compaction_state,
-    write_model_context,
     write_session_metadata,
 )
 from haagent.runtime.session.path_mutators import (
@@ -89,7 +88,6 @@ from haagent.context.compression.session_memory import (
     compact_session_memory,
 )
 from haagent.runtime.session.working_state import (
-    format_working_state_for_model,
     update_working_state,
     working_state_from_dict,
     write_working_state,
@@ -102,7 +100,6 @@ from haagent.runtime.session.task_ledger import (
     update_task_ledger_runtime,
     write_task_ledger,
     write_task_ledger_markdown,
-    format_task_ledger_for_model,
 )
 from haagent.runtime.session.planning_state import (
     PlanningStateError,
@@ -113,14 +110,8 @@ from haagent.runtime.session.planning_state import (
     request_plan_revision,
     submit_plan_revision,
     write_planning_state,
-    format_planning_state_for_model,
 )
-from haagent.context.versioned_state import ContextStateSnapshot, next_snapshot
-from haagent.context.messages import (
-    build_context_state_delta_message,
-    build_context_state_snapshot_message,
-)
-from haagent.context.builder import format_context_state_section
+from haagent.context.projection import ModelContextFacts
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
 
 CHAT_MAX_TURNS = DEFAULT_INTERACTIVE_MAX_TURNS
@@ -154,6 +145,7 @@ _SESSION_OWN_ATTRS = frozenset(
         "_skill_catalog",
         "_instruction_cache",
         "_tool_schema_cache",
+        "_model_context_runtime",
     }
 )
 
@@ -178,10 +170,6 @@ _SNAPSHOT_ATTRS: dict[str, str] = {
     "_planning_state": "planning_state",
     "_created_at": "created_at",
     "_session_interaction_state": "session_interaction_state",
-    "context_state": "context_state",
-    "_model_context_messages": "model_context_messages",
-    "_model_context_epoch": "model_context_epoch",
-    "_context_rebuild_required": "context_rebuild_required",
 }
 
 # 对外/对内属性名 → SessionResources 字段名
@@ -289,7 +277,6 @@ class AgentSession:
         self._write_working_state()
         self._write_task_ledger()
         self._write_planning_state()
-        self._write_model_context()
 
     @classmethod
     def resume(
@@ -477,43 +464,6 @@ class AgentSession:
         target_paths = list(self._next_turn_target_paths)
         self._next_turn_target_paths = []
         session_memory = self._session_memory()
-        context_sections_holder: dict[str, object] = {}
-        def context_state_provider() -> dict[str, object]:
-            sections = dict(context_sections_holder)
-            for key in ("session_summary", "working_state", "task_ledger", "planning_state"):
-                sections.pop(key, None)
-            if session_memory.summary_text:
-                sections["session_summary"] = session_memory.summary_text
-            if not self._working_state.is_empty():
-                sections["working_state"] = format_context_state_section(
-                    "working_state",
-                    format_working_state_for_model(self._working_state.to_dict()),
-                )
-            if self._task_ledger.todos:
-                sections["task_ledger"] = format_context_state_section(
-                    "task_ledger",
-                    format_task_ledger_for_model(self._task_ledger.to_dict()),
-                )
-            if self._planning_state.status not in {"inactive", "cancelled"}:
-                sections["planning_state"] = format_context_state_section(
-                    "planning_state",
-                    format_planning_state_for_model(self._planning_state),
-                )
-            return sections
-
-        def context_state_sink(snapshot: ContextStateSnapshot) -> None:
-            context_sections_holder.clear()
-            context_sections_holder.update(snapshot.sections)
-            self._snapshot.context_state = snapshot
-            self._write_session_metadata()
-
-        def model_context_sink(messages: list[dict[str, object]], epoch: int) -> None:
-            self._model_context_messages = deepcopy(messages)
-            self._model_context_epoch = epoch
-            self._context_rebuild_required = False
-            self._write_session_metadata()
-            self._write_model_context()
-
         new_attachments = list(attachments or [])
         prompt_attachments = new_attachments if new_attachments else list(self._last_user_image_attachments)
         try:
@@ -567,12 +517,7 @@ class AgentSession:
                         self._planning_state.status == "execution_started"
                         and self._task_ledger.has_active_todos()
                     ),
-                    context_state_snapshot=self.snapshot.context_state,
-                    context_state_provider=context_state_provider,
-                    context_state_sink=context_state_sink,
-                    model_context_messages=deepcopy(self._model_context_messages),
-                    model_context_sink=model_context_sink,
-                    force_context_rebuild=self._context_rebuild_required,
+                    model_context_runtime=self._model_context_runtime,
                 ),
             )
         except Exception:
@@ -621,24 +566,6 @@ class AgentSession:
         )
         self._summaries.append(summary)
         self._record_turn(clean_prompt, turn_result, summary)
-        # 最后一轮工具可能已更新状态但没有下一次模型调用；先把最终运行态写入 session snapshot，
-        # 下次 resume 不依赖尚未发送的 delta 才能恢复事实。
-        if self.snapshot.context_state is not None:
-            latest_state, latest_delta = next_snapshot(
-                self.snapshot.context_state,
-                context_state_provider(),
-            )
-            if latest_delta is not None:
-                if not self._model_context_messages:
-                    self._model_context_messages.append(
-                        build_context_state_snapshot_message(self.snapshot.context_state),
-                    )
-                self._model_context_messages.append(
-                    build_context_state_delta_message(latest_delta),
-                )
-                context_state_sink(latest_state)
-                self._model_context_epoch = latest_state.epoch
-                self._write_model_context()
         extraction_result = None
         if self.memory_extraction_enabled and memory_update_requested(runtime_events):
             extraction_result = self._run_memory_extraction(clean_prompt, turn_result, runtime_events)
@@ -894,13 +821,13 @@ class AgentSession:
         self._write_working_state()
         self._write_task_ledger()
         self._write_planning_state()
-        self._write_model_context()
 
     def _snapshot_state(self) -> SessionRuntimeState:
         # new() 会再构造独立 package；clone 避免共享可变 list。
         return SessionRuntimeState(
             snapshot=self._snapshot.clone(),
             resources=self._resources.clone(),
+            model_context_runtime=self._model_context_runtime,
         )
 
     @property
@@ -1152,7 +1079,8 @@ class AgentSession:
             )
         self._manual_compaction_summary = summary_text_value
         self._manual_compaction_turn_count = max(0, len(self._summaries) - compact_result.preserved_recent_count)
-        self._context_rebuild_required = True
+        # 先持久化 rebuild intent；中断最多导致一次额外 rebuild，不能漏掉代际切换。
+        self._model_context_runtime.require_rebuild("session_memory_compacted")
         self._write_manual_compaction_state()
         self._write_session_metadata()
         final_chars = len("\n".join(self._effective_session_summaries()))
@@ -1175,6 +1103,21 @@ class AgentSession:
             keep_recent=keep_recent,
             memory_char_limit=SESSION_MEMORY_CHAR_LIMIT,
             recent_turns=self._recent_full_turns(keep_recent),
+        )
+
+    def _model_context_facts(self) -> ModelContextFacts:
+        """向 Model Context Runtime 提供原始 session 事实，不参与格式化或版本推进。"""
+
+        memory = self._session_memory()
+        return ModelContextFacts(
+            session_summary=memory.summary_text,
+            working_state=(
+                self._working_state.to_dict()
+                if not self._working_state.is_empty()
+                else None
+            ),
+            task_ledger=self._task_ledger.to_dict(),
+            planning_state=self._planning_state.to_dict(),
         )
 
     def _recent_full_turns(self, keep_recent: int) -> list[dict[str, object]]:
@@ -1263,8 +1206,6 @@ class AgentSession:
             permission_rules=self._session_interaction_state.permission_rules,
             first_request=first_request,
             session_snapshot_schema_version=self.snapshot.schema_version,
-            context_state=self.snapshot.context_state,
-            context_rebuild_required=self._context_rebuild_required,
         )
 
     def _write_manual_compaction_state(self) -> None:
@@ -1273,15 +1214,6 @@ class AgentSession:
             summary=self._manual_compaction_summary,
             compacted_turn_count=self._manual_compaction_turn_count,
         )
-
-    def _write_model_context(self) -> None:
-        write_model_context(
-            self.session_path,
-            messages=self._model_context_messages,
-            context_epoch=self._model_context_epoch,
-            context_state=self.snapshot.context_state,
-        )
-
 
 def _steering_texts_from_events(runtime_events: list[object]) -> list[str]:
     from haagent.runtime.events.bus import SteeringInjectedBusEvent, coerce_bus_event

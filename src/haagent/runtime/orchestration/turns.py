@@ -15,23 +15,14 @@ from threading import Lock
 from typing import Any, Callable
 
 from haagent.context.compression.budget import CompressionBudget
-from haagent.context.compression.checkpoint import maybe_checkpoint_messages
 from haagent.context.compression.messages import build_compressed_model_view
+from haagent.context.model_context_runtime import ModelContextTurn
 from haagent.context.messages import (
     build_assistant_message,
-    build_context_state_delta_message,
-    build_context_state_snapshot_message,
     build_steering_message,
     build_suggestion_message,
     build_tool_result_message,
     generate_tool_call_id,
-    is_context_state_message,
-)
-from haagent.context.versioned_state import (
-    ContextStateSnapshot,
-    ContextStateError,
-    next_snapshot,
-    reset_epoch,
 )
 from haagent.models.capabilities import effective_input_window_tokens
 from haagent.models.telemetry import ModelTransportEvent
@@ -87,14 +78,13 @@ from haagent.verification.engine import VerificationEngine
 
 @dataclass
 class TurnLoopState:
-    messages: list[dict[str, Any]]
-    context_id: str
+    model_context: ModelContextTurn
+    model_step_messages: list[dict[str, Any]] = field(default_factory=list)
+    context_chars: int = 0
     completion_recovery_attempted: bool = False
     verification_engine: VerificationEngine | None = None
     pending_worker_task_ids: list[str] = field(default_factory=list)
     progress_warn_emitted: bool = False
-    context_epoch: int = 0
-    context_snapshot: ContextStateSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -132,8 +122,6 @@ class TurnLoopDependencies:
     progress_guard_mode: str = "warn"
     on_progress_blocked: Callable[[int, ProgressDecision], None] | None = None
     plan_execution_has_active_todos: Callable[[], bool] | None = None
-    context_state_provider: Callable[[], dict[str, object]] | None = None
-    context_state_sink: Callable[[ContextStateSnapshot], None] | None = None
 
 
 def run_turn_loop(
@@ -144,8 +132,6 @@ def run_turn_loop(
     turn_numbers = count(1) if deps.max_turns is None else range(1, deps.max_turns + 1)
     for turn in turn_numbers:
         deps.raise_if_cancelled()
-        if state.context_snapshot is not None and state.context_epoch != state.context_snapshot.epoch:
-            state.context_epoch = state.context_snapshot.epoch
         # 安全边界：上一轮工具批次已收尾、下一次模型调用尚未发出，此处注入运行中引导。
         _drain_steering(turn=turn, state=state, deps=deps)
         if state.pending_worker_task_ids:
@@ -157,47 +143,16 @@ def run_turn_loop(
                     "notifications": notifications,
                 },
             )
-            state.messages.append(_build_worker_notifications_message(notifications))
+            state.model_step_messages.append(_build_worker_notifications_message(notifications))
 
-        _sync_context_state(turn=turn, state=state, deps=deps)
-
-        # 压缩只在模型调用边界整段切换一次；同一 epoch 内已发送消息绝不改写。
-        checkpoint = maybe_checkpoint_messages(
-            messages=state.messages,
-            budget=deps.compression_budget,
-            epoch=state.context_epoch,
-            artifact_writer=deps.writer.write_tool_artifact,
+        # Model Context Runtime 在唯一模型调用 seam 同步 projection、checkpoint 并原子提交。
+        context_frame = state.model_context.before_model_call(
+            pending_messages=state.model_step_messages,
+            interaction_records=deps.interaction_resolver.state_records(),
+            turn=turn,
         )
-        if checkpoint.applied:
-            state.messages = checkpoint.messages
-            state.context_epoch = checkpoint.epoch
-            if state.context_snapshot is not None:
-                state.context_snapshot = reset_epoch(state.context_snapshot, checkpoint.epoch)
-                state.messages = _insert_fresh_context_snapshot(state.messages, state.context_snapshot)
-                if deps.context_state_sink is not None:
-                    deps.context_state_sink(state.context_snapshot)
-            deps.writer.append_transcript(
-                {
-                    "event": "context_checkpoint",
-                    "turn": turn,
-                    "context_revision": (
-                        state.context_snapshot.revision
-                        if state.context_snapshot is not None
-                        else None
-                    ),
-                    "context_snapshot_id": (
-                        state.context_snapshot.snapshot_id
-                        if state.context_snapshot is not None
-                        else None
-                    ),
-                    "changed_sections": (
-                        sorted(state.context_snapshot.sections)
-                        if state.context_snapshot is not None
-                        else []
-                    ),
-                    **checkpoint.diagnostic,
-                },
-            )
+        state.model_step_messages.clear()
+        state.context_chars = _estimate_context_chars(list(context_frame.messages))
 
         def record_schema_cache(value: dict[str, object]) -> None:
             if deps.performance_trace is not None:
@@ -219,14 +174,14 @@ def run_turn_loop(
             {
                 "event": "model_call",
                 "provider": deps.model_gateway.provider_name,
-                "context_id": state.context_id,
+                "context_id": context_frame.context_id,
                 "turn": turn,
                 "attempt": model_attempt,
                 "max_attempts": max_attempts,
                 "goal": deps.task_goal,
-                "context_epoch": state.context_epoch,
-                "context_revision": state.context_snapshot.revision if state.context_snapshot else None,
-                "context_snapshot_id": state.context_snapshot.snapshot_id if state.context_snapshot else None,
+                "context_epoch": context_frame.epoch,
+                "context_revision": context_frame.revision,
+                "context_snapshot_id": context_frame.snapshot_id,
             },
         )
         deps.emit_event(
@@ -293,9 +248,9 @@ def run_turn_loop(
             set_route_event_sink(emit_model_route_event)
 
         settings = getattr(deps.model_gateway, "model_settings", ModelSettings.empty())
-        # 构建压缩视图副本，state.messages 保持不变（原始历史供回放和调试）
+        # 构建压缩视图副本，runtime 聚合保持不变（原始历史供回放和调试）。
         model_view, compression_diagnostics = build_compressed_model_view(
-            state.messages, deps.compression_budget,
+            list(context_frame.messages), deps.compression_budget,
         )
         for diag_index, diagnostic in enumerate(compression_diagnostics):
             event = diagnostic.to_dict()
@@ -367,14 +322,14 @@ def run_turn_loop(
                 {
                     "event": "model_call",
                     "provider": deps.model_gateway.provider_name,
-                    "context_id": state.context_id,
+                    "context_id": context_frame.context_id,
                     "turn": turn,
                     "attempt": model_attempt,
                     "max_attempts": max_attempts,
                     "goal": deps.task_goal,
-                    "context_epoch": state.context_epoch,
-                    "context_revision": state.context_snapshot.revision if state.context_snapshot else None,
-                    "context_snapshot_id": state.context_snapshot.snapshot_id if state.context_snapshot else None,
+                    "context_epoch": context_frame.epoch,
+                    "context_revision": context_frame.revision,
+                    "context_snapshot_id": context_frame.snapshot_id,
                 },
             )
             if deps.persist_performance is not None:
@@ -498,6 +453,11 @@ def run_turn_loop(
 
         if not model_response.tool_calls:
             result = _handle_no_tool_response(turn=turn, model_response=model_response, state=state, deps=deps)
+            state.model_context.complete_model_step(
+                state.model_step_messages,
+                interaction_records=deps.interaction_resolver.state_records(),
+            )
+            state.model_step_messages.clear()
             if result is not None:
                 return result
             continue
@@ -523,7 +483,7 @@ def run_turn_loop(
             }
             for tc in tool_calls_with_ids
         ]
-        state.messages.append(
+        state.model_step_messages.append(
             build_assistant_message(
                 model_response.content,
                 assistant_tool_calls,
@@ -532,10 +492,20 @@ def run_turn_loop(
         )
 
         result = _run_tool_calls(turn=turn, tool_calls_with_ids=tool_calls_with_ids, state=state, deps=deps)
+        state.model_context.complete_model_step(
+            state.model_step_messages,
+            interaction_records=deps.interaction_resolver.state_records(),
+        )
+        state.model_step_messages.clear()
         if result is not None:
             return result
         if terminal_memory_response:
             result = _handle_no_tool_response(turn=turn, model_response=model_response, state=state, deps=deps)
+            state.model_context.complete_model_step(
+                state.model_step_messages,
+                interaction_records=deps.interaction_resolver.state_records(),
+            )
+            state.model_step_messages.clear()
             if result is not None:
                 return result
             continue
@@ -552,73 +522,6 @@ def run_turn_loop(
     return None
 
 
-def _sync_context_state(
-    *,
-    turn: int,
-    state: TurnLoopState,
-    deps: TurnLoopDependencies,
-) -> None:
-    provider = deps.context_state_provider
-    if provider is None or state.context_snapshot is None:
-        return
-    sections = provider()
-    if not isinstance(sections, dict):
-        raise ContextStateError("context_state_provider must return a dictionary")
-    updated, delta = next_snapshot(state.context_snapshot, sections)
-    if delta is None:
-        return
-    state.context_snapshot = updated
-    state.messages.append(build_context_state_delta_message(delta))
-    if deps.context_state_sink is not None:
-        deps.context_state_sink(updated)
-    deps.writer.append_transcript(
-        {
-            "event": "context_state_delta",
-            "turn": turn,
-            "epoch": updated.epoch,
-            "base_revision": delta.base_revision,
-            "revision": updated.revision,
-            "base_snapshot_id": delta.base_snapshot_id,
-            "snapshot_id": updated.snapshot_id,
-            "changed_sections": sorted(delta.changed),
-            "removed_sections": list(delta.removed),
-            "changed_chars": sum(len(str(value)) for value in delta.changed.values()),
-        },
-    )
-
-
-def _insert_fresh_context_snapshot(
-    messages: list[dict[str, Any]],
-    snapshot: ContextStateSnapshot,
-) -> list[dict[str, Any]]:
-    """epoch 切换时删除旧状态消息，并在 checkpoint 后插入唯一完整快照。"""
-
-    filtered = [
-        message
-        for message in messages
-        if not is_context_state_message(message)
-    ]
-    index = 0
-    while index < len(filtered) and filtered[index].get("role") == "system":
-        index += 1
-    if index < len(filtered) and filtered[index].get("role") == "user":
-        index += 1
-    if index < len(filtered) and _is_checkpoint_message(filtered[index]):
-        index += 1
-    filtered.insert(index, build_context_state_snapshot_message(snapshot))
-    return filtered
-
-
-def _is_checkpoint_message(message: dict[str, Any]) -> bool:
-    if message.get("role") != "user" or not isinstance(message.get("content"), str):
-        return False
-    try:
-        payload = json.loads(message["content"])
-    except (TypeError, ValueError):
-        return False
-    return isinstance(payload, dict) and payload.get("kind") == "context_checkpoint"
-
-
 def _drain_steering(
     *,
     turn: int,
@@ -631,7 +534,7 @@ def _drain_steering(
         return 0
     steering_texts = channel.drain()
     for text in steering_texts:
-        state.messages.append(build_steering_message(text))
+        state.model_step_messages.append(build_steering_message(text))
         deps.writer.append_transcript(
             {
                 "event": "steering_injected",
@@ -662,7 +565,7 @@ def _handle_no_tool_response(
         )
     if not model_response.tool_calls:
         # 最终/候选回复进入 session 模型历史；下一条用户请求才能真正追加在它后面。
-        state.messages.append(
+        state.model_step_messages.append(
             build_assistant_message(
                 model_response.content,
                 [],
@@ -685,7 +588,7 @@ def _handle_no_tool_response(
                 "notifications": notifications,
             },
         )
-        state.messages.append(_build_worker_notifications_message(notifications))
+        state.model_step_messages.append(_build_worker_notifications_message(notifications))
         return None
     if deps.steering_channel is not None and deps.steering_channel.has_pending():
         # 有未消费引导时不得完成：保留本轮回答文本，注入引导后继续循环修正。
@@ -709,7 +612,7 @@ def _handle_no_tool_response(
                 "reason": "active_plan_todos",
             },
         )
-        state.messages.append(
+        state.model_step_messages.append(
             build_suggestion_message(
                 "The approved plan still has unfinished Todo items. Do not provide a final answer yet. "
                 "Use the latest tool result to continue the active Todo, then update Todo state."
@@ -791,7 +694,7 @@ def _handle_no_tool_response(
         f"Verification failed: {verification_evidence}. "
         "Use the failure details to repair the task, then retry the declared verification command."
     )
-    state.messages.append(ver_msg)
+    state.model_step_messages.append(ver_msg)
     if deps.max_turns is not None and turn == deps.max_turns:
         deps.emit_event(
             coerce_bus_event(
@@ -889,10 +792,12 @@ def _run_tool_calls(
                 }
             else:
                 visible_result_fingerprints.add(fingerprint)
-        state.messages.append(build_tool_result_message(tool_call.id, tool_call.name, message_result))
+        state.model_step_messages.append(
+            build_tool_result_message(tool_call.id, tool_call.name, message_result),
+        )
         loaded_image_message = _build_loaded_image_attachment_message(tool_result)
         if loaded_image_message is not None:
-            state.messages.append(loaded_image_message)
+            state.model_step_messages.append(loaded_image_message)
             loaded_image_attached_this_turn = True
         if tool_call.name == "agent" and tool_result.get("status") == "running":
             task_id = str(tool_result.get("task_id") or "").strip()
@@ -923,7 +828,7 @@ def _run_tool_calls(
 
     for suggestion_message in pending_suggestion_messages:
         if suggestion_message:
-            state.messages.append(build_suggestion_message(suggestion_message))
+            state.model_step_messages.append(build_suggestion_message(suggestion_message))
 
     control_result = next(
         (result for result in tool_results if result.get("control") == "end_turn"),
@@ -999,7 +904,7 @@ def _apply_progress_guard(
                 "请更换策略，避免重复相同 action/observation。"
                 "如需回顾完整 Todo 进展，file_read episode 目录下的 task-ledger.md。"
             )
-            state.messages.append(build_suggestion_message(suggestion))
+            state.model_step_messages.append(build_suggestion_message(suggestion))
             state.progress_warn_emitted = True
             deps.writer.append_transcript(
                 {
@@ -1103,7 +1008,7 @@ def _resolve_progress_block(
             },
         )
         if choice == "replan":
-            state.messages.append(
+            state.model_step_messages.append(
                 build_suggestion_message(
                     "用户要求 replan：请更换策略与工具路径，不要重复相同 action/observation。",
                 ),
@@ -1179,7 +1084,7 @@ def _build_progress_frame(
     return ProgressFrame(
         pairs=tuple(pairs),
         workspace_changed=workspace_changed,
-        context_chars=_estimate_context_chars(state.messages),
+        context_chars=state.context_chars + _estimate_context_chars(state.model_step_messages),
         has_running_tool=has_running_tool,
         has_running_worker=bool(state.pending_worker_task_ids),
         waiting_approval=waiting_approval,

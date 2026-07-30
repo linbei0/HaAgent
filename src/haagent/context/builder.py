@@ -30,7 +30,12 @@ from haagent.context.messages import (
     build_system_message,
     build_task_message,
 )
-from haagent.context.versioned_state import ContextStateSnapshot, content_digest
+from haagent.context.projection import (
+    ProjectedModelContext,
+    format_context_state_section,
+    format_interaction_state_for_model,
+)
+from haagent.context.versioned_state import ContextStateSnapshot
 from haagent.context.selection import (
     ContextCandidateInputs,
     ContextSelector,
@@ -73,14 +78,6 @@ from haagent.tools.session_history import SESSION_HISTORY_USAGE_GUIDANCE
 
 CONTEXT_MANIFEST_VERSION = "2.0"
 PROJECT_INSTRUCTIONS_CHAR_LIMIT = 4000
-CONTEXT_STATE_SECTION_TITLES = {
-    "working_state": "Working State",
-    "task_ledger": "Task Ledger",
-    "planning_state": "Planning State",
-    "memory_index": "Memory/SOP Navigation Index",
-    "memory": "Relevant Memory",
-    "interaction_history": "Interaction History",
-}
 # session_summary 的截断决策已上移至 compact_session_memory（整轮丢弃），
 # builder 不再叠加更小的本地硬截断；此常量仅用于诊断展示的历史口径。
 SESSION_SUMMARY_CHAR_LIMIT = 12000
@@ -112,6 +109,7 @@ class BuiltContext:
     manifest: ContextManifest
     diagnostics: list[ContextSelectionRecord]
     context_state: ContextStateSnapshot | None = None
+    initial_projection: ProjectedModelContext | None = None
     user_request_message: dict | None = None
 
     @property
@@ -219,14 +217,18 @@ class ContextBuilder:
             for key in sorted(dynamic_keys)
             if selected_sections.get(key)
         }
+        initial_projection = ProjectedModelContext.create(
+            dynamic_sections,
+            requires_rebuild=(
+                isinstance(self._session_compaction, dict)
+                and self._session_compaction.get("decision") == "compacted"
+            ),
+        )
         context_state = ContextStateSnapshot.create(
             epoch=0,
             revision=1,
-            sections=dynamic_sections,
-            source_digests={
-                key: content_digest(value)
-                for key, value in dynamic_sections.items()
-            },
+            sections=initial_projection.sections,
+            source_digests=initial_projection.source_digests,
         )
 
         system_chars = len(system_msg["content"])
@@ -308,6 +310,7 @@ class ContextBuilder:
             context_id=context_id,
             messages=messages,
             context_state=context_state,
+            initial_projection=initial_projection,
             user_request_message=task_msg,
             manifest=manifest,
             diagnostics=compaction.diagnostics,
@@ -474,9 +477,6 @@ class ContextBuilder:
             return None
         return manifest
 
-    def _format_interaction_state(self) -> list[str]:
-        return [f"- {_interaction_state_summary(r)}" for r in self._interaction_state[-8:]]
-
     def _build_context_candidates(
         self,
         project_instructions: str | None,
@@ -503,7 +503,11 @@ class ContextBuilder:
                 ),
                 memory_index_metadata=self._memory_navigation_result().diagnostics,
                 memory_block=self._memory_block(),
-                interaction_state="\n".join(self._format_interaction_state()),
+                interaction_state=(
+                    format_interaction_state_for_model(self._interaction_state)
+                    if self._interaction_state
+                    else ""
+                ),
                 skills_block=self._skills_block(),
             ),
         )
@@ -596,20 +600,6 @@ class ContextBuilder:
         if len(items) > 20:
             lines.append(f"- ... {len(items) - 20} more skills available via skill_list")
         return "\n".join(lines)
-
-
-def format_context_state_section(key: str, content: object) -> object:
-    if not isinstance(content, str):
-        return content
-    title = CONTEXT_STATE_SECTION_TITLES.get(key)
-    if title is None or content.startswith(f"{title}:"):
-        return content
-    return f"{title}:\n{content}"
-
-
-def format_interaction_state_for_model(records: list[dict]) -> str:
-    lines = [f"- {_interaction_state_summary(record)}" for record in records[-8:]]
-    return format_context_state_section("interaction_history", "\n".join(lines))
 
 
 def _compaction_manifest(compaction: ContextCompactionResult) -> dict:
@@ -796,31 +786,6 @@ def _selection_record_dict(record: ContextSelectionRecord) -> dict:
         "final_chars": record.final_chars,
         "priority": record.priority,
     }
-
-
-def _interaction_state_summary(record: dict) -> str:
-    parts = [
-        f"type={_safe_state_value(record.get('type'), 'interaction')}",
-        f"tool={_safe_state_value(record.get('tool'), 'unknown')}",
-        f"status={_safe_state_value(record.get('status'), 'unknown')}",
-    ]
-    question = str(record.get("question") or "")
-    if question:
-        parts.append(f"question={json.dumps(question, ensure_ascii=False)}")
-    if record.get("type") == "user_input":
-        for key in ("outcome", "question_count", "answered_count", "answer_chars"):
-            if key in record:
-                parts.append(f"{key}={_safe_state_value(record[key], 'unknown')}")
-    if "approved" in record:
-        parts.append(f"approved={str(bool(record['approved'])).lower()}")
-    if "turn" in record:
-        parts.append(f"turn={record['turn']}")
-    return " ".join(parts)
-
-
-def _safe_state_value(value: object, fallback: str) -> str:
-    text = str(value or fallback)
-    return " ".join(text.split())
 
 
 def _now_iso() -> str:

@@ -295,9 +295,9 @@ def test_chat_session_manual_compact_uses_smart_summary_for_next_turn(tmp_path: 
         session.run_prompt(f"turn {index}")
 
     compact_result = session.compact_current_session()
-    previous_epoch = session.snapshot.context_state.epoch
-    metadata = json.loads((session.session_path / "session.json").read_text(encoding="utf-8"))
-    assert metadata["context_rebuild_required"] is True
+    aggregate = json.loads((session.session_path / "model-context.json").read_text(encoding="utf-8"))
+    previous_epoch = aggregate["snapshot"]["epoch"]
+    assert aggregate["rebuild_required"] is True
 
     resumed = AgentSession.resume(
         session.session_id,
@@ -315,8 +315,9 @@ def test_chat_session_manual_compact_uses_smart_summary_for_next_turn(tmp_path: 
     assert "- user_request: turn 1" not in gateway.model_inputs[-1]
     for index in range(3, 9):
         assert f"- user_request: turn {index}" in gateway.model_inputs[-1]
-    assert resumed.snapshot.context_state.epoch == previous_epoch + 1
-    assert resumed.snapshot.context_rebuild_required is False
+    aggregate = json.loads((resumed.session_path / "model-context.json").read_text(encoding="utf-8"))
+    assert aggregate["snapshot"]["epoch"] == previous_epoch + 1
+    assert aggregate["rebuild_required"] is False
 
 
 def test_session_metadata_records_model_profile_without_api_key(tmp_path: Path) -> None:

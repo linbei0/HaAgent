@@ -578,10 +578,10 @@ def test_context_builder_diagnostics_match_real_model_input(tmp_path: Path) -> N
 
 
 def test_interaction_state_summary_uses_counts_without_answer_excerpt() -> None:
-    from haagent.context.builder import _interaction_state_summary
+    from haagent.context.projection import format_interaction_state_for_model
 
-    summary = _interaction_state_summary(
-        {
+    summary = format_interaction_state_for_model(
+        ({
             "type": "user_input",
             "tool": "request_user_input",
             "status": "answered",
@@ -591,7 +591,7 @@ def test_interaction_state_summary_uses_counts_without_answer_excerpt() -> None:
             "answered_count": 2,
             "answer_chars": 18,
             "answer_excerpt": "不应进入上下文",
-        }
+        },)
     )
 
     assert "outcome=answered" in summary
