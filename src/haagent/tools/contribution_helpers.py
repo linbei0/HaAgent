@@ -102,7 +102,7 @@ def secret_write_guardrail(tool_name: str, args: dict[str, Any]) -> GuardrailRes
     return None
 
 
-def patch_set_secret_guardrail(args: dict[str, Any]) -> GuardrailResult | None:
+def patch_secret_guardrail(args: dict[str, Any]) -> GuardrailResult | None:
     replacements = args.get("replacements")
     if not isinstance(replacements, list):
         return None
@@ -116,8 +116,8 @@ def patch_set_secret_guardrail(args: dict[str, Any]) -> GuardrailResult | None:
             return GuardrailResult(
                 status="blocked",
                 scope="tool_input",
-                rule_id="apply_patch_set_secret_write",
-                message="apply_patch_set arguments contain a secret-like token",
+                rule_id="apply_patch_secret_write",
+                message="apply_patch arguments contain a secret-like token",
                 severity="high",
             )
     return None

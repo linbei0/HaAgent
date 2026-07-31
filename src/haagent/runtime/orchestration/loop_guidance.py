@@ -86,9 +86,9 @@ def _success_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, 
             return f"Search was incomplete, so zero returned matches is not conclusive. {guidance}"
         return "No matches found. Refine the grep pattern or use file_list to explore the directory structure."
 
-    if tool_name in {"file_write", "apply_patch", "apply_patch_set"}:
+    if tool_name in {"file_write", "apply_patch"}:
         path = str(result.get("path") or args.get("path") or "")
-        if tool_name == "apply_patch_set":
+        if tool_name == "apply_patch":
             paths = result.get("paths")
             path = ", ".join(str(p) for p in paths) if isinstance(paths, list) else path
         return f"File change succeeded. Consider reading back {path} or running verification before completing."
@@ -126,17 +126,13 @@ def _error_suggestion(tool_name: str, args: dict[str, Any], result: dict[str, An
     error_type = str(error.get("type", ""))
     message = str(error.get("message", ""))
 
-    if tool_name == "apply_patch" and _patch_miss(error_type, message):
-        path = str(args.get("path", ""))
-        return f"Patch did not match. First file_read {path!r}, then narrow old_text to an exact current snippet."
-
-    if tool_name == "apply_patch_set" and error_type == "patch_text_not_unique":
-        path = _first_patch_set_error_path(result)
+    if tool_name == "apply_patch" and error_type == "patch_text_not_unique":
+        path = _first_patch_error_path(args, result)
         return f"Patch text is not unique in {path}. Use a longer old_text that uniquely identifies the target location."
 
-    if tool_name == "apply_patch_set" and _patch_miss(error_type, message):
-        path = _first_patch_set_error_path(result)
-        return f"Patch did not match in {path}. Read the file first to get the exact current content."
+    if tool_name == "apply_patch" and _patch_miss(error_type, message):
+        path = _first_patch_error_path(args, result)
+        return f"Patch did not match in {path}. Read the file first, then narrow old_text to an exact current snippet."
 
     if tool_name == "code_run" and error_type == "tool_argument_invalid":
         return "code_run argument invalid. Check code, cwd, timeout_seconds, and external_directories."
@@ -156,14 +152,22 @@ def _first_match_path(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _first_patch_set_error_path(result: dict[str, Any]) -> str:
+def _first_patch_error_path(args: dict[str, Any], result: dict[str, Any]) -> str:
     for key in ("patch_results", "replacements"):
         items = result.get(key)
         if isinstance(items, list):
             for item in items:
                 if isinstance(item, dict) and item.get("status") == "error":
                     return str(item.get("path") or "")
-    return str(result.get("path") or "")
+    path = str(result.get("path") or args.get("path") or "")
+    if path:
+        return path
+    replacements = args.get("replacements")
+    if isinstance(replacements, list):
+        for replacement in replacements:
+            if isinstance(replacement, dict) and replacement.get("path"):
+                return str(replacement["path"])
+    return ""
 
 
 def _patch_miss(error_type: str, message: str) -> bool:

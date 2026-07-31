@@ -255,13 +255,11 @@ def format_args_summary(args_summary: dict[str, object]) -> str:
 
 def impact_summary(tool_name: str, args_summary: dict[str, object]) -> str:
     if tool_name in {"file_write", "apply_patch"}:
+        paths = args_summary.get("paths")
+        if tool_name == "apply_patch" and isinstance(paths, list) and paths:
+            return f"会修改本地文件；paths={safe_summary(', '.join(str(path) for path in paths[:3]), 160)}"
         path = safe_summary(str(args_summary.get("path", "unknown")), 120)
         return f"会修改本地文件；path={path}"
-    if tool_name == "apply_patch_set":
-        paths = args_summary.get("paths")
-        if isinstance(paths, list) and paths:
-            return f"会修改本地文件；paths={safe_summary(', '.join(str(path) for path in paths[:3]), 160)}"
-        return "会修改本地文件；paths=unknown"
     if tool_name == "shell":
         command = safe_summary(str(args_summary.get("command", "unknown")), 160)
         return f"会执行本地命令；是否修改本地文件取决于命令；command={command}"

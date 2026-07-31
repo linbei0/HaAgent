@@ -1650,7 +1650,7 @@ def test_apply_patch_is_denied_before_handler(tmp_path: Path) -> None:
 
     result = router.dispatch(
         "apply_patch",
-        {"path": str(outside), "old_text": "old", "new_text": "new"},
+        {"replacements": [{"path": str(outside), "old_text": "old", "new_text": "new"}]},
     )
 
     assert result["status"] == "error"
@@ -1672,7 +1672,7 @@ def test_apply_patch_denial_writes_tool_call_error(tmp_path: Path) -> None:
 
     result = router.dispatch(
         "apply_patch",
-        {"path": "change.txt", "old_text": "old value", "new_text": "new value"},
+        {"replacements": [{"path": "change.txt", "old_text": "old value", "new_text": "new value"}]},
     )
 
     assert result["status"] == "error"
@@ -1698,7 +1698,7 @@ def test_apply_patch_missing_path_returns_short_argument_error(tmp_path: Path) -
 
     result = router.dispatch(
         "apply_patch",
-        {"path": "missing.txt", "old_text": "old", "new_text": "new"},
+        {"replacements": [{"path": "missing.txt", "old_text": "old", "new_text": "new"}]},
     )
 
     assert result["status"] == "error"
@@ -1710,22 +1710,22 @@ def test_apply_patch_missing_path_returns_short_argument_error(tmp_path: Path) -
     assert str(tmp_path) not in result["error"]["message"]
 
 
-def test_apply_patch_set_replaces_multiple_unique_snippets_atomically(tmp_path: Path) -> None:
+def test_apply_patch_replaces_multiple_unique_snippets_atomically(tmp_path: Path) -> None:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("alpha\nold one\nomega\n", encoding="utf-8")
     second.write_text("before\nold two\nafter\n", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {
             "replacements": [
                 {"path": "first.txt", "old_text": "old one", "new_text": "new one"},
@@ -1745,22 +1745,22 @@ def test_apply_patch_set_replaces_multiple_unique_snippets_atomically(tmp_path: 
     assert second.read_text(encoding="utf-8") == "before\nnew two\nafter\n"
 
 
-def test_apply_patch_set_single_failure_writes_no_partial_results(tmp_path: Path) -> None:
+def test_apply_patch_single_failure_writes_no_partial_results(tmp_path: Path) -> None:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("alpha\nold one\nomega\n", encoding="utf-8")
     second.write_text("before\nunchanged\nafter\n", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {
             "replacements": [
                 {"path": "first.txt", "old_text": "old one", "new_text": "new one"},
@@ -1776,20 +1776,20 @@ def test_apply_patch_set_single_failure_writes_no_partial_results(tmp_path: Path
     assert second.read_text(encoding="utf-8") == "before\nunchanged\nafter\n"
 
 
-def test_apply_patch_set_duplicate_match_fails_without_writing(tmp_path: Path) -> None:
+def test_apply_patch_duplicate_match_fails_without_writing(tmp_path: Path) -> None:
     target = tmp_path / "repeat.txt"
     target.write_text("same\nsame\n", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {"replacements": [{"path": "repeat.txt", "old_text": "same", "new_text": "done"}]},
     )
 
@@ -1799,21 +1799,21 @@ def test_apply_patch_set_duplicate_match_fails_without_writing(tmp_path: Path) -
     assert target.read_text(encoding="utf-8") == "same\nsame\n"
 
 
-def test_apply_patch_set_rejects_workspace_escape(tmp_path: Path) -> None:
-    outside = tmp_path.parent / "apply_patch_set_outside.txt"
+def test_apply_patch_rejects_workspace_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "apply_patch_outside.txt"
     outside.write_text("old", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
 
     result = router.dispatch(
-        "apply_patch_set",
-        {"replacements": [{"path": "../apply_patch_set_outside.txt", "old_text": "old", "new_text": "new"}]},
+        "apply_patch",
+        {"replacements": [{"path": "../apply_patch_outside.txt", "old_text": "old", "new_text": "new"}]},
     )
 
     assert result["status"] == "error"
@@ -1821,7 +1821,7 @@ def test_apply_patch_set_rejects_workspace_escape(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "old"
 
 
-def test_apply_patch_set_batches_external_directory_permission(tmp_path: Path) -> None:
+def test_apply_patch_batches_external_directory_permission(tmp_path: Path) -> None:
     first_dir = tmp_path.parent / f"{tmp_path.name}-external-a"
     second_dir = tmp_path.parent / f"{tmp_path.name}-external-b"
     first_dir.mkdir()
@@ -1832,11 +1832,11 @@ def test_apply_patch_set_batches_external_directory_permission(tmp_path: Path) -
     second.write_text("old-b", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
     requests = []
 
@@ -1845,7 +1845,7 @@ def test_apply_patch_set_batches_external_directory_permission(tmp_path: Path) -
         return HumanInteractionResponse(approved=True, answer="once")
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {
             "replacements": [
                 {"path": str(first), "old_text": "old-a", "new_text": "new-a"},
@@ -1866,11 +1866,11 @@ def test_apply_patch_set_batches_external_directory_permission(tmp_path: Path) -
     assert second.read_text(encoding="utf-8") == "new-b"
 
 
-def test_apply_patch_set_policy_denial_happens_before_handler(tmp_path: Path) -> None:
+def test_apply_patch_policy_denial_happens_before_handler(tmp_path: Path) -> None:
     target = tmp_path / "change.txt"
     target.write_text("old", encoding="utf-8")
     writer = make_writer(tmp_path)
-    router = ToolRouter(allowed_tools=["apply_patch_set"], episode_writer=writer, workspace_root=tmp_path)
+    router = ToolRouter(allowed_tools=["apply_patch"], episode_writer=writer, workspace_root=tmp_path)
     calls = []
 
     def handler(args, _context=None):
@@ -1878,10 +1878,10 @@ def test_apply_patch_set_policy_denial_happens_before_handler(tmp_path: Path) ->
         target.write_text("new", encoding="utf-8")
         return {"status": "success"}
 
-    router._handlers["apply_patch_set"] = handler
+    router._handlers["apply_patch"] = handler
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {"replacements": [{"path": "change.txt", "old_text": "old", "new_text": "new"}]},
     )
 
@@ -2007,18 +2007,18 @@ def test_file_write_edit_diff_denial_does_not_modify_workspace(tmp_path: Path) -
     assert target.read_text(encoding="utf-8") == "old\n"
 
 
-def test_apply_patch_set_edit_diff_denial_preserves_atomicity(tmp_path: Path) -> None:
+def test_apply_patch_edit_diff_denial_preserves_atomicity(tmp_path: Path) -> None:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("alpha\nold one\nomega\n", encoding="utf-8")
     second.write_text("before\nold two\nafter\n", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
 
     def interaction_handler(request):
@@ -2029,7 +2029,7 @@ def test_apply_patch_set_edit_diff_denial_preserves_atomicity(tmp_path: Path) ->
         return HumanInteractionResponse(approved=False, answer="deny")
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {
             "replacements": [
                 {"path": "first.txt", "old_text": "old one", "new_text": "new one"},
@@ -2188,9 +2188,13 @@ def test_apply_patch_blocks_formal_memory_store_path(tmp_path: Path) -> None:
     result = router.dispatch(
         "apply_patch",
         {
-            "path": ".haagent/memory/facts.jsonl",
-            "old_text": '{"title":"old"}\n',
-            "new_text": '{"title":"new"}\n',
+            "replacements": [
+                {
+                    "path": ".haagent/memory/facts.jsonl",
+                    "old_text": '{"title":"old"}\n',
+                    "new_text": '{"title":"new"}\n',
+                },
+            ],
         },
     )
 
@@ -2199,7 +2203,7 @@ def test_apply_patch_blocks_formal_memory_store_path(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == '{"title":"old"}\n'
 
 
-def test_apply_patch_set_blocks_formal_memory_store_path_without_partial_write(tmp_path: Path) -> None:
+def test_apply_patch_blocks_formal_memory_store_path_without_partial_write(tmp_path: Path) -> None:
     memory_target = tmp_path / ".haagent" / "memory" / "facts.jsonl"
     memory_target.parent.mkdir(parents=True)
     memory_target.write_text('{"title":"old"}\n', encoding="utf-8")
@@ -2207,15 +2211,15 @@ def test_apply_patch_set_blocks_formal_memory_store_path_without_partial_write(t
     normal_target.write_text("old normal\n", encoding="utf-8")
     writer = make_writer(tmp_path)
     router = ToolRouter(
-        allowed_tools=["apply_patch_set"],
+        allowed_tools=["apply_patch"],
         episode_writer=writer,
         workspace_root=tmp_path,
-        approval_allowed_tools=["apply_patch_set"],
-        approved_tools=["apply_patch_set"],
+        approval_allowed_tools=["apply_patch"],
+        approved_tools=["apply_patch"],
     )
 
     result = router.dispatch(
-        "apply_patch_set",
+        "apply_patch",
         {
             "replacements": [
                 {"path": "notes.txt", "old_text": "old normal\n", "new_text": "new normal\n"},

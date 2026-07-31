@@ -147,7 +147,7 @@ def _dogfood_tasks() -> list[_DogfoodTask]:
             prompt=(
                 "把问候功能从 Hello 改成 Howdy，并同步相关断言。不要假设文件路径；"
                 "先用 file_list 查看目录结构，再用 grep 做确定性文本搜索，随后 file_read 候选文件，"
-                "最后用 apply_patch_set 一次完成相关修改。"
+                "最后用 apply_patch 的 replacements 一次完成相关修改。"
             ),
             setup=_setup_greeting_workspace,
             verify=_verify_howdy_workspace,
@@ -156,7 +156,7 @@ def _dogfood_tasks() -> list[_DogfoodTask]:
             name="edit-and-test",
             prompt=(
                 "修改 shout 功能，让它返回大写文本并在末尾加感叹号；"
-                "同步代码和测试时优先用 apply_patch_set，一次修改相关文件，然后运行 pytest。"
+                "同步代码和测试时优先用 apply_patch 的 replacements，一次修改相关文件，然后运行 pytest。"
             ),
             setup=_setup_shout_workspace,
             verify=_verify_shout_workspace,
@@ -165,7 +165,7 @@ def _dogfood_tasks() -> list[_DogfoodTask]:
             name="guidance-repair",
             prompt=(
                 "把 README 第一段项目描述改成 Tiny demo。为了覆盖失败恢复，首次尝试请先用 "
-                "apply_patch_set，old_text 只填 Tiny project.，不要先读取文件；如果片段重复导致失败，"
+                "apply_patch 的 replacements，old_text 只填 Tiny project.，不要先读取文件；如果片段重复导致失败，"
                 "之后不要再重复这个最小片段，按下一轮 guidance 读取文件并扩大上下文后重试。"
             ),
             setup=_setup_repeated_readme_workspace,
@@ -220,8 +220,8 @@ def _verify_howdy_workspace(workspace: Path, tool_calls: list[dict[str, Any]]) -
     if "Howdy" not in app or "Howdy" not in test:
         return False, "expected Howdy in implementation and test"
     tools = _tool_names(tool_calls)
-    if not all(tool in tools for tool in ("file_list", "grep", "file_read", "apply_patch_set")):
-        return False, "expected file_list, grep, file_read, and apply_patch_set"
+    if not all(tool in tools for tool in ("file_list", "grep", "file_read", "apply_patch")):
+        return False, "expected file_list, grep, file_read, and apply_patch"
     return True, "none"
 
 
@@ -308,8 +308,8 @@ def _task_improvement(
         return "none"
     if name == "context-edit" and not {"file_list", "grep", "file_read"} <= tools:
         return "prompt/schema should steer context discovery through file_list, grep, and file_read"
-    if name in {"context-edit", "edit-and-test"} and "apply_patch_set" not in tools:
-        return "tool schema should steer multi-file edits toward apply_patch_set"
+    if name in {"context-edit", "edit-and-test"} and "apply_patch" not in tools:
+        return "tool schema should steer multi-file edits toward apply_patch replacements"
     if name == "edit-and-test" and "shell" not in tools:
         return "loop guidance should require pytest evidence after edits"
     if name == "guidance-repair" and "file_read" not in tools:

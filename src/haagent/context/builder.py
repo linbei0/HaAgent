@@ -85,8 +85,7 @@ TOOL_WORKFLOW_HINTS = [
     "Use file_list to inspect directory structure or narrow the search scope.",
     "Use grep for exact deterministic text search when you know the phrase, symbol, or filename fragment.",
     "Then use file_read on candidate files before editing or summarizing.",
-    "Use apply_patch_set for related edits across multiple files or multiple replacements.",
-    "Use apply_patch only for a single isolated replacement.",
+    "Use apply_patch with one replacement for an isolated edit or multiple replacements for related atomic edits.",
     (
         "Use file tools with absolute or workspace-relative paths; external paths trigger a user permission request. "
         'Use cwd="." or omit cwd for the workspace root.'
@@ -372,18 +371,16 @@ class ContextBuilder:
         hints: list[str] = []
         if {"file_list", "grep", "file_read"} <= allowed_tools:
             hints.extend(TOOL_WORKFLOW_HINTS[:3])
-        if "apply_patch_set" in allowed_tools:
-            hints.append(TOOL_WORKFLOW_HINTS[3])
         if "apply_patch" in allowed_tools:
-            hints.append(TOOL_WORKFLOW_HINTS[4])
+            hints.append(TOOL_WORKFLOW_HINTS[3])
         if allowed_tools & {"shell", "code_run"}:
+            hints.append(TOOL_WORKFLOW_HINTS[4])
+        if allowed_tools & {"file_write", "apply_patch"}:
             hints.append(TOOL_WORKFLOW_HINTS[5])
-        if allowed_tools & {"file_write", "apply_patch", "apply_patch_set"}:
-            hints.append(TOOL_WORKFLOW_HINTS[6])
         if allowed_tools & {"web_search", "web_fetch"}:
-            hints.extend(TOOL_WORKFLOW_HINTS[7:9])
+            hints.extend(TOOL_WORKFLOW_HINTS[6:8])
         if "session_history" in allowed_tools:
-            hints.append(TOOL_WORKFLOW_HINTS[9])
+            hints.append(TOOL_WORKFLOW_HINTS[8])
         return hints or ["Use the allowed tools only as needed for the task."]
 
     def _working_state_content(self) -> str | None:

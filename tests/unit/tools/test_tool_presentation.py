@@ -105,9 +105,9 @@ def test_summarizes_apply_patch_args_and_result() -> None:
     }
 
 
-def test_summarizes_apply_patch_set_args_and_result() -> None:
+def test_summarizes_apply_patch_args_and_result() -> None:
     assert summarize_tool_args(
-        "apply_patch_set",
+        "apply_patch",
         {
             "replacements": [
                 {"path": "src/a.py", "old_text": "a", "new_text": "b"},
@@ -117,7 +117,7 @@ def test_summarizes_apply_patch_set_args_and_result() -> None:
         },
     ) == {"replacement_count": 3, "paths": ["src/a.py", "src/b.py"]}
     assert summarize_tool_result(
-        "apply_patch_set",
+        "apply_patch",
         {
             "paths": ["src/a.py", "src/b.py"],
             "replacement_count": 2,

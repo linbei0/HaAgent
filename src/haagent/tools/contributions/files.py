@@ -15,13 +15,12 @@ from haagent.tools.contribution_helpers import (
     first_present_string,
     format_search_match,
     interaction_summary_value,
+    patch_secret_guardrail,
     secret_write_guardrail,
     summary_value,
-    patch_set_secret_guardrail,
 )
 from haagent.tools.file_tools import (
     apply_patch,
-    apply_patch_set,
     file_list,
     file_read,
     file_write,
@@ -66,18 +65,6 @@ def _bind_file_write(deps: ToolRuntimeDeps) -> ToolHandler:
 def _bind_apply_patch(deps: ToolRuntimeDeps) -> ToolHandler:
     def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
         return apply_patch(
-            args,
-            deps.workspace_root,
-            deps.path_policy,
-            context,
-        )
-
-    return handler
-
-
-def _bind_apply_patch_set(deps: ToolRuntimeDeps) -> ToolHandler:
-    def handler(args: dict[str, Any], context: ToolExecutionContext) -> dict[str, Any]:
-        return apply_patch_set(
             args,
             deps.workspace_root,
             deps.path_policy,
@@ -183,34 +170,6 @@ def _file_write_observation(args: dict[str, Any], result: dict[str, Any]) -> dic
 
 
 def _apply_patch_interaction(args: dict[str, Any]) -> dict[str, object]:
-    old_text = str(args.get("old_text", ""))
-    new_text = str(args.get("new_text", ""))
-    return {
-        "new_text_chars": len(new_text),
-        "old_text_chars": len(old_text),
-        "path": interaction_summary_value(str(args.get("path", "")), 160),
-    }
-
-
-def _apply_patch_result(result: dict[str, Any]) -> dict[str, object]:
-    return {
-        "path": summary_value(str(result.get("path", "")), 160),
-        "replacements": result.get("replacements"),
-        "changed_files": changed_files_summary(result),
-    }
-
-
-def _apply_patch_observation(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
-    patch = first_present_string(result.get("patch"), args.get("patch"))
-    return {
-        "status": result.get("status", "unknown"),
-        "path": first_present_string(result.get("path"), args.get("path")),
-        "changed": result.get("changed"),
-        "patch": compact_excerpt(patch)[0],
-    }
-
-
-def _apply_patch_set_interaction(args: dict[str, Any]) -> dict[str, object]:
     replacements = args.get("replacements")
     if not isinstance(replacements, list):
         return {"replacement_count": 0, "paths": []}
@@ -222,7 +181,7 @@ def _apply_patch_set_interaction(args: dict[str, Any]) -> dict[str, object]:
     return {"replacement_count": len(replacements), "paths": paths}
 
 
-def _apply_patch_set_result(result: dict[str, Any]) -> dict[str, object]:
+def _apply_patch_result(result: dict[str, Any]) -> dict[str, object]:
     paths = result.get("paths") if isinstance(result.get("paths"), list) else []
     return {
         "paths": [summary_value(str(path), 160) for path in paths],
@@ -231,7 +190,7 @@ def _apply_patch_set_result(result: dict[str, Any]) -> dict[str, object]:
     }
 
 
-def _apply_patch_set_observation(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
+def _apply_patch_observation(args: dict[str, Any], result: dict[str, Any]) -> dict[str, object]:
     replacements = args.get("replacements")
     count = len(replacements) if isinstance(replacements, list) else 0
     return {
@@ -325,8 +284,8 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
         name="file_read",
         description=(
             "Read a known text file with offset, limit, or keyword context. Use file_list when the path is unknown "
-            "and grep when searching for content. Read an existing file before file_write, apply_patch, or "
-            "apply_patch_set. Prefer one useful window over many tiny repeated reads; directories require file_list."
+            "and grep when searching for content. Read an existing file before file_write or apply_patch. "
+            "Prefer one useful window over many tiny repeated reads; directories require file_list."
         ),
         risk_level="low",
         parameters={
@@ -366,7 +325,7 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
         name="file_write",
         description=(
             "Create, overwrite, or append a text file. Use this for genuinely new files, full replacements, or "
-            "appends. Read an existing file before overwriting it. Prefer apply_patch/apply_patch_set for targeted "
+            "appends. Read an existing file before overwriting it. Prefer apply_patch for targeted "
             "changes, and do not create extra files or documentation unless the user requested them."
         ),
         risk_level="high",
@@ -403,47 +362,9 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
         name="apply_patch",
         description=(
-            "Replace one exact, unique text fragment in one existing file. Read the file first and copy exact "
-            "indentation and context. If old_text is missing or repeated, read the current file and retry with a "
-            "larger unique fragment. Use apply_patch_set for related or multi-file changes."
-        ),
-        risk_level="high",
-        parameters={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "absolute or workspace-relative file path; external paths require permission",
-                },
-                "old_text": {
-                    "type": "string",
-                    "description": "exact text that must occur once; include surrounding lines when needed for uniqueness",
-                },
-                "new_text": {
-                    "type": "string",
-                    "description": "replacement text",
-                },
-            },
-            "required": ["path", "old_text", "new_text"],
-            "additionalProperties": False,
-        },
-        execution_effect="workspace_write",
-        replay_safety=ReplaySafety.NEVER_REPLAY,
-        tags=frozenset({"chat_default", "chat_approval"}),
-        bind_handler=_bind_apply_patch,
-        interaction_args_summary=_apply_patch_interaction,
-        summarize_result=_apply_patch_result,
-        project_observation=_apply_patch_observation,
-        guardrail=lambda args: secret_write_guardrail("apply_patch", args),
-        display_name_zh="修改文件",
-        observation_long_text_keys=("patch",),
-    ),
-    ToolContribution(
-        name="apply_patch_set",
-        description=(
-            "Apply one or more exact text replacements atomically across one or multiple files. Read every target "
+            "Apply one or more exact, unique text replacements atomically across existing files. Read every target "
             "file first. Each old_text must match exactly once; if any replacement is missing or repeated, no file "
-            "is written. Prefer this for related multi-file or multi-site edits and verify changed files afterward."
+            "is written. Pass one replacement for a small edit and multiple replacements for related changes."
         ),
         risk_level="high",
         parameters={
@@ -463,11 +384,12 @@ FILE_CONTRIBUTIONS: list[ToolContribution] = [
         execution_effect="workspace_write",
         replay_safety=ReplaySafety.NEVER_REPLAY,
         tags=frozenset({"chat_default", "chat_approval"}),
-        bind_handler=_bind_apply_patch_set,
-        interaction_args_summary=_apply_patch_set_interaction,
-        summarize_result=_apply_patch_set_result,
-        project_observation=_apply_patch_set_observation,
-        guardrail=patch_set_secret_guardrail,
+        bind_handler=_bind_apply_patch,
+        interaction_args_summary=_apply_patch_interaction,
+        summarize_result=_apply_patch_result,
+        project_observation=_apply_patch_observation,
+        guardrail=patch_secret_guardrail,
         display_name_zh="修改文件",
+        observation_long_text_keys=("patch",),
     ),
 ]

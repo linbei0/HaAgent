@@ -364,85 +364,29 @@ def apply_patch(
     path_policy: PathPolicy | None = None,
     execution_context: ToolExecutionContext | None = None,
 ) -> dict[str, Any]:
-    """仅允许工作区内文件，并要求 old_text 唯一匹配后再写回。"""
-    path_arg = args.get("path")
-    old_text = args.get("old_text")
-    new_text = args.get("new_text")
-    if not all(isinstance(value, str) for value in (path_arg, old_text, new_text)):
-        return tool_error("tool_argument_invalid", "path, old_text, and new_text must be strings")
-
-    policy = path_policy or default_path_policy(workspace_root)
-    path = _resolve_tool_path(path_arg, policy, "full", execution_context)
-    if isinstance(path, dict):
-        return path
-    if is_workspace_memory_store_path(path, workspace_root):
-        return tool_error(MEMORY_STORE_PATH_ERROR, MEMORY_STORE_PATH_MESSAGE)
-    if not path.exists():
-        return tool_error("tool_argument_invalid", f"path does not exist: {path_arg}; {PATH_GUIDANCE}")
-    if not path.is_file():
-        return tool_error("tool_argument_invalid", f"path must be a file: {path_arg}; {PATH_GUIDANCE}")
-
-    text = path.read_text(encoding="utf-8")
-    count = text.count(old_text)
-    if count == 0:
-        return tool_error(
-            "patch_text_not_found",
-            "old_text was not found",
-            recovery=_use_tool_recovery(
-                "file_read",
-                {"path": path_arg},
-                "先读取文件当前内容，再使用精确片段重试补丁。",
-            ),
-        )
-    if count > 1:
-        return tool_error(
-            "patch_text_not_unique",
-            "old_text must match exactly once",
-            recovery=_use_tool_recovery(
-                "file_read",
-                {"path": path_arg},
-                "读取文件并扩大 old_text 上下文，使其唯一匹配。",
-            ),
-        )
-
-    updated_text = text.replace(old_text, new_text, 1)
-    change = _file_change_summary(
-        path=path,
-        old_text=text,
-        new_text=updated_text,
-        change_type="modified",
-        replacements=1,
-    )
-    if approval_error := _request_edit_approval(
-        execution_context.interaction_handler if execution_context is not None else None,
-        tool_name="apply_patch",
-        question=f"Approve file edit for {path_arg}?",
-        reason=f"apply_patch will modify {path_arg}",
-        args_summary={
-            "path": path_arg,
-            "change_type": change["change_type"],
-            "additions": change["additions"],
-            "deletions": change["deletions"],
-            "replacements": 1,
-            "diff_preview": _diff_preview(path_arg, text, updated_text),
-        },
-    ):
-        return approval_error
-
-    path.write_text(updated_text, encoding="utf-8")
-    return {"status": "success", "path": str(path), "replacements": 1, "changed_files": [change]}
-
-
-def apply_patch_set(
-    args: dict[str, Any],
-    workspace_root: Path,
-    path_policy: PathPolicy | None = None,
-    execution_context: ToolExecutionContext | None = None,
-) -> dict[str, Any]:
-    """原子校验多个唯一文本替换；全部可应用后才写文件。"""
+    """原子应用一个或多个精确文本替换。"""
     replacements = args.get("replacements")
     if not isinstance(replacements, list) or not replacements:
         return tool_error("tool_argument_invalid", "replacements must be a non-empty list")
+
+    return _apply_patch_replacements(
+        replacements,
+        workspace_root,
+        path_policy,
+        execution_context,
+        tool_name="apply_patch",
+    )
+
+
+def _apply_patch_replacements(
+    replacements: list[object],
+    workspace_root: Path,
+    path_policy: PathPolicy | None,
+    execution_context: ToolExecutionContext | None,
+    *,
+    tool_name: str,
+) -> dict[str, Any]:
+    """原子校验并写入补丁；调用方保留各自的公开输入和输出契约。"""
 
     validated: list[tuple[str, str, str]] = []
     for index, replacement in enumerate(replacements):
@@ -560,9 +504,9 @@ def apply_patch_set(
     ]
     if approval_error := _request_edit_approval(
         execution_context.interaction_handler if execution_context is not None else None,
-        tool_name="apply_patch_set",
+        tool_name=tool_name,
         question="Approve file edits?",
-        reason=f"apply_patch_set will modify {len(changed_files)} file(s)",
+        reason=f"{tool_name} will modify {len(changed_files)} file(s)",
         args_summary={
             "replacement_count": len(summaries),
             "paths": [_display_path(path, workspace_root) for path in sorted(staged_texts)],

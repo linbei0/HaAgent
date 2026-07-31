@@ -1077,7 +1077,7 @@ def _build_progress_frame(
                 pair_status,
             ),
         )
-        if status != "error" and tool_call.name in {"apply_patch", "apply_patch_set", "file_write"}:
+        if status != "error" and tool_call.name in {"apply_patch", "file_write"}:
             workspace_changed = True
         if status != "error" and tool_result.get("changed_files"):
             workspace_changed = True

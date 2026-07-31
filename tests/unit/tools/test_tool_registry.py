@@ -41,7 +41,6 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "file_write",
         "code_run",
         "apply_patch",
-        "apply_patch_set",
         "shell",
         "job_start",
         "job_status",
@@ -77,7 +76,6 @@ def test_tool_registry_static_execution_effects() -> None:
         "file_read": "read_only",
         "file_write": "workspace_write",
         "apply_patch": "workspace_write",
-        "apply_patch_set": "workspace_write",
         "skill_list": "read_only",
         "skill_read": "read_only",
         "skill_market_search": "read_only",
@@ -385,16 +383,16 @@ def test_code_run_schema_describes_timeout_and_cwd() -> None:
     assert "workspace_root" in properties["cwd"]["description"]
 
 
-def test_apply_patch_set_schema_describes_atomic_replacements() -> None:
-    schemas = export_tool_schemas(["apply_patch_set"])
+def test_apply_patch_schema_describes_atomic_replacements() -> None:
+    schemas = export_tool_schemas(["apply_patch"])
     schema = schemas[0]
 
     assert "atomically" in schema["description"]
-    assert "related multi-file or multi-site edits" in schema["description"]
+    assert "multiple replacements" in schema["description"]
     assert "no file is written" in schema["description"]
     assert schema["parameters"]["required"] == ["replacements"]
     assert schema["parameters"]["properties"]["replacements"]["type"] == "array"
-    assert TOOL_REGISTRY["apply_patch_set"].risk_level == "high"
+    assert TOOL_REGISTRY["apply_patch"].risk_level == "high"
 
 
 def test_tool_registry_rejects_unknown_tool() -> None:
@@ -404,7 +402,6 @@ def test_tool_registry_rejects_unknown_tool() -> None:
 
 def test_mutating_tools_are_high_risk() -> None:
     assert TOOL_REGISTRY["apply_patch"].risk_level == "high"
-    assert TOOL_REGISTRY["apply_patch_set"].risk_level == "high"
     assert TOOL_REGISTRY["shell"].risk_level == "high"
     assert TOOL_REGISTRY["file_write"].risk_level == "high"
     assert TOOL_REGISTRY["code_run"].risk_level == "high"

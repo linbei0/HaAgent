@@ -65,7 +65,7 @@ def test_real_task_smoke_modifies_markdown_file_with_approval(tmp_path: Path) ->
                 "update README",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "README.md",
@@ -84,7 +84,7 @@ def test_real_task_smoke_modifies_markdown_file_with_approval(tmp_path: Path) ->
 
     assert result.status == "completed"
     assert "## Usage" in (workspace / "README.md").read_text(encoding="utf-8")
-    assert _tool_names(result.episode_path) == ["apply_patch_set"]
+    assert _tool_names(result.episode_path) == ["apply_patch"]
     assert "approval_requested" in _transcript_events(result.episode_path)
     assert "approval_granted" in _transcript_events(result.episode_path)
 
@@ -97,7 +97,7 @@ def test_real_task_smoke_modifies_python_file_and_runs_tests(tmp_path: Path) -> 
                 "change greeting",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "src/app.py",
@@ -112,7 +112,7 @@ def test_real_task_smoke_modifies_python_file_and_runs_tests(tmp_path: Path) -> 
                 "update test",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "tests/test_app.py",
@@ -149,7 +149,7 @@ def test_real_task_smoke_grep_read_patch_set_and_runs_tests(tmp_path: Path) -> N
                 "edit implementation and test",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -180,7 +180,7 @@ def test_real_task_smoke_grep_read_patch_set_and_runs_tests(tmp_path: Path) -> N
         "grep",
         "file_read",
         "file_read",
-        "apply_patch_set",
+        "apply_patch",
         "shell",
     ]
     assert 'return f"Hi, {name}!"' in (workspace / "src" / "app.py").read_text(encoding="utf-8")
@@ -293,7 +293,7 @@ def test_real_task_smoke_denied_approval_does_not_modify_file(tmp_path: Path) ->
                 "try denied patch",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "README.md",
@@ -514,7 +514,7 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
                 "bad patch",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "README.md",
@@ -530,7 +530,7 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
                 "patch exact text",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "README.md",
@@ -550,9 +550,9 @@ def test_real_task_smoke_reads_file_after_patch_miss_then_repairs(tmp_path: Path
     assert result.status == "completed"
     assert "Tiny repaired project." in (workspace / "README.md").read_text(encoding="utf-8")
     assert [call["tool_name"] for call in _tool_calls(result.episode_path)] == [
-        "apply_patch_set",
+        "apply_patch",
         "file_read",
-        "apply_patch_set",
+        "apply_patch",
     ]
     assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 
@@ -567,7 +567,7 @@ def test_real_task_smoke_patch_set_failure_does_not_partially_write(tmp_path: Pa
                 "try multi edit",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -594,14 +594,14 @@ def test_real_task_smoke_patch_set_failure_does_not_partially_write(tmp_path: Pa
         ],
     )
 
-    result = _run_chat(workspace, gateway, "确认 apply_patch_set 失败不会部分写入", approvals=True)
+    result = _run_chat(workspace, gateway, "确认 apply_patch 失败不会部分写入", approvals=True)
 
     assert result.status == "completed"
     calls = _tool_calls(result.episode_path)
     call = calls[0]
-    assert call["tool_name"] == "apply_patch_set"
+    assert call["tool_name"] == "apply_patch"
     assert call["error"]["type"] == "patch_text_not_found"
-    assert [item["tool_name"] for item in calls] == ["apply_patch_set", "file_read", "file_read"]
+    assert [item["tool_name"] for item in calls] == ["apply_patch", "file_read", "file_read"]
     assert (workspace / "src" / "app.py").read_text(encoding="utf-8") == original_app
     assert (workspace / "tests" / "test_app.py").read_text(encoding="utf-8") == original_test
 
@@ -615,7 +615,7 @@ def test_real_task_smoke_repeated_patch_set_fragment_reads_then_uses_longer_cont
                 "ambiguous edit",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {"replacements": [{"path": "README.md", "old_text": "Tiny project.", "new_text": "Tiny demo."}]},
                     ),
                 ],
@@ -625,7 +625,7 @@ def test_real_task_smoke_repeated_patch_set_fragment_reads_then_uses_longer_cont
                 "edit with larger context",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -646,9 +646,9 @@ def test_real_task_smoke_repeated_patch_set_fragment_reads_then_uses_longer_cont
 
     assert result.status == "completed"
     assert [call["tool_name"] for call in _tool_calls(result.episode_path)] == [
-        "apply_patch_set",
+        "apply_patch",
         "file_read",
-        "apply_patch_set",
+        "apply_patch",
     ]
     assert _tool_calls(result.episode_path)[0]["error"]["type"] == "patch_text_not_unique"
     assert (workspace / "README.md").read_text(encoding="utf-8") == "# Demo\n\nTiny demo.\n\nTiny project.\n"
@@ -682,7 +682,7 @@ def test_real_task_smoke_searches_and_reads_before_edit_without_path(tmp_path: P
                 "patch found file",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [{
                                 "path": "src/app.py",
@@ -705,7 +705,7 @@ def test_real_task_smoke_searches_and_reads_before_edit_without_path(tmp_path: P
         "file_list",
         "grep",
         "file_read",
-        "apply_patch_set",
+        "apply_patch",
     ]
     assert "loop_suggestion_added" in _transcript_events(result.episode_path)
 

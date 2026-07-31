@@ -48,7 +48,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
                 "patch app and test",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -71,7 +71,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
                 "patch shout",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -95,7 +95,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
                 "ambiguous patch",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {"replacements": [{"path": "README.md", "old_text": "Tiny project.", "new_text": "Tiny demo."}]},
                     ),
                 ],
@@ -105,7 +105,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
                 "retry with context",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -124,7 +124,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
                 "update description",
                 [
                     ToolCall(
-                        "apply_patch_set",
+                        "apply_patch",
                         {
                             "replacements": [
                                 {
@@ -146,7 +146,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     assert report.status == "completed"
     assert [task.status for task in report.tasks] == ["completed", "completed", "completed", "completed"]
     assert report.tasks[0].tools[:4] == ["file_list", "grep", "file_read", "file_read"]
-    assert "apply_patch_set" in report.tasks[0].tools
+    assert "apply_patch" in report.tasks[0].tools
     assert "shell" in report.tasks[1].tools
     assert report.tasks[2].failure_reason == "none"
     assert report.tasks[3].reliability_metrics["tool_argument_error_count"] == 0
@@ -158,7 +158,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     first_tool_call = _tool_calls(report.tasks[0].episode_path)[2]
     assert first_tool_call["tool_name"] == "file_read"
     patch_call = _tool_calls(report.tasks[0].episode_path)[4]
-    assert patch_call["tool_name"] == "apply_patch_set"
+    assert patch_call["tool_name"] == "apply_patch"
     assert patch_call["policy"]["approval"]["status"] == "granted"
     assert (report.tasks[0].episode_path / "contexts").exists()
     assert "Use file_list to inspect directory structure" in gateway.calls[0]["model_input"]
@@ -166,7 +166,7 @@ def test_dogfood_runner_uses_runtime_tools_and_records_granted_approval(tmp_path
     assert "context_find" not in gateway.calls[0]["model_input"]
     visible_tools = {schema["name"] for schema in gateway.calls[0]["tool_schemas"]}
     assert {"agent", "code_run", "apply_patch", "skill_list", "skill_read"}.issubset(visible_tools)
-    assert "related multi-file or multi-site edits" in json.dumps(gateway.calls[0]["tool_schemas"])
+    assert "multiple replacements" in json.dumps(gateway.calls[0]["tool_schemas"])
     assert "Most needed improvement: none" in render_dogfood_report(report)
     assert "tool_argument_error_rate" in render_dogfood_report(report)
 

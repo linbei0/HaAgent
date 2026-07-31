@@ -23,7 +23,6 @@ PARALLEL_FORBIDDEN_TOOLS: frozenset[str] = frozenset(
     {
         "file_write",
         "apply_patch",
-        "apply_patch_set",
         "shell",
         "code_run",
     }

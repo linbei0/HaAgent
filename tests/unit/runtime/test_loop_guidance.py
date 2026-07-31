@@ -248,10 +248,10 @@ def test_apply_patch_miss_suggests_read_before_retry() -> None:
     assert "narrow old_text" in suggestion.message
 
 
-def test_apply_patch_set_not_unique_suggests_expand_context() -> None:
+def test_apply_patch_not_unique_suggests_expand_context() -> None:
     suggestion = suggestion_for_observation(
         _obs(
-            "apply_patch_set",
+            "apply_patch",
             {"replacements": [{"path": "README.md", "old_text": "same", "new_text": "new"}]},
             {
                 "status": "error",
