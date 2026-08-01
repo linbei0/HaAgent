@@ -6,6 +6,8 @@ haagent/app/workspace_usecases.py - Workspace 状态与运行控制 Module
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from haagent.app.assistant_context import AssistantContext
 from haagent.app.assistant_types import (
     AssistantSandboxStatus,
@@ -17,6 +19,7 @@ from haagent.app.assistant_types import (
 from haagent.mcp.settings import load_mcp_settings
 from haagent.models.config.connections import ProviderProfileError, user_config_dir
 from haagent.multi_agent.team_store import TeamStore
+from haagent.runtime.events import WorkerNotificationEvent
 from haagent.runtime.settings import RuntimeSettingsError, load_runtime_settings, set_interactive_max_turns
 from haagent.runtime.sandbox.status import (
     disable_sandbox as disable_runtime_sandbox,
@@ -96,6 +99,49 @@ class AssistantWorkspace:
             for team in store.list_teams_for_leader(self._context.session.session_id)
             for worker in team.agents
         ]
+
+    def poll_worker_notifications(
+        self,
+        event_sink: Callable[[WorkerNotificationEvent], None],
+        *,
+        limit: int = 10,
+    ) -> int:
+        """投递并确认当前 session 的 UI 通知；TUI 不直接访问 TeamStore。"""
+        session = self._context.session
+        if session is None:
+            return 0
+        store = TeamStore(user_config_dir() / "teams")
+        delivered = 0
+        for team in store.list_teams_for_leader(session.session_id):
+            remaining = limit - delivered
+            if remaining <= 0:
+                break
+            batch = store.read_unread_notifications(
+                team.team_id,
+                consumer="ui",
+                limit=remaining,
+                max_chars=4000,
+            )
+            for item in batch["notifications"]:
+                event_sink(
+                    WorkerNotificationEvent(
+                        session_id=session.session_id,
+                        task_id=str(item.get("task_id", "")),
+                        agent_id=str(item.get("agent_id", "")),
+                        status=str(item.get("status", "")),
+                        summary=str(item.get("summary", ""))[:300],
+                        needs_attention=bool(item.get("needs_attention", False)),
+                        request_id=str(item.get("request_id", "")),
+                    ),
+                )
+                # 每条 typed 事件成功交给 TUI 后立即确认；后续事件失败不会重放已显示项。
+                store.acknowledge_notifications(
+                    team.team_id,
+                    consumer="ui",
+                    cursor=str(item.get("notification_id", "")),
+                )
+                delivered += 1
+        return delivered
 
     def set_web_enabled(self, enabled: bool) -> AssistantWorkspaceStatus:
         self._context.enable_web = enabled

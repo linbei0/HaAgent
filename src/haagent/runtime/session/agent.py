@@ -146,6 +146,7 @@ _SESSION_OWN_ATTRS = frozenset(
         "_instruction_cache",
         "_tool_schema_cache",
         "_model_context_runtime",
+        "_closed",
     }
 )
 
@@ -273,6 +274,7 @@ class AgentSession:
         self._skill_catalog = skill_catalog
         self._instruction_cache = instruction_cache
         self._tool_schema_cache = tool_schema_cache
+        self._closed = False
         self._write_session_metadata()
         self._write_working_state()
         self._write_task_ledger()
@@ -315,6 +317,7 @@ class AgentSession:
         instance._skill_catalog = skill_catalog
         instance._instruction_cache = instruction_cache
         instance._tool_schema_cache = tool_schema_cache
+        instance._closed = False
         return instance
 
     def reload(
@@ -330,6 +333,7 @@ class AgentSession:
         """把磁盘 session package 装入当前实例，复用 MCP/tool registry（可选换 gateway）。"""
         if self._current_cancellation_token is not None:
             raise ChatSessionError("current task is running")
+        self._interrupt_background_workers(reason="session reloaded")
         previous_gateway = self.model_gateway
         # 未显式传入的字段保持当前 live session 值，避免误清 max_turns/web。
         next_gateway = self.model_gateway if model_gateway is None else model_gateway
@@ -477,6 +481,7 @@ class AgentSession:
                     workspace_root=self.workspace_root,
                     runs_root=self.runs_root,
                     model_gateway=self.model_gateway,
+                    model_ref=self.model_ref,
                     max_turns=self.max_turns,
                     session_summary=session_memory.summary_text,
                     session_compaction=session_memory.diagnostics,
@@ -815,6 +820,7 @@ class AgentSession:
         }
 
     def new(self) -> None:
+        self._interrupt_background_workers(reason="new session created")
         state = build_new_package_state(self._snapshot_state())
         apply_state(self, state)
         self._write_session_metadata()
@@ -1014,10 +1020,23 @@ class AgentSession:
             interaction_handler=interaction_handler,
         )
 
+    def _interrupt_background_workers(self, *, reason: str) -> int:
+        from haagent.multi_agent.runtime import MultiAgentRuntime
+
+        return MultiAgentRuntime.interrupt_session(
+            team_root=user_config_dir() / "teams",
+            leader_session_id=self.session_id,
+            reason=reason,
+        )
+
     def close(self) -> None:
-        # 先取消 active run，再幂等关闭 gateway/MCP，避免关闭后仍有请求占用连接。
+        # 先封闭重复入口，再取消 active run 和后台 worker，避免重复关闭 gateway/MCP。
+        if self._closed:
+            return
+        self._closed = True
         self.cancel_current_run()
         try:
+            self._interrupt_background_workers(reason="session closed")
             store = TeamStore(user_config_dir() / "teams")
             for team in store.list_teams_for_leader(self.session_id):
                 store.mark_inactive(team.team_id)

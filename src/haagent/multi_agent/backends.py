@@ -130,26 +130,8 @@ def _watch_subprocess_worker(runtime: Any, worker: Any, process: subprocess.Pope
         episode_path=episode_path,
         error="" if status == "completed" else summary,
     )
-    runtime.store.update_worker_status(
-        worker.team_id,
-        worker.agent_id,
-        status,
-        episode_path=episode_path,
-        session_id=worker.session.session_id,
-        restart_count=worker.restart_count,
-    )
-    runtime.store.append_notification(worker.team_id, notification)
-    worker.notification = notification
-    worker.done.set()
-    record = runtime._worker_record(worker)
-    runtime._emit_worker_event(
-        "worker_completed" if status == "completed" else "worker_failed",
-        worker,
-        status=status,
-        subagent_type=record.subagent_type if record is not None else "",
-        description=record.description if record is not None else "",
-        episode_path=episode_path,
-    )
+    # 终态可能发生在创建 worker 的 leader turn 结束后，只通知持久收件箱与等待者。
+    runtime._finalize_worker(worker, status=status, notification=notification)
 
 
 def _read_result_payload(path: Path) -> dict[str, Any] | None:

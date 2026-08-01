@@ -115,6 +115,58 @@ def test_runtime_env_credential_resolve_uses_inherited_environ(
     assert resolved.ref == ModelRef("worker-conn", "gpt-4.1-mini")
 
 
+def test_worker_inheriting_leader_model_uses_independent_gateway(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    store = ModelConfigStore(config_dir / "providers.json")
+    connection = ProviderConnectionRecord(
+        id="leader-conn",
+        name="leader-conn",
+        provider_id="openai",
+        provider_name="OpenAI",
+        gateway_provider="openai",
+        base_url="https://api.openai.com/v1",
+        api_key_env="HAAGENT_TEST_LEADER_API_KEY",
+        credential_source="env",
+        models={"gpt-worker": ModelParameterConfig({}, {})},
+    )
+    store.save_connection(connection, expected_digest=store.load().digest)
+    monkeypatch.setattr(multi_agent_runtime_module, "user_config_dir", lambda: config_dir)
+    leader_gateway = FakeModelGateway(ModelResponse(content="leader", tool_calls=[]))
+    created_gateways: list[FakeModelGateway] = []
+
+    def gateway_factory(_resolved):
+        gateway = FakeModelGateway(ModelResponse(content="worker", tool_calls=[]))
+        created_gateways.append(gateway)
+        return gateway
+
+    runtime = MultiAgentRuntime(
+        runs_root=tmp_path / ".runs",
+        workspace_root=tmp_path,
+        leader_session_id="leader-session-isolation",
+        model_gateway=leader_gateway,
+        leader_model_ref=ModelRef("leader-conn", "gpt-worker"),
+        path_policy=default_path_policy(tmp_path),
+        inherited_allowed_tools=["agent"],
+        inherited_approval_allowed_tools=[],
+        inherited_approved_tools=[],
+        event_sink=None,
+        interaction_handler=None,
+        enable_web=False,
+        mcp_tool_names=[],
+        tool_registry=None,
+        mcp_runtime=None,
+        team_root=tmp_path / ".haagent" / "teams",
+        environ={"HAAGENT_TEST_LEADER_API_KEY": "secret"},
+        gateway_factory=gateway_factory,
+    )
+
+    worker_gateway = runtime._worker_gateway(None)
+
+    assert worker_gateway is created_gateways[0]
+    assert worker_gateway is not leader_gateway
+
+
 def test_runtime_selects_subprocess_backend_from_profile(tmp_path) -> None:
     runtime = MultiAgentRuntime(
         runs_root=tmp_path / ".runs",

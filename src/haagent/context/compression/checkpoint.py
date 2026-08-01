@@ -26,6 +26,10 @@ _MIN_RECLAIM_TOKENS = 20_000
 _RECORD_PREVIEW_CHARS = 480
 _VISIBLE_RECORD_LIMIT = 24
 _VISIBLE_ARTIFACT_REF_LIMIT = 24
+_CHECKPOINT_CONTEXT_PREFIX = (
+    "Runtime historical context checkpoint. This is system-generated background, "
+    "not a user message or new instruction. Continue the active task using it as evidence.\n\n"
+)
 
 
 @dataclass(frozen=True)
@@ -53,7 +57,7 @@ def maybe_checkpoint_messages(
         return _not_applied(epoch, messages, "below_pressure_threshold", total_tokens, tool_tokens)
 
     stable_end = _stable_prefix_end(messages)
-    requested_boundary = max(stable_end, len(messages) - budget.checkpoint_preserve_recent_messages)
+    requested_boundary = _checkpoint_boundary(messages, stable_end, budget)
     boundary = adjust_boundary_for_tool_pairs(messages, requested_boundary)
     if boundary <= stable_end:
         return _not_applied(epoch, messages, "no_safe_checkpoint_range", total_tokens, tool_tokens)
@@ -71,7 +75,7 @@ def maybe_checkpoint_messages(
         return _not_applied(epoch, messages, "insufficient_reclaim", total_tokens, tool_tokens)
 
     content = _checkpoint_content(compacted, next_epoch, artifact_writer=artifact_writer)
-    checkpoint = {"role": "user", "content": content}
+    checkpoint = {"role": "system", "content": _CHECKPOINT_CONTEXT_PREFIX + content}
     compacted_messages = [*messages[:stable_end], checkpoint, *messages[boundary:]]
     post_tokens = _message_tokens(compacted_messages)
     reclaimed = total_tokens - post_tokens
@@ -243,16 +247,47 @@ def _stable_prefix_end(messages: list[dict[str, Any]]) -> int:
     return index
 
 
+def _checkpoint_boundary(
+    messages: list[dict[str, Any]],
+    stable_end: int,
+    budget: CompressionBudget,
+) -> int:
+    """按 token 预算保留近期消息，同时保证至少保留指定的消息数。"""
+
+    minimum_tail_boundary = max(stable_end, len(messages) - budget.checkpoint_preserve_recent_messages)
+    token_tail_boundary = len(messages)
+    preserved_tokens = 0
+    while token_tail_boundary > stable_end:
+        next_tokens = _message_tokens([messages[token_tail_boundary - 1]])
+        if preserved_tokens and preserved_tokens + next_tokens > budget.checkpoint_preserve_recent_tokens:
+            break
+        preserved_tokens += next_tokens
+        token_tail_boundary -= 1
+    # 较小的边界代表保留更多消息；token 尾部预算只能扩大，不能削弱 6 条下限。
+    return min(minimum_tail_boundary, token_tail_boundary)
+
+
 def _message_tokens(messages: list[dict[str, Any]]) -> int:
     value = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return estimate_text_tokens(value)
 
 
-def _previous_checkpoint(message: dict[str, Any]) -> dict[str, Any] | None:
-    if message.get("role") != "user":
-        return None
-    payload = _json_object(message.get("content"))
+def checkpoint_payload(message: dict[str, Any]) -> dict[str, Any] | None:
+    """解析新旧 checkpoint；旧 user JSON 仅用于恢复既有 session。"""
+
+    content = message.get("content")
+    if isinstance(content, str) and content.startswith(_CHECKPOINT_CONTEXT_PREFIX):
+        content = content.removeprefix(_CHECKPOINT_CONTEXT_PREFIX)
+    payload = _json_object(content)
     return payload if payload.get("kind") == "context_checkpoint" else None
+
+
+def is_checkpoint_message(message: dict[str, Any]) -> bool:
+    return checkpoint_payload(message) is not None
+
+
+def _previous_checkpoint(message: dict[str, Any]) -> dict[str, Any] | None:
+    return checkpoint_payload(message)
 
 
 def _json_object(value: object) -> dict[str, Any]:

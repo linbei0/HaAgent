@@ -72,3 +72,12 @@ class AssistantService:
         self.memory = memory_usecases.AssistantMemory(self._context)
         self.channels = channel_usecases.AssistantChannels(self._context)
         self.schedules = schedule_usecases.AssistantSchedules(self._context)
+        self._closed = False
+
+    def close(self) -> None:
+        """幂等关闭当前 session；后台 worker 的中断由 AgentSession 统一结算。"""
+        if self._closed:
+            return
+        self._closed = True
+        if self._context.session is not None:
+            self._context.session.close()

@@ -26,6 +26,7 @@ from haagent.runtime.events import (
     TodoStateEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
+    WorkerNotificationEvent,
 )
 from haagent.tui.design.failures import failure_from_payload
 from haagent.tui.presentation.progress import (
@@ -182,6 +183,24 @@ def _handle_warning_notice(app, event: WarningNoticeEvent) -> None:
     app._conversation.append_block(event.title, event.message)
 
 
+def _handle_worker_notification(app, event: WorkerNotificationEvent) -> None:
+    labels = {
+        "completed": "后台任务已完成",
+        "failed": "后台任务失败",
+        "stopped": "后台任务已停止",
+        "interrupted": "后台任务已中断",
+        "awaiting_approval": "后台任务等待审批",
+    }
+    title = labels.get(event.status, "后台任务状态更新")
+    detail = f"{event.agent_id} · {event.task_id} · {event.status}"
+    if event.summary:
+        detail += f"\n{event.summary}"
+    if event.request_id:
+        detail += f"\n审批请求：{event.request_id}"
+    # 后台通知不代表主 turn 状态变化，也不冒充 assistant 最终回答。
+    app._conversation.append_block(title, detail)
+
+
 def _handle_session_lifecycle(app, event: SessionLifecycleEvent) -> None:
     if event.state in {"turn_started", "turn_finished", "session_started", "session_finished"}:
         app._refresh_todo_panel()
@@ -250,6 +269,7 @@ RUNTIME_UI_EVENT_HANDLERS: dict[type[object], RuntimeUiEventHandler] = {
     TaskProgressEvent: _handle_task_progress,
     PlanningStateEvent: _handle_planning_state,
     TodoStateEvent: _handle_todo_state,
+    WorkerNotificationEvent: _handle_worker_notification,
     SessionLifecycleEvent: _handle_session_lifecycle,
 }
 

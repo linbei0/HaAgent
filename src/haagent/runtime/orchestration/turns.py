@@ -83,7 +83,6 @@ class TurnLoopState:
     context_chars: int = 0
     completion_recovery_attempted: bool = False
     verification_engine: VerificationEngine | None = None
-    pending_worker_task_ids: list[str] = field(default_factory=list)
     progress_warn_emitted: bool = False
 
 
@@ -122,6 +121,7 @@ class TurnLoopDependencies:
     progress_guard_mode: str = "warn"
     on_progress_blocked: Callable[[int, ProgressDecision], None] | None = None
     plan_execution_has_active_todos: Callable[[], bool] | None = None
+    after_context_commit: Callable[[], None] | None = None
 
 
 def run_turn_loop(
@@ -134,16 +134,6 @@ def run_turn_loop(
         deps.raise_if_cancelled()
         # 安全边界：上一轮工具批次已收尾、下一次模型调用尚未发出，此处注入运行中引导。
         _drain_steering(turn=turn, state=state, deps=deps)
-        if state.pending_worker_task_ids:
-            notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
-            deps.writer.append_transcript(
-                {
-                    "event": "worker_notifications_collected",
-                    "turn": turn,
-                    "notifications": notifications,
-                },
-            )
-            state.model_step_messages.append(_build_worker_notifications_message(notifications))
 
         # Model Context Runtime 在唯一模型调用 seam 同步 projection、checkpoint 并原子提交。
         context_frame = state.model_context.before_model_call(
@@ -151,6 +141,8 @@ def run_turn_loop(
             interaction_records=deps.interaction_resolver.state_records(),
             turn=turn,
         )
+        if deps.after_context_commit is not None:
+            deps.after_context_commit()
         state.model_step_messages.clear()
         state.context_chars = _estimate_context_chars(list(context_frame.messages))
 
@@ -579,17 +571,6 @@ def _handle_no_tool_response(
             "termination": model_response.termination,
         },
     )
-    if state.pending_worker_task_ids:
-        notifications = _wait_for_pending_worker_tasks(state=state, deps=deps)
-        deps.writer.append_transcript(
-            {
-                "event": "worker_notifications_collected",
-                "turn": turn,
-                "notifications": notifications,
-            },
-        )
-        state.model_step_messages.append(_build_worker_notifications_message(notifications))
-        return None
     if deps.steering_channel is not None and deps.steering_channel.has_pending():
         # 有未消费引导时不得完成：保留本轮回答文本，注入引导后继续循环修正。
         deps.writer.append_transcript(
@@ -799,11 +780,6 @@ def _run_tool_calls(
         if loaded_image_message is not None:
             state.model_step_messages.append(loaded_image_message)
             loaded_image_attached_this_turn = True
-        if tool_call.name == "agent" and tool_result.get("status") == "running":
-            task_id = str(tool_result.get("task_id") or "").strip()
-            if task_id:
-                state.pending_worker_task_ids.append(task_id)
-
         if tool_result.get("status") == "error":
             if deps.tool_error_is_terminal(tool_result):
                 terminal_error = terminal_error or tool_result
@@ -1056,6 +1032,7 @@ def _build_progress_frame(
 ) -> ProgressFrame:
     pairs: list[tuple[str, dict[str, Any], str, str]] = []
     has_running_tool = False
+    has_running_worker = False
     waiting_approval = False
     waiting_user_input = False
     workspace_changed = False
@@ -1064,6 +1041,8 @@ def _build_progress_frame(
         execution_state = str(tool_result.get("execution_state") or "")
         if status == "running" or execution_state in {"running", "pending", "not_started"}:
             has_running_tool = True
+        if tool_call.name == "agent" and status == "running":
+            has_running_worker = True
         if execution_state in {"awaiting_approval", "approval_required"} or tool_result.get("approval_required"):
             waiting_approval = True
         if tool_call.name == "request_user_input":
@@ -1086,7 +1065,7 @@ def _build_progress_frame(
         workspace_changed=workspace_changed,
         context_chars=state.context_chars + _estimate_context_chars(state.model_step_messages),
         has_running_tool=has_running_tool,
-        has_running_worker=bool(state.pending_worker_task_ids),
+        has_running_worker=has_running_worker,
         waiting_approval=waiting_approval,
         waiting_user_input=waiting_user_input,
     )
@@ -1406,25 +1385,6 @@ def _blocks_later_high_impact(
     return True
 
 
-def _wait_for_pending_worker_tasks(
-    *,
-    state: TurnLoopState,
-    deps: TurnLoopDependencies,
-) -> list[dict[str, Any]]:
-    task_ids = list(state.pending_worker_task_ids)
-    notifications: list[dict[str, Any]] = []
-    for task_id in task_ids:
-        while True:
-            deps.raise_if_cancelled()
-            notification = deps.router.wait_for_agent_task(task_id, timeout=0.2)
-            deps.raise_if_cancelled()
-            if notification:
-                notifications.append(notification)
-                break
-    state.pending_worker_task_ids.clear()
-    return notifications
-
-
 def _build_loaded_image_attachment_message(tool_result: dict[str, Any]) -> dict[str, Any] | None:
     if tool_result.get("status") != "success":
         return None
@@ -1452,25 +1412,6 @@ def _build_loaded_image_attachment_message(tool_result: dict[str, Any]) -> dict[
             },
         ],
     }
-
-
-def _build_worker_notifications_message(notifications: list[dict[str, Any]]) -> dict[str, Any]:
-    lines = ["Worker notifications:"]
-    for notification in notifications:
-        status = str(notification.get("status") or "unknown")
-        task_id = str(notification.get("task_id") or "unknown-task")
-        agent_id = str(notification.get("agent_id") or "unknown-agent")
-        summary = str(
-            notification.get("summary")
-            or notification.get("result_excerpt")
-            or notification.get("error")
-            or ""
-        )
-        if summary:
-            lines.append(f"- {agent_id} ({task_id}) {status}: {summary[:500]}")
-        else:
-            lines.append(f"- {agent_id} ({task_id}) {status}")
-    return {"role": "user", "content": "\n".join(lines)}
 
 
 def _ensure_tool_call_ids(tool_calls: list[ToolCall]) -> list[ToolCall]:

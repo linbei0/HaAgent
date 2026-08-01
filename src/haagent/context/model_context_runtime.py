@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from haagent.context.compression.budget import CompressionBudget
-from haagent.context.compression.checkpoint import maybe_checkpoint_messages
+from haagent.context.compression.checkpoint import is_checkpoint_message, maybe_checkpoint_messages
 from haagent.context.messages import (
     build_context_state_delta_message,
     build_context_state_snapshot_message,
@@ -508,10 +508,4 @@ def _insert_fresh_context_snapshot(
 
 
 def _is_checkpoint_message(message: dict[str, Any]) -> bool:
-    if message.get("role") != "user" or not isinstance(message.get("content"), str):
-        return False
-    try:
-        payload = json.loads(message["content"])
-    except (TypeError, ValueError):
-        return False
-    return isinstance(payload, dict) and payload.get("kind") == "context_checkpoint"
+    return is_checkpoint_message(message)

@@ -13,6 +13,7 @@ import threading
 import time
 
 from haagent.context.compression.budget import CompressionBudget, derive_compression_budget
+from haagent.context.compression.checkpoint import checkpoint_payload
 from haagent.context.model_context_runtime import (
     ModelContextRuntime,
     ModelContextTurnSeed,
@@ -636,7 +637,7 @@ def test_turn_loop_checkpoints_model_input_and_records_context_epoch(tmp_path: P
         {"role": "system", "content": "stable instructions"},
         {"role": "user", "content": "Task:\ngoal: inspect the project"},
     ]
-    for index in range(4):
+    for index in range(6):
         call_id = f"call-{index}"
         content = f"result-{index}-" + ("x" * 50_000)
         messages.extend(
@@ -704,11 +705,12 @@ def test_turn_loop_checkpoints_model_input_and_records_context_epoch(tmp_path: P
 
     assert result is not None
     checkpoint_payloads = [
-        json.loads(message["content"])
+        checkpoint_payload(message)
         for message in invocations[0]
-        if message.get("role") == "user"
-        and "context_checkpoint" in str(message.get("content"))
+        if message.get("role") == "system"
+        and checkpoint_payload(message) is not None
     ]
+    assert checkpoint_payloads[0] is not None
     assert checkpoint_payloads[0]["kind"] == "context_checkpoint"
     checkpoint_events = [
         record for record in writer.transcript if record.get("event") == "context_checkpoint"
@@ -1348,7 +1350,7 @@ def test_truncated_completion_candidate_fails_without_publishing_answer() -> Non
     assert not any(type(event).__name__ == "AssistantMessageBusEvent" for event in emitted)
 
 
-def test_agent_tool_result_is_tracked_as_pending_worker_task() -> None:
+def test_agent_tool_result_does_not_register_an_implicit_wait() -> None:
     router = _FakeRouter(
         {
             "status": "running",
@@ -1373,47 +1375,39 @@ def test_agent_tool_result_is_tracked_as_pending_worker_task() -> None:
         deps=deps,
     )
 
-    assert state.pending_worker_task_ids == ["task-pending"]
+    assert router.waited_task_ids == []
+    assert "task-pending" in str(state.model_step_messages[-1])
 
 
-def test_no_tool_response_waits_for_pending_worker_before_finalizing() -> None:
+def test_no_tool_response_can_finish_while_worker_runs() -> None:
     router = _FakeRouter({})
     writer = _FakeWriter()
-    emitted_events: list[dict[str, object]] = []
     transitions: list[object] = []
-    state = TurnLoopState(
-        messages=[],
-        context_id="ctx",
-        pending_worker_task_ids=["task-pending"],
-    )
+    state = TurnLoopState(messages=[], context_id="ctx")
     deps = _deps(
         router=router,
         writer=writer,
-        emit_event=emitted_events.append,
         recorder=SimpleNamespace(
             state_history=[],
             transition=transitions.append,
             finish=lambda status: SimpleNamespace(status=status),
         ),
     )
+    state.verification_engine = SimpleNamespace(run=lambda commands: SimpleNamespace(status="success"))
 
     result = _handle_no_tool_response(
         turn=2,
-        model_response=ModelResponse(content="worker 已启动，请稍候", tool_calls=[]),
+        model_response=ModelResponse(content="后台任务已启动：task-pending", tool_calls=[]),
         state=state,
         deps=deps,
     )
 
-    assert result is None
-    assert router.waited_task_ids == ["task-pending"]
-    assert state.pending_worker_task_ids == []
-    assert emitted_events == []
-    assert transitions == []
-    assert "Worker notifications" in state.model_step_messages[-1]["content"]
-    assert "worker inspected the project" in state.model_step_messages[-1]["content"]
+    assert result is not None
+    assert router.waited_task_ids == []
+    assert transitions[-2:] == [RunStatus.VERIFYING, RunStatus.COMPLETED]
 
 
-def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll() -> None:
+def test_turn_loop_continues_without_collecting_worker_notifications() -> None:
     router = _FakeRouter(
         {
             "status": "running",
@@ -1444,12 +1438,7 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
                         )
                     ],
                 )
-            if any("Worker notifications" in str(message.get("content", "")) for message in messages):
-                return ModelResponse(content="worker inspected the project", tool_calls=[])
-            return ModelResponse(
-                content="",
-                tool_calls=[ToolCall(name="task_get", args={"task_id": "task-pending"}, id="call_poll")],
-            )
+            return ModelResponse(content="后台任务已启动：task-pending", tool_calls=[])
 
     deps = _deps(
         router=router,
@@ -1473,7 +1462,7 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
 
     assert result is not None
     assert finish_statuses == [RunStatus.COMPLETED]
-    assert router.waited_task_ids == ["task-pending"]
+    assert router.waited_task_ids == []
     assert len(model_messages) == 2
     tool_call_names = [
         call["name"]
@@ -1481,7 +1470,7 @@ def test_turn_loop_collects_pending_worker_notifications_before_model_can_poll()
         for call in record.get("tool_calls", [])
     ]
     assert "task_get" not in tool_call_names
-    assert any(record["event"] == "worker_notifications_collected" for record in writer.transcript)
+    assert not any(record["event"] == "worker_notifications_collected" for record in writer.transcript)
 
 
 def test_turn_loop_adds_loaded_image_attachment_to_next_model_call(tmp_path: Path) -> None:

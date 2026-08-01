@@ -31,6 +31,7 @@ def test_static_handler_factory_has_one_handler_for_every_static_tool(tmp_path: 
             "agent": _handler,
             "send_message": _handler,
             "task_stop": _handler,
+            "task_wait": _handler,
             "task_get": _handler,
             "task_list": _handler,
             "task_output": _handler,

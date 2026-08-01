@@ -40,6 +40,7 @@ def test_default_catalog_matches_tool_registry_and_handlers(tmp_path: Path) -> N
             "agent": _handler,
             "send_message": _handler,
             "task_stop": _handler,
+            "task_wait": _handler,
             "task_get": _handler,
             "task_list": _handler,
             "task_output": _handler,
@@ -118,7 +119,15 @@ def test_default_candidate_tool_set_preserves_agent_capabilities_and_resource_ga
     expected_default = set(catalog.chat_default_tools()) - {"start_memory_update"}
     assert expected_default.issubset(normal)
     assert {"code_run", "apply_patch"}.issubset(normal)
-    assert {"agent", "send_message", "task_get", "task_list", "task_output", "task_stop"}.issubset(normal)
+    assert {
+        "agent",
+        "send_message",
+        "task_get",
+        "task_list",
+        "task_output",
+        "task_stop",
+        "task_wait",
+    }.issubset(normal)
     assert {"skill_list", "skill_read", "skill_market_search"}.issubset(normal)
     assert set(online) - set(normal) == {"web_search", "web_fetch"}
     assert "load_image_attachment" not in normal

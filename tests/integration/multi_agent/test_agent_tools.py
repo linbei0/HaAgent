@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from haagent.models.fake import FakeModelGateway
 from haagent.models.types import ModelResponse, ToolCall
 from haagent.multi_agent.runtime import MultiAgentRuntime, _failure_summary_from_episode
+from haagent.multi_agent.team_store import WorkerRecord
 from haagent.runtime.episodes.writer import EpisodeWriter
+from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.path_policy import default_path_policy
 from haagent.tools.router import ToolRouter
 
@@ -115,9 +117,11 @@ def test_agent_tool_starts_worker_and_records_trace(tmp_path: Path) -> None:
 
     assert notification["status"] == "completed"
     payloads = [bus_event_to_dict(event) for event in events]
-    assert [event["event_type"] for event in payloads] == ["worker_started", "worker_completed"]
+    # 终态脱离创建 worker 的旧 leader turn sink，经持久通知收件箱投递。
+    assert [event["event_type"] for event in payloads] == ["worker_started"]
     assert payloads[0]["agent_id"] == result["agent_id"]
-    assert payloads[1]["status"] == "completed"
+    stored = runtime.store.read_unread_notifications("team-test", consumer="ui")
+    assert stored["notifications"][0]["status"] == "completed"
 
     trace_lines = (writer.path / "tool-calls.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(trace_lines[0])["tool_name"] == "agent"
@@ -379,6 +383,154 @@ def test_task_tools_read_worker_state_and_output(tmp_path: Path) -> None:
 
     assert reloaded_output["status"] == "success"
     assert "worker final output" in reloaded_output["output"]
+
+
+def test_task_wait_returns_first_actionable_task_without_polling(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(
+        runs_root=tmp_path / ".runs",
+        workspace_root=tmp_path,
+        leader_session_id="leader-task-wait",
+        model_gateway=FakeModelGateway(ModelResponse(content="worker output", tool_calls=[])),
+        path_policy=default_path_policy(tmp_path),
+        inherited_allowed_tools=["agent", "task_wait", "task_get", "task_output"],
+        inherited_approval_allowed_tools=[],
+        inherited_approved_tools=[],
+        event_sink=None,
+        interaction_handler=None,
+        enable_web=False,
+        mcp_tool_names=[],
+        tool_registry=None,
+        mcp_runtime=None,
+        team_root=tmp_path / ".haagent" / "teams",
+    )
+    started = runtime.spawn_worker(
+        description="Inspect",
+        prompt="Return output",
+        subagent_type="explorer",
+    )
+
+    waited = runtime.task_wait([started["task_id"]], timeout_seconds=5)
+
+    assert waited["status"] == "success"
+    assert waited["timed_out"] is False
+    assert waited["tasks"][0]["task_id"] == started["task_id"]
+    assert waited["tasks"][0]["status"] == "completed"
+    assert "worker output" in waited["tasks"][0]["summary"]
+
+
+def test_task_wait_validates_all_ids_before_waiting(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(
+        runs_root=tmp_path / ".runs",
+        workspace_root=tmp_path,
+        leader_session_id="leader-task-wait-invalid",
+        model_gateway=FakeModelGateway(ModelResponse(content="unused", tool_calls=[])),
+        path_policy=default_path_policy(tmp_path),
+        inherited_allowed_tools=["agent", "task_wait"],
+        inherited_approval_allowed_tools=[],
+        inherited_approved_tools=[],
+        event_sink=None,
+        interaction_handler=None,
+        enable_web=False,
+        mcp_tool_names=[],
+        tool_registry=None,
+        mcp_runtime=None,
+        team_root=tmp_path / ".haagent" / "teams",
+    )
+
+    waited = runtime.task_wait(["task-missing"], timeout_seconds=1)
+
+    assert waited["is_error"] is True
+    assert "unknown task" in waited["error"]
+
+
+def test_task_wait_timeout_returns_latest_running_state(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(
+        runs_root=tmp_path / ".runs",
+        workspace_root=tmp_path,
+        leader_session_id="leader-task-wait-timeout",
+        model_gateway=FakeModelGateway(ModelResponse(content="unused", tool_calls=[])),
+        path_policy=default_path_policy(tmp_path),
+        inherited_allowed_tools=["agent", "task_wait"],
+        inherited_approval_allowed_tools=[],
+        inherited_approved_tools=[],
+        event_sink=None,
+        interaction_handler=None,
+        enable_web=False,
+        mcp_tool_names=[],
+        tool_registry=None,
+        mcp_runtime=None,
+        team_root=tmp_path / ".haagent" / "teams",
+    )
+    team = runtime.store.ensure_team(
+        team_id="team-timeout",
+        workspace_root=tmp_path,
+        leader_session_id=runtime.leader_session_id,
+    )
+    runtime.store.upsert_worker(
+        team.team_id,
+        WorkerRecord(
+            agent_id="explorer-running",
+            task_id="task-running",
+            subagent_type="explorer",
+            description="still running",
+            status="running",
+        ),
+    )
+
+    waited = runtime.task_wait(["task-running"], timeout_seconds=1)
+
+    assert waited["status"] == "success"
+    assert waited["timed_out"] is True
+    assert waited["tasks"][0]["status"] == "running"
+
+    runtime.store.update_worker_status(team.team_id, "explorer-running", "interrupted")
+    interrupted = runtime.task_wait(["task-running"], timeout_seconds=1)
+    assert interrupted["timed_out"] is False
+    assert interrupted["tasks"][0]["status"] == "interrupted"
+
+
+def test_task_wait_honors_turn_cancellation(tmp_path: Path) -> None:
+    runtime = MultiAgentRuntime(
+        runs_root=tmp_path / ".runs",
+        workspace_root=tmp_path,
+        leader_session_id="leader-task-wait-cancel",
+        model_gateway=FakeModelGateway(ModelResponse(content="unused", tool_calls=[])),
+        path_policy=default_path_policy(tmp_path),
+        inherited_allowed_tools=["agent", "task_wait"],
+        inherited_approval_allowed_tools=[],
+        inherited_approved_tools=[],
+        event_sink=None,
+        interaction_handler=None,
+        enable_web=False,
+        mcp_tool_names=[],
+        tool_registry=None,
+        mcp_runtime=None,
+        team_root=tmp_path / ".haagent" / "teams",
+    )
+    team = runtime.store.ensure_team(
+        team_id="team-cancel",
+        workspace_root=tmp_path,
+        leader_session_id=runtime.leader_session_id,
+    )
+    runtime.store.upsert_worker(
+        team.team_id,
+        WorkerRecord(
+            agent_id="explorer-running",
+            task_id="task-running",
+            subagent_type="explorer",
+            description="still running",
+            status="running",
+        ),
+    )
+    token = CancellationToken()
+    token.cancel()
+
+    try:
+        runtime.task_wait(["task-running"], timeout_seconds=30, cancellation_token=token)
+    except RunCancelled:
+        pass
+    else:
+        raise AssertionError("task_wait must propagate turn cancellation")
 
 
 def test_failure_summary_uses_episode_failure_evidence_when_reason_is_missing(tmp_path: Path) -> None:

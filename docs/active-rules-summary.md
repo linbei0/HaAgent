@@ -57,7 +57,7 @@
 - `request_user_input` 只接受 `questions + reason` 结构化输入：每次 1–3 题、ID 唯一；选项题 2–4 项，`multiple` 仅用于选项题，`custom` 默认允许自定义。不得保留旧顶层 `question` 双契约，也不支持 Secret、自动默认答案或跨会话复用回答。
 - 用户补充输入返回 `answered`、`dismissed` 或 `timed_out`。关闭和超时都是成功工具结果，由模型调整方案或解释阻塞；缺少交互 handler 才返回明确的 `user_input_unavailable` 工具错误。
 - 聊天频道按问题顺序逐题发送并为每题生成独立 nonce；`/answer <nonce> 1` 与多选 `1,3` 映射为选项标签，非纯数字内容仅在允许自定义时接收，`/dismiss <nonce>` 返回 `dismissed`。非法编号或禁止的自定义答案必须保留 pending，超时单独返回 `timed_out`。
-- `todo_update` 与 `submit_plan` 是主 Agent 专用的静态工具：普通执行模式默认可见 `todo_update`，`submit_plan` 只在 Plan Mode 可见；Worker 不得读取或推进主任务 Todo。
+- `todo_update`、`submit_plan` 与 `task_wait` 是主 Agent 专用的静态工具：普通执行模式默认可见 `todo_update`，`submit_plan` 只在 Plan Mode 可见；Worker 不得读取或推进主任务 Todo，也不得替 leader 阻塞等待其他 Worker。
 - `todo_update` 以完整列表原子替换 `TaskLedger`，最多 20 项、最多一个 `in_progress`；未完成项不得静默消失，blocker、evidence 和 checkpoint 不得隐式改变 Todo 状态。
 - `submit_plan` 只提交完整 Plan revision 并等待用户确认。反馈必须产生新 revision；批准结束规划 turn，由 session 层幂等初始化 Todo 并自动进入执行，旧 plan id 或旧 revision 必须明确拒绝。
 
@@ -112,6 +112,9 @@
 ## 8. 工具执行与运行边界
 
 - 真实任务工具包包括 `file_read`、`file_write`、`apply_patch`、`shell`、`code_run` 以及 `job_start` / `job_status` / `job_logs` / `job_cancel` 等默认 workspace-bound 原子工具。
+- 多智能体 `agent` 调用只确认 Worker 已启动并立即返回完整 `task_id`，不得在主 Agent loop 中隐式等待。当前动作硬依赖 Worker 结果时显式调用 `task_wait`；仅查询状态用 `task_get` / `task_list`，读取完整产物用 `task_output`。`task_wait` 使用有界条件等待，至少一个目标进入 completed / failed / stopped / interrupted / awaiting_approval 即返回，超时是成功状态响应，不得转成高频模型轮询。
+- Worker 终态写入 TeamStore 的持久通知收件箱；model 与 UI 使用独立消费者游标，互不吞通知。下一模型 turn 只注入一次有界未读摘要，TUI 可独立提示，但完成通知不自动唤醒模型、不创建协调 turn，也不冒充 assistant 最终回答。
+- Worker 生命周期只保证跨 turn、当前 HaAgent 进程内持续运行。新建或切换 session、关闭 session、退出 TUI 时，仍运行的 Worker 必须有限等待清理并明确记录为 `interrupted`；进程重启后无法恢复的非终态记录也应对账为 `interrupted`，不得长期保留假 `running`。
 - 文件工具接受绝对路径或 workspace 相对路径；未授权外部路径触发 `external_directory` 审批，允许一次只作用于当前调用，始终允许写入有界 session 权限规则。
 - `file_read` 应支持范围读取、关键词定位和路径建议，服务普通 Agent 使用。
 - `apply_patch` 继续保持 fail-fast；失败应帮助模型从结构化错误中恢复，而不是吞掉错误。

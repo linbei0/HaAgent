@@ -22,6 +22,7 @@ from haagent.context.model_context_runtime import (
 )
 from haagent.context.projection import ModelContextFacts
 from haagent.models.fake import FakeModelGateway
+from haagent.models.model_ref import ModelRef
 from haagent.models.types import ModelCallError, ModelGateway
 from haagent.models.config.connections import user_config_dir
 from haagent.multi_agent.team_store import TeamStore
@@ -86,6 +87,7 @@ class RunOrchestrator:
         tool_registry: ToolRuntimeRegistry | None = None,
         mcp_runtime: Any | None = None,
         leader_session_id: str | None = None,
+        model_ref: ModelRef | None = None,
         worker_permission_requester: Callable[[str, dict[str, Any], Any], Any] | None = None,
         session_interaction_state: SessionInteractionState | None = None,
         performance_trace: PerformanceTrace | None = None,
@@ -101,6 +103,7 @@ class RunOrchestrator:
     ) -> None:
         self._runs_root = runs_root
         self._model_gateway = model_gateway or FakeModelGateway()
+        self._model_ref = model_ref
         self._max_turns = max_turns
         self._session_summary = session_summary
         self._session_compaction = session_compaction
@@ -269,6 +272,7 @@ class RunOrchestrator:
                     workspace_root=workspace_root,
                     leader_session_id=self._leader_session_id,
                     model_gateway=self._model_gateway,
+                    leader_model_ref=self._model_ref,
                     path_policy=path_policy,
                     approval_allowed_tools=task.policy["approval_allowed_tools"],
                     approved_tools=task.policy["approved_tools"],
@@ -324,7 +328,9 @@ class RunOrchestrator:
             for component, diagnostic in prepared_messages.cache_diagnostics.items():
                 if isinstance(diagnostic, dict):
                     performance_trace.record_cache_diagnostic(component, diagnostic)
-            worker_notifications = _worker_notification_context(self._leader_session_id)
+            worker_notifications, worker_notification_acks = _worker_notification_context(
+                self._leader_session_id,
+            )
             context_id = prepared_messages.context_id
             model_context_turn = self._model_context_runtime.begin_turn(
                 ModelContextTurnSeed(
@@ -336,6 +342,25 @@ class RunOrchestrator:
                     episode_writer=writer,
                 ),
             )
+            worker_notifications_ack_attempted = False
+
+            def acknowledge_worker_notifications_after_commit() -> None:
+                nonlocal worker_notifications_ack_attempted
+                if worker_notifications_ack_attempted:
+                    return
+                worker_notifications_ack_attempted = True
+                try:
+                    _acknowledge_worker_notifications(worker_notification_acks, consumer="model")
+                except (OSError, ValueError) as error:
+                    # 通知已进入本轮上下文；确认失败时保留未读供下轮重投，不牵连主任务。
+                    writer.append_transcript(
+                        {
+                            "event": "worker_notification_ack_failed",
+                            "error_type": type(error).__name__,
+                            "message": str(error)[:300],
+                        },
+                    )
+
             task_step_id = _current_task_step_id(self._task_ledger) or "step-001"
             self._emit_event(
                 task_plan_created_event(
@@ -409,9 +434,10 @@ class RunOrchestrator:
                         turn=turn,
                         decision=decision,
                     ),
-                        plan_execution_has_active_todos=self._plan_execution_has_active_todos,
-                    ),
-                )
+                    plan_execution_has_active_todos=self._plan_execution_has_active_todos,
+                    after_context_commit=acknowledge_worker_notifications_after_commit,
+                ),
+            )
             except BaseException:
                 model_context_turn.abort()
                 raise
@@ -852,6 +878,7 @@ _MULTI_AGENT_CONTROL_TOOLS = frozenset(
         "agent",
         "send_message",
         "task_stop",
+        "task_wait",
         "task_get",
         "task_list",
         "task_output",
@@ -870,6 +897,7 @@ def _maybe_multi_agent_runtime(
     workspace_root: Path,
     leader_session_id: str,
     model_gateway: ModelGateway,
+    leader_model_ref: ModelRef | None,
     path_policy: Any,
     approval_allowed_tools: list[str],
     approved_tools: list[str],
@@ -891,6 +919,7 @@ def _maybe_multi_agent_runtime(
         leader_session_id=leader_session_id,
         model_gateway=model_gateway,
         path_policy=path_policy,
+        leader_model_ref=leader_model_ref,
         inherited_allowed_tools=allowed_tools,
         inherited_approval_allowed_tools=approval_allowed_tools,
         inherited_approved_tools=approved_tools,
@@ -905,11 +934,28 @@ def _maybe_multi_agent_runtime(
     )
 
 
-def _worker_notification_context(leader_session_id: str) -> str | None:
+def _worker_notification_context(
+    leader_session_id: str,
+) -> tuple[str | None, list[tuple[str, str]]]:
     store = TeamStore(user_config_dir() / "teams")
     lines: list[str] = []
+    acknowledgements: list[tuple[str, str]] = []
+    remaining_budget = 4000
     for team in store.list_teams_for_leader(leader_session_id):
-        for item in store.read_notifications(team.team_id, limit=5):
+        remaining_count = 10 - len(lines)
+        if remaining_count <= 0 or remaining_budget <= 0:
+            break
+        batch = store.read_unread_notifications(
+            team.team_id,
+            consumer="model",
+            limit=min(5, remaining_count),
+            max_chars=max(1, remaining_budget),
+        )
+        notifications = batch["notifications"]
+        if not notifications:
+            continue
+        acknowledgements.append((team.team_id, str(batch["next_cursor"])))
+        for item in notifications:
             details: list[str] = []
             task_id = str(item.get("task_id", "")).strip()
             if task_id:
@@ -917,19 +963,37 @@ def _worker_notification_context(leader_session_id: str) -> str | None:
             request_id = str(item.get("request_id", "")).strip()
             if request_id:
                 details.append(f"request={request_id}")
-            parent_step_id = str(item.get("parent_step_id", "")).strip()
-            if parent_step_id:
-                details.append(f"parent_step={parent_step_id}")
             if item.get("needs_attention") is True:
                 details.append("attention=yes")
             suffix = f" ({', '.join(details)})" if details else ""
-            lines.append(
+            line = (
                 "- "
                 f"{item.get('agent_id', '')} "
                 f"{item.get('status', '')}: "
-                f"{item.get('summary', '')}"
+                f"{str(item.get('summary', ''))[:500]}"
                 f"{suffix}"
             )
+            lines.append(line)
+            remaining_budget -= len(line)
     if not lines:
-        return None
-    return "Worker Notifications:\n" + "\n".join(lines[-10:])
+        return None, []
+    guidance = (
+        "Worker Notifications (unread inbox; historical statuses may already be stale):\n"
+        + "\n".join(lines)
+        + "\nCall task_get/task_list before reporting current status; use task_output for full artifacts."
+    )
+    return guidance, acknowledgements
+
+
+def _acknowledge_worker_notifications(
+    acknowledgements: list[tuple[str, str]],
+    *,
+    consumer: str,
+) -> None:
+    store = TeamStore(user_config_dir() / "teams")
+    for team_id, cursor in acknowledgements:
+        store.acknowledge_notifications(
+            team_id,
+            consumer=consumer,  # type: ignore[arg-type]
+            cursor=cursor,
+        )

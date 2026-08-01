@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class WorkerNotification:
     request_id: str = ""
     parent_step_id: str = ""
     evidence_refs: tuple[str, ...] = ()
+    notification_id: str = field(default_factory=lambda: f"notification-{uuid.uuid4().hex[:16]}")
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

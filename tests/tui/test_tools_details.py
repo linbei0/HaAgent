@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from haagent.runtime.events import RuntimeUiEvent, TaskProgressEvent
+from haagent.runtime.events import RuntimeUiEvent, TaskProgressEvent, WorkerNotificationEvent
 from haagent.tui.application.app import HaAgentTuiApp
 from haagent.tui.commands import command_registry, parse_slash_command
 from haagent.tui.design.failures import failure_from_payload
@@ -89,6 +89,35 @@ def test_tui_timeline_hides_worker_lifecycle_internal_events(tmp_path: Path) -> 
             assert "worker_completed" not in conversation
 
     asyncio.run(run())
+
+def test_tui_polls_background_notification_without_starting_assistant_turn(tmp_path: Path) -> None:
+    async def run() -> None:
+        service = FakeAssistantService(
+            workspace_root=tmp_path,
+            worker_notifications=[
+                WorkerNotificationEvent(
+                    session_id="session-test",
+                    task_id="task-background-1",
+                    agent_id="explorer-1",
+                    status="completed",
+                    summary="README 已整理",
+                ),
+            ],
+        )
+        app = HaAgentTuiApp(service)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause(1.2)
+
+            conversation = _text(app, "#conversation")
+            assert "后台任务已完成" in conversation
+            assert "task-background-1" in conversation
+            assert service.prompts == []
+            assert app._state == "idle"
+
+        assert service.closed is True
+
+    asyncio.run(run())
+
 
 def test_tui_progress_status_line_updates_and_clears(tmp_path: Path) -> None:
     async def run() -> None:

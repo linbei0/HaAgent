@@ -19,8 +19,11 @@ def test_context_builder_budget_scales_with_context_window() -> None:
     large = derive_compression_budget(Metadata(256_000))
 
     assert small.context_builder_max_tokens == 8_000
+    assert small.checkpoint_preserve_recent_tokens == 4_000
     assert 20_000 <= medium.context_builder_max_tokens <= 25_000
+    assert medium.checkpoint_preserve_recent_tokens == 10_496
     assert 40_000 <= large.context_builder_max_tokens <= 50_000
+    assert large.checkpoint_preserve_recent_tokens == 20_000
 
 
 def test_context_builder_budget_has_upper_bound() -> None:

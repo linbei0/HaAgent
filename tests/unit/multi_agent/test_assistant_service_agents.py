@@ -7,6 +7,7 @@ tests/unit/multi_agent/test_assistant_service_agents.py - 服务层 worker 状�
 from pathlib import Path
 from haagent.app import workspace_usecases
 from haagent.app.assistant_service import AssistantService
+from haagent.multi_agent.messages import WorkerNotification
 from haagent.multi_agent.team_store import TeamStore, WorkerRecord
 
 
@@ -78,6 +79,46 @@ def test_assistant_service_lists_agents_for_current_session(tmp_path: Path, monk
             "episode_path": "",
         },
     ]
+
+
+def test_assistant_service_delivers_ui_notifications_once(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "home" / ".haagent"
+    monkeypatch.setattr(workspace_usecases, "user_config_dir", lambda: config_dir)
+    store = TeamStore(config_dir / "teams")
+    store.ensure_team(
+        team_id="team-session-test",
+        workspace_root=tmp_path,
+        leader_session_id="session-test",
+    )
+    store.append_notification(
+        "team-session-test",
+        WorkerNotification(
+            event_type="worker_status",
+            team_id="team-session-test",
+            agent_id="explorer-1",
+            task_id="task-1",
+            status="completed",
+            summary="done",
+            result_excerpt="full output",
+            episode_path="episode",
+            error="",
+            needs_attention=False,
+        ).to_dict(),
+    )
+    service = AssistantService(
+        workspace_root=tmp_path,
+        gateway_factory=lambda profile: object(),
+        session_cls=_Session,  # type: ignore[arg-type]
+    )
+    service._context.session = _Session(workspace_root=tmp_path, runs_root=tmp_path / ".runs")
+    delivered = []
+
+    first_count = service.workspace.poll_worker_notifications(delivered.append)
+    second_count = service.workspace.poll_worker_notifications(delivered.append)
+
+    assert first_count == 1
+    assert second_count == 0
+    assert delivered[0].task_id == "task-1"
 
 
 def test_assistant_service_lists_no_agents_without_session(tmp_path: Path) -> None:

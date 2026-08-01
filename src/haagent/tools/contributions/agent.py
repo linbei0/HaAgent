@@ -8,6 +8,7 @@ from haagent.runtime.execution.retry import ReplaySafety
 from haagent.tools.catalog import ToolContribution
 
 _AGENT_CONTROL = frozenset({"chat_default", "agent_control"})
+_AGENT_MAIN_CONTROL = frozenset({"chat_default", "agent_control", "main_only"})
 
 AGENT_CONTRIBUTIONS: list[ToolContribution] = [
     ToolContribution(
@@ -16,8 +17,9 @@ AGENT_CONTRIBUTIONS: list[ToolContribution] = [
             "Delegate a complex, self-contained multi-step research, implementation, or verification task to a "
             "background agent. Do not delegate a single file read, one grep, or a short direct operation. The "
             "prompt must state the scope, whether edits are allowed, constraints, and expected evidence. Start "
-            "independent tasks concurrently, then use task_get/task_output to collect results instead of repeating "
-            "the delegated work in the main agent."
+            "independent tasks concurrently. This tool always returns immediately with the full task_id. If the "
+            "current answer depends on a result, call task_wait once with a bounded timeout; otherwise report the "
+            "task_id and stop. Do not immediately poll task_get in a loop."
         ),
         risk_level="low",
         parameters={
@@ -115,6 +117,40 @@ AGENT_CONTRIBUTIONS: list[ToolContribution] = [
         router_owned=True,
     ),
     ToolContribution(
+        name="task_wait",
+        description=(
+            "Explicitly wait for at least one of several worker tasks to become actionable. Use only when the "
+            "current operation cannot continue without a worker result. A timeout is a successful status response, "
+            "not a reason to poll repeatedly; use task_output separately for complete output."
+        ),
+        risk_level="low",
+        parameters={
+            "type": "object",
+            "properties": {
+                "task_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "description": "one to sixteen complete task identifiers returned by agent/task_list",
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 30,
+                    "description": "bounded wait duration in seconds; defaults to 30",
+                },
+            },
+            "required": ["task_ids"],
+            "additionalProperties": False,
+        },
+        execution_effect="read_only",
+        replay_safety=ReplaySafety.NEVER_REPLAY,
+        tags=_AGENT_MAIN_CONTROL,
+        router_owned=True,
+        display_name_zh="等待后台任务",
+    ),
+    ToolContribution(
         name="task_get",
         description=(
             "Inspect one worker's current status and metadata. Use this to decide whether to wait, send a "
@@ -146,7 +182,16 @@ AGENT_CONTRIBUTIONS: list[ToolContribution] = [
             "properties": {
                 "status": {
                     "type": "string",
-                    "enum": ["queued", "running", "idle", "completed", "failed", "stopped"],
+                    "enum": [
+                        "queued",
+                        "running",
+                        "idle",
+                        "awaiting_approval",
+                        "completed",
+                        "failed",
+                        "stopped",
+                        "interrupted",
+                    ],
                     "description": "optional exact status filter",
                 },
             },

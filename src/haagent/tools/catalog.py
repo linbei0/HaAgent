@@ -115,6 +115,7 @@ _CHAT_DEFAULT_ORDER = (
     "agent",
     "send_message",
     "task_stop",
+    "task_wait",
     "task_get",
     "task_list",
     "task_output",

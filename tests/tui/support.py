@@ -81,6 +81,13 @@ class FakeWorkspace:
     def list_agents(self):
         return self._owner._list_agents()
 
+    def poll_worker_notifications(self, event_sink, *, limit: int = 10):
+        notifications = self._owner.worker_notifications[:limit]
+        del self._owner.worker_notifications[:len(notifications)]
+        for event in notifications:
+            event_sink(event)
+        return len(notifications)
+
     def set_web_enabled(self, enabled: bool):
         return self._owner._set_web_enabled(enabled)
 
@@ -586,6 +593,7 @@ class FakeAssistantService:
         marketplace_warnings: list[str] | None = None,
         mcp_status: dict[str, object] | None = None,
         agents: list[dict[str, object]] | None = None,
+        worker_notifications: list[RuntimeUiEvent] | None = None,
         sandbox_status: AssistantSandboxStatus | None = None,
         sandbox_doctor_report: SandboxDoctorReport | None = None,
         image_input_supported: bool | None = None,
@@ -619,6 +627,8 @@ class FakeAssistantService:
         self.marketplace_results = list(marketplace_results or [])
         self.marketplace_warnings = list(marketplace_warnings or [])
         self.agents = list(agents or [])
+        self.worker_notifications = list(worker_notifications or [])
+        self.closed = False
         self.sandbox_status = sandbox_status or AssistantSandboxStatus(
             backend="local_subprocess",
             degraded=True,
@@ -703,6 +713,9 @@ class FakeAssistantService:
         self.schedule_details: dict[str, AssistantSchedule] = {}
         self.schedule_runs: list[AssistantScheduleRun] = []
         self.schedules = FakeSchedules(self)
+
+    def close(self) -> None:
+        self.closed = True
 
     def _get_workspace_status(self) -> AssistantWorkspaceStatus:
         current_profile = next(

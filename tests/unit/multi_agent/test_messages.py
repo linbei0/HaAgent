@@ -22,7 +22,13 @@ def test_worker_notification_to_dict_has_stable_fields() -> None:
         request_id="",
     )
 
-    assert notification.to_dict() == {
+    payload = notification.to_dict()
+    notification_id = payload.pop("notification_id")
+    created_at = payload.pop("created_at")
+
+    assert notification_id.startswith("notification-")
+    assert "+00:00" in created_at
+    assert payload == {
         "event_type": "worker_completed",
         "team_id": "team-1",
         "agent_id": "explorer-1",

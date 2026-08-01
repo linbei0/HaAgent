@@ -47,6 +47,7 @@ from haagent.runtime.events.types import (
     ToolActivityEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
+    WorkerNotificationEvent,
 )
 from haagent.runtime.events.ui_mapper import RuntimeUiEventMapper
 
@@ -84,6 +85,7 @@ __all__ = [
     "ToolStartedBusEvent",
     "UserInputStateEvent",
     "WarningNoticeEvent",
+    "WorkerNotificationEvent",
     "bus_event_from_dict",
     "bus_event_to_dict",
     "coerce_bus_event",

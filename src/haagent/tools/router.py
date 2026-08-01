@@ -131,6 +131,7 @@ class ToolRouter:
                 "agent": self._agent,
                 "send_message": self._send_message,
                 "task_stop": self._task_stop,
+                "task_wait": self._task_wait,
                 "task_get": self._task_get,
                 "task_list": self._task_list,
                 "task_output": self._task_output,
@@ -320,11 +321,6 @@ class ToolRouter:
             self._episode_writer.write_tool_artifact,
         )
 
-    def wait_for_agent_task(self, task_id: str, timeout: float | None = None) -> dict[str, Any]:
-        if self._agent_runtime is None:
-            return {}
-        return self._agent_runtime.wait_for_task(task_id, timeout=timeout)
-
     def _fake_tool(
         self,
         args: dict[str, Any],
@@ -420,6 +416,21 @@ class ToolRouter:
             self._agent_runtime.stop_task(
                 str(args["task_id"]),
                 force=bool(args.get("force", False)),
+            ),
+        )
+
+    def _task_wait(
+        self,
+        args: dict[str, Any],
+        _context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        if self._agent_runtime is None:
+            return tool_error("agent_runtime_missing", "agent runtime is not configured")
+        return _agent_runtime_result(
+            self._agent_runtime.task_wait(
+                [str(task_id) for task_id in args["task_ids"]],
+                timeout_seconds=float(args.get("timeout_seconds", 30)),
+                cancellation_token=self._cancellation_token,
             ),
         )
 
@@ -771,7 +782,7 @@ class ToolRouter:
         return self._handlers[tool_name](args, context)
 
     def _mode_or_actor_denial(self, tool_name: str) -> dict[str, Any] | None:
-        if self._actor_role != "main" and tool_name in {"todo_update", "submit_plan"}:
+        if self._actor_role != "main" and tool_name in {"todo_update", "submit_plan", "task_wait"}:
             return tool_error("tool_actor_denied", f"{tool_name} is only available to the main Agent")
         if tool_name == "submit_plan" and self._planning_status not in {"planning", "awaiting_confirmation"}:
             return tool_error("plan_mode_required", "submit_plan is only available in Plan Mode")

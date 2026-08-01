@@ -133,11 +133,12 @@ class ChatCommandHandlers:
         lines = ["Workers:"]
         for item in agents:
             agent_id = str(item.get("agent_id", "unknown"))
+            task_id = str(item.get("task_id", "unknown"))
             status = str(item.get("status", "unknown"))
             subagent_type = str(item.get("subagent_type", "worker"))
             description = str(item.get("description", "")).strip()
             suffix = f" - {description}" if description else ""
-            lines.append(f"- {agent_id} [{subagent_type}] {status}{suffix}")
+            lines.append(f"- {agent_id} [{subagent_type}] {status} · task_id={task_id}{suffix}")
         self._app._conversation.append_block("Agents", "\n".join(lines))
         self._app._refresh()
 

@@ -7,21 +7,23 @@ src/haagent/multi_agent/runtime.py - 进程内 worker 调度运行时
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from haagent.models.types import ModelGateway
 from haagent.mcp.runtime import SyncMcpRuntime
 from haagent.mcp.types import McpSettings
-from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.models.config.connections import ProviderProfileError, user_config_dir
+from haagent.models.gateway_registry import gateway_from_resolved
 from haagent.models.model_ref import ModelRef, ResolvedModel
 from haagent.models.model_runtime import ModelRuntime
+from haagent.models.types import ModelGateway
 from haagent.multi_agent.backends import BACKEND_REGISTRY, WorkerBackend
 from haagent.multi_agent.messages import WorkerMessage, WorkerNotification, WorkerPermissionRequest
 from haagent.multi_agent.permissions import WorkerType, worker_tool_policy
@@ -34,11 +36,10 @@ from haagent.runtime.execution.path_policy import PathPolicy
 from haagent.runtime.orchestration.task_progress import map_failure_to_recovery
 from haagent.runtime.orchestration.task_progress import task_recovery_suggested_event
 from haagent.runtime.settings import DEFAULT_INTERACTIVE_MAX_TURNS
-from haagent.runtime.settings import load_runtime_settings
-from haagent.runtime.execution.retry import RetryController
 
 
 RESTART_STATUS_NOTE = "Task restarted; prior interactive context was not preserved."
+_TERMINAL_WORKER_STATUSES = frozenset({"completed", "failed", "stopped", "interrupted"})
 GatewayFactory = Callable[[ResolvedModel], ModelGateway]
 
 
@@ -56,11 +57,14 @@ class _WorkerTask:
     restart_count: int = 0
     permission_request_to_consume: str = ""
     parent_step_id: str = ""
+    final_status: str = ""
+    owns_gateway: bool = False
 
 
 class MultiAgentRuntime:
     _task_registry: dict[tuple[str, str, str], dict[str, _WorkerTask]] = {}
     _registry_lock = threading.RLock()
+    _registry_condition = threading.Condition(_registry_lock)
 
     def __init__(
         self,
@@ -79,6 +83,7 @@ class MultiAgentRuntime:
         mcp_tool_names: list[str],
         tool_registry: Any,
         mcp_runtime: Any,
+        leader_model_ref: ModelRef | None = None,
         team_root: Path | None = None,
         worker_max_turns: int | None = DEFAULT_INTERACTIVE_MAX_TURNS,
         environ: Mapping[str, str] | None = None,
@@ -89,6 +94,7 @@ class MultiAgentRuntime:
         self.workspace_root = workspace_root
         self.leader_session_id = leader_session_id
         self.model_gateway = model_gateway
+        self.leader_model_ref = leader_model_ref
         self.path_policy = path_policy
         self.inherited_allowed_tools = list(inherited_allowed_tools)
         self.inherited_approval_allowed_tools = list(inherited_approval_allowed_tools)
@@ -118,7 +124,9 @@ class MultiAgentRuntime:
         )
         with self._registry_lock:
             self._tasks = self._task_registry.setdefault(self._scope, {})
-        self._lock = threading.RLock()
+        # 同一 session 的不同 turn 会创建不同 runtime 实例，但必须同步访问共享任务表。
+        self._lock = self._registry_lock
+        self._reconcile_orphaned_tasks()
 
     def spawn_worker(
         self,
@@ -138,11 +146,14 @@ class MultiAgentRuntime:
         except ValueError as error:
             return {"is_error": True, "error": str(error)}
         resolved_model_profile = model_profile or worker_profile.model_profile
-        team = self.store.ensure_team(
-            team_id=team_id or f"team-{self.leader_session_id}",
-            workspace_root=self.workspace_root,
-            leader_session_id=self.leader_session_id,
-        )
+        try:
+            team = self.store.ensure_team(
+                team_id=team_id or f"team-{self.leader_session_id}",
+                workspace_root=self.workspace_root,
+                leader_session_id=self.leader_session_id,
+            )
+        except ValueError as error:
+            return {"is_error": True, "error": str(error)}
         agent_id = f"{worker_profile.subagent_type}-{uuid.uuid4().hex[:8]}"
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         worktree_lease: WorktreeLease | None = None
@@ -195,6 +206,7 @@ class MultiAgentRuntime:
             session=session,
             backend=backend.backend_type,
             parent_step_id=self.parent_task_step_id,
+            owns_gateway=session.model_gateway is not self.model_gateway,
         )
         with self._lock:
             self._tasks[task_id] = worker
@@ -205,7 +217,17 @@ class MultiAgentRuntime:
             subagent_type=worker_profile.subagent_type,
             description=description,
         )
-        backend.spawn(self, worker, prompt)
+        try:
+            backend.spawn(self, worker, prompt)
+        except Exception as error:
+            notification = self._notification(
+                worker,
+                status="failed",
+                summary=f"worker failed to start: {error}",
+                error=str(error),
+            )
+            self._finalize_worker(worker, status="failed", notification=notification)
+            return {"is_error": True, "error": f"worker failed to start: {error}"}
         return {
             "agent_id": agent_id,
             "task_id": task_id,
@@ -237,19 +259,31 @@ class MultiAgentRuntime:
             worker.thread.join(timeout=1)
             if worker.thread.is_alive():
                 return {"is_error": True, "error": f"agent {to} is still finishing"}
-        worker.done.clear()
-        worker.notification = None
-        worker.restart_count += 1
         record = self._worker_record(worker)
         if record is None:
             return {"is_error": True, "error": f"task record not found for agent: {to}"}
-        worker.session = self._create_worker_session(
-            agent_id=worker.agent_id,
-            task_id=worker.task_id,
-            team_id=worker.team_id,
-            worker_profile=self._resolve_record_profile(record, model_profile=record.model_profile or None),
-            restart_count=worker.restart_count,
-        )
+        if record.status == "awaiting_approval":
+            return {
+                "is_error": True,
+                "error": f"agent {to} is awaiting approval; resolve the permission request first",
+            }
+        next_restart_count = worker.restart_count + 1
+        try:
+            session = self._create_worker_session(
+                agent_id=worker.agent_id,
+                task_id=worker.task_id,
+                team_id=worker.team_id,
+                worker_profile=self._resolve_record_profile(record, model_profile=record.model_profile or None),
+                restart_count=next_restart_count,
+            )
+        except ValueError as error:
+            return {"is_error": True, "error": str(error)}
+        worker.done.clear()
+        worker.notification = None
+        worker.final_status = ""
+        worker.restart_count = next_restart_count
+        worker.session = session
+        worker.owns_gateway = session.model_gateway is not self.model_gateway
         thread = threading.Thread(
             target=self._run_worker,
             args=(worker, message),
@@ -293,66 +327,81 @@ class MultiAgentRuntime:
         }
 
     def approve_permission(self, request_id: str, *, message: str = "") -> dict[str, Any]:
-        try:
-            request = self.store.resolve_permission_request(
-                request_id,
-                approved=True,
-                response_message=message,
-            )
-        except ValueError as error:
-            return {"is_error": True, "error": str(error)}
+        request = self.store.get_permission_request(request_id)
+        if request is None:
+            return {"is_error": True, "error": f"pending permission request not found: {request_id}"}
         worker = self._find_worker_by_task_id(request.task_id)
         if worker is None:
             return {"is_error": True, "error": f"unknown task: {request.task_id}"}
         record = self._worker_record(worker)
         if record is None:
             return {"is_error": True, "error": f"task record not found for agent: {request.agent_id}"}
-        worker.done.clear()
-        worker.notification = None
-        worker.restart_count += 1
+        next_restart_count = worker.restart_count + 1
         try:
-            worker.session = self._create_worker_session(
+            session = self._create_worker_session(
                 agent_id=worker.agent_id,
                 task_id=worker.task_id,
                 team_id=worker.team_id,
                 worker_profile=self._resolve_record_profile(record, model_profile=record.model_profile or None),
-                restart_count=worker.restart_count,
+                restart_count=next_restart_count,
                 approved_tools_extra=[request.tool_name],
             )
         except ValueError as error:
             return {"is_error": True, "error": str(error)}
-        worker.permission_request_to_consume = request.request_id
-        thread = threading.Thread(
-            target=self._run_worker,
-            args=(worker, _permission_resolution_prompt(request, approved=True)),
-            name=f"haagent-worker-{worker.agent_id}",
-            daemon=True,
-        )
-        worker.thread = thread
-        self.store.update_worker_status(
-            worker.team_id,
-            worker.agent_id,
-            "running",
-            session_id=worker.session.session_id,
-            restart_count=worker.restart_count,
-            status_note=f"Permission {request.request_id} approved; worker resumed.",
-        )
-        self.store.append_notification(
-            worker.team_id,
-            self._notification(
+        with self._registry_condition:
+            if worker.final_status != "awaiting_approval":
+                _close_model_gateway_if_owned(session.model_gateway, leader_gateway=self.model_gateway)
+                return {
+                    "is_error": True,
+                    "error": f"task is no longer awaiting approval: {request.task_id}",
+                }
+            try:
+                request = self.store.resolve_permission_request(
+                    request_id,
+                    approved=True,
+                    response_message=message,
+                )
+            except ValueError as error:
+                _close_model_gateway_if_owned(session.model_gateway, leader_gateway=self.model_gateway)
+                return {"is_error": True, "error": str(error)}
+            worker.done.clear()
+            worker.notification = None
+            worker.final_status = ""
+            worker.restart_count = next_restart_count
+            worker.session = session
+            worker.owns_gateway = session.model_gateway is not self.model_gateway
+            worker.permission_request_to_consume = request.request_id
+            thread = threading.Thread(
+                target=self._run_worker,
+                args=(worker, _permission_resolution_prompt(request, approved=True)),
+                name=f"haagent-worker-{worker.agent_id}",
+                daemon=True,
+            )
+            worker.thread = thread
+            self.store.update_worker_status(
+                worker.team_id,
+                worker.agent_id,
+                "running",
+                session_id=worker.session.session_id,
+                restart_count=worker.restart_count,
+                status_note=f"Permission {request.request_id} approved; worker resumed.",
+            )
+            self.store.append_notification(
+                worker.team_id,
+                self._notification(
+                    worker,
+                    status="running",
+                    summary=f"Permission {request.request_id} approved; worker resumed.",
+                ),
+            )
+            self._emit_worker_event(
+                "worker_started",
                 worker,
                 status="running",
-                summary=f"Permission {request.request_id} approved; worker resumed.",
-            ),
-        )
-        self._emit_worker_event(
-            "worker_started",
-            worker,
-            status="running",
-            subagent_type=record.subagent_type,
-            description=record.description,
-        )
-        thread.start()
+                subagent_type=record.subagent_type,
+                description=record.description,
+            )
+            thread.start()
         return {
             "request_id": request.request_id,
             "agent_id": request.agent_id,
@@ -361,41 +410,41 @@ class MultiAgentRuntime:
         }
 
     def reject_permission(self, request_id: str, *, message: str = "") -> dict[str, Any]:
-        try:
-            request = self.store.resolve_permission_request(
-                request_id,
-                approved=False,
-                response_message=message,
-            )
-        except ValueError as error:
-            return {"is_error": True, "error": str(error)}
+        request = self.store.get_permission_request(request_id)
+        if request is None:
+            return {"is_error": True, "error": f"pending permission request not found: {request_id}"}
         worker = self._find_worker_by_task_id(request.task_id)
         if worker is None:
             return {"is_error": True, "error": f"unknown task: {request.task_id}"}
-        summary = f"Permission {request.request_id} rejected for tool {request.tool_name}."
-        if message.strip():
-            summary = f"{summary} {message.strip()}"
-        notification = self._notification(
-            worker,
-            status="failed",
-            summary=summary,
-            result_excerpt=summary,
-            error=summary,
-            request_id=request.request_id,
-        )
-        self.store.update_worker_status(worker.team_id, worker.agent_id, "failed")
-        self.store.append_notification(worker.team_id, notification)
-        self.store.consume_permission_request(request.request_id)
-        worker.notification = notification
-        worker.done.set()
-        record = self._worker_record(worker)
-        self._emit_worker_event(
-            "worker_failed",
-            worker,
-            status="failed",
-            subagent_type=record.subagent_type if record is not None else "",
-            description=record.description if record is not None else "",
-        )
+        with self._registry_condition:
+            if worker.final_status != "awaiting_approval":
+                return {
+                    "is_error": True,
+                    "error": f"task is no longer awaiting approval: {request.task_id}",
+                }
+            try:
+                request = self.store.resolve_permission_request(
+                    request_id,
+                    approved=False,
+                    response_message=message,
+                )
+            except ValueError as error:
+                return {"is_error": True, "error": str(error)}
+            summary = f"Permission {request.request_id} rejected for tool {request.tool_name}."
+            if message.strip():
+                summary = f"{summary} {message.strip()}"
+            notification = self._notification(
+                worker,
+                status="failed",
+                summary=summary,
+                result_excerpt=summary,
+                error=summary,
+                request_id=request.request_id,
+            )
+            self.store.consume_permission_request(request.request_id)
+            worker.final_status = ""
+            worker.done.clear()
+            self._finalize_worker(worker, status="failed", notification=notification)
         return {
             "request_id": request.request_id,
             "agent_id": request.agent_id,
@@ -408,21 +457,35 @@ class MultiAgentRuntime:
             worker = self._tasks.get(task_id)
         if worker is None:
             return {"is_error": True, "error": f"unknown task: {task_id}"}
+        if worker.final_status in _TERMINAL_WORKER_STATUSES:
+            record = self._worker_record(worker)
+            return {
+                "agent_id": worker.agent_id,
+                "task_id": task_id,
+                "status": record.status if record is not None else worker.final_status,
+                "force": force,
+                "already_terminal": True,
+            }
+        if worker.final_status == "awaiting_approval":
+            with self._registry_condition:
+                worker.final_status = ""
+                worker.done.clear()
         worker.session.cancel_current_run()
-        status = "stopped"
-        self.store.update_worker_status(worker.team_id, worker.agent_id, status)
-        notification = self._notification(worker, status=status, summary="worker stopped")
-        worker.notification = notification
-        worker.done.set()
-        self.store.append_notification(worker.team_id, notification)
+        if worker.process is not None and worker.process.poll() is None:
+            worker.process.terminate()
+            if force:
+                try:
+                    worker.process.wait(timeout=1)
+                except Exception:
+                    worker.process.kill()
+        notification = self._notification(worker, status="stopped", summary="worker stopped")
+        finalized = self._finalize_worker(worker, status="stopped", notification=notification)
+        if worker.thread is not None and worker.thread.is_alive():
+            worker.thread.join(timeout=2.0)
+        if worker.thread is None or not worker.thread.is_alive():
+            _close_owned_worker_gateway(worker)
         record = self._worker_record(worker)
-        self._emit_worker_event(
-            "worker_stopped",
-            worker,
-            status=status,
-            subagent_type=record.subagent_type if record is not None else "",
-            description=record.description if record is not None else "",
-        )
+        status = "stopped" if finalized else (record.status if record is not None else worker.final_status)
         return {"agent_id": worker.agent_id, "task_id": task_id, "status": status, "force": force}
 
     def wait_for_task(self, task_id: str, timeout: float | None = None) -> dict[str, Any]:
@@ -432,6 +495,40 @@ class MultiAgentRuntime:
         if worker.thread is not None and worker.done.is_set():
             worker.thread.join(timeout=1)
         return worker.notification or {}
+
+    def task_wait(
+        self,
+        task_ids: list[str],
+        *,
+        timeout_seconds: float = 30.0,
+        cancellation_token: Any | None = None,
+    ) -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(task_id.strip() for task_id in task_ids if task_id.strip()))
+        if not 1 <= len(unique_ids) <= 16:
+            return {"is_error": True, "error": "task_ids must contain 1 to 16 unique task IDs"}
+        timeout_seconds = float(timeout_seconds)
+        if not math.isfinite(timeout_seconds) or not 1.0 <= timeout_seconds <= 30.0:
+            return {"is_error": True, "error": "timeout_seconds must be between 1 and 30"}
+        with self._registry_condition:
+            unknown = [task_id for task_id in unique_ids if self._worker_record_by_task_id(task_id) is None]
+            if unknown:
+                return {"is_error": True, "error": f"unknown task: {unknown[0]}"}
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                if cancellation_token is not None:
+                    cancellation_token.raise_if_cancelled()
+                ready = self._task_wait_payloads(unique_ids, actionable_only=True)
+                if ready:
+                    return {"status": "success", "timed_out": False, "tasks": ready}
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {
+                        "status": "success",
+                        "timed_out": True,
+                        "tasks": self._task_wait_payloads(unique_ids, actionable_only=False),
+                    }
+                # Worker 终态在同一 Condition 上通知；短周期只用于响应当前 turn 取消。
+                self._registry_condition.wait(timeout=min(remaining, 0.25))
 
     def task_get(self, task_id: str) -> dict[str, Any]:
         found = self._worker_record_by_task_id(task_id)
@@ -448,6 +545,39 @@ class MultiAgentRuntime:
                     continue
                 tasks.append(_worker_record_payload(team.team_id, worker))
         return {"status": "success", "tasks": tasks}
+
+    def _task_wait_payloads(
+        self,
+        task_ids: list[str],
+        *,
+        actionable_only: bool,
+    ) -> list[dict[str, Any]]:
+        actionable = {"completed", "failed", "stopped", "interrupted", "awaiting_approval"}
+        payloads: list[dict[str, Any]] = []
+        for task_id in task_ids:
+            found = self._worker_record_by_task_id(task_id)
+            if found is None:
+                continue
+            team_id, record = found
+            if actionable_only and record.status not in actionable:
+                continue
+            notification = self.store.latest_notification_for_task(
+                team_id,
+                task_id,
+                status=record.status,
+            ) or {}
+            payloads.append(
+                {
+                    "task_id": task_id,
+                    "agent_id": record.agent_id,
+                    "status": record.status,
+                    "summary": str(notification.get("summary", ""))[:300],
+                    "episode_path": record.episode_path,
+                    "needs_attention": bool(notification.get("needs_attention", False)),
+                    "request_id": str(notification.get("request_id", "")),
+                },
+            )
+        return payloads
 
     def task_output(self, task_id: str, *, max_chars: int = 12000) -> dict[str, Any]:
         found = self._worker_record_by_task_id(task_id)
@@ -520,26 +650,210 @@ class MultiAgentRuntime:
                 result_excerpt="",
                 error=str(error),
             )
-        self.store.update_worker_status(
-            worker.team_id,
-            worker.agent_id,
-            status,
-            episode_path=str(notification.get("episode_path", "")),
-            session_id=worker.session.session_id,
-            restart_count=worker.restart_count,
-        )
-        self.store.append_notification(worker.team_id, notification)
-        worker.notification = notification
-        worker.done.set()
-        record = self._worker_record(worker)
-        self._emit_worker_event(
-            "worker_completed" if status == "completed" else "worker_failed",
-            worker,
-            status=status,
-            subagent_type=record.subagent_type if record is not None else "",
-            description=record.description if record is not None else "",
-            episode_path=str(notification.get("episode_path", "")),
-        )
+        # 终态属于跨 turn 后台事实，只写持久收件箱；不得回调创建它的旧 turn sink。
+        self._finalize_worker(worker, status=status, notification=notification)
+
+    def _finalize_worker(
+        self,
+        worker: _WorkerTask,
+        *,
+        status: str,
+        notification: dict[str, Any],
+    ) -> bool:
+        finalized = False
+        with self._registry_condition:
+            already_settled = worker.final_status in _TERMINAL_WORKER_STATUSES or (
+                worker.final_status == "awaiting_approval" and status == "awaiting_approval"
+            )
+            if not already_settled:
+                if status in _TERMINAL_WORKER_STATUSES:
+                    self.store.cancel_pending_permissions_for_task(
+                        worker.team_id,
+                        worker.task_id,
+                        reason=f"task settled as {status}",
+                    )
+                self.store.update_worker_status_and_notify(
+                    worker.team_id,
+                    worker.agent_id,
+                    status,  # type: ignore[arg-type]
+                    notification,
+                    episode_path=str(notification.get("episode_path", "")),
+                    session_id=worker.session.session_id,
+                    restart_count=worker.restart_count,
+                )
+                worker.final_status = status
+                worker.notification = notification
+                worker.done.set()
+                self._registry_condition.notify_all()
+                finalized = True
+        # 正常终态在 worker 自身线程内收尾；外部 stop/interrupt 必须等线程退出后再关连接。
+        if worker.thread is None or worker.thread is threading.current_thread() or not worker.thread.is_alive():
+            _close_owned_worker_gateway(worker)
+        return finalized
+
+    def _reconcile_orphaned_tasks(self) -> None:
+        """进程内 registry 不存在的非终态记录无法恢复，明确结算为 interrupted。"""
+        known_task_ids = set(self._tasks)
+        nonterminal = {"queued", "running", "idle", "awaiting_approval"}
+        for team in self.store.list_teams_for_leader(self.leader_session_id):
+            for record in team.agents:
+                if record.status not in nonterminal or record.task_id in known_task_ids:
+                    continue
+                notification = WorkerNotification(
+                    event_type="worker_status",
+                    team_id=team.team_id,
+                    agent_id=record.agent_id,
+                    task_id=record.task_id,
+                    status="interrupted",
+                    summary="Worker host is no longer available; task was interrupted.",
+                    result_excerpt="",
+                    episode_path=record.episode_path,
+                    error="worker host unavailable",
+                    needs_attention=True,
+                    parent_step_id=record.parent_step_id,
+                    evidence_refs=(f"worker={record.agent_id}", f"task={record.task_id}"),
+                ).to_dict()
+                self.store.cancel_pending_permissions_for_task(
+                    team.team_id,
+                    record.task_id,
+                    reason="task settled as interrupted",
+                )
+                self.store.update_worker_status_and_notify(
+                    team.team_id,
+                    record.agent_id,
+                    "interrupted",
+                    notification,
+                )
+
+    def interrupt_all(self, *, reason: str = "session closed") -> int:
+        interrupted = 0
+        interrupted_workers: list[_WorkerTask] = []
+        with self._lock:
+            workers = list(self._tasks.values())
+        for worker in workers:
+            if worker.final_status in _TERMINAL_WORKER_STATUSES:
+                continue
+            if worker.final_status == "awaiting_approval":
+                with self._registry_condition:
+                    worker.final_status = ""
+                    worker.done.clear()
+            worker.session.cancel_current_run()
+            if worker.process is not None and worker.process.poll() is None:
+                worker.process.terminate()
+            notification = self._notification(
+                worker,
+                status="interrupted",
+                summary=f"worker interrupted: {reason}",
+                error=reason,
+            )
+            if self._finalize_worker(worker, status="interrupted", notification=notification):
+                interrupted += 1
+                interrupted_workers.append(worker)
+        _wait_for_interrupted_workers(interrupted_workers)
+        return interrupted
+
+    @classmethod
+    def interrupt_session(
+        cls,
+        *,
+        team_root: Path,
+        leader_session_id: str,
+        reason: str,
+    ) -> int:
+        resolved_team_root = str(team_root.resolve())
+        with cls._registry_lock:
+            matching_scopes = [
+                scope
+                for scope in cls._task_registry
+                if scope[0] == resolved_team_root and scope[2] == leader_session_id
+            ]
+            task_maps = [cls._task_registry[scope] for scope in matching_scopes]
+        store = TeamStore(team_root)
+        interrupted = 0
+        interrupted_workers: list[_WorkerTask] = []
+        for tasks in task_maps:
+            for worker in list(tasks.values()):
+                if worker.final_status in _TERMINAL_WORKER_STATUSES:
+                    continue
+                if worker.final_status == "awaiting_approval":
+                    with cls._registry_condition:
+                        worker.final_status = ""
+                        worker.done.clear()
+                worker.session.cancel_current_run()
+                if worker.process is not None and worker.process.poll() is None:
+                    worker.process.terminate()
+                notification = WorkerNotification(
+                    event_type="worker_status",
+                    team_id=worker.team_id,
+                    agent_id=worker.agent_id,
+                    task_id=worker.task_id,
+                    status="interrupted",
+                    summary=f"worker interrupted: {reason}",
+                    result_excerpt="",
+                    episode_path="",
+                    error=reason,
+                    needs_attention=True,
+                    parent_step_id=worker.parent_step_id,
+                    evidence_refs=(f"worker={worker.agent_id}", f"task={worker.task_id}"),
+                ).to_dict()
+                with cls._registry_condition:
+                    if worker.final_status:
+                        continue
+                    store.cancel_pending_permissions_for_task(
+                        worker.team_id,
+                        worker.task_id,
+                        reason="task settled as interrupted",
+                    )
+                    store.update_worker_status_and_notify(
+                        worker.team_id,
+                        worker.agent_id,
+                        "interrupted",
+                        notification,
+                    )
+                    worker.final_status = "interrupted"
+                    worker.notification = notification
+                    worker.done.set()
+                    cls._registry_condition.notify_all()
+                interrupted += 1
+                interrupted_workers.append(worker)
+        _wait_for_interrupted_workers(interrupted_workers)
+
+        # registry 可能因异常退出或 runtime 重建而丢失；关闭 session 时仍需结算磁盘非终态。
+        nonterminal = {"queued", "running", "idle", "awaiting_approval"}
+        for team in store.list_teams_for_leader(leader_session_id):
+            for record in team.agents:
+                if record.status not in nonterminal:
+                    continue
+                notification = WorkerNotification(
+                    event_type="worker_status",
+                    team_id=team.team_id,
+                    agent_id=record.agent_id,
+                    task_id=record.task_id,
+                    status="interrupted",
+                    summary=f"worker interrupted: {reason}",
+                    result_excerpt="",
+                    episode_path=record.episode_path,
+                    error=reason,
+                    needs_attention=True,
+                    parent_step_id=record.parent_step_id,
+                    evidence_refs=(f"worker={record.agent_id}", f"task={record.task_id}"),
+                ).to_dict()
+                store.cancel_pending_permissions_for_task(
+                    team.team_id,
+                    record.task_id,
+                    reason="task settled as interrupted",
+                )
+                store.update_worker_status_and_notify(
+                    team.team_id,
+                    record.agent_id,
+                    "interrupted",
+                    notification,
+                )
+                interrupted += 1
+        with cls._registry_lock:
+            for scope in matching_scopes:
+                cls._task_registry.pop(scope, None)
+        return interrupted
 
     def _start_worker_thread(self, worker: _WorkerTask, prompt: str) -> None:
         thread = threading.Thread(
@@ -576,10 +890,10 @@ class MultiAgentRuntime:
             status=status,
             summary=summary[:300],
             result_excerpt=result_excerpt[:1000],
-            episode_path=episode_path,
-            error=error or "",
+            episode_path=episode_path[:1000],
+            error=(error or "")[:1000],
             needs_attention=bool(error),
-            request_id=request_id,
+            request_id=request_id[:200],
             parent_step_id=worker.parent_step_id,
             evidence_refs=tuple(_worker_evidence_refs(worker, episode_path=episode_path)),
         ).to_dict()
@@ -653,36 +967,43 @@ class MultiAgentRuntime:
 
         suffix = "" if restart_count <= 0 else f"-restart{restart_count}"
         resolved_workspace_root = workspace_root or self.workspace_root
-        return AgentSession(
-            workspace_root=resolved_workspace_root,
-            runs_root=self.runs_root,
-            model_gateway=self._worker_gateway(worker_profile.model_profile),
-            model_ref=self._worker_model_ref(worker_profile.model_profile),
-            max_turns=worker_profile.max_turns or self.worker_max_turns,
-            session_id=f"{self.leader_session_id}-{agent_id}{suffix}",
-            memory_extraction_enabled=False,
-            enable_web=self.enable_web if worker_profile.enable_web is None else worker_profile.enable_web,
-            allowed_tools_override=allowed_tools,
-            approval_allowed_tools_override=approval_allowed_tools,
-            approved_tools_override=approved_tools,
-            mcp_runtime=self.mcp_runtime or SyncMcpRuntime(McpSettings()),
-            worker_context={
-                "agent_id": agent_id,
-                "agent_profile": worker_profile.name,
-                "system_prompt": worker_profile.system_prompt,
-                "leader_session_id": self.leader_session_id,
-                "team_id": team_id,
-                "inbox_enabled": True,
-            },
-            worker_permission_requester=lambda tool_name, args, policy_decision: self.create_permission_request(
-                team_id=team_id,
-                agent_id=agent_id,
-                task_id=task_id,
-                tool_name=tool_name,
-                args=args,
-                reason=policy_decision.approval.reason,
-            ),
-        )
+        worker_gateway: ModelGateway | None = None
+        try:
+            worker_gateway = self._worker_gateway(worker_profile.model_profile)
+            worker_model_ref = self._worker_model_ref(worker_profile.model_profile)
+            return AgentSession(
+                workspace_root=resolved_workspace_root,
+                runs_root=self.runs_root,
+                model_gateway=worker_gateway,
+                model_ref=worker_model_ref,
+                max_turns=worker_profile.max_turns or self.worker_max_turns,
+                session_id=f"{self.leader_session_id}-{agent_id}{suffix}",
+                memory_extraction_enabled=False,
+                enable_web=self.enable_web if worker_profile.enable_web is None else worker_profile.enable_web,
+                allowed_tools_override=allowed_tools,
+                approval_allowed_tools_override=approval_allowed_tools,
+                approved_tools_override=approved_tools,
+                mcp_runtime=self.mcp_runtime or SyncMcpRuntime(McpSettings()),
+                worker_context={
+                    "agent_id": agent_id,
+                    "agent_profile": worker_profile.name,
+                    "system_prompt": worker_profile.system_prompt,
+                    "leader_session_id": self.leader_session_id,
+                    "team_id": team_id,
+                    "inbox_enabled": True,
+                },
+                worker_permission_requester=lambda tool_name, args, policy_decision: self.create_permission_request(
+                    team_id=team_id,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    tool_name=tool_name,
+                    args=args,
+                    reason=policy_decision.approval.reason,
+                ),
+            )
+        except BaseException:
+            _close_model_gateway_if_owned(worker_gateway, leader_gateway=self.model_gateway)
+            raise
 
     def create_permission_request(
         self,
@@ -709,7 +1030,7 @@ class MultiAgentRuntime:
             status="pending",
         )
         self.store.write_permission_request(request)
-        self.store.update_worker_status(team_id, agent_id, "awaiting_approval")
+        # awaiting_approval 必须与其通知原子结算；提前改状态会让 task_wait 看见缺少 request_id 的半状态。
         return request
 
     def _resolve_record_profile(
@@ -740,7 +1061,15 @@ class MultiAgentRuntime:
 
     def _worker_gateway(self, model_profile: str | None) -> ModelGateway:
         if model_profile is None:
-            return self.model_gateway
+            # 真实 leader 连接为每个 worker 创建独立 gateway，避免可变路由/重试状态并发共享。
+            # Fake/自定义无 ModelRef 的测试 gateway 保持受控共享，不假装可克隆。
+            if self.leader_model_ref is None:
+                return self.model_gateway
+            try:
+                self.model_runtime.resolve(self.leader_model_ref)
+            except ProviderProfileError as error:
+                raise ValueError(str(error)) from error
+            return self.model_runtime.create_gateway(self.leader_model_ref)
         try:
             ref = self.model_runtime.ref_for_connection(model_profile)
             self.model_runtime.resolve(ref)
@@ -750,7 +1079,7 @@ class MultiAgentRuntime:
 
     def _worker_model_ref(self, model_profile: str | None) -> ModelRef | None:
         if model_profile is None:
-            return None
+            return self.leader_model_ref
         return self.model_runtime.ref_for_connection(model_profile)
 
     def _emit_worker_event(
@@ -803,6 +1132,44 @@ class MultiAgentRuntime:
                 ),
             ),
         )
+
+
+def _close_owned_worker_gateway(worker: _WorkerTask) -> None:
+    if not worker.owns_gateway:
+        return
+    worker_gateway = getattr(worker.session, "model_gateway", None)
+    worker.owns_gateway = False
+    _close_model_gateway_if_owned(worker_gateway, leader_gateway=None)
+
+
+def _close_model_gateway_if_owned(worker_gateway: Any, *, leader_gateway: Any | None) -> None:
+    if worker_gateway is None or worker_gateway is leader_gateway:
+        return
+    from haagent.models.http_transport import close_model_gateway
+
+    try:
+        close_model_gateway(worker_gateway)
+    except Exception:
+        # 任务状态和通知已持久化；连接清理失败不能回滚终态或伪造 worker 失败。
+        pass
+
+
+def _wait_for_interrupted_workers(workers: list[_WorkerTask], *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    for worker in workers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if worker.thread is not None and worker.thread.is_alive():
+            worker.thread.join(timeout=remaining)
+        if worker.process is not None and worker.process.poll() is None:
+            try:
+                worker.process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                # subprocess 未在有界窗口内退出时升级终止；不无限阻塞 session 关闭。
+                worker.process.kill()
+        if worker.thread is None or not worker.thread.is_alive():
+            _close_owned_worker_gateway(worker)
 
 
 def _failure_summary_from_episode(result: Any) -> str:

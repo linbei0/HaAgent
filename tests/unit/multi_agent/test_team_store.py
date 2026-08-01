@@ -7,6 +7,7 @@ tests/unit/multi_agent/test_team_store.py - 多智能体 team 存储测试
 import json
 from pathlib import Path
 
+from haagent.multi_agent.messages import WorkerNotification, WorkerPermissionRequest
 from haagent.multi_agent.team_store import TeamStore, WorkerRecord
 
 
@@ -82,6 +83,7 @@ def test_worker_record_persists_profile_fields(tmp_path: Path) -> None:
             session_id="session-1",
             profile="explorer",
             model_profile="fast",
+            parent_step_id="todo-1",
         ),
     )
 
@@ -90,3 +92,70 @@ def test_worker_record_persists_profile_fields(tmp_path: Path) -> None:
     assert team is not None
     assert team.agents[0].profile == "explorer"
     assert team.agents[0].model_profile == "fast"
+    assert team.agents[0].parent_step_id == "todo-1"
+
+
+def test_notification_consumers_have_independent_acknowledged_cursors(tmp_path: Path) -> None:
+    store = TeamStore(tmp_path / "teams")
+    store.ensure_team(team_id="team-1", workspace_root=tmp_path, leader_session_id="leader")
+    notification = WorkerNotification(
+        event_type="worker_status",
+        team_id="team-1",
+        agent_id="explorer-1",
+        task_id="task-1",
+        status="completed",
+        summary="done",
+        result_excerpt="full output",
+        episode_path="episode",
+        error="",
+        needs_attention=False,
+    ).to_dict()
+    store.append_notification("team-1", notification)
+
+    model_batch = store.read_unread_notifications("team-1", consumer="model")
+    ui_batch = store.read_unread_notifications("team-1", consumer="ui")
+    assert [item["task_id"] for item in model_batch["notifications"]] == ["task-1"]
+    assert [item["task_id"] for item in ui_batch["notifications"]] == ["task-1"]
+
+    store.acknowledge_notifications(
+        "team-1",
+        consumer="ui",
+        cursor=str(ui_batch["next_cursor"]),
+    )
+    assert store.read_unread_notifications("team-1", consumer="ui")["notifications"] == []
+    assert store.read_unread_notifications("team-1", consumer="model")["notifications"]
+
+    store.acknowledge_notifications(
+        "team-1",
+        consumer="model",
+        cursor=str(model_batch["next_cursor"]),
+    )
+    assert store.read_unread_notifications("team-1", consumer="model")["notifications"] == []
+
+
+def test_terminal_task_consumes_pending_permission_request(tmp_path: Path) -> None:
+    store = TeamStore(tmp_path / "teams")
+    store.ensure_team(team_id="team-1", workspace_root=tmp_path, leader_session_id="leader")
+    store.write_permission_request(
+        WorkerPermissionRequest(
+            request_id="perm-1",
+            team_id="team-1",
+            agent_id="worker-1",
+            task_id="task-1",
+            tool_name="shell",
+            tool_args_summary="pytest",
+            reason="approval required",
+            status="pending",
+        ),
+    )
+
+    cancelled = store.cancel_pending_permissions_for_task(
+        "team-1",
+        "task-1",
+        reason="task settled as interrupted",
+    )
+
+    assert cancelled == 1
+    assert store.read_permission_requests("team-1", status="pending") == []
+    consumed = store.read_permission_requests("team-1", status="consumed")
+    assert [request.request_id for request in consumed] == ["perm-1"]

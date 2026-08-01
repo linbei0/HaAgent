@@ -35,9 +35,10 @@ def test_worker_notification_context_reads_structured_notification_from_store(
     )
     monkeypatch.setattr(orchestrator_module, "user_config_dir", lambda: tmp_path)
 
-    context = orchestrator_module._worker_notification_context("leader-1")
+    context, acknowledgements = orchestrator_module._worker_notification_context("leader-1")
 
     assert context is not None
+    assert acknowledgements
     assert "verification-1" in context
     assert "task-123" in context
     assert "perm-456" in context

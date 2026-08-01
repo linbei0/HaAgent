@@ -13,6 +13,7 @@ from typing import Any, Callable, Protocol
 
 import yaml
 
+from haagent.models.model_ref import ModelRef
 from haagent.models.types import ModelGateway
 from haagent.context.model_context_runtime import ModelContextRuntime
 from haagent.prompts.commands import parse_prompt_command
@@ -37,6 +38,7 @@ class OrchestratorFactory(Protocol):
         *,
         runs_root: Path,
         model_gateway: ModelGateway,
+        model_ref: ModelRef | None,
         max_turns: int | None,
         session_summary: str | None,
         session_compaction: dict[str, object] | None,
@@ -84,6 +86,7 @@ class ChatTurnRequest:
     steering_channel: SteeringChannel | None = None
     task_ledger: dict[str, object] | None = None
     planning_state: dict[str, object] | None = None
+    model_ref: ModelRef | None = None
     leader_session_id: str | None = None
     tool_registry: ToolRuntimeRegistry | None = None
     mcp_runtime: object | None = None
@@ -146,6 +149,7 @@ class ChatTurnRunner:
             orchestrator = request.orchestrator_factory(
                 runs_root=request.runs_root,
                 model_gateway=request.model_gateway,
+                model_ref=request.model_ref,
                 max_turns=request.max_turns,
                 session_summary=request.session_summary,
                 session_compaction=request.session_compaction,

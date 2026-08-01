@@ -83,6 +83,10 @@ def test_worker_high_risk_tool_creates_pending_permission_request(tmp_path: Path
     requests = runtime.store.read_permission_requests(worker["team_id"], status="pending")
 
     assert notification["status"] == "awaiting_approval"
+    waited = runtime.task_wait([worker["task_id"]], timeout_seconds=5)
+    assert waited["timed_out"] is False
+    assert waited["tasks"][0]["status"] == "awaiting_approval"
+    assert waited["tasks"][0]["request_id"] == requests[0].request_id
     assert len(requests) == 1
     assert requests[0].tool_name == "shell"
     assert requests[0].task_id == worker["task_id"]

@@ -27,6 +27,7 @@ from haagent.runtime.events.types import (
     ToolActivityEvent,
     UserInputStateEvent,
     WarningNoticeEvent,
+    WorkerNotificationEvent,
 )
 from haagent.runtime.events.ui_mapper import RuntimeUiEventMapper
 
@@ -47,6 +48,7 @@ __all__ = [
     "ToolActivityEvent",
     "UserInputStateEvent",
     "WarningNoticeEvent",
+    "WorkerNotificationEvent",
     "failure_notice_event",
     "memory_candidates_created_event",
     "memory_extraction_warning_event",

@@ -7,7 +7,7 @@ tests/unit/context/test_context_checkpoint.py - 模型上下文 checkpoint 测�
 import json
 
 from haagent.context.compression.budget import CompressionBudget
-from haagent.context.compression.checkpoint import maybe_checkpoint_messages
+from haagent.context.compression.checkpoint import checkpoint_payload, maybe_checkpoint_messages
 
 
 def _budget() -> CompressionBudget:
@@ -63,7 +63,9 @@ def test_checkpoint_replaces_one_contiguous_prefix_and_preserves_recent_tool_pai
         {"role": "system", "content": "stable instructions"},
         {"role": "user", "content": "Task:\ngoal: inspect the project"},
     ]
-    messages = [*prefix, *_tool_pair(1), *_tool_pair(2), *_tool_pair(3), *_tool_pair(4)]
+    messages = [*prefix]
+    for index in range(1, 7):
+        messages.extend(_tool_pair(index))
     original = json.loads(json.dumps(messages))
 
     result = maybe_checkpoint_messages(
@@ -76,7 +78,8 @@ def test_checkpoint_replaces_one_contiguous_prefix_and_preserves_recent_tool_pai
     assert result.applied is True
     assert result.epoch == 1
     assert result.messages[:2] == prefix
-    checkpoint = json.loads(result.messages[2]["content"])
+    checkpoint = checkpoint_payload(result.messages[2])
+    assert checkpoint is not None
     assert checkpoint["kind"] == "context_checkpoint"
     assert checkpoint["epoch"] == 1
     assert checkpoint["compacted_message_count"] >= 2
@@ -87,15 +90,48 @@ def test_checkpoint_replaces_one_contiguous_prefix_and_preserves_recent_tool_pai
     assert messages == original
 
 
+def test_checkpoint_preserves_token_budgeted_tail_and_marks_history_as_system_context() -> None:
+    budget = CompressionBudget(
+        context_window_tokens=80_000,
+        reserved_output_tokens=4_000,
+        safety_buffer_tokens=4_000,
+        available_input_tokens=72_000,
+        context_builder_max_tokens=14_000,
+        checkpoint_preserve_recent_messages=6,
+        checkpoint_preserve_recent_tokens=12_000,
+    )
+    prefix = [
+        {"role": "system", "content": "stable instructions"},
+        {"role": "user", "content": "Task:\ngoal: inspect the project"},
+    ]
+    messages = [*prefix]
+    for index in range(20):
+        messages.extend(_tool_pair(index, size=8_000))
+    original = json.loads(json.dumps(messages))
+
+    result = maybe_checkpoint_messages(
+        messages=messages,
+        budget=budget,
+        epoch=0,
+        artifact_writer=lambda tool_name, content: f"artifacts/{tool_name}-{len(content)}.txt",
+    )
+
+    assert result.applied is True
+    assert result.messages[2]["role"] == "system"
+    assert result.messages[2]["content"].startswith("Runtime historical context checkpoint")
+    # 12,000 token 尾部预算保留的消息比 6 条下限更多，且完整保留最近工具配对。
+    preserved_recent = result.messages[3:]
+    assert len(preserved_recent) > 6
+    assert result.messages[-len(preserved_recent) :] == original[-len(preserved_recent) :]
+
+
 def test_checkpoint_materializes_inline_tool_output_before_forgetting_it() -> None:
     messages = [
         {"role": "system", "content": "stable instructions"},
         {"role": "user", "content": "Task:\ngoal: inspect the project"},
-        *_tool_pair(1, artifact=False),
-        *_tool_pair(2, artifact=False),
-        *_tool_pair(3, artifact=False),
-        *_tool_pair(4, artifact=False),
     ]
+    for index in range(1, 7):
+        messages.extend(_tool_pair(index, artifact=False))
     saved: list[tuple[str, str]] = []
 
     result = maybe_checkpoint_messages(
@@ -109,7 +145,8 @@ def test_checkpoint_materializes_inline_tool_output_before_forgetting_it() -> No
 
     assert result.applied is True
     assert saved
-    checkpoint = json.loads(result.messages[2]["content"])
+    checkpoint = checkpoint_payload(result.messages[2])
+    assert checkpoint is not None
     assert all(ref["path"].startswith("artifacts/") for ref in checkpoint["artifact_refs"])
 
 
@@ -138,7 +175,7 @@ def test_checkpoint_skips_small_reclaim_after_cache_generation_change() -> None:
         {"role": "system", "content": "stable instructions"},
         {"role": "user", "content": "Task:\ngoal: inspect the project"},
     ]
-    for index in range(4):
+    for index in range(12):
         content = f"result-{index}-" + ("x" * 3_000)
         messages.extend(
             [
@@ -211,11 +248,9 @@ def test_repeated_checkpoint_keeps_model_visible_index_bounded_and_archives_full
         {"role": "system", "content": "stable instructions"},
         {"role": "user", "content": "Task:\ngoal: inspect the project"},
         {"role": "user", "content": json.dumps(previous_payload)},
-        *_tool_pair(5),
-        *_tool_pair(6),
-        *_tool_pair(7),
-        *_tool_pair(8),
     ]
+    for index in range(5, 11):
+        messages.extend(_tool_pair(index))
     saved: list[tuple[str, str]] = []
 
     result = maybe_checkpoint_messages(
@@ -228,7 +263,8 @@ def test_repeated_checkpoint_keeps_model_visible_index_bounded_and_archives_full
     )
 
     assert result.applied is True
-    checkpoint = json.loads(result.messages[2]["content"])
+    checkpoint = checkpoint_payload(result.messages[2])
+    assert checkpoint is not None
     assert len(checkpoint["records"]) <= 24
     assert len(checkpoint["artifact_refs"]) <= 24
     assert checkpoint["archive"]["path"].startswith("artifacts/context-checkpoint-")

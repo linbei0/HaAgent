@@ -49,6 +49,7 @@ def test_tool_registry_contains_mvp_tools() -> None:
         "agent",
         "send_message",
         "task_stop",
+        "task_wait",
         "task_get",
         "task_list",
         "task_output",
@@ -68,6 +69,7 @@ def test_tool_registry_static_execution_effects() -> None:
         "agent": "external_effect",
         "send_message": "external_effect",
         "task_stop": "external_effect",
+        "task_wait": "read_only",
         "task_get": "read_only",
         "task_list": "read_only",
         "task_output": "read_only",
@@ -233,14 +235,20 @@ def test_grep_schema_stays_deterministic() -> None:
 
 
 def test_task_tools_are_low_risk_worker_inspection_tools() -> None:
-    get_schema, list_schema, output_schema = export_tool_schemas(["task_get", "task_list", "task_output"])
+    wait_schema, get_schema, list_schema, output_schema = export_tool_schemas(
+        ["task_wait", "task_get", "task_list", "task_output"],
+    )
 
+    assert wait_schema["parameters"]["required"] == ["task_ids"]
+    assert set(wait_schema["parameters"]["properties"]) == {"task_ids", "timeout_seconds"}
+    assert wait_schema["parameters"]["properties"]["task_ids"]["maxItems"] == 16
     assert get_schema["parameters"]["required"] == ["task_id"]
     assert set(get_schema["parameters"]["properties"]) == {"task_id"}
     assert list_schema["parameters"]["required"] == []
     assert set(list_schema["parameters"]["properties"]) == {"status"}
     assert output_schema["parameters"]["required"] == ["task_id"]
     assert set(output_schema["parameters"]["properties"]) == {"task_id", "max_chars"}
+    assert TOOL_REGISTRY["task_wait"].risk_level == "low"
     assert TOOL_REGISTRY["task_get"].risk_level == "low"
     assert TOOL_REGISTRY["task_list"].risk_level == "low"
     assert TOOL_REGISTRY["task_output"].risk_level == "low"

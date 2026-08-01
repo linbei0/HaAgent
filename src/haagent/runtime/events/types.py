@@ -173,6 +173,19 @@ class TodoStateEvent:
 
 
 @dataclass(frozen=True)
+class WorkerNotificationEvent:
+    """跨 turn 后台任务通知；不携带完整 worker 输出。"""
+
+    session_id: str
+    task_id: str
+    agent_id: str
+    status: str
+    summary: str
+    needs_attention: bool = False
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
 class SessionLifecycleEvent:
     session_id: str
     turn_index: int
@@ -200,6 +213,7 @@ RuntimeUiEvent: TypeAlias = (
     | TaskProgressEvent
     | PlanningStateEvent
     | TodoStateEvent
+    | WorkerNotificationEvent
     | SessionLifecycleEvent
 )
 
@@ -218,6 +232,7 @@ RuntimeUiEventType: TypeAlias = (
     | type[TaskProgressEvent]
     | type[PlanningStateEvent]
     | type[TodoStateEvent]
+    | type[WorkerNotificationEvent]
     | type[SessionLifecycleEvent]
 )
 
@@ -236,5 +251,6 @@ RUNTIME_UI_EVENT_TYPES: tuple[RuntimeUiEventType, ...] = (
     TaskProgressEvent,
     PlanningStateEvent,
     TodoStateEvent,
+    WorkerNotificationEvent,
     SessionLifecycleEvent,
 )

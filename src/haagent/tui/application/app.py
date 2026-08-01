@@ -121,6 +121,8 @@ class HaAgentTuiApp(App[None]):
         # delta 热路径只调度批量 timeline 刷新，禁止每 token 全量 _refresh。
         self._streaming_refresh_scheduled = False
         self._streaming_refresh_timer: Timer | None = None
+        self._worker_notification_timer: Timer | None = None
+        self._worker_notification_error = ""
         self._timeline_widget: ConversationTimeline | None = None
         self._input_dock_widget: InputDock | None = None
         self._tool_failure_groups: dict[tuple[int, str, str], int] = {}
@@ -159,6 +161,8 @@ class HaAgentTuiApp(App[None]):
         self._show_initial_configuration_state()
         self.session_flow.restore_initial_session()
         self.schedule_flow.start_background_polling()
+        # 后台 worker 终态脱离旧 turn 回调，通过独立收件箱低频投递到主线程。
+        self._worker_notification_timer = self.set_interval(1.0, self._poll_worker_notifications)
         self._refresh()
         self._update_responsive_layout()
         self._prompt_input().focus()
@@ -166,7 +170,13 @@ class HaAgentTuiApp(App[None]):
 
     async def on_unmount(self) -> None:
         # 停止 badge 轮询并停止 TUI 内嵌 coordinator host，释放租约。
-        self.schedule_flow.stop_background_polling()
+        try:
+            self.schedule_flow.stop_background_polling()
+        finally:
+            if self._worker_notification_timer is not None:
+                self._worker_notification_timer.stop()
+                self._worker_notification_timer = None
+            self.service.close()
         # Textual 可能在 default screen 卸载后才触发 timer；必须显式取消，
         # 否则回调会查询已移除的 timeline 并中断退出。
         if self._streaming_refresh_timer is not None:
@@ -360,6 +370,18 @@ class HaAgentTuiApp(App[None]):
 
     def _handle_chat_event(self, event: RuntimeUiEvent) -> None:
         handle_runtime_ui_event(self, event)
+
+    def _poll_worker_notifications(self) -> None:
+        try:
+            self.service.workspace.poll_worker_notifications(self._handle_chat_event)
+        except Exception as error:
+            message = f"后台任务通知读取失败：{error}"
+            if message != self._worker_notification_error:
+                self._worker_notification_error = message
+                self._conversation.append_block("后台任务通知", message)
+                self._refresh()
+            return
+        self._worker_notification_error = ""
 
     def _finish_prompt(self, status: str, unconsumed_steering: tuple[str, ...] = ()) -> None:
         if unconsumed_steering:
