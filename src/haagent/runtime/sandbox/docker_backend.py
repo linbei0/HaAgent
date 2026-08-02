@@ -201,6 +201,8 @@ class DockerSandboxBackend:
             cwd=self._workspace_root,
             timeout_seconds=command.timeout_seconds,
             cancellation_token=command.cancellation_token,
+            output_artifact_root=command.output_artifact_root,
+            artifact_name="shell",
         )
         return self._host_visible_result(result)
 
@@ -224,6 +226,8 @@ class DockerSandboxBackend:
                 cwd=self._workspace_root,
                 timeout_seconds=command.timeout_seconds,
                 cancellation_token=command.cancellation_token,
+                output_artifact_root=command.output_artifact_root,
+                artifact_name="code_run",
             )
             return self._host_visible_result(result)
         finally:
@@ -311,6 +315,12 @@ class DockerSandboxBackend:
             redacted=result.redacted,
             duration_seconds=result.duration_seconds,
             timeout_seconds=result.timeout_seconds,
+            stdout_original_chars=result.stdout_original_chars,
+            stderr_original_chars=result.stderr_original_chars,
+            stdout_original_bytes=result.stdout_original_bytes,
+            stderr_original_bytes=result.stderr_original_bytes,
+            stdout_artifact_path=result.stdout_artifact_path,
+            stderr_artifact_path=result.stderr_artifact_path,
         )
 
     def _host_visible_text(self, text: str) -> str:

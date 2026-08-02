@@ -47,6 +47,7 @@ class SandboxCommand:
     timeout_seconds: float
     cancellation_token: CancellationToken | None = None
     env: dict[str, str] = field(default_factory=dict)
+    output_artifact_root: Path | None = None
 
 
 class SandboxBackend(Protocol):

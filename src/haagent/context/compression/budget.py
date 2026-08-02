@@ -18,11 +18,10 @@ class CompressionBudget:
     safety_buffer_tokens: int
     available_input_tokens: int
     context_builder_max_tokens: int
-    tool_output_inline_chars: int = 12_000
-    tool_output_preview_chars: int = 3_000
-    historical_collapse_head_chars: int = 900
-    historical_collapse_tail_chars: int = 500
-    checkpoint_preserve_recent_messages: int = 4
+    # 模型单条工具结果的唯一默认上限；字符数只用于估算，不再作为工具层硬截断。
+    tool_output_inline_tokens: int = 10_000
+    checkpoint_preserve_recent_messages: int = 6
+    checkpoint_preserve_recent_tokens: int = 4_000
     full_compact_preserve_recent: int = 6
 
 
@@ -52,6 +51,7 @@ def derive_compression_budget(
         safety_buffer_tokens=safety_buffer,
         available_input_tokens=available_input,
         context_builder_max_tokens=context_builder,
+        checkpoint_preserve_recent_tokens=_clamp(int(available_input * 0.10), 4_000, 20_000),
     )
 
 

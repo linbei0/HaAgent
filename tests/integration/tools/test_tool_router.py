@@ -622,7 +622,7 @@ def test_tool_router_offloads_large_mcp_output_for_model_visibility(tmp_path: Pa
         },
         execution_effect="external_effect",
     )
-    large_output = "start " + ("middle " * 2200) + "important tail"
+    large_output = "start " + ("middle " * 7000) + "important tail"
     runtime = FakeMcpRuntime(output=large_output)
     router = ToolRouter(
         allowed_tools=["mcp__fixture__fetch"],
@@ -637,7 +637,7 @@ def test_tool_router_offloads_large_mcp_output_for_model_visibility(tmp_path: Pa
 
     visible = result["model_visible"]
     assert visible["kind"] == "tool_result_view"
-    assert visible["truncated"] is True
+    assert visible["truncation"]["occurred"] is True
     assert visible["artifact"]["original_chars"] == len(large_output)
     assert "start" in visible["content"]
     assert "important tail" in visible["content"]
@@ -1049,18 +1049,21 @@ def test_file_read_model_visible_includes_range_and_truncation_diagnostics(tmp_p
     result = router.dispatch("file_read", {"path": "notes.txt", "offset": 1, "limit": 2})
 
     visible = result["model_visible"]
-    assert visible == {
+    assert visible["kind"] == "tool_result_view"
+    assert visible["content"] == "one\ntwo\n"
+    assert visible["truncation"]["occurred"] is False
+    assert visible["source_scope"] == {
+        "kind": "file_range",
         "path": "notes.txt",
-        "offset": 1,
-        "limit": 2,
-        "keyword": None,
+        "requested_offset": 1,
+        "requested_limit": 2,
         "start_line": 2,
         "end_line": 3,
-        "line_count": 5,
-        "content": "one\ntwo\n",
-        "truncated": True,
-        "truncation_reason": "requested_range_excludes_file_lines",
+        "total_lines": 5,
+        "outside_requested_lines": 3,
     }
+    assert visible["truncation"]["occurred"] is False
+    assert result["truncated"] is True
 
 
 def test_file_read_raw_content_is_not_serialized_to_tool_message_when_model_visible_exists(tmp_path: Path) -> None:
@@ -2417,7 +2420,8 @@ def test_code_run_success_nonzero_timeout_and_truncation(tmp_path: Path) -> None
     assert timeout["exit_code"] is None
     assert timeout["error"]["type"] == "timeout"
     assert long_output["status"] == "success"
-    assert long_output["truncated"] is True
+    assert long_output["truncated"] is False
+    assert long_output["stdout_truncated"] is True
     assert len(long_output["stdout_excerpt"]) < 5000
 
 

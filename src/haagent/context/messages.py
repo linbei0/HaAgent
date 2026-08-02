@@ -249,15 +249,17 @@ def build_steering_message(steering_text: str) -> dict[str, Any]:
 
 def _format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
     status = result.get("status", "unknown")
+    display = result.get("model_visible")
+    if isinstance(display, dict) and display.get("kind") == "tool_result_view":
+        payload = dict(display)
+        if status == "error" and isinstance(result.get("error"), dict):
+            payload["error"] = result["error"]
+        return render_tool_result_view(payload)
     if status == "error":
         error = result.get("error") or {}
         error_type = error.get("type", "unknown")
         message = error.get("message", "")
         return f"error ({error_type}): {message}"
-
-    display = result.get("model_visible")
-    if isinstance(display, dict) and display.get("kind") == "tool_result_view":
-        return render_tool_result_view(display)
     if display is None:
         # Remove status key from display, keep everything else.
         display = {k: v for k, v in result.items() if k != "status"}

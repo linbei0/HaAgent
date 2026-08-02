@@ -3210,7 +3210,7 @@ verification_commands: []
     assert context_manifest["full_compact"]["reason"] == "schema_invalid"
 
 
-def test_orchestrator_microcompacts_old_tool_result_messages(tmp_path: Path) -> None:
+def test_orchestrator_does_not_microcompact_projected_tool_result_messages(tmp_path: Path) -> None:
     from haagent.runtime.orchestration.orchestrator import RunOrchestrator
 
     class LargeToolResultGateway:
@@ -3229,7 +3229,7 @@ def test_orchestrator_microcompacts_old_tool_result_messages(tmp_path: Path) -> 
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    large_content = "HEAD-" + ("body-" * 2000) + "TAIL"
+    large_content = "HEAD-" + ("body-" * 10000) + "TAIL"
     (workspace / "large.txt").write_text(large_content, encoding="utf-8")
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -3259,19 +3259,16 @@ verification_commands: []
     second_input = gateway.model_inputs[1]
     assert "HEAD-" in second_input
     assert "TAIL" in second_input
-    assert "...[collapsed " in second_input
+    assert "characters omitted" in second_input
     assert large_content not in second_input
     transcript = [
         json.loads(line)
         for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert any(record.get("event") == "compression_diagnostic" for record in transcript)
+    assert not any(record.get("event") == "compression_diagnostic" for record in transcript)
     microcompact_events = [
         bus_event_to_dict(event)
         for event in runtime_events
         if bus_event_to_dict(event).get("event_type") == "compression_diagnostic"
     ]
-    assert len(microcompact_events) == 1
-    assert "event" not in microcompact_events[0]
-    assert microcompact_events[0]["stage"] == "historical_tool_message"
-    assert microcompact_events[0]["reason"] == "long_text_result"
+    assert microcompact_events == []

@@ -19,8 +19,6 @@ from haagent.context.messages import is_context_state_message
 
 
 ArtifactWriter = Callable[[str, str], str]
-_INPUT_PRESSURE_RATIO = 0.70
-_TOOL_PRESSURE_RATIO = 0.15
 # checkpoint 会改变缓存代际；只有能回收一批有意义的 token 才值得承担重写成本。
 _MIN_RECLAIM_TOKENS = 20_000
 _RECORD_PREVIEW_CHARS = 480
@@ -51,10 +49,9 @@ def maybe_checkpoint_messages(
 
     total_tokens = _message_tokens(messages)
     tool_tokens = sum(_message_tokens([message]) for message in messages if message.get("role") == "tool")
-    input_threshold = int(budget.available_input_tokens * _INPUT_PRESSURE_RATIO)
-    tool_threshold = int(budget.available_input_tokens * _TOOL_PRESSURE_RATIO)
-    if total_tokens < input_threshold and tool_tokens < tool_threshold:
-        return _not_applied(epoch, messages, "below_pressure_threshold", total_tokens, tool_tokens)
+    # 未超过实际输入预算时不做有损历史重写；工具数量本身不是截断理由。
+    if total_tokens <= budget.available_input_tokens:
+        return _not_applied(epoch, messages, "within_input_budget", total_tokens, tool_tokens)
 
     stable_end = _stable_prefix_end(messages)
     requested_boundary = _checkpoint_boundary(messages, stable_end, budget)
@@ -67,14 +64,25 @@ def maybe_checkpoint_messages(
         return _not_applied(epoch, messages, "no_tool_history_to_checkpoint", total_tokens, tool_tokens)
 
     next_epoch = epoch + 1
-    dry_content = _checkpoint_content(compacted, next_epoch, artifact_writer=None)
-    candidate_tokens = _message_tokens(compacted)
+    compacted_tokens = _message_tokens(compacted)
+    dry_content = _checkpoint_content(
+        compacted,
+        next_epoch,
+        artifact_writer=None,
+        compacted_tokens=compacted_tokens,
+    )
+    candidate_tokens = compacted_tokens
     dry_checkpoint_tokens = estimate_text_tokens(dry_content)
     minimum_reclaim = _MIN_RECLAIM_TOKENS
     if candidate_tokens - dry_checkpoint_tokens < minimum_reclaim:
         return _not_applied(epoch, messages, "insufficient_reclaim", total_tokens, tool_tokens)
 
-    content = _checkpoint_content(compacted, next_epoch, artifact_writer=artifact_writer)
+    content = _checkpoint_content(
+        compacted,
+        next_epoch,
+        artifact_writer=artifact_writer,
+        compacted_tokens=compacted_tokens,
+    )
     checkpoint = {"role": "system", "content": _CHECKPOINT_CONTEXT_PREFIX + content}
     compacted_messages = [*messages[:stable_end], checkpoint, *messages[boundary:]]
     post_tokens = _message_tokens(compacted_messages)
@@ -104,6 +112,7 @@ def _checkpoint_content(
     epoch: int,
     *,
     artifact_writer: ArtifactWriter | None,
+    compacted_tokens: int,
 ) -> str:
     records: list[dict[str, object]] = []
     artifact_refs: list[dict[str, object]] = []
@@ -150,6 +159,7 @@ def _checkpoint_content(
         "version": 1,
         "epoch": epoch,
         "compacted_message_count": compacted_message_count,
+        "compacted_tokens": compacted_tokens,
         "records": records[-_VISIBLE_RECORD_LIMIT:],
         "artifact_refs": artifact_refs[-_VISIBLE_ARTIFACT_REF_LIMIT:],
     }
@@ -213,7 +223,8 @@ def _tool_record(
     digest = str(payload.get("content_digest") or _digest(visible_content))
     artifact = payload.get("artifact")
     path = str(artifact.get("path") or "") if isinstance(artifact, dict) else ""
-    if not path:
+    is_projected_view = payload.get("kind") == "tool_result_view"
+    if not path and not is_projected_view:
         path = artifact_writer(tool_name, visible_content) if artifact_writer is not None else f"pending:{digest}"
     artifact_ref = {
         "tool_name": tool_name,
@@ -234,7 +245,7 @@ def _tool_record(
             "artifact_path": path,
             "digest": digest,
         },
-        artifact_ref,
+        artifact_ref if path else None,
     )
 
 

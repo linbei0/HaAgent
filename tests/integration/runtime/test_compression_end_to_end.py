@@ -1,7 +1,7 @@
 """
 tests/integration/runtime/test_compression_end_to_end.py - 统一压缩端到端测试
 
-验证长工具结果在多轮历史中会产生统一 compression_diagnostic 事件。
+验证长工具结果在工具边界完成一次模型投影，历史层不再二次折叠。
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ class LongFileGateway:
         return ModelResponse("done", [])
 
 
-def test_historical_tool_result_emits_compression_diagnostic(tmp_path: Path) -> None:
+def test_long_tool_result_is_projected_once_before_model_call(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    large_content = "HEAD-" + ("body-" * 2000) + "TAIL"
+    large_content = "HEAD-" + ("body-" * 10000) + "TAIL"
     (workspace / "large.txt").write_text(large_content, encoding="utf-8")
     task_path = tmp_path / "task.yaml"
     task_path.write_text(
@@ -63,15 +63,15 @@ verification_commands: []
 
     assert result.status is RunStatus.COMPLETED
     assert large_content not in gateway.model_inputs[1]
+    assert "characters omitted" in gateway.model_inputs[1]
     diagnostics = [
         bus_event_to_dict(event)
         for event in runtime_events
         if bus_event_to_dict(event).get("event_type") == "compression_diagnostic"
     ]
-    assert diagnostics
-    assert diagnostics[0]["stage"] == "historical_tool_message"
+    assert diagnostics == []
     transcript = [
         json.loads(line)
         for line in (result.episode_path / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert any(record.get("event") == "compression_diagnostic" for record in transcript)
+    assert not any(record.get("event") == "compression_diagnostic" for record in transcript)

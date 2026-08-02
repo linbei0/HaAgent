@@ -63,6 +63,8 @@ class LocalSubprocessSandboxBackend:
             command.timeout_seconds,
             cancellation_token=command.cancellation_token,
             shell_contract=self._shell_contract,
+            output_artifact_root=command.output_artifact_root,
+            artifact_name="shell",
         )
 
     def shell_contract(self) -> ShellContract:
@@ -78,6 +80,8 @@ class LocalSubprocessSandboxBackend:
             timeout_seconds=command.timeout_seconds,
             cancellation_token=command.cancellation_token,
             env=build_python_utf8_environment(command.env),
+            output_artifact_root=command.output_artifact_root,
+            artifact_name="code_run",
         )
 
     def close(self) -> None:

@@ -57,7 +57,14 @@ def shell(
         return tool_error("tool_argument_invalid", timeout_result)
 
     if sandbox_backend is None:
-        command_result = run_command(command, cwd_result, timeout_result, cancellation_token=cancellation_token)
+        command_result = run_command(
+            command,
+            cwd_result,
+            timeout_result,
+            cancellation_token=cancellation_token,
+            output_artifact_root=execution_context.output_artifact_root if execution_context else None,
+            artifact_name="shell",
+        )
     else:
         command_result = sandbox_backend.run_shell(
             SandboxCommand(
@@ -65,16 +72,25 @@ def shell(
                 cwd=cwd_result,
                 timeout_seconds=timeout_result,
                 cancellation_token=cancellation_token,
+                output_artifact_root=execution_context.output_artifact_root if execution_context else None,
             ),
         )
     result = {
         "status": "success" if command_result.status == "success" else "error",
         "exit_code": command_result.exit_code,
+        "stdout": command_result.stdout,
+        "stderr": command_result.stderr,
         "stdout_excerpt": command_result.stdout_excerpt,
         "stderr_excerpt": command_result.stderr_excerpt,
         "stdout_truncated": command_result.stdout_truncated,
         "stderr_truncated": command_result.stderr_truncated,
         "truncated": command_result.truncated,
+        "stdout_original_chars": command_result.stdout_original_chars,
+        "stderr_original_chars": command_result.stderr_original_chars,
+        "stdout_original_bytes": command_result.stdout_original_bytes,
+        "stderr_original_bytes": command_result.stderr_original_bytes,
+        "stdout_artifact_path": command_result.stdout_artifact_path,
+        "stderr_artifact_path": command_result.stderr_artifact_path,
         "timeout": command_result.timeout,
         "redacted": command_result.redacted,
         "timeout_seconds": command_result.timeout_seconds,

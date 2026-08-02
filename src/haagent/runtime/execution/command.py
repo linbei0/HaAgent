@@ -6,13 +6,17 @@ src/haagent/runtime/execution/command.py - 统一命令执行器
 
 from __future__ import annotations
 
+import codecs
 import locale
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -22,7 +26,11 @@ from haagent.runtime.execution.cancellation import CancellationToken
 CWD_GUIDANCE = 'cwd is relative to workspace_root; use "." or omit cwd for workspace root'
 DEFAULT_TIMEOUT_SECONDS = 60.0
 MAX_TIMEOUT_SECONDS = 120.0
-OUTPUT_EXCERPT_CHAR_LIMIT = 2400
+# 仅用于 UI/episode 的短摘要；模型输入由 ToolResultView 统一预算。
+OUTPUT_UI_EXCERPT_CHAR_LIMIT = 2400
+# stdout/stderr 共享此进程层内存预算；超出部分流式写入临时文件。
+PROCESS_CAPTURE_MEMORY_LIMIT = 1 * 1024 * 1024
+PROCESS_CAPTURE_CHUNK_BYTES = 64 * 1024
 REDACTED_SECRET = "[REDACTED_SECRET]"
 REDACTED_TOKEN = "[REDACTED_TOKEN]"
 SECRET_TOKEN_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")
@@ -56,6 +64,35 @@ class CommandResult:
     redacted: bool
     duration_seconds: float
     timeout_seconds: float
+    stdout_original_chars: int = 0
+    stderr_original_chars: int = 0
+    stdout_original_bytes: int = 0
+    stderr_original_bytes: int = 0
+    stdout_artifact_path: str | None = None
+    stderr_artifact_path: str | None = None
+
+
+@dataclass(frozen=True)
+class _CapturedStream:
+    memory: bytes
+    spill_path: Path | None
+    total_bytes: int
+
+
+@dataclass
+class _CaptureBudget:
+    limit_bytes: int = PROCESS_CAPTURE_MEMORY_LIMIT
+    used_bytes: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass(frozen=True)
+class _MaterializedStream:
+    preview: str
+    artifact_path: str | None
+    original_chars: int
+    original_bytes: int
+    redacted: bool
 
 
 @dataclass(frozen=True)
@@ -73,6 +110,8 @@ def run_command(
     timeout_seconds: float,
     cancellation_token: CancellationToken | None = None,
     shell_contract: ShellContract | None = None,
+    output_artifact_root: Path | None = None,
+    artifact_name: str = "shell",
 ) -> CommandResult:
     """运行 shell 命令，并用统一结构表达执行结果。"""
     contract = shell_contract or resolve_shell_contract()
@@ -84,6 +123,8 @@ def run_command(
         cwd=cwd,
         timeout_seconds=timeout_seconds,
         cancellation_token=cancellation_token,
+        output_artifact_root=output_artifact_root,
+        artifact_name=artifact_name,
     )
 
 
@@ -191,8 +232,10 @@ def run_process(
     timeout_seconds: float,
     cancellation_token: CancellationToken | None = None,
     env: Mapping[str, str] | None = None,
+    output_artifact_root: Path | None = None,
+    artifact_name: str = "command",
 ) -> CommandResult:
-    """运行本地进程，支持超时和外部取消。"""
+    """运行本地进程，支持超时、取消和有界 stdout/stderr 采集。"""
     started = time.perf_counter()
     process = subprocess.Popen(
         popen_args,
@@ -202,76 +245,81 @@ def run_process(
         stderr=subprocess.PIPE,
         env=dict(env) if env is not None else None,
     )
-    while True:
-        if cancellation_token is not None and cancellation_token.is_cancelled:
-            stdout_bytes, stderr_bytes = _stop_process(process)
-            stdout, stderr = _decode_process_streams(stdout_bytes, stderr_bytes)
-            output = build_output_summary(stdout, stderr)
-            return CommandResult(
-                command=command,
-                status="cancelled",
-                exit_code=None,
-                stdout=output["stdout"],
-                stderr=output["stderr"],
-                stdout_excerpt=output["stdout_excerpt"],
-                stderr_excerpt=output["stderr_excerpt"],
-                stdout_truncated=output["stdout_truncated"],
-                stderr_truncated=output["stderr_truncated"],
-                truncated=output["truncated"],
-                timeout=False,
-                redacted=output["redacted"],
-                duration_seconds=time.perf_counter() - started,
-                timeout_seconds=timeout_seconds,
-            )
-        elapsed = time.perf_counter() - started
-        remaining = timeout_seconds - elapsed
-        if remaining <= 0:
-            stdout_bytes, stderr_bytes = _stop_process(process)
-            stdout, stderr = _decode_process_streams(stdout_bytes, stderr_bytes)
-            output = build_output_summary(stdout, stderr)
-            return CommandResult(
-                command=command,
-                status="timeout",
-                exit_code=None,
-                stdout=output["stdout"],
-                stderr=output["stderr"],
-                stdout_excerpt=output["stdout_excerpt"],
-                stderr_excerpt=output["stderr_excerpt"],
-                stdout_truncated=output["stdout_truncated"],
-                stderr_truncated=output["stderr_truncated"],
-                truncated=output["truncated"],
-                timeout=True,
-                redacted=output["redacted"],
-                duration_seconds=time.perf_counter() - started,
-                timeout_seconds=timeout_seconds,
-            )
-        try:
-            stdout_bytes, stderr_bytes = process.communicate(timeout=min(0.05, remaining))
-            break
-        except subprocess.TimeoutExpired:
-            continue
+    captures: dict[str, _CapturedStream] = {}
+    capture_budget = _CaptureBudget()
+    threads = [
+        threading.Thread(
+            target=_capture_pipe,
+            args=("stdout", process.stdout, captures, capture_budget),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=_capture_pipe,
+            args=("stderr", process.stderr, captures, capture_budget),
+            daemon=True,
+        ),
+    ]
+    for thread in threads:
+        thread.start()
 
-    stdout, stderr = _decode_process_streams(stdout_bytes, stderr_bytes)
-    output = build_output_summary(stdout, stderr)
+    status = "success"
+    timeout = False
+    while process.poll() is None:
+        if cancellation_token is not None and cancellation_token.is_cancelled:
+            status = "cancelled"
+            _stop_process(process)
+            break
+        if time.perf_counter() - started >= timeout_seconds:
+            status = "timeout"
+            timeout = True
+            _stop_process(process)
+            break
+        time.sleep(0.01)
+    if process.poll() is None:
+        _stop_process(process)
+    for thread in threads:
+        thread.join(timeout=3)
+
+    stdout_materialized = _materialize_stream(
+        captures.get("stdout", _CapturedStream(b"", None, 0)),
+        stream_name="stdout",
+        output_artifact_root=output_artifact_root,
+        artifact_name=artifact_name,
+    )
+    stderr_materialized = _materialize_stream(
+        captures.get("stderr", _CapturedStream(b"", None, 0)),
+        stream_name="stderr",
+        output_artifact_root=output_artifact_root,
+        artifact_name=artifact_name,
+    )
+    output = build_output_summary(stdout_materialized.preview, stderr_materialized.preview)
+    if status == "success" and process.returncode not in (0, None):
+        status = "failed"
     return CommandResult(
         command=command,
-        status="success" if process.returncode == 0 else "failed",
-        exit_code=process.returncode,
+        status=status,
+        exit_code=process.returncode if status == "failed" else (None if status != "success" else process.returncode),
         stdout=output["stdout"],
         stderr=output["stderr"],
         stdout_excerpt=output["stdout_excerpt"],
         stderr_excerpt=output["stderr_excerpt"],
         stdout_truncated=output["stdout_truncated"],
         stderr_truncated=output["stderr_truncated"],
-        truncated=output["truncated"],
-        timeout=False,
-        redacted=output["redacted"],
+        truncated=bool(stdout_materialized.artifact_path or stderr_materialized.artifact_path),
+        timeout=timeout,
+        redacted=output["redacted"] or stdout_materialized.redacted or stderr_materialized.redacted,
         duration_seconds=time.perf_counter() - started,
         timeout_seconds=timeout_seconds,
+        stdout_original_chars=stdout_materialized.original_chars,
+        stderr_original_chars=stderr_materialized.original_chars,
+        stdout_original_bytes=stdout_materialized.original_bytes,
+        stderr_original_bytes=stderr_materialized.original_bytes,
+        stdout_artifact_path=stdout_materialized.artifact_path,
+        stderr_artifact_path=stderr_materialized.artifact_path,
     )
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         if os.name == "nt":
             subprocess.run(
@@ -283,12 +331,117 @@ def _stop_process(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
         else:
             process.terminate()
     try:
-        return process.communicate(timeout=3)
+        process.wait(timeout=3)
     except subprocess.TimeoutExpired:
         if process.poll() is None:
             process.kill()
-        stdout, stderr = process.communicate()
-        return stdout, stderr
+        process.wait(timeout=3)
+
+
+def _capture_pipe(
+    stream_name: str,
+    stream: Any,
+    captures: dict[str, _CapturedStream],
+    capture_budget: _CaptureBudget,
+) -> None:
+    """在共享进程预算耗尽后把原始字节转存临时文件，避免管道阻塞和内存爆炸。"""
+    buffer = bytearray()
+    spill_path: Path | None = None
+    spill_handle: Any | None = None
+    total_bytes = 0
+    try:
+        while True:
+            chunk = stream.read(PROCESS_CAPTURE_CHUNK_BYTES)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if spill_handle is None:
+                with capture_budget.lock:
+                    available = capture_budget.limit_bytes - capture_budget.used_bytes
+                    if len(buffer) + len(chunk) <= available:
+                        buffer.extend(chunk)
+                        capture_budget.used_bytes += len(chunk)
+                        continue
+            if spill_handle is None:
+                handle = tempfile.NamedTemporaryFile(prefix="haagent-process-output-", suffix=".bin", delete=False)
+                spill_path = Path(handle.name)
+                spill_handle = handle
+                if buffer:
+                    spill_handle.write(buffer)
+                    buffer.clear()
+            spill_handle.write(chunk)
+    finally:
+        if spill_handle is not None:
+            spill_handle.flush()
+            spill_handle.close()
+        captures[stream_name] = _CapturedStream(bytes(buffer), spill_path, total_bytes)
+
+
+def _materialize_stream(
+    capture: _CapturedStream,
+    *,
+    stream_name: str,
+    output_artifact_root: Path | None,
+    artifact_name: str,
+) -> _MaterializedStream:
+    if capture.spill_path is None:
+        text = _decode_process_output(capture.memory)
+        safe_text, redacted = redact_secret_like_text(text)
+        return _MaterializedStream(
+            preview=safe_text,
+            artifact_path=None,
+            original_chars=len(safe_text),
+            original_bytes=len(safe_text.encode("utf-8")),
+            redacted=redacted,
+        )
+
+    root = output_artifact_root or Path(tempfile.gettempdir()) / "haagent-process-artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", artifact_name).strip("._") or "command"
+    target = root / f"{safe_name}-{stream_name}-{uuid.uuid4().hex[:8]}.txt"
+    head_limit = 32 * 1024
+    tail_limit = 32 * 1024
+    head = ""
+    tail = ""
+    total_chars = 0
+    total_bytes = 0
+    redacted = False
+    overlap = 256
+    pending = ""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    with capture.spill_path.open("rb") as source, target.open("wb") as destination:
+        while chunk := source.read(PROCESS_CAPTURE_CHUNK_BYTES):
+            decoded = _normalize_process_newlines(pending + decoder.decode(chunk, final=False))
+            if len(decoded) <= overlap:
+                pending = decoded
+                continue
+            body, pending = decoded[:-overlap], decoded[-overlap:]
+            safe, changed = redact_secret_like_text(body)
+            redacted = redacted or changed
+            destination.write(safe.encode("utf-8"))
+            total_chars += len(safe)
+            total_bytes += len(safe.encode("utf-8"))
+            if len(head) < head_limit:
+                head += safe[: head_limit - len(head)]
+            tail = (tail + safe)[-tail_limit:]
+        final_text = _normalize_process_newlines(pending + decoder.decode(b"", final=True))
+        safe, changed = redact_secret_like_text(final_text)
+        redacted = redacted or changed
+        destination.write(safe.encode("utf-8"))
+        total_chars += len(safe)
+        total_bytes += len(safe.encode("utf-8"))
+        if len(head) < head_limit:
+            head += safe[: head_limit - len(head)]
+        tail = (tail + safe)[-tail_limit:]
+    capture.spill_path.unlink(missing_ok=True)
+    preview = head + tail if total_chars > len(head) + len(tail) else head
+    return _MaterializedStream(
+        preview=preview,
+        artifact_path=str(target),
+        original_chars=total_chars,
+        original_bytes=total_bytes,
+        redacted=redacted,
+    )
 
 
 def build_python_utf8_environment(
@@ -303,10 +456,6 @@ def build_python_utf8_environment(
     # code_run 是确定性的 Python 执行边界，不能继承 Windows 本地代码页。
     environment.update(PYTHON_UTF8_ENV)
     return environment
-
-
-def _decode_process_streams(stdout: bytes, stderr: bytes) -> tuple[str, str]:
-    return _decode_process_output(stdout), _decode_process_output(stderr)
 
 
 def _decode_process_output(output: bytes) -> str:
@@ -351,7 +500,7 @@ def normalize_timeout(value: Any) -> float | str:
 
 
 def build_output_summary(stdout: str, stderr: str) -> dict[str, Any]:
-    """生成脱敏后的 stdout/stderr 摘要，避免工具结果暴露完整长输出。"""
+    """生成脱敏后的完整 stdout/stderr，并单独提供 UI 短摘要。"""
     safe_stdout, stdout_redacted = redact_secret_like_text(stdout)
     safe_stderr, stderr_redacted = redact_secret_like_text(stderr)
     stdout_excerpt, stdout_truncated = _excerpt(safe_stdout)
@@ -363,8 +512,13 @@ def build_output_summary(stdout: str, stderr: str) -> dict[str, Any]:
         "stderr_excerpt": stderr_excerpt,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
-        "truncated": stdout_truncated or stderr_truncated,
+        # 这是 UI excerpt 是否缩短，不代表模型视图是否截断。
+        "truncated": False,
         "redacted": stdout_redacted or stderr_redacted,
+        "stdout_original_chars": len(safe_stdout),
+        "stderr_original_chars": len(safe_stderr),
+        "stdout_original_bytes": len(safe_stdout.encode("utf-8")),
+        "stderr_original_bytes": len(safe_stderr.encode("utf-8")),
     }
 
 
@@ -382,8 +536,8 @@ def redact_secret_like_text(text: str) -> tuple[str, bool]:
 
 
 def _excerpt(value: str) -> tuple[str, bool]:
-    truncated = len(value) > OUTPUT_EXCERPT_CHAR_LIMIT
-    return value[:OUTPUT_EXCERPT_CHAR_LIMIT], truncated
+    truncated = len(value) > OUTPUT_UI_EXCERPT_CHAR_LIMIT
+    return value[:OUTPUT_UI_EXCERPT_CHAR_LIMIT], truncated
 
 
 def _secret_environment_values() -> list[str]:

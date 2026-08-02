@@ -40,7 +40,6 @@ NOISE_DIRECTORIES = {
     "build",
 }
 GREP_NOISE_DIRECTORIES = NOISE_DIRECTORIES | {".tmp", ".haagent-tmp", ".pytest_cache"}
-FILE_READ_MODEL_VISIBLE_CHAR_BUDGET = 12000
 GREP_DEFAULT_TIMEOUT_SECONDS = 15
 GREP_MAX_TIMEOUT_SECONDS = 60
 GREP_NARROW_GUIDANCE = "Search was incomplete; narrow path or include and retry."
@@ -258,7 +257,16 @@ def file_read(
     selected = lines[start_index:end_index]
     content = "".join(selected)
     range_truncated = start_index > 0 or end_index < total_lines
-    visible_content, content_collapsed = _bounded_visible_text(content, FILE_READ_MODEL_VISIBLE_CHAR_BUDGET)
+    source_scope = {
+        "kind": "file_range",
+        "path": _display_path(path, workspace_root),
+        "requested_offset": offset,
+        "requested_limit": limit,
+        "start_line": start_index + 1 if selected else start_index,
+        "end_line": end_index,
+        "total_lines": total_lines,
+        "outside_requested_lines": max(0, total_lines - len(selected)),
+    }
     return {
         "status": "success",
         "path": _display_path(path, workspace_root),
@@ -270,6 +278,7 @@ def file_read(
         "line_count": total_lines,
         "content": content,
         "truncated": range_truncated,
+        "source_limited": range_truncated,
         "model_visible": {
             "path": _display_path(path, workspace_root),
             "offset": offset,
@@ -278,9 +287,9 @@ def file_read(
             "start_line": start_index + 1 if selected else start_index,
             "end_line": end_index,
             "line_count": total_lines,
-            "content": visible_content,
-            "truncated": range_truncated or content_collapsed,
-            "truncation_reason": _file_read_truncation_reason(range_truncated, content_collapsed),
+            "content": content,
+            "source_limited": range_truncated,
+            "source_scope": source_scope,
         },
     }
 
@@ -542,28 +551,6 @@ def _display_path(path: Path, workspace_root: Path) -> str:
         return resolved.relative_to(root).as_posix()
     except ValueError:
         return str(resolved)
-
-
-def _bounded_visible_text(text: str, max_chars: int) -> tuple[str, bool]:
-    if len(text) <= max_chars:
-        return text, False
-    marker = "\n...[model-visible content truncated]...\n"
-    keep = max_chars - len(marker)
-    if keep <= 0:
-        return text[:max_chars], True
-    head = keep // 2
-    tail = keep - head
-    return f"{text[:head].rstrip()}{marker}{text[-tail:].lstrip()}", True
-
-
-def _file_read_truncation_reason(range_truncated: bool, content_collapsed: bool) -> str | None:
-    if range_truncated and content_collapsed:
-        return "requested_range_excludes_file_lines_and_content_over_budget"
-    if range_truncated:
-        return "requested_range_excludes_file_lines"
-    if content_collapsed:
-        return "content_over_model_visible_budget"
-    return None
 
 
 def _file_change_summary(

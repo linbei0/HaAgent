@@ -343,10 +343,12 @@ def test_microcompact_preserves_artifact_backed_tool_result_messages(tmp_path: P
     tool_content = json.dumps(
         {
             "output": "head " + ("x" * 2600) + " tail",
-            "artifact_path": ".runs/episode/artifacts/tool-results/mcp_exa_web_fetch_exa-test.txt",
-            "original_chars": 13000,
-            "preview_chars": 3000,
-            "truncated": True,
+            "artifact": {
+                "path": ".runs/episode/artifacts/tool-results/mcp_exa_web_fetch_exa-test.txt",
+                "original_chars": 13000,
+                "preview_chars": 3000,
+            },
+            "truncation": {"occurred": True},
             "continuation_hint": "Use file_read with path=.runs/episode/artifacts/tool-results/mcp_exa_web_fetch_exa-test.txt",
         },
         ensure_ascii=False,

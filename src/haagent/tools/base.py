@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from haagent.runtime.execution.human_interaction import (
@@ -27,6 +28,7 @@ class ToolExecutionContext:
 
     interaction_handler: HumanInteractionHandler | None = None
     turn: int | None = None
+    output_artifact_root: Path | None = None
 
     def ask(self, request: ToolPermissionRequest) -> HumanInteractionResponse | None:
         """暂停当前工具调用等待用户决定；无交互入口时返回 None。"""

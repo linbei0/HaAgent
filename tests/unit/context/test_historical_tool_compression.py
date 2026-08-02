@@ -1,7 +1,7 @@
 """
 tests/unit/context/test_historical_tool_compression.py - 历史工具消息压缩测试
 
-验证工具结果首次进入模型后保持不可变，长文本结果按统一策略折叠。
+验证工具结果首次进入模型后保持不可变，历史层不再二次折叠长文本。
 KV-cache 稳定性测试覆盖完整模型视图，而非只覆盖 system 前缀。
 """
 
@@ -29,7 +29,7 @@ def _artifact_tool_message(index: int) -> dict[str, object]:
                     "original_chars": 13000 + index,
                     "preview_chars": 3000,
                 },
-                "truncated": True,
+                "truncation": {"occurred": True},
                 "continuation_hint": f"Use file_read with path={path}",
             },
             ensure_ascii=False,
@@ -47,9 +47,9 @@ def test_artifact_backed_tool_messages_keep_immutable_previews() -> None:
     assert all(view[index] is messages[index] for index in range(len(messages)))
 
 
-def test_non_artifact_long_tool_result_collapses_with_head_and_tail() -> None:
+def test_raw_long_tool_result_is_not_recollapsed() -> None:
     budget = derive_compression_budget(None)
-    long_text = "head " + ("x" * budget.tool_output_inline_chars) + " tail"
+    long_text = "head " + ("x" * 50_000) + " tail"
     messages = [
         {
             "role": "tool",
@@ -60,16 +60,8 @@ def test_non_artifact_long_tool_result_collapses_with_head_and_tail() -> None:
     ]
     view, diagnostics = build_compressed_model_view(messages, budget)
 
-    assert view[0]["content"].startswith("head ")
-    assert view[0]["content"].endswith(" tail")
-    assert "collapsed" in view[0]["content"]
-    assert diagnostics[0].stage == "historical_tool_message"
-    assert diagnostics[0].decision == "collapsed"
-    assert diagnostics[0].reason == "long_text_result"
-    assert diagnostics[0].original_chars == len(long_text)
-    assert diagnostics[0].final_chars == len(view[0]["content"])
-    # 原始消息不被修改
-    assert messages[0]["content"] == long_text
+    assert view == messages
+    assert diagnostics == []
 
 
 def test_historical_compression_no_old_reason_name() -> None:
@@ -79,13 +71,14 @@ def test_historical_compression_no_old_reason_name() -> None:
             "role": "tool",
             "tool_call_id": "call_1",
             "name": "shell",
-            "content": "x" * (budget.tool_output_inline_chars + 1),
+            "content": "x" * 50_001,
         },
     ]
 
-    _, diagnostics = build_compressed_model_view(messages, budget)
+    view, diagnostics = build_compressed_model_view(messages, budget)
 
-    assert all(diagnostic.reason != "old_tool_result_over_budget" for diagnostic in diagnostics)
+    assert view == messages
+    assert diagnostics == []
 
 
 def test_append_only_prefix_stability() -> None:
@@ -118,7 +111,7 @@ def test_append_only_prefix_stability() -> None:
 def test_original_messages_never_mutated() -> None:
     """build_compressed_model_view 不修改原始消息列表中的任何元素。"""
     budget = derive_compression_budget(None)
-    long_text = "y" * (budget.tool_output_inline_chars + 100)
+    long_text = "y" * 50_100
     messages = [
         {"role": "user", "content": "hello"},
         {"role": "tool", "tool_call_id": "c1", "name": "shell", "content": long_text},
@@ -128,12 +121,11 @@ def test_original_messages_never_mutated() -> None:
 
     view, diagnostics = build_compressed_model_view(messages, budget)
 
-    assert len(diagnostics) == 2
+    assert diagnostics == []
+    assert view == messages
     # 原始列表和元素均未被修改
     for i, (original, current) in enumerate(zip(originals, messages)):
         assert current == original, f"message at index {i} was mutated"
-    # 视图中被压缩的消息是新对象
-    assert view[1] is not messages[1]
-    assert view[2] is not messages[2]
-    # 未压缩消息保持原引用
+    assert view[1] is messages[1]
+    assert view[2] is messages[2]
     assert view[0] is messages[0]

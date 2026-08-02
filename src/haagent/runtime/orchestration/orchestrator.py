@@ -224,6 +224,7 @@ class RunOrchestrator:
                     "denied_tools": dict(access_snapshot.denied_tools),
                 },
             )
+            compression_budget = _compression_budget_for_gateway(self._model_gateway)
             input_guardrail = check_user_input(task.goal)
             if input_guardrail is not None:
                 _record_guardrail(writer, self._emit_event, input_guardrail)
@@ -296,6 +297,7 @@ class RunOrchestrator:
                 actor_role="worker" if task.worker_context is not None else "main",
                 todo_state_sink=self._todo_state_sink,
                 planning_state_handler=self._planning_state_handler,
+                compression_budget=compression_budget,
             )
             verification_engine: VerificationEngine | None = None
             progress_guard = ProgressGuard()
@@ -338,7 +340,7 @@ class RunOrchestrator:
                     stable_messages=tuple(prepared_messages.messages),
                     user_request_message=prepared_messages.user_request_message,
                     initial_projection=prepared_messages.initial_projection,
-                    compression_budget=_compression_budget_for_gateway(self._model_gateway),
+                    compression_budget=compression_budget,
                     episode_writer=writer,
                 ),
             )
@@ -396,7 +398,7 @@ class RunOrchestrator:
                     max_turns=self._max_turns,
                     raise_if_cancelled=self._raise_if_cancelled,
                     emit_event=self._emit_event,
-                    compression_budget=_compression_budget_for_gateway(self._model_gateway),
+                    compression_budget=compression_budget,
                     interaction_handler=self._interaction_handler,
                     interaction_resolver=interaction_resolver,
                     interaction_bridge_factory=lambda turn, resolver: _interaction_bridge(

@@ -91,6 +91,8 @@ def code_run(
                 timeout_seconds=timeout_result,
                 cancellation_token=cancellation_token,
                 env=build_python_utf8_environment(),
+                output_artifact_root=execution_context.output_artifact_root if execution_context else None,
+                artifact_name="code_run",
             )
         else:
             command_result = sandbox_backend.run_python(
@@ -101,16 +103,25 @@ def code_run(
                     timeout_seconds=timeout_result,
                     cancellation_token=cancellation_token,
                     env=build_python_utf8_environment(inherit=False),
+                    output_artifact_root=execution_context.output_artifact_root if execution_context else None,
                 ),
             )
         result = {
             "status": "success" if command_result.status == "success" else "error",
             "exit_code": command_result.exit_code,
+            "stdout": command_result.stdout,
+            "stderr": command_result.stderr,
             "stdout_excerpt": command_result.stdout_excerpt,
             "stderr_excerpt": command_result.stderr_excerpt,
             "stdout_truncated": command_result.stdout_truncated,
             "stderr_truncated": command_result.stderr_truncated,
             "truncated": command_result.truncated,
+            "stdout_original_chars": command_result.stdout_original_chars,
+            "stderr_original_chars": command_result.stderr_original_chars,
+            "stdout_original_bytes": command_result.stdout_original_bytes,
+            "stderr_original_bytes": command_result.stderr_original_bytes,
+            "stdout_artifact_path": command_result.stdout_artifact_path,
+            "stderr_artifact_path": command_result.stderr_artifact_path,
             "timeout": command_result.timeout,
             "redacted": command_result.redacted,
             "timeout_seconds": command_result.timeout_seconds,

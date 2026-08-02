@@ -197,12 +197,11 @@ def web_fetch(
     if len(content) > max_chars:
         content = content[:max_chars].rstrip() + "\n...[truncated]"
         truncated = True
-    model_visible, visible_truncated = _web_fetch_model_visible(
+    model_visible = _web_fetch_model_visible(
         body,
         final_url=str(response.url),
         status_code=response.status_code,
         content_type=content_type or "(unknown)",
-        max_chars=max_chars,
     )
     result = {
         "status": "success",
@@ -214,7 +213,6 @@ def web_fetch(
         "model_visible": {
             **model_visible,
             "raw_content_truncated": truncated,
-            "truncated": visible_truncated or truncated,
         },
     }
     if artifact_writer is not None:
@@ -586,8 +584,7 @@ def _web_fetch_model_visible(
     final_url: str,
     status_code: int,
     content_type: str,
-    max_chars: int,
-) -> tuple[dict[str, Any], bool]:
+) -> dict[str, Any]:
     if "html" in content_type.lower():
         content = _simplified_html(body, base_url=final_url)
         content_format = "simplified_html"
@@ -601,7 +598,7 @@ def _web_fetch_model_visible(
         "content_format": content_format,
         "content": content,
     }
-    return model_visible, len(content) > max_chars
+    return model_visible
 
 
 def _simplified_html(raw_html: str, *, base_url: str) -> str:
@@ -647,18 +644,6 @@ def _clean_html_tree(root: Tag | BeautifulSoup, *, base_url: str) -> None:
 
 def _collapse_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-
-
-def _bounded_visible_text(text: str, max_chars: int) -> tuple[str, bool]:
-    if len(text) <= max_chars:
-        return text, False
-    marker = "\n...[model-visible content truncated]...\n"
-    keep = max_chars - len(marker)
-    if keep <= 0:
-        return text[:max_chars], True
-    head = keep // 2
-    tail = keep - head
-    return f"{text[:head].rstrip()}{marker}{text[-tail:].lstrip()}", True
 
 
 def _html_to_text(raw_html: str) -> str:

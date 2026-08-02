@@ -188,7 +188,7 @@ def test_shell_non_zero_exit_is_recoverable_observation(tmp_path: Path) -> None:
     assert result["recovery"]["action"] == "correct_arguments"
 
 
-def test_shell_long_stdout_and_stderr_are_excerpted(tmp_path: Path) -> None:
+def test_shell_long_stdout_and_stderr_are_retained_for_central_projection(tmp_path: Path) -> None:
     command = (
         f"{sys.executable} -c "
         "\"import sys; print('o' * 5000); print('e' * 5000, file=sys.stderr)\""
@@ -197,11 +197,34 @@ def test_shell_long_stdout_and_stderr_are_excerpted(tmp_path: Path) -> None:
     result = shell({"command": command, "timeout_seconds": 5}, tmp_path)
 
     assert result["status"] == "success"
-    assert result["truncated"] is True
+    assert result["truncated"] is False
     assert len(result["stdout_excerpt"]) < 5000
     assert len(result["stderr_excerpt"]) < 5000
-    assert "stdout" not in result
-    assert "stderr" not in result
+    assert len(result["stdout"]) == 5001
+    assert len(result["stderr"]) == 5001
+    assert result["stdout_original_chars"] == 5001
+    assert result["stderr_original_chars"] == 5001
+
+
+def test_process_capture_spills_after_shared_one_mib_budget(tmp_path: Path) -> None:
+    command = (
+        f"{sys.executable} -c "
+        "\"import sys; print('o' * 700000); print('e' * 700000, file=sys.stderr)\""
+    )
+    artifact_root = tmp_path / "process-artifacts"
+    result = shell(
+        {"command": command, "timeout_seconds": 10},
+        tmp_path,
+        execution_context=ToolExecutionContext(output_artifact_root=artifact_root),
+    )
+
+    assert result["status"] == "success"
+    assert result["truncated"] is True
+    assert result["stdout_original_chars"] == 700001
+    assert result["stderr_original_chars"] == 700001
+    artifact_path = result["stdout_artifact_path"] or result["stderr_artifact_path"]
+    assert artifact_path is not None
+    assert len(Path(artifact_path).read_text(encoding="utf-8")) == 700001
 
 
 def test_secret_like_output_is_redacted_from_tool_result_and_context(

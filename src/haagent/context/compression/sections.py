@@ -69,8 +69,8 @@ def context_budget_from_compression_budget(budget: CompressionBudget) -> Context
         max_section_chars=max(4_000, min(24_000, max_total_chars // 4)),
         max_tool_observation_chars=OBSERVATION_MICROCOMPACT_CHAR_LIMIT,
         keep_recent_observations=budget.full_compact_preserve_recent,
-        collapse_head_chars=budget.historical_collapse_head_chars,
-        collapse_tail_chars=budget.historical_collapse_tail_chars,
+        collapse_head_chars=OBSERVATION_MICROCOMPACT_HEAD_CHARS,
+        collapse_tail_chars=OBSERVATION_MICROCOMPACT_TAIL_CHARS,
         max_total_tokens=budget.context_builder_max_tokens,
     )
 

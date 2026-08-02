@@ -12,7 +12,7 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, Callable
 
-from haagent.context.compression.budget import derive_compression_budget
+from haagent.context.compression.budget import CompressionBudget, derive_compression_budget
 from haagent.context.compression.tool_results import prepare_tool_result_for_model
 from haagent.runtime.execution.cancellation import CancellationToken, RunCancelled
 from haagent.runtime.execution.retry import (
@@ -91,6 +91,7 @@ class ToolRouter:
         actor_role: str = "main",
         todo_state_sink: TodoStateSink | None = None,
         planning_state_handler: PlanningStateHandler | None = None,
+        compression_budget: CompressionBudget | None = None,
     ) -> None:
         self._allowed_tools = set(allowed_tools)
         self._approval_allowed_tools = list(approval_allowed_tools or [])
@@ -110,6 +111,8 @@ class ToolRouter:
         self._actor_role = actor_role
         self._todo_state_sink = todo_state_sink
         self._planning_state_handler = planning_state_handler
+        # Router 与 ModelContextRuntime 共用同一模型窗口派生预算，避免工具边界偷偷回退到固定默认窗口。
+        self._compression_budget = compression_budget or derive_compression_budget(None)
         self._image_attachment_history = {
             attachment.id: attachment
             for attachment in image_attachment_history or []
@@ -317,7 +320,7 @@ class ToolRouter:
         return prepare_tool_result_for_model(
             tool_name,
             result,
-            derive_compression_budget(None),
+            self._compression_budget,
             self._episode_writer.write_tool_artifact,
         )
 
@@ -778,7 +781,14 @@ class ToolRouter:
         turn: int | None = None,
     ) -> dict[str, Any]:
         # 静态工具唯一执行入口：catalog 绑定的 handler + 逐次 ToolExecutionContext。
-        context = ToolExecutionContext(interaction_handler=interaction_handler, turn=turn)
+        artifact_root = getattr(self._episode_writer, "path", None)
+        if artifact_root is not None:
+            artifact_root = artifact_root / "artifacts" / "tool-results"
+        context = ToolExecutionContext(
+            interaction_handler=interaction_handler,
+            turn=turn,
+            output_artifact_root=artifact_root,
+        )
         return self._handlers[tool_name](args, context)
 
     def _mode_or_actor_denial(self, tool_name: str) -> dict[str, Any] | None:

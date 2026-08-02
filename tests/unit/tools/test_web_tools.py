@@ -164,7 +164,7 @@ def test_web_fetch_simplified_html_removes_low_value_page_chrome() -> None:
 
 def test_web_fetch_offloads_long_simplified_content_to_artifact() -> None:
     saved: dict[str, str] = {}
-    long_body = "start " + ("middle " * 2200) + "important tail"
+    long_body = "start " + ("middle " * 7000) + "important tail"
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -180,7 +180,7 @@ def test_web_fetch_offloads_long_simplified_content_to_artifact() -> None:
         return ".runs/episode/artifacts/tool-results/web_fetch-test.txt"
 
     result = web_fetch(
-        {"url": "https://example.com/long", "max_chars": 12000},
+        {"url": "https://example.com/long", "max_chars": 50000},
         transport=httpx.MockTransport(handler),
         resolver=_public_resolver,
         artifact_writer=artifact_writer,
@@ -188,7 +188,7 @@ def test_web_fetch_offloads_long_simplified_content_to_artifact() -> None:
 
     visible = result["model_visible"]
     assert visible["kind"] == "tool_result_view"
-    assert visible["truncated"] is True
+    assert visible["truncation"]["occurred"] is True
     assert visible["artifact"]["path"] == ".runs/episode/artifacts/tool-results/web_fetch-test.txt"
     assert visible["artifact"]["original_chars"] == len(saved["content"])
     assert "file_read" in visible["continuation_hint"]
